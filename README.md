@@ -1,14 +1,30 @@
 # RRouter
 
-A Rust rewrite of [9router](https://github.com/decolua/9router) — one local endpoint that
-every coding agent ([CC], Codex CLI, Cline, Cursor, OpenCode, aider) points at, routing each
-request to the provider/account most likely to serve it right now, translating between wire
-protocols on the fly.
+A Rust-native local AI gateway: one endpoint that every coding agent ([CC], Codex CLI, Cline,
+Cursor, OpenCode, aider) points at. Each request goes to the provider/account most likely to
+serve it right now, with wire-protocol translation on the fly.
 
 Fast and boring on purpose: no Next.js, no JS runtime, no dashboard build step, one binary,
 one SQLite file.
 
-## Why a rewrite
+## Design bar
+
+Inspired by [9router](https://github.com/decolua/9router)'s feature set — OAuth subscription
+accounts, round-robin across accounts, automatic fallback. Not a reimplementation of it: every
+layer is rebuilt against a stricter bar.
+
+1. **Correctness first** — exactly one token-refresh path, proven by concurrent tests;
+   byte-level SSE framing that cannot desync.
+2. **Security as a default, not an option** — credentials AES-256-GCM at rest (per-write nonce,
+   authenticated), gateway keys stored only as SHA-256, secrets never echoed through the admin
+   API, loopback bind by default.
+3. **Latency is the product** — zero-copy streaming; fallback decided in microseconds (no
+   sleeping on 429/5xx while another candidate is eligible); half-open breakers so a recovered
+   account is used again immediately instead of waiting out a timer.
+4. **Lightweight deployment** — a single `rrouter` binary with embedded UI and embedded
+   SQLite: no npm, no Node, no build pipeline at deploy time, millisecond cold start.
+
+What that means concretely versus the Node implementation:
 
 | 9router (Node/Next.js) | RRouter (Rust) |
 |---|---|
@@ -53,8 +69,47 @@ Client-facing (OpenAI- and Anthropic-compatible):
 | `GET /v1/models` | union of catalog, aliases, combos, connected providers |
 | `GET /health` | liveness + version |
 
-Admin API (loopback-bound): `/api/connections`, `/api/keys`, `/api/aliases`,
-`/api/combos`, `/api/usage`. The UI at `/` drives the same API.
+## Dashboard
+
+`GET /` serves a dashboard embedded in the binary — no build step, no CDN, no internet access
+required. It is an *extension surface*, not a fixed page: the client composes itself from
+`GET /api/ui/panels`, which lists the built-in panels (Connections, API keys, Aliases, Combos,
+Usage, Health) plus any `extension` panels you register. An extension panel is a URL the
+dashboard loads in an isolated frame and hands a scoped token, so an organisation can add its
+own panels without forking RRouter.
+
+White-label it from `PUT /api/settings`: brand name, accent colour, logo URL, footer text.
+
+## Running it as a self-hosted platform
+
+Everything runs on your own hardware; there is no vendor service in the path and no telemetry.
+
+```sh
+RROUTER_HOST=0.0.0.0 \
+RROUTER_DATA_DIR=/var/lib/rrouter \
+RROUTER_MASTER_KEY=$(openssl rand -hex 32) \
+RROUTER_REQUIRE_API_KEY=true \
+RROUTER_CORS_ORIGINS=https://ide.internal.example \
+RROUTER_ALLOW_REMOTE_ADMIN=false \
+rrouter serve
+```
+
+| env | default | |
+|---|---|---|
+| `RROUTER_HOST` | `127.0.0.1` | bind address |
+| `RROUTER_DATA_DIR` | `./data` | SQLite DB + master key file |
+| `RROUTER_MASTER_KEY` | unset | 64-hex-char AES key; otherwise `data/.key` (0600) is generated |
+| `RROUTER_REQUIRE_API_KEY` | `false` | require a stored `sk-rr-…` key on `/v1/*` |
+| `RROUTER_ALLOW_REMOTE_ADMIN` | `false` | admin API is loopback-only unless enabled, even when bound to `0.0.0.0` |
+| `RROUTER_CORS_ORIGINS` | unset | comma-separated allowlist; no wildcard |
+| `RROUTER_STATIC_DIR` | unset | serve operator-supplied files under `/ext/*` (traversal-safe) |
+| `RROUTER_REQUEST_TIMEOUT_SECS` | `600` | upstream request timeout |
+| `RROUTER_CONNECT_TIMEOUT_SECS` | `15` | connect timeout |
+| `RUST_LOG` | `rrouter=info` | tracing filter |
+
+Admin API: `/api/connections`, `/api/keys`, `/api/aliases`, `/api/combos`, `/api/usage`,
+`/api/settings`, `/api/system`, `/api/ui/panels`. No endpoint ever returns token material;
+`/api/system` exposes booleans and counters only.
 
 ## Model strings
 
@@ -117,5 +172,5 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## License
 
-MIT. Upstream 9router is MIT as well; no code is copied — the wire contracts were
-re-derived from its published behaviour and the providers' own APIs.
+MIT. Behavioural inspiration from 9router (also MIT); no code is copied — wire contracts were
+re-derived from published behaviour and the providers' own APIs.
