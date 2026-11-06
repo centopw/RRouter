@@ -42,7 +42,9 @@ pub fn parse_request(body: &Value) -> Result<ChatRequest> {
     req.stop = body.get("stop_sequences").map(parse_stop).unwrap_or_default();
     req.system = body.get("system").map(system_text).filter(|s| !s.is_empty());
     req.messages = parse_messages(body)?;
-    req.tools = parse_tools(body);
+    let (tools, raw_tools) = parse_tools(body);
+    req.tools = tools;
+    req.raw_tools = raw_tools.map(|t| (D, t));
     req.tool_choice = parse_tool_choice(body);
 
     capture_extra(body, KNOWN_KEYS, D, &mut req)?;
@@ -149,12 +151,22 @@ fn result_text(v: &Value) -> String {
     }
 }
 
-fn parse_tools(body: &Value) -> Vec<ToolDef> {
+/// Custom tools carry `input_schema` and no `type`; server tools (`web_search`,
+/// `computer`, `bash`, `text_editor`) are identified by their versioned `type`.
+/// Server tools have no canonical form, so they are kept verbatim and only sent
+/// back to Anthropic — treating one as a function tool would strip the feature
+/// and leave an empty schema behind.
+fn parse_tools(body: &Value) -> (Vec<ToolDef>, Option<Vec<Value>>) {
     let Some(items) = body.get("tools").and_then(Value::as_array) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let mut out = Vec::with_capacity(items.len());
+    let mut raw = Vec::new();
     for item in items {
+        if item.get("type").is_some() {
+            raw.push(item.clone());
+            continue;
+        }
         let Some(name) = req_str(item, "name") else { continue };
         out.push(ToolDef {
             name: name.to_owned(),
@@ -164,7 +176,7 @@ fn parse_tools(body: &Value) -> Vec<ToolDef> {
             strict: false,
         });
     }
-    out
+    (out, (!raw.is_empty()).then_some(raw))
 }
 
 fn parse_tool_choice(body: &Value) -> Option<ToolChoice> {
@@ -212,20 +224,25 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
             body.insert("system".into(), Value::from(system.clone()));
         }
     }
-    if !req.tools.is_empty() {
-        let tools: Vec<Value> = req
-            .tools
-            .iter()
-            .map(|t| {
-                let mut m = Map::new();
-                m.insert("name".into(), Value::from(t.name.clone()));
-                if let Some(d) = &t.description {
-                    m.insert("description".into(), Value::from(d.clone()));
-                }
-                m.insert("input_schema".into(), t.parameters.clone());
-                Value::Object(m)
-            })
-            .collect();
+    let mut tools: Vec<Value> = req
+        .tools
+        .iter()
+        .map(|t| {
+            let mut m = Map::new();
+            m.insert("name".into(), Value::from(t.name.clone()));
+            if let Some(d) = &t.description {
+                m.insert("description".into(), Value::from(d.clone()));
+            }
+            m.insert("input_schema".into(), t.parameters.clone());
+            Value::Object(m)
+        })
+        .collect();
+    if let Some((src, raw)) = &req.raw_tools {
+        if *src == D {
+            tools.extend(raw.iter().cloned());
+        }
+    }
+    if !tools.is_empty() {
         body.insert("tools".into(), Value::from(tools));
     }
     if let Some(choice) = &req.tool_choice {
@@ -711,6 +728,31 @@ mod tests {
     use super::*;
     use crate::openai_chat::{build_response as build_oi, parse_request as parse_oi};
     use crate::{build_request, parse_request, StreamEncoder};
+
+    #[test]
+    fn anthropic_server_tools_are_passed_through_unchanged() {
+        let body = json!({
+            "model": "m",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"name": "lookup", "description": "d", "input_schema": {"type": "object"}},
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+            ],
+        });
+        let req = super::parse_request(&body).unwrap();
+        assert_eq!(req.tools.len(), 1, "the server tool is not a function tool");
+        assert_eq!(req.tools[0].name, "lookup");
+
+        let same = super::build_request(&req, false).unwrap();
+        let tools = same["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[1], json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 5}));
+
+        let chat = build_request(Dialect::OpenAiChat, &req, false).unwrap();
+        assert!(chat.get("tools").and_then(|t| t.as_array()).map(|t| t.len()) == Some(1),
+            "a server tool must not be smuggled into another dialect: {chat}");
+    }
 
     fn sse(event: &str, data: Value) -> String {
         render_anthropic(event, &data.to_string())
