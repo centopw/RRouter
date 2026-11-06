@@ -1,6 +1,8 @@
 //! `Store`: the single embedded SQLite database behind the gateway.
 
 use std::path::{Path, PathBuf};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,7 +14,7 @@ use rrouter_core::{Error, Result};
 
 use crate::crypto::Cipher;
 use crate::migrations;
-use crate::testkit::{CredentialStore, Credentials};
+use rrouter_auth::{CredentialStore, Credentials};
 
 /// Prefix of every gateway API key. The remainder is 32 hex chars of CSPRNG output.
 pub const API_KEY_PREFIX: &str = "sk-rr-";
@@ -676,15 +678,24 @@ impl Store {
 }
 
 impl CredentialStore for Store {
-    async fn load(&self, id: Uuid) -> Result<Credentials> {
-        self.get_connection(id)
-            .await?
-            .map(|c| c.credentials)
-            .ok_or_else(|| Error::NotFound(format!("connection {id}")))
+    fn load<'a>(
+        &'a self,
+        id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials>> + Send + 'a>> {
+        Box::pin(async move {
+            self.get_connection(id)
+                .await?
+                .map(|c| c.credentials)
+                .ok_or_else(|| Error::NotFound(format!("connection {id}")))
+        })
     }
 
-    async fn merge(&self, id: Uuid, patch: Credentials) -> Result<Credentials> {
-        Ok(self.merge_credentials(id, patch).await?.credentials)
+    fn merge<'a>(
+        &'a self,
+        id: Uuid,
+        patch: Credentials,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials>> + Send + 'a>> {
+        Box::pin(async move { Ok(self.merge_credentials(id, patch).await?.credentials) })
     }
 }
 

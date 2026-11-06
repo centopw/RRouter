@@ -19,19 +19,13 @@
 //! material rules (hex master key, else a `0600` key file in the data dir). API keys are
 //! stored as SHA-256 hex only. Usage rows never hold prompt or response text.
 //!
-//! # Sibling-crate note
-//!
-//! [`testkit`] holds a temporary local copy of `rrouter_auth::{Credentials, CredentialStore}`
-//! because `rrouter-auth` is still a placeholder crate. That module documents the one-line
-//! switch once task T3 lands.
 
 mod crypto;
 mod migrations;
 mod store;
-pub mod testkit;
 
 pub use crypto::KEY_FILE_NAME;
 pub use store::{
     ApiKey, Combo, Connection, ModelAlias, Store, UsageRecord, UsageSummary, API_KEY_PREFIX,
 };
-pub use testkit::{CredentialStore, Credentials};
+pub use rrouter_auth::{CredentialStore, Credentials};
