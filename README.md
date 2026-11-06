@@ -241,6 +241,10 @@ npm run dev     # http://localhost:5173, proxies /api and /v1 to :20128
 npm run build   # writes ui/dist; the next cargo build embeds it
 ```
 
+**Logs** is the incident view: every request, newest first, filterable by range, status,
+provider, model and key, with backward paging over the full history and the same attempts
+detail as Activity.
+
 **Playground** sends a real request through the gateway and shows the answer as it streams —
 Chat and Messages dialects, time to first token, total latency, tokens, and the raw SSE when
 you need it. **Settings** edits the deployment's brand (name, accent, logo, footer) and shows

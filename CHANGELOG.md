@@ -5,8 +5,12 @@ All notable changes. Dates are local; versions follow semver once tagged.
 ## Unreleased
 
 ### Added
+- Logs page: filterable, cursor-paginated request history with the same attempts detail as
+  Activity.
 - Structured logs: `RROUTER_LOG_FORMAT=json` and one access line per finished request
   (request id, provider, model, status, latency, first-output time, endpoint, key id).
+- Cursor pagination for the request log (`/api/usage` `before`/`before_id` and
+  `next_before`), so history can be paged without time-window guessing.
 - Budget windows: per-key budgets reset daily, weekly or monthly (UTC), enforced alongside the
   lifetime cap; `spent_*` on the key row is scoped to the current window.
 - Opt-in exact-match response cache for non-streaming requests (`RROUTER_CACHE=sqlite`), with
