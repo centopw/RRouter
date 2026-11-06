@@ -39,7 +39,20 @@ What that means concretely versus the Node implementation:
 
 ```sh
 cargo build --release
-./target/release/rrouter            # listens on 127.0.0.1:20128 (same port as 9router)
+./target/release/rrouter            # 127.0.0.1:20128, data/ created on first run
+open http://127.0.0.1:20128         # dashboard: add a provider connection, copy an API key
+```
+
+Recurring account setup lives in the dashboard. From the CLI it is two calls:
+
+```sh
+# store an [OI]-compatible provider key (encrypted at rest immediately)
+curl -s localhost:20128/api/connections -H 'content-type: application/json' -d '{
+  "provider":"openai","auth_type":"api_key","name":"personal",
+  "credentials":{"api_key":"sk-..."}}'
+
+# optional gateway key: clients then need "Authorization: Bearer sk-rr-..."
+curl -s -X POST localhost:20128/api/keys -d '{"name":"laptop"}'
 ```
 
 Point a client at it:
@@ -98,7 +111,7 @@ rrouter serve
 |---|---|---|
 | `RROUTER_HOST` | `127.0.0.1` | bind address |
 | `RROUTER_DATA_DIR` | `./data` | SQLite DB + master key file |
-| `RROUTER_MASTER_KEY` | unset | 64-hex-char AES key; otherwise `data/.key` (0600) is generated |
+| `RROUTER_MASTER_KEY` | unset | 64-hex-char AES key; otherwise `data/master.key` (0600) is generated |
 | `RROUTER_REQUIRE_API_KEY` | `false` | require a stored `sk-rr-…` key on `/v1/*` |
 | `RROUTER_ALLOW_REMOTE_ADMIN` | `false` | admin API is loopback-only unless enabled, even when bound to `0.0.0.0` |
 | `RROUTER_CORS_ORIGINS` | unset | comma-separated allowlist; no wildcard |
@@ -124,7 +137,7 @@ Admin API: `/api/connections`, `/api/keys`, `/api/aliases`, `/api/combos`, `/api
 | `RROUTER_PORT` | `20128` | same port as 9router, so existing client configs keep working |
 | `RROUTER_HOST` | `127.0.0.1` | bind address |
 | `RROUTER_DATA_DIR` | `./data` | SQLite DB + master key file |
-| `RROUTER_MASTER_KEY` | unset | 64-hex-char AES key; otherwise `data/.key` (0600) is generated |
+| `RROUTER_MASTER_KEY` | unset | 64-hex-char AES key; otherwise `data/master.key` (0600) is generated |
 | `RROUTER_REQUIRE_API_KEY` | `false` | require a stored `sk-rr-…` key on `/v1/*` |
 | `RROUTER_REQUEST_TIMEOUT_SECS` | `600` | upstream request timeout |
 | `RROUTER_CONNECT_TIMEOUT_SECS` | `15` | connect timeout |
@@ -165,11 +178,19 @@ crates/rrouter-router     model resolution, fallback, circuit breaker
 crates/rrouter-gateway    axum server, /v1 proxy, admin API, embedded UI, `rrouter` binary
 ```
 
+## Tests
+
 ```sh
-cargo test                                          # all crates
+cargo test --workspace                             # 110 tests
 cargo clippy --workspace --all-targets -- -D warnings
+python3 scripts/e2e_smoke.py                       # live binary + mock upstream, 12 checks
 ```
 
+`scripts/e2e_smoke.py` starts a mock provider and the release binary, then proves: a 401 on
+the first account falls through to the next in milliseconds, the first SSE frame reaches the
+client before the upstream finishes its stream, an Anthropic client gets Anthropic-shaped
+output from an [OI]-speaking provider, credentials are absent from the DB file in plaintext,
+the key file is `0600`, and the admin API never returns token material.
 ## License
 
 MIT. Behavioural inspiration from 9router (also MIT); no code is copied — wire contracts were
