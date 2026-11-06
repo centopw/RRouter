@@ -41,8 +41,9 @@ the same host connects from loopback, so **the proxy makes the admin API reachab
 Two ways to close that:
 
 - set `RROUTER_ADMIN_TOKEN` — every admin request then needs `Authorization: Bearer <token>`
-  (or `x-admin-token`), and the loopback shortcut no longer applies. This works even when the
-  proxy cannot add auth.
+  (or `x-admin-token`), and the loopback shortcut no longer applies. The dashboard prompts for
+  the token and keeps it in the tab's sessionStorage; this works even when the proxy cannot add
+  auth.
 - keep the token unset and authenticate `/api/*` and `/metrics` at the proxy (basic auth,
   OIDC, IP allowlist); `deploy/Caddyfile.example` does this.
 
