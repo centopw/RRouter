@@ -84,7 +84,7 @@ impl Planner {
         let aliases = store.list_aliases().await?;
         let disabled: Vec<String> = store.disabled_models().await?;
 
-        let mut targets = self.targets(catalog, store, model, &aliases).await?;
+        let targets = self.targets(catalog, store, model, &aliases).await?;
         if targets.is_empty() {
             return Err(Error::NoRoute {
                 model: model.to_string(),
@@ -95,21 +95,29 @@ impl Planner {
 
         let active: Vec<&Connection> = connections.iter().filter(|c| c.is_active).collect();
 
-        // Spec step 4 for an id the catalog does not know: *every* active
-        // connection declares it by virtue of the client asking for it, ordered
-        // by priority. Only catalog-known ids restrict the provider set.
-        if !catalog.is_known(&targets[0].1) {
+        // A bare id the catalog does not know is taken as "every active provider can
+        // serve it" — that is how a self-hosted or freshly published id reaches the
+        // aggregators. An explicit `provider/model` never widens: asking for
+        // `claude/claude-opus-5-5` must not be answered by a Codex account.
+        let mut expanded: Vec<(String, String)> = Vec::with_capacity(targets.len());
+        for (provider, model_id, explicit) in targets {
+            if explicit || catalog.is_known(&model_id) {
+                expanded.push((provider, model_id));
+                continue;
+            }
             let mut seen_providers: Vec<&str> = Vec::with_capacity(active.len());
             for conn in &active {
                 if !seen_providers.contains(&conn.provider.as_str()) {
                     seen_providers.push(conn.provider.as_str());
                 }
             }
-            targets = seen_providers
-                .into_iter()
-                .map(|provider| (provider.to_string(), targets[0].1.clone()))
-                .collect();
+            expanded.extend(
+                seen_providers
+                    .into_iter()
+                    .map(|p| (p.to_string(), model_id.clone())),
+            );
         }
+        let targets = expanded;
         let disabled: std::collections::HashSet<&str> =
             disabled.iter().map(String::as_str).collect();
 
@@ -174,14 +182,16 @@ impl Planner {
         self.cursor.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Ordered `(provider, model)` list for `model`, before connection expansion.
+    /// Ordered `(provider, model, explicit)` list for `model`, before connection
+    /// expansion. `explicit` records that the caller named the provider, which stops
+    /// an unknown id from being fanned out to every active connection.
     async fn targets(
         &self,
         catalog: &Catalog,
         store: &Store,
         model: &str,
         aliases: &[rrouter_store::ModelAlias],
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<Vec<(String, String, bool)>> {
         let mut current = model.to_string();
 
         // 1. Alias, exactly one hop: a self-referential or cyclic alias must not loop.
@@ -214,21 +224,21 @@ impl Planner {
         Ok(self.expand_entry(catalog, &current))
     }
 
-    /// Expand one non-combo model string into `(provider, model)` targets.
-    fn expand_entry(&self, catalog: &Catalog, entry: &str) -> Vec<(String, String)> {
+    /// Expand one non-combo model string into `(provider, model, explicit)` targets.
+    fn expand_entry(&self, catalog: &Catalog, entry: &str) -> Vec<(String, String, bool)> {
         // 2. Explicit `provider/model` for a registered provider.
         if let Some((head, rest)) = entry.split_once('/') {
             if !rest.is_empty() && KNOWN_PROVIDERS.contains(&head) {
                 // Trust the caller even when the catalog does not know the id:
                 // regional deployments and freshly published models are common.
-                return vec![(head.to_string(), rest.to_string())];
+                return vec![(head.to_string(), rest.to_string(), true)];
             }
         }
 
         // 4. Everything the catalog says serves this id.
         let hits = catalog.resolve(entry);
         if !hits.is_empty() {
-            return hits.into_iter().map(|m| (m.provider, m.id)).collect();
+            return hits.into_iter().map(|m| (m.provider, m.id, false)).collect();
         }
 
         // Unknown bare id (or a self-referential alias): no provider declares it,
@@ -236,7 +246,7 @@ impl Planner {
         // accept arbitrary ids. `plan` widens this to every active connection.
         ["openrouter", "ollama", "together", "groq", "cerebras"]
             .into_iter()
-            .map(|provider| (provider.to_string(), entry.to_string()))
+            .map(|provider| (provider.to_string(), entry.to_string(), false))
             .collect()
     }
 }

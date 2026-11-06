@@ -253,7 +253,7 @@ non-streaming client is reassembled from the same decoder.
 ## Tests
 
 ```sh
-cargo test --workspace                              # 182 tests
+cargo test --workspace                              # 183 tests
 cargo clippy --workspace --all-targets -- -D warnings
 ./scripts/verify.sh                                 # build + every gate
 python3 scripts/e2e_smoke.py                        # live binary + mock upstream

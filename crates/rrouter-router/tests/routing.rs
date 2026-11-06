@@ -85,6 +85,38 @@ async fn self_referential_alias_does_not_loop() {
 }
 
 #[tokio::test]
+async fn explicit_provider_is_not_widened_for_unknown_ids() {
+    // A bare id the catalog does not know is normally handed to every active
+    // provider; naming the provider must stop that, or a Claude model reaches a
+    // Codex account and the test button surfaces the wrong upstream's 400.
+    let store = Store::open_in_memory().unwrap();
+    assert!(
+        !Catalog::builtin().is_known("claude-opus-5-5"),
+        "the test only means something while this id is outside the builtin catalog"
+    );
+    let claude = conn(&store, "claude", "claude-opus-5-5", 0).await;
+    let _codex = conn(&store, "codex", "gpt-5", 0).await;
+    let planner = Planner::new();
+    let plan = planner
+        .plan(&Catalog::builtin(), &store, "claude/claude-opus-5-5", false, None)
+        .await
+        .unwrap();
+    assert_eq!(plan.candidates.len(), 1);
+    assert_eq!(plan.candidates[0].provider, "claude");
+    assert_eq!(plan.candidates[0].model, "claude-opus-5-5");
+    assert_eq!(plan.candidates[0].connection, claude);
+
+    // Unprefixed ids keep the old behaviour: any active provider may serve them.
+    let bare = planner
+        .plan(&Catalog::builtin(), &store, "mystery-model", false, None)
+        .await
+        .unwrap();
+    let providers: Vec<&str> = bare.candidates.iter().map(|c| c.provider.as_str()).collect();
+    assert!(providers.contains(&"claude"));
+    assert!(providers.contains(&"codex"));
+}
+
+#[tokio::test]
 async fn explicit_provider_wins_over_catalog_guess() {
     let store = Store::open_in_memory().unwrap();
     let _ = conn(&store, "openai", "gpt-4.1", 0).await;

@@ -179,13 +179,16 @@ const CODEX_REFRESH: RefreshSpec = RefreshSpec {
     body: RefreshBody::Form,
 };
 
+/// Anthropic gates model access on the client version it sees: a request claiming an
+/// old Claude Code is answered with "version 2.1.280 or newer is required" instead of
+/// a completion. Keep this at or above that floor when new models land.
 const CLAUDE_HEADERS: &[(&str, &str)] = &[
     ("anthropic-version", "2023-06-01"),
     (
         "anthropic-beta",
         "oauth-2025-04-20,interleaved-thinking-2025-05-14",
     ),
-    ("user-agent", "claude-cli/2.0.0 (external, cli)"),
+    ("user-agent", "claude-cli/2.1.318 (external, cli)"),
 ];
 
 const CODEX_HEADERS: &[(&str, &str)] = &[
