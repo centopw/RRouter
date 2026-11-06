@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rrouter_core::{ChatResponse, Error, Result};
+use uuid::Uuid;
 
 use crate::breaker::Breaker;
 use crate::candidate::{Candidate, Plan};
@@ -82,21 +83,28 @@ impl Dispatcher {
         let mut last: Option<Error> = None;
         let mut sends = 0usize;
         while sends < self.max_attempts {
-            let Some(candidate) = self.next_claim(plan, &mut order).await else { break };
+            let Some((candidate, mut claim)) = self.next_claim(plan, &mut order).await else {
+                break;
+            };
             sends += 1;
-            match send(candidate.clone()).await {
+            let result = send(candidate.clone()).await;
+            // Disarm before settling so `Drop` cannot double-report.
+            claim.disarm();
+            match result {
                 Ok(resp) => {
                     self.breaker.record_success(candidate.connection);
                     return Ok(AttemptOutcome { candidate, result: Ok(resp) });
                 }
+                Err(err) if !err.is_retryable_upstream() => {
+                    // A non-retryable error (bad client request, translation failure) says
+                    // nothing about the account: the upstream answered sanely. Releasing the
+                    // probe keeps it eligible instead of counting a client 400 toward a trip.
+                    self.breaker.record_success(candidate.connection);
+                    return Ok(AttemptOutcome { candidate, result: Err(err) });
+                }
                 Err(err) => {
-                    // Settle the claim on every path: a claimed probe slot that is
-                    // never resolved parks the account for PROBE_TAKEN.
                     self.breaker
                         .record_failure(candidate.connection, status_of(&err), retry_after(&err));
-                    if !err.is_retryable_upstream() {
-                        return Ok(AttemptOutcome { candidate, result: Err(err) });
-                    }
                     last = Some(err);
                 }
             }
@@ -110,17 +118,22 @@ impl Dispatcher {
     /// Pop the next candidate whose send is permitted *now*, claiming its
     /// half-open probe slot in the same step so no slot is taken and dropped.
     ///
-    /// `Some(wait)` from [`Breaker::claim`] means another task is already probing
-    /// that connection; the candidate is skipped rather than sent in parallel.
+    /// The returned [`ProbeClaim`] settles the slot on drop, so a cancelled request
+    /// (client disconnect) can never park the account.
     pub(crate) async fn next_claim(
         &self,
         plan: &Plan,
         order: &mut std::collections::VecDeque<usize>,
-    ) -> Option<Candidate> {
+    ) -> Option<(Candidate, ProbeClaim)> {
         while let Some(idx) = order.pop_front() {
             let candidate = plan.candidates[idx].clone();
             if self.breaker.claim(candidate.connection).is_none() {
-                return Some(candidate);
+                let claim = ProbeClaim {
+                    breaker: Arc::clone(&self.breaker),
+                    conn: candidate.connection,
+                    armed: true,
+                };
+                return Some((candidate, claim));
             }
         }
         None
@@ -152,6 +165,35 @@ impl Dispatcher {
             }
         }
         eligible
+    }
+}
+
+/// RAII settlement for one claimed attempt.
+///
+/// `Dispatcher` claims a half-open probe slot immediately before sending. Every
+/// documented outcome settles it explicitly, but a **cancelled** request — the
+/// axum handler future dropped on client disconnect — never reaches that code.
+/// Dropping this guard releases the slot instead of parking the account for
+/// `PROBE_TAKEN`, and is a no-op when the slot was already settled.
+pub(crate) struct ProbeClaim {
+    breaker: Arc<Breaker>,
+    conn: Uuid,
+    armed: bool,
+}
+
+impl ProbeClaim {
+    /// Mark the claim as already settled by an explicit `record_success` /
+    /// `record_failure`. Must be called before those, so a panic cannot double-report.
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProbeClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            self.breaker.release_probe(self.conn);
+        }
     }
 }
 

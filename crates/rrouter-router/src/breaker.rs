@@ -139,6 +139,20 @@ impl Breaker {
         entry.rate_limit_strikes = 0;
     }
 
+    /// Give back a claimed half-open probe slot without judging the attempt.
+    ///
+    /// Used when a request is cancelled before it produced a verdict (client
+    /// disconnect): the account is neither proven healthy nor proven broken, so
+    /// the slot is returned and the state otherwise left alone.
+    pub fn release_probe(&self, conn: Uuid) {
+        let mut map = self.lock();
+        if let Some(entry) = map.get_mut(&conn) {
+            if let BreakerState::HalfOpen { probes } = entry.state {
+                entry.state = BreakerState::HalfOpen { probes: probes.saturating_sub(1) };
+            }
+        }
+    }
+
     /// 429 → exponential backoff (1,2,4,8,… capped 240 s, honoring `Retry-After`);
     /// 5xx → 30 s; 401/403 → 300 s; anything else counts toward tripping.
     pub fn record_failure(&self, conn: Uuid, status: u16, retry_after: Option<Duration>) {

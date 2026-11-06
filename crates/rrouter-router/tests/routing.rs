@@ -499,3 +499,62 @@ async fn skipped_candidate_is_waited_for_once_when_nothing_else_is_eligible() {
     assert!(started.elapsed() >= Duration::from_millis(250), "{:?}", started.elapsed());
     assert!(started.elapsed() <= Duration::from_secs(3), "{:?}", started.elapsed());
 }
+
+#[tokio::test]
+async fn cancelled_attempt_releases_the_probe_slot() {
+    // Regression: a client disconnect drops the handler future mid-await. Without an
+    // RAII claim the half-open slot would stay taken and park the account for an hour.
+    // A zero-width open window makes every attempt a half-open probe from the start.
+    let breaker = Arc::new(Breaker::with_policy(1, Duration::ZERO, 1));
+    let plan = plan_of(1);
+    let conn = plan.candidates[0].connection;
+
+    // Trip it: the next eligibility check sees an already-elapsed window → half-open.
+    breaker.record_failure(conn, 500, None);
+    // A zero-width window means the state is already past-open: the next attempt is a probe.
+    assert!(matches!(
+        breaker.state(conn),
+        BreakerState::Open { .. } | BreakerState::HalfOpen { .. }
+    ));
+
+    let dispatcher = Dispatcher::with_shared_breaker(breaker.clone());
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(50),
+        dispatcher.run(&plan, |_c| async {
+            std::future::pending::<Result<ChatResponse, Error>>().await
+        }),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the attempt must have been cancelled mid-flight");
+
+    // The probe slot must be free again; a leaked claim would report PROBE_TAKEN.
+    assert!(
+        breaker.check(conn).is_none(),
+        "a cancelled attempt must not leave the probe slot taken"
+    );
+    assert!(breaker.claim(conn).is_none(), "account must be probeable again");
+}
+
+#[tokio::test]
+async fn client_error_does_not_trip_a_healthy_account() {
+    // Regression: non-retryable errors (a malformed client request) were recorded as
+    // account failures, so three bad requests opened a working account's breaker.
+    let dispatcher = Dispatcher::new(Breaker::new());
+    let plan = plan_of(1);
+    let conn = plan.candidates[0].connection;
+
+    for _ in 0..3 {
+        let outcome = dispatcher
+            .run(&plan, |_c| async {
+                Err::<ChatResponse, _>(Error::BadRequest("messages is required".into()))
+            })
+            .await
+            .unwrap();
+        assert!(outcome.result.is_err());
+    }
+    assert!(
+        matches!(dispatcher.breaker().state(conn), BreakerState::Closed),
+        "client errors must not count toward the account's failure streak"
+    );
+    assert!(dispatcher.breaker().claim(conn).is_none(), "account must stay eligible");
+}

@@ -43,21 +43,26 @@ impl Dispatcher {
         let mut last: Option<Error> = None;
         let mut sends = 0usize;
         while sends < self.max_attempts() {
-            let Some(candidate) = self.next_claim(plan, &mut order).await else { break };
+            let Some((candidate, mut claim)) = self.next_claim(plan, &mut order).await else {
+                break;
+            };
             sends += 1;
-            match open(candidate.clone()).await {
+            let opened = open(candidate.clone()).await;
+            claim.disarm();
+            match opened {
                 Ok(stream) => {
                     let committed =
                         Committed::new(stream, self.breaker_arc(), candidate.connection);
                     return Ok((candidate, Box::pin(committed)));
                 }
+                Err(err) if !err.is_retryable_upstream() => {
+                    // The account answered sanely; the request was bad. Release the probe.
+                    self.breaker.record_success(candidate.connection);
+                    return Err(err);
+                }
                 Err(err) => {
-                    // Settle the probe claim before deciding whether to retry.
                     self.breaker
                         .record_failure(candidate.connection, status_of(&err), retry_after(&err));
-                    if !err.is_retryable_upstream() {
-                        return Err(err);
-                    }
                     last = Some(err);
                 }
             }
