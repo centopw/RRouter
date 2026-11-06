@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RRouter</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="bar">
+  <span class="brand" id="brand">RRouter</span>
+  <nav id="tabs" class="tabs" role="tablist"></nav>
+  <span class="spacer"></span>
+  <span id="health" class="pill" title="live /health">…</span>
+</header>
+<main id="panel" class="panel" role="tabpanel"></main>
+<footer class="bar foot"><span id="footer"></span></footer>
+<template id="tpl-table">
+  <div class="toolbar" id="toolbar"></div>
+  <table><thead id="thead"></thead><tbody id="tbody"></tbody></table>
+</template>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
