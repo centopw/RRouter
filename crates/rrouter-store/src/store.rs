@@ -180,24 +180,25 @@ impl Store {
         let blob = self.seal(&id, &credentials)?;
         let now = now();
         let email = credentials.account_label.clone();
-        let conn = self.conn();
-        conn.execute(
-            "INSERT INTO connections \
-             (id, provider, auth_type, name, email, priority, is_active, data, backoff_level, \
-              created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, ?6, 0, ?7, ?7)",
-            params![
-                id.to_string(),
-                provider,
-                auth_type,
-                name,
-                email,
-                blob,
-                now
-            ],
-        )
-        .map_err(migrations::db_err)?;
-        drop(conn);
+        {
+            let conn = self.conn();
+            conn.execute(
+                "INSERT INTO connections \
+                 (id, provider, auth_type, name, email, priority, is_active, data, backoff_level, \
+                  created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, ?6, 0, ?7, ?7)",
+                params![
+                    id.to_string(),
+                    provider,
+                    auth_type,
+                    name,
+                    email,
+                    blob,
+                    now
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        }
         self.get_connection(id)
             .await?
             .ok_or_else(|| Error::Store("connection vanished after insert".to_string()))

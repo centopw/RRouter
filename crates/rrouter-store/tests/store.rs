@@ -160,8 +160,8 @@ fn concurrent_merges_do_not_lose_updates() {
     let id = c.id;
     let store = &store;
 
-    // 20 tasks: 9 distinct optional string fields + 11 distinct `extra` keys, so every
-    // task patches something no sibling touches. A lost read-merge-write drops one.
+    // 20 tasks: 9 distinct scalar fields + 11 distinct `extra` keys, so every task patches
+    // something no sibling touches. A lost read-merge-write drops exactly one of them.
     let expected_extra: Vec<String> = (9..20).map(|n| format!("field_{n}")).collect();
     rt().block_on(async {
         let setter = |i: usize, s: Store| async move {
