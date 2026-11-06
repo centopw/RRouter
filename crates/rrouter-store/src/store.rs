@@ -112,6 +112,18 @@ pub struct UsageSummary {
     pub avg_latency_ms: u32,
 }
 
+/// One time bucket of usage, for charts that must stay honest at high volume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageBucket {
+    /// Bucket start, unix seconds, aligned to the requested bucket width.
+    pub start: i64,
+    pub requests: u64,
+    pub errors: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub avg_latency_ms: u32,
+}
+
 /// Embedded database handle. Cheap to clone; all clones share one connection.
 #[derive(Clone)]
 pub struct Store {
@@ -796,6 +808,43 @@ impl Store {
                     errors: r.get(3)?,
                     input_tokens: r.get(4)?,
                     output_tokens: r.get(5)?,
+                    avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+}
+
+impl Store {
+    /// Aggregate usage into fixed-width buckets starting at `since`.
+    ///
+    /// Counters are grouped in SQL so a dashboard never has to fetch every event to
+    /// draw a chart; `recent_usage` is capped at 1000 rows and cannot answer a week.
+    pub async fn usage_series(&self, since: i64, bucket_secs: i64) -> Result<Vec<UsageBucket>> {
+        let bucket_secs = bucket_secs.max(60);
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT (ts / ?2) * ?2 AS bucket, count(*), \
+                        sum(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), \
+                        sum(input_tokens), sum(output_tokens), avg(latency_ms) \
+                 FROM usage WHERE ts >= ?1 GROUP BY bucket ORDER BY bucket ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params![since, bucket_secs], |r| {
+                let avg: f64 = r.get(5)?;
+                Ok(UsageBucket {
+                    start: r.get(0)?,
+                    requests: r.get(1)?,
+                    errors: r.get(2)?,
+                    input_tokens: r.get(3)?,
+                    output_tokens: r.get(4)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })

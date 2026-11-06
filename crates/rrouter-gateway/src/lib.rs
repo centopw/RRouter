@@ -94,6 +94,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/usage", get(routes::usage::list))
         .route("/usage/summary", get(routes::usage::summary))
+        .route("/usage/series", get(routes::usage::series))
         .route("/system", get(routes::system::system))
         .route("/settings", get(routes::settings::get_settings).put(routes::settings::put_settings))
         .route("/oauth/providers", get(routes::oauth::providers))

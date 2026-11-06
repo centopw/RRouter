@@ -47,6 +47,53 @@ pub async fn list(
     }
 }
 
+/// `GET /api/usage/series?hours=168&bucket=hour|day`
+///
+/// Aggregated in SQL so the dashboard draws a week of traffic without reading every
+/// event. `bucket` defaults to whichever of hour/day keeps the point count readable.
+pub async fn series(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<Vec<(String, String)>>,
+) -> Response {
+    let param = |key: &str| {
+        query
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    let hours = param("hours")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(24)
+        .clamp(1, 24 * 365);
+    let bucket_secs = match param("bucket").as_deref() {
+        Some("hour") => 3600,
+        Some("day") => 86_400,
+        Some("minute") => 60,
+        _ if hours <= 48 => 3600,
+        _ => 86_400,
+    };
+    let since = crate::now_unix() - hours * 3600;
+    match state.store.usage_series(since, bucket_secs).await {
+        Ok(buckets) => {
+            let data: Vec<serde_json::Value> = buckets
+                .iter()
+                .map(|b| {
+                    json!({
+                        "start": b.start,
+                        "requests": b.requests,
+                        "errors": b.errors,
+                        "input_tokens": b.input_tokens,
+                        "output_tokens": b.output_tokens,
+                        "avg_latency_ms": b.avg_latency_ms,
+                    })
+                })
+                .collect();
+            ok_json(json!({ "data": data, "hours": hours, "bucket_secs": bucket_secs }))
+        }
+        Err(e) => admin_error(&e),
+    }
+}
+
 pub async fn summary(State(state): State<Arc<AppState>>) -> Response {
     match state.store.usage_summary().await {
         Ok(rows) => {

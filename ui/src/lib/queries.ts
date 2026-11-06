@@ -10,6 +10,7 @@ import {
   type Model,
   type ModelProvider,
   type SystemInfo,
+  type UsageBucket,
   type UsageEvent,
   type UsageSummaryRow,
 } from "./api";
@@ -25,6 +26,7 @@ export const qk = {
   aliases: ["aliases"] as const,
   combos: ["combos"] as const,
   usage: (limit: number) => ["usage", limit] as const,
+  series: (hours: number) => ["usage-series", hours] as const,
   summary: ["usage-summary"] as const,
 };
 
@@ -77,6 +79,15 @@ export function useUsage(limit = 1000) {
     queryKey: qk.usage(limit),
     queryFn: () => list<UsageEvent>(`/api/usage?limit=${limit}`),
     refetchInterval: 15_000,
+  });
+}
+
+/** Buckets aggregated server-side, so the window is real regardless of volume. */
+export function useUsageSeries(hours: number) {
+  return useQuery({
+    queryKey: qk.series(hours),
+    queryFn: () => list<UsageBucket>(`/api/usage/series?hours=${hours}`),
+    refetchInterval: 30_000,
   });
 }
 

@@ -121,6 +121,15 @@ export type UsageEvent = {
   error: string | null;
 };
 
+export type UsageBucket = {
+  start: number;
+  requests: number;
+  errors: number;
+  input_tokens: number;
+  output_tokens: number;
+  avg_latency_ms: number;
+};
+
 export type Capabilities = {
   vision: boolean;
   pdf: boolean;

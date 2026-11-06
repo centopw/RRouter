@@ -55,7 +55,12 @@ function normalize(values: number[], w: number, h: number): Array<{ x: number; y
 
 export type Bar = { label: string; value: number; highlight?: boolean };
 
-export function Bars({ bars, height = 220 }: { bars: Bar[]; height?: number }) {
+/**
+ * `fill` stretches bars across the panel: use it for contiguous time buckets.
+ * Without it each bar keeps a fixed width, which is right for categories such as
+ * models, where two rows must not become two half-panel columns.
+ */
+export function Bars({ bars, height = 220, fill = false }: { bars: Bar[]; height?: number; fill?: boolean }) {
   if (bars.length === 0) {
     return <div className="px-5 py-10 text-center text-[13px] text-faint">no usage in this window</div>;
   }
@@ -79,11 +84,21 @@ export function Bars({ bars, height = 220 }: { bars: Bar[]; height?: number }) {
         })}
         {/* Category bars: fixed width and left-aligned, so two models do not
             stretch into two halves of the panel. */}
-        <div className="absolute inset-y-0 left-12 right-0 flex items-end gap-4 overflow-x-auto">
+        <div
+          className={
+            fill
+              ? "absolute inset-y-0 left-12 right-0 flex items-end gap-1"
+              : "absolute inset-y-0 left-12 right-0 flex items-end gap-4 overflow-x-auto"
+          }
+        >
           {bars.map((b, i) => (
             <div
               key={`${b.label}-${i}`}
-              className="group flex h-full w-[46px] shrink-0 items-end"
+              className={
+                fill
+                  ? "group flex h-full min-w-0 flex-1 items-end"
+                  : "group flex h-full w-[46px] shrink-0 items-end"
+              }
               title={`${b.label}: ${b.value.toLocaleString()} tokens`}
             >
               <div
@@ -97,12 +112,19 @@ export function Bars({ bars, height = 220 }: { bars: Bar[]; height?: number }) {
           ))}
         </div>
       </div>
-      <div className="mt-2 flex gap-4 overflow-hidden pl-12">
-        {bars.map((b, i) => (
-          <div key={`${b.label}-label-${i}`} className="w-[46px] shrink-0 truncate text-[10px] text-faint" title={b.label}>
-            {shortId(b.label)}
-          </div>
-        ))}
+      <div className={fill ? "mt-2 flex justify-between pl-12 text-[10px] text-faint" : "mt-2 flex gap-4 overflow-hidden pl-12"}>
+        {fill ? (
+          <>
+            <span>{bars[0]?.label}</span>
+            <span>{bars[bars.length - 1]?.label}</span>
+          </>
+        ) : (
+          bars.map((b, i) => (
+            <div key={`${b.label}-label-${i}`} className="w-[46px] shrink-0 truncate text-[10px] text-faint" title={b.label}>
+              {shortId(b.label)}
+            </div>
+          ))
+        )}
       </div>
     </div>
   );
