@@ -279,6 +279,9 @@ The operational guide — exposure, TLS proxy, backups, upgrades, failure modes 
 | `RROUTER_MAX_ATTEMPTS` | `4` | Upstream sends per request before giving up (1–8) |
 | `RROUTER_SHUTDOWN_GRACE_SECS` | `20` | How long a graceful shutdown waits for live streams |
 | `RROUTER_CORS_ORIGINS` | unset | Comma-separated allowlist; `*` is rejected |
+| `RROUTER_CACHE` | `off` | `sqlite` enables the opt-in exact-match response cache |
+| `RROUTER_CACHE_TTL_SECS` | `300` | Cache entry lifetime |
+| `RROUTER_CACHE_MAX_ENTRIES` | `1000` | Cache size bound (oldest evicted) |
 | `RROUTER_REQUEST_TIMEOUT_SECS` | `600` | Upstream request timeout |
 | `RROUTER_CONNECT_TIMEOUT_SECS` | `15` | TCP/TLS connect timeout |
 | `RROUTER_STATIC_DIR` | unset | Serve extra extension assets under `/ext` |
