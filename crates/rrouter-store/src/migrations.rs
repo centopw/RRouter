@@ -8,10 +8,10 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 2;
+pub(crate) const SCHEMA_VERSION: i64 = 3;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2];
+const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 const V1: &str = r#"
 CREATE TABLE IF NOT EXISTS connections (
@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS models (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (provider, model)
 );
+"#;
+
+/// V3: pricing. models.dev publishes per-million-token cost, which is metadata about a
+/// model rather than a fact the provider lists, so it lives beside the caps blob.
+const V3: &str = r#"
+ALTER TABLE models ADD COLUMN cost TEXT;
 "#;
 
 /// Bring `conn` up to [`SCHEMA_VERSION`]. Idempotent.

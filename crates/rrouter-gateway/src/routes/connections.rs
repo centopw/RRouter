@@ -106,6 +106,8 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
                     return admin_error(&e);
                 }
             }
+            // List this provider's own models now, so the registry is useful immediately.
+            super::models::spawn_initial_fetch(Arc::clone(&state), created.id);
             match state.store.get_connection(created.id).await {
                 Ok(Some(c)) => (StatusCode::CREATED, axum::Json(ConnectionView::from(&c))).into_response(),
                 Ok(None) => (StatusCode::CREATED, axum::Json(ConnectionView::from(&created))).into_response(),

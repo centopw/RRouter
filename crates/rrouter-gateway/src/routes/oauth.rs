@@ -114,12 +114,15 @@ pub async fn complete(
         .create_connection(spec.id, "oauth", creds, Some(&name))
         .await
     {
-        Ok(conn) => ok_json(json!({
-            "id": conn.id.to_string(),
-            "provider": conn.provider,
-            "name": conn.name,
-            "warning": warning,
-        })),
+        Ok(conn) => {
+            super::models::spawn_initial_fetch(Arc::clone(&state), conn.id);
+            ok_json(json!({
+                "id": conn.id.to_string(),
+                "provider": conn.provider,
+                "name": conn.name,
+                "warning": warning,
+            }))
+        }
         Err(e) => admin_error(&e),
     }
 }

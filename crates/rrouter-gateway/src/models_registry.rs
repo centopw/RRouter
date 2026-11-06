@@ -91,6 +91,18 @@ impl Capabilities {
     }
 }
 
+/// Published price per million tokens, in USD. models.dev is the only source; a
+/// provider's own `/models` response does not carry pricing.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Cost {
+    pub input: f64,
+    pub output: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+}
+
 /// One item of the `GET /api/models` payload.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ModelItem {
@@ -102,6 +114,7 @@ pub struct ModelItem {
     pub context: Option<u32>,
     pub max_output: Option<u32>,
     pub capabilities: Capabilities,
+    pub cost: Option<Cost>,
     pub source: String,
     pub enabled: bool,
     pub available: bool,
@@ -117,6 +130,7 @@ impl ModelItem {
             context: None,
             max_output: None,
             capabilities: Capabilities::default(),
+            cost: None,
             source: source.to_string(),
             enabled: true,
             available: false,
@@ -171,6 +185,15 @@ pub fn merge(
     ordered.sort_by_key(|row| source_rank(&row.source));
 
     for row in ordered {
+        // models.dev describes models; it does not prove a provider serves one. Its rows
+        // are merged into an existing item and never create one, so the list stays
+        // "models this gateway can actually call".
+        if row.source == SOURCE_SYNCED {
+            if let Some(item) = items.get_mut(&(row.provider.clone(), row.model.clone())) {
+                overlay(item, row);
+            }
+            continue;
+        }
         let key = (row.provider.clone(), row.model.clone());
         let item = match items.get_mut(&key) {
             Some(item) => item,
@@ -190,9 +213,12 @@ pub fn merge(
 
     items
         .into_values()
+        // A model is listed only when its provider is connected right now. This is the
+        // whole point of the registry: what the gateway can route, not what exists.
+        .filter(|item| active_providers.contains(&item.provider))
         .map(|mut item| {
             item.enabled = !disabled.contains(&item.id);
-            item.available = active_providers.contains(&item.provider);
+            item.available = true;
             item
         })
         .collect()
@@ -210,7 +236,22 @@ fn overlay(item: &mut ModelItem, row: &ModelRow) {
     if row.max_output.is_some() {
         item.max_output = row.max_output;
     }
+    if row.cost.is_some() {
+        item.cost = row.cost.as_ref().and_then(parse_cost);
+    }
     item.capabilities.overlay(&row.caps);
+}
+
+/// `cost: {input, output, cache_read, cache_write}` in USD per million tokens.
+fn parse_cost(value: &Value) -> Option<Cost> {
+    let input = value.get("input").and_then(Value::as_f64)?;
+    let output = value.get("output").and_then(Value::as_f64)?;
+    Some(Cost {
+        input,
+        output,
+        cache_read: value.get("cache_read").and_then(Value::as_f64),
+        cache_write: value.get("cache_write").and_then(Value::as_f64),
+    })
 }
 
 /// Live `GET /api/models` payload.
@@ -240,10 +281,31 @@ pub async fn list(state: &AppState) -> Result<Vec<ModelItem>> {
 
 /// One merged item, for the `POST /api/models/custom` echo.
 pub async fn item(state: &AppState, provider: &str, id: &str) -> Result<Option<ModelItem>> {
-    Ok(list(state)
+    // Built from storage rather than from `list`: a row the operator just defined must be
+    // echoed even while its provider is disconnected, which is exactly when a custom model
+    // is most useful — it documents what will be callable once the account is added.
+    let rows = state.store.list_models().await?;
+    let Some(row) = rows.iter().find(|r| r.provider == provider && r.model == id) else {
+        return Ok(None);
+    };
+    let mut item = ModelItem::new(provider, id, &row.source);
+    let vendor = rrouter_router::catalog::models_dev_provider(provider);
+    if let Some(donor) = rows
+        .iter()
+        .find(|r| r.source == SOURCE_SYNCED && r.provider == vendor && r.model == id)
+    {
+        overlay(&mut item, donor);
+    }
+    overlay(&mut item, row);
+    let disabled: BTreeSet<String> = state.store.disabled_models().await?.into_iter().collect();
+    item.enabled = !disabled.contains(&item.id);
+    item.available = state
+        .store
+        .list_connections(None)
         .await?
-        .into_iter()
-        .find(|item| item.provider == provider && item.id == id))
+        .iter()
+        .any(|c| c.is_active && c.provider == provider);
+    Ok(Some(item))
 }
 
 /// Download models.dev and return the parsed rows. Network failures are
@@ -312,6 +374,7 @@ pub fn parse_models_dev(document: &Value) -> Vec<ModelRow> {
                     context: limit(entry, "context"),
                     max_output: limit(entry, "output"),
                     caps: caps_from_models_dev(entry),
+                    cost: entry.get("cost").cloned().filter(|c| c.is_object()),
                     source: SOURCE_SYNCED.to_string(),
                     updated_at: 0,
                 });

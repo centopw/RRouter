@@ -204,6 +204,7 @@ const CAPABILITY_KEYS: [&str; 9] = [
 #[tokio::test]
 async fn catalog_rows_have_nine_capabilities_and_are_sorted() {
     let h = harness();
+    h.connect("codex", "http://127.0.0.1:9").await;
     let data = h.models().await;
     assert!(!data.is_empty());
 
@@ -235,13 +236,14 @@ async fn catalog_rows_have_nine_capabilities_and_are_sorted() {
     assert_eq!(codex["capabilities"]["tools"], true);
     assert_eq!(codex["capabilities"]["vision"], false);
     assert_eq!(codex["enabled"], true);
-    assert_eq!(codex["available"], false);
+    assert_eq!(codex["available"], true, "a listing implies an active connection");
     assert_eq!(codex["max_output"], 128_000);
 }
 
 #[tokio::test]
 async fn custom_row_wins_over_a_catalog_id_of_the_same_provider() {
     let h = harness();
+    h.connect("codex", "http://127.0.0.1:9").await;
     let (status, body) = h
         .post(
             "/api/models/custom",
@@ -331,6 +333,7 @@ async fn deleting_a_non_custom_row_is_a_404() {
             context: None,
             max_output: None,
             caps: json!({}),
+            cost: None,
             source: "synced".into(),
             updated_at: 0,
         })
@@ -338,16 +341,18 @@ async fn deleting_a_non_custom_row_is_a_404() {
         .expect("row");
     let (status, _) = h.delete("/api/models/custom?provider=openai&id=synced-only").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(h
-        .models()
-        .await
-        .iter()
-        .any(|item| item["ref"] == "openai/synced-only"));
+    // models.dev rows describe models; they never become entries of their own.
+    assert!(
+        !h.models().await.iter().any(|item| item["ref"] == "openai/synced-only"),
+        "a synced row must not add a model to the registry"
+    );
 }
 
 #[tokio::test]
 async fn disabled_models_flips_enabled_to_false() {
     let h = harness();
+    h.connect("codex", "http://127.0.0.1:9").await;
+    h.connect("openai", "http://127.0.0.1:9").await;
     // Two providers serving the same id: disabling is keyed by model id alone, so
     // both must flip. Custom rows make the test independent of catalog contents.
     for provider in ["codex", "openai"] {
@@ -370,6 +375,61 @@ async fn disabled_models_flips_enabled_to_false() {
     let (status, _) = h.send("PUT", "/api/disabled/shared-id/enable", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(h.item("codex/shared-id").await["enabled"], true);
+}
+
+/// The registry answers one question: what can this gateway call right now.
+#[tokio::test]
+async fn registry_lists_nothing_until_a_provider_is_connected() {
+    let h = harness();
+    assert!(h.models().await.is_empty(), "no connection means no models");
+
+    // models.dev rows are metadata: they describe a model, they do not add one.
+    h.state
+        .store
+        .upsert_model(&ModelRow {
+            provider: "openai".into(),
+            model: "gpt-4.1".into(),
+            display: Some("GPT-4.1".into()),
+            context: Some(400_000),
+            max_output: Some(32_768),
+            caps: json!({"vision": true}),
+            cost: Some(json!({"input": 2.0, "output": 8.0})),
+            source: "synced".into(),
+            updated_at: 0,
+        })
+        .await
+        .expect("synced row");
+    assert!(h.models().await.is_empty(), "a synced row must not list a model");
+
+    h.connect("openai", "http://127.0.0.1:9").await;
+    let item = h.item("openai/gpt-4.1").await;
+    assert_eq!(item["source"], "catalog", "the catalog is why it exists");
+    // ...and models.dev is why we know its limits and price.
+    assert_eq!(item["context"], 400_000);
+    assert_eq!(item["max_output"], 32_768);
+    assert_eq!(item["capabilities"]["vision"], true);
+    assert_eq!(item["cost"]["input"], 2.0);
+    assert_eq!(item["cost"]["output"], 8.0);
+}
+
+/// A custom definition outlives the account: it is hidden from the list while its
+/// provider is disconnected, and echoed by the POST that created it.
+#[tokio::test]
+async fn custom_row_is_hidden_until_its_provider_is_connected() {
+    let h = harness();
+    let (status, body) = h
+        .post(
+            "/api/models/custom",
+            json!({"provider": "openai", "id": "internal-model", "context": 8_000}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ref"], "openai/internal-model");
+    assert_eq!(body["available"], false);
+    assert!(!h.models().await.iter().any(|i| i["ref"] == "openai/internal-model"));
+
+    h.connect("openai", "http://127.0.0.1:9").await;
+    assert!(h.models().await.iter().any(|i| i["ref"] == "openai/internal-model"));
 }
 
 #[tokio::test]

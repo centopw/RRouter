@@ -195,6 +195,29 @@ export default function Models() {
       render: (m) => <span className="text-muted">{compact(m.max_output)}</span>,
     },
     {
+      key: "cost",
+      title: "price\u00A0/1M",
+      align: "right",
+      width: "8rem",
+      render: (m) =>
+        m.cost ? (
+          <span
+            className="whitespace-nowrap text-muted tnum"
+            title={
+              "input $" +
+              m.cost.input +
+              " · output $" +
+              m.cost.output +
+              (m.cost.cache_read === undefined ? "" : ` · cache read $${m.cost.cache_read}`)
+            }
+          >
+            ${m.cost.input.toFixed(2)} / ${m.cost.output.toFixed(2)}
+          </span>
+        ) : (
+          <span className="text-faint">—</span>
+        ),
+    },
+    {
       key: "source",
       title: "source",
       width: "6rem",
@@ -324,9 +347,9 @@ export default function Models() {
             <Button
               onClick={() => sync.mutate()}
               disabled={sync.isPending}
-              title="replace every synced row from models.dev"
+              title="refresh context, capabilities, and pricing from models.dev (does not add models)"
             >
-              {sync.isPending ? "syncing…" : "sync models.dev"}
+              {sync.isPending ? "syncing…" : "sync metadata"}
             </Button>
             <span title={fetchBlocker} className="inline-flex w-[200px]">
               <Select
@@ -391,26 +414,28 @@ export default function Models() {
         </div>
       ) : null}
 
-      <Card>
-        <CardHeader
-          title="Registry"
-          action={
-            <span className="text-[11px] text-faint tnum">
-              {rows ? `${rows.length} of ${all.length} models` : "loading…"}
-            </span>
-          }
-        />
-        <RegistryTable
-          columns={columns}
-          rows={rows}
-          empty={
-            deferredQuery || provider !== ALL
-              ? "no models match this filter"
-              : "no models yet; sync models.dev"
-          }
-          loading={models.isLoading}
-        />
-      </Card>
+      {!models.isLoading && all.length === 0 ? (
+        <EmptyRegistry onSync={() => sync.mutate()} syncing={sync.isPending} />
+      ) : (
+        <Card>
+          <CardHeader
+            title="Registry"
+            action={
+              <span className="text-[11px] text-faint tnum">
+                {rows ? `${rows.length} of ${all.length} models` : "loading…"}
+              </span>
+            }
+          />
+          <RegistryTable
+            columns={columns}
+            rows={rows}
+            empty={
+              deferredQuery || provider !== ALL ? "no models match this filter" : "no models for this provider"
+            }
+            loading={models.isLoading}
+          />
+        </Card>
+      )}
 
       {customOpen ? (
         <CustomModelModal
@@ -555,6 +580,33 @@ function CustomModelModal({
 }
 
 const rowKey = (model: Model) => model.ref;
+
+/** Nothing here means nothing is connected: models come from providers, not catalogs. */
+function EmptyRegistry({ onSync, syncing }: { onSync: () => void; syncing: boolean }) {
+  return (
+    <Card className="px-6 py-12 text-center">
+      <h2 className="text-[16px] font-medium">No models yet</h2>
+      <p className="mx-auto mt-1.5 max-w-[440px] text-[13px] text-muted">
+        Models are listed from the providers you connected — add one under{" "}
+        <a href="/app/providers" className="underline underline-offset-2">
+          Providers
+        </a>
+        . Metadata such as context window, capabilities, and price is filled in from models.dev when you sync.
+      </p>
+      <div className="mt-5 flex justify-center gap-2">
+        <Button variant="primary" onClick={onSync} disabled={syncing}>
+          {syncing ? "syncing…" : "sync metadata"}
+        </Button>
+        <a
+          href="/app/providers"
+          className="inline-flex h-8 items-center rounded-lg border border-line-strong bg-surface-2 px-3 text-[13px] text-fg hover:border-[#3d3d3d]"
+        >
+          go to providers
+        </a>
+      </div>
+    </Card>
+  );
+}
 
 /** The table is the expensive part: memoized so toolbar edits never reconcile 9k rows. */
 const RegistryTable = memo(function RegistryTable({

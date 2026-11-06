@@ -142,6 +142,13 @@ export type Capabilities = {
   search: boolean;
 };
 
+export type ModelCost = {
+  input: number;
+  output: number;
+  cache_read?: number;
+  cache_write?: number;
+};
+
 export type Model = {
   ref: string;
   provider: string;
@@ -150,6 +157,8 @@ export type Model = {
   context: number | null;
   max_output: number | null;
   capabilities: Capabilities;
+  /** USD per million tokens, from models.dev. Absent when no catalog covers the model. */
+  cost: ModelCost | null;
   source: "catalog" | "upstream" | "custom" | "synced";
   enabled: boolean;
   available: boolean;

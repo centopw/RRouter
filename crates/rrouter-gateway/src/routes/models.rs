@@ -18,25 +18,17 @@ use super::{admin_error, body_json, ok_json};
 use crate::models_registry::{self, SOURCE_CUSTOM, SOURCE_UPSTREAM};
 use crate::state::AppState;
 
-/// Union of catalog models, aliases, combos, and every connected provider's models.
+/// Models a client can actually call: the registry (already limited to connected
+/// providers) plus aliases and combos.
 pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
     let mut entries: BTreeMap<String, String> = BTreeMap::new();
-
-    for info in state.catalog.all() {
-        entries.entry(info.id).or_insert(info.provider);
-    }
-    if let Ok(connections) = state.store.list_connections(None).await {
-        for conn in connections {
-            if !conn.is_active {
-                continue;
-            }
-            // Catalog entries are keyed by model; keep only this connection's provider.
-            for info in state.catalog.all() {
-                if info.provider == conn.provider {
-                    entries.entry(info.id).or_insert(info.provider);
-                }
+    match models_registry::list(&state).await {
+        Ok(items) => {
+            for item in items {
+                entries.entry(item.id).or_insert(item.provider);
             }
         }
+        Err(e) => return admin_error(&e),
     }
     if let Ok(aliases) = state.store.list_aliases().await {
         for alias in aliases {
@@ -48,15 +40,6 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
             entries.entry(combo.name).or_insert_with(|| "rrouter".to_string());
         }
     }
-    // Operator-defined and freshly fetched models are routable too, so an OpenAI-shaped
-    // client discovery call must see them.
-    if let Ok(rows) = state.store.list_models().await {
-        for row in rows {
-            if row.source == SOURCE_CUSTOM || row.source == SOURCE_UPSTREAM {
-                entries.entry(row.model).or_insert(row.provider);
-            }
-        }
-    }
 
     let created = crate::now_unix();
     let data: Vec<Value> = entries
@@ -66,6 +49,24 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
         })
         .collect();
     ok_json(json!({ "object": "list", "data": data }))
+}
+
+/// Fetch a connection's models in the background, right after it is added.
+///
+/// The registry lists a provider's real catalog without an extra click; a provider
+/// that cannot enumerate (codex) or a failed fetch is logged and otherwise ignored —
+/// the catalog rows remain.
+pub fn spawn_initial_fetch(state: Arc<AppState>, id: Uuid) {
+    tokio::spawn(async move {
+        let Ok(Some(conn)) = state.store.get_connection(id).await else { return };
+        let Some(spec) = rrouter_auth::get(&conn.provider) else { return };
+        if !models_registry::can_list(spec.id) {
+            return;
+        }
+        if let Err(e) = fetch_upstream(&state, spec, &conn).await {
+            tracing::debug!(provider = %conn.provider, error = %e, "initial model fetch failed");
+        }
+    });
 }
 
 pub async fn list_aliases(State(state): State<Arc<AppState>>) -> Response {
@@ -287,6 +288,8 @@ async fn fetch_upstream(
                 context: None,
                 max_output: None,
                 caps: Value::Object(Map::new()),
+                // A provider's own list carries ids, not prices; models.dev supplies them.
+                cost: None,
                 source: SOURCE_UPSTREAM.to_string(),
                 updated_at: 0,
             })
@@ -317,6 +320,7 @@ pub async fn custom(State(state): State<Arc<AppState>>, body: Body) -> Response 
         context: u32_field(&value, "context"),
         max_output: u32_field(&value, "max_output"),
         caps: capabilities_from(&value),
+        cost: value.get("cost").cloned().filter(|c| c.is_object()),
         source: SOURCE_CUSTOM.to_string(),
         updated_at: 0,
     };

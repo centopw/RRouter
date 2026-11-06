@@ -80,6 +80,8 @@ pub struct ModelRow {
     pub context: Option<u32>,
     pub max_output: Option<u32>,
     pub caps: serde_json::Value,
+    /// Per-million-token pricing, when a catalog publishes it. `null` means unknown.
+    pub cost: Option<serde_json::Value>,
     pub source: String,
     /// Set by [`Store::upsert_model`]; the field is ignored on write.
     pub updated_at: i64,
@@ -590,6 +592,7 @@ impl Store {
                 row.context,
                 row.max_output,
                 caps,
+                row.cost.as_ref().map(|c| c.to_string()),
                 row.source,
                 now()
             ],
@@ -617,7 +620,7 @@ impl Store {
         let conn = self.conn();
         let mut stmt = conn
             .prepare(
-                "SELECT provider, model, display, context, max_output, caps, source, updated_at \
+                "SELECT provider, model, display, context, max_output, caps, cost, source, updated_at \
                  FROM models ORDER BY provider ASC, model ASC",
             )
             .map_err(migrations::db_err)?;
@@ -630,8 +633,11 @@ impl Store {
                     context: r.get(3)?,
                     max_output: r.get(4)?,
                     caps: parse_caps(r.get::<_, String>(5)?),
-                    source: r.get(6)?,
-                    updated_at: r.get(7)?,
+                    cost: r
+                        .get::<_, Option<String>>(6)?
+                        .and_then(|raw| serde_json::from_str(&raw).ok()),
+                    source: r.get(7)?,
+                    updated_at: r.get(8)?,
                 })
             })
             .map_err(migrations::db_err)?;
@@ -1032,13 +1038,14 @@ fn hash_api_key(plaintext: &str) -> String {
 /// Upsert that never lowers a row's source precedence. Kept as one statement so the
 /// read-compare-write happens under SQLite's write lock.
 const UPSERT_MODEL_SQL: &str = r#"
-INSERT INTO models (provider, model, display, context, max_output, caps, source, updated_at)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+INSERT INTO models (provider, model, display, context, max_output, caps, cost, source, updated_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 ON CONFLICT(provider, model) DO UPDATE SET
   display    = excluded.display,
   context    = excluded.context,
   max_output = excluded.max_output,
   caps       = excluded.caps,
+  cost       = coalesce(excluded.cost, models.cost),
   source     = excluded.source,
   updated_at = excluded.updated_at
 WHERE CASE excluded.source WHEN 'custom' THEN 3 WHEN 'upstream' THEN 2 WHEN 'synced' THEN 1 ELSE 0 END
