@@ -30,7 +30,9 @@ jobs:
           - runner: macos-15
             target: aarch64-apple-darwin
             asset: darwin-arm64
-          - runner: macos-15-intel
+          # Cross-compiled on the arm64 runner: the Apple SDK ships both arches, and
+          # macOS 13 (the last Intel image) is retired.
+          - runner: macos-15
             target: x86_64-apple-darwin
             asset: darwin-amd64
     runs-on: ${{ matrix.runner }}
