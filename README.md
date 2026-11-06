@@ -128,6 +128,25 @@ connected. Disconnect the last account and the list is empty.
 Every place the dashboard asks for a model is a select grouped by provider — no free-text
 model fields, so a typo cannot silently route to nothing.
 
+## Prompt caching
+
+Caching is what makes agentic coding affordable, and a gateway can silently destroy it in
+two ways. RRouter avoids both:
+
+- **Same-dialect requests are forwarded as the client wrote them.** Only routing fields are
+  patched (the resolved model id, streaming, `store:false` for Codex, a bare-string
+  `input`). Anthropic `cache_control` breakpoints and the OpenAI Responses fields
+  (`prompt_cache_options`, `prompt_cache_key`, per-block `prompt_cache_breakpoint`) survive
+  untouched. Cross-dialect requests still go through the canonical translator.
+- **Accounts are pinned per conversation.** KV caches live on one upstream account, so
+  equal-priority connections are ordered by a hash of the conversation (model, system,
+  first turn, `prompt_cache_key`) instead of round-robin. Different conversations still
+  spread across the pool; the same conversation never alternates accounts.
+
+Cache reads and writes are recorded per request, and **Activity** shows the hit rate
+(`cache_read / (input + cache_read + cache_write)`), so a regression is visible instead of
+inferred from the bill.
+
 ## Security
 
 - Credentials encrypted with AES-256-GCM, unique nonce per write; the key lives in

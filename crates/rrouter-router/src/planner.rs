@@ -67,12 +67,18 @@ impl Planner {
     }
 
     /// Build the ordered candidate list for `model`.
+    /// `affinity` pins account selection for a conversation: equal-priority accounts are
+    /// ordered by `affinity % group`, not round-robin. KV caches live per upstream
+    /// account, so alternating accounts between turns turns every prompt into a cold
+    /// write. Callers pass a stable hash of the request; `None` keeps round-robin for
+    /// probes and embeddings where there is no conversation to preserve.
     pub async fn plan(
         &self,
         catalog: &Catalog,
         store: &Store,
         model: &str,
         stream: bool,
+        affinity: Option<u64>,
     ) -> Result<Plan> {
         let connections = store.list_connections(None).await?;
         let aliases = store.list_aliases().await?;
@@ -117,7 +123,7 @@ impl Planner {
         }
 
         let mut candidates = Vec::with_capacity(active.len());
-        let offset = self.next_offset();
+        let offset = affinity.unwrap_or_else(|| self.next_offset());
         let target_count = seen_pairs.len();
         for (provider, model_id) in seen_pairs {
             if disabled.contains(model_id) {

@@ -380,6 +380,9 @@ fn usage_records_summary_and_recent_order() {
             connection_id: Some(conn_id),
             input_tokens: inp,
             output_tokens: out,
+            // Prompt-cache counters are priced separately; keep them per row.
+            cache_read_tokens: if ts == 100 { 900 } else { 0 },
+            cache_write_tokens: if ts == 100 { 100 } else { 0 },
             latency_ms: ms,
             status: st,
             streamed: true,
@@ -401,6 +404,15 @@ fn usage_records_summary_and_recent_order() {
         assert!(recent[2].streamed);
         assert_eq!(recent[2].error.as_deref(), Some("upstream 429"));
         assert_eq!(recent[0].connection_id, Some(conn_id));
+        let cached = s
+            .recent_usage(4)
+            .await
+            .expect("recent all")
+            .into_iter()
+            .find(|r| r.ts == 100)
+            .expect("row 100");
+        assert_eq!(cached.cache_read_tokens, 900);
+        assert_eq!(cached.cache_write_tokens, 100);
 
         let sum = s.usage_summary().await.expect("summary");
         assert_eq!(sum.len(), 2);
@@ -410,6 +422,8 @@ fn usage_records_summary_and_recent_order() {
         assert_eq!(claude.errors, 1, "status >= 400 counts as an error");
         assert_eq!(claude.input_tokens, 40);
         assert_eq!(claude.output_tokens, 60);
+        assert_eq!(claude.cache_read_tokens, 900);
+        assert_eq!(claude.cache_write_tokens, 100);
         assert_eq!(claude.avg_latency_ms, 200, "(100+300+200)/3");
         let groq = &sum[1];
         assert_eq!((groq.requests, groq.errors, groq.avg_latency_ms), (1, 0, 400));

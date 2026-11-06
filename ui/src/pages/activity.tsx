@@ -31,15 +31,32 @@ export default function Activity() {
 
     const totals = (rows: UsageBucket[]) => {
       const requests = rows.reduce((n, b) => n + b.requests, 0);
+      const input = rows.reduce((n, b) => n + b.input_tokens, 0);
       const tokens = rows.reduce((n, b) => n + b.input_tokens + b.output_tokens, 0);
+      const cacheRead = rows.reduce((n, b) => n + b.cache_read_tokens, 0);
+      const cacheWrite = rows.reduce((n, b) => n + b.cache_write_tokens, 0);
       const errors = rows.reduce((n, b) => n + b.errors, 0);
       const latency = rows.reduce((n, b) => n + b.avg_latency_ms * b.requests, 0);
-      return { requests, tokens, errors, latency: requests ? latency / requests : 0 };
+      return {
+        requests,
+        tokens,
+        input,
+        errors,
+        cacheRead,
+        cacheWrite,
+        latency: requests ? latency / requests : 0,
+      };
     };
 
     const cur = totals(current);
     const prev = totals(previous);
     const delta = (a: number, b: number) => (b > 0 ? ((a - b) / b) * 100 : null);
+    // Share of prompt tokens served from cache: reads are ~0.1x, writes ~1.25x, so a
+    // low ratio is the difference between a cheap session and a full-price one.
+    const hitRate = (t: typeof cur) => {
+      const prompt = t.input + t.cacheRead + t.cacheWrite;
+      return prompt > 0 ? (t.cacheRead / prompt) * 100 : 0;
+    };
 
     return {
       cur,
@@ -48,6 +65,8 @@ export default function Activity() {
       buckets: current,
       errorRate: cur.requests ? (cur.errors / cur.requests) * 100 : 0,
       prevErrorRate: prev.requests ? (prev.errors / prev.requests) * 100 : 0,
+      hitRate: hitRate(cur),
+      prevHitRate: hitRate(prev),
     };
   }, [series.data, hours]);
 
@@ -104,7 +123,7 @@ export default function Activity() {
         </div>
       ) : null}
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         <Metric
           label="Requests"
           value={compact(cur.requests)}
@@ -130,6 +149,13 @@ export default function Activity() {
           delta={prev.requests ? view.errorRate - view.prevErrorRate : null}
           tone="neg"
           hint="no errors logged"
+        />
+        <Metric
+          label="Cache hit"
+          value={cur.cacheRead + cur.cacheWrite > 0 ? pct(view.hitRate) : "—"}
+          delta={prev.cacheRead + prev.cacheWrite > 0 ? view.hitRate - view.prevHitRate : null}
+          hint="no cache reads yet"
+          tone="accent"
         />
         <Metric
           label="Models in use"

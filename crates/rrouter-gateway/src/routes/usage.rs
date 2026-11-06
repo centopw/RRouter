@@ -34,6 +34,8 @@ pub async fn list(
                         "connection_id": r.connection_id.map(|c| c.to_string()),
                         "input_tokens": r.input_tokens,
                         "output_tokens": r.output_tokens,
+                        "cache_read_tokens": r.cache_read_tokens,
+                        "cache_write_tokens": r.cache_write_tokens,
                         "latency_ms": r.latency_ms,
                         "status": r.status,
                         "streamed": r.streamed,
@@ -84,6 +86,8 @@ pub async fn series(
                         "errors": b.errors,
                         "input_tokens": b.input_tokens,
                         "output_tokens": b.output_tokens,
+                        "cache_read_tokens": b.cache_read_tokens,
+                        "cache_write_tokens": b.cache_write_tokens,
                         "avg_latency_ms": b.avg_latency_ms,
                     })
                 })
@@ -107,6 +111,8 @@ pub async fn summary(State(state): State<Arc<AppState>>) -> Response {
                         "errors": s.errors,
                         "input_tokens": s.input_tokens,
                         "output_tokens": s.output_tokens,
+                        "cache_read_tokens": s.cache_read_tokens,
+                        "cache_write_tokens": s.cache_write_tokens,
                         "avg_latency_ms": s.avg_latency_ms,
                     })
                 })

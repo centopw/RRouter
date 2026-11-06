@@ -96,6 +96,9 @@ pub struct UsageRecord {
     pub connection_id: Option<Uuid>,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Prompt-cache reads (billed at a discount) and writes (billed at a premium).
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
     pub latency_ms: u32,
     pub status: u16,
     pub streamed: bool,
@@ -111,6 +114,8 @@ pub struct UsageSummary {
     pub errors: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
     pub avg_latency_ms: u32,
 }
 
@@ -123,6 +128,8 @@ pub struct UsageBucket {
     pub errors: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
     pub avg_latency_ms: u32,
 }
 
@@ -738,9 +745,9 @@ impl Store {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO usage \
-             (ts, provider, model, connection_id, input_tokens, output_tokens, latency_ms, \
-              status, streamed, error) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (ts, provider, model, connection_id, input_tokens, output_tokens, \
+              cache_read_tokens, cache_write_tokens, latency_ms, status, streamed, error) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 r.ts,
                 r.provider,
@@ -748,6 +755,8 @@ impl Store {
                 r.connection_id.map(|u| u.to_string()),
                 r.input_tokens,
                 r.output_tokens,
+                r.cache_read_tokens,
+                r.cache_write_tokens,
                 r.latency_ms,
                 r.status,
                 r.streamed as i64,
@@ -765,7 +774,7 @@ impl Store {
         let mut stmt = conn
             .prepare(
                 "SELECT ts, provider, model, connection_id, input_tokens, output_tokens, \
-                        latency_ms, status, streamed, error \
+                        cache_read_tokens, cache_write_tokens, latency_ms, status, streamed, error \
                  FROM usage ORDER BY ts DESC, id DESC LIMIT ?1",
             )
             .map_err(migrations::db_err)?;
@@ -779,10 +788,12 @@ impl Store {
                     connection_id: cid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
                     input_tokens: r.get(4)?,
                     output_tokens: r.get(5)?,
-                    latency_ms: r.get(6)?,
-                    status: r.get(7)?,
-                    streamed: r.get::<_, i64>(8)? != 0,
-                    error: r.get(9)?,
+                    cache_read_tokens: r.get(6)?,
+                    cache_write_tokens: r.get(7)?,
+                    latency_ms: r.get(8)?,
+                    status: r.get(9)?,
+                    streamed: r.get::<_, i64>(10)? != 0,
+                    error: r.get(11)?,
                 })
             })
             .map_err(migrations::db_err)?;
@@ -800,13 +811,15 @@ impl Store {
             .prepare(
                 "SELECT provider, model, count(*), \
                         sum(CASE WHEN status >= 400 THEN 1 ELSE 0 END), \
-                        sum(input_tokens), sum(output_tokens), avg(latency_ms) \
+                        sum(input_tokens), sum(output_tokens), \
+                        sum(cache_read_tokens), sum(cache_write_tokens), \
+                        avg(latency_ms) \
                  FROM usage GROUP BY provider, model ORDER BY provider ASC, model ASC",
             )
             .map_err(migrations::db_err)?;
         let rows = stmt
             .query_map([], |r| {
-                let avg: f64 = r.get(6)?;
+                let avg: f64 = r.get(8)?;
                 Ok(UsageSummary {
                     provider: r.get(0)?,
                     model: r.get(1)?,
@@ -814,6 +827,8 @@ impl Store {
                     errors: r.get(3)?,
                     input_tokens: r.get(4)?,
                     output_tokens: r.get(5)?,
+                    cache_read_tokens: r.get(6)?,
+                    cache_write_tokens: r.get(7)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })
@@ -838,19 +853,23 @@ impl Store {
             .prepare(
                 "SELECT (ts / ?2) * ?2 AS bucket, count(*), \
                         sum(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), \
-                        sum(input_tokens), sum(output_tokens), avg(latency_ms) \
+                        sum(input_tokens), sum(output_tokens), \
+                        sum(cache_read_tokens), sum(cache_write_tokens), \
+                        avg(latency_ms) \
                  FROM usage WHERE ts >= ?1 GROUP BY bucket ORDER BY bucket ASC",
             )
             .map_err(migrations::db_err)?;
         let rows = stmt
             .query_map(params![since, bucket_secs], |r| {
-                let avg: f64 = r.get(5)?;
+                let avg: f64 = r.get(7)?;
                 Ok(UsageBucket {
                     start: r.get(0)?,
                     requests: r.get(1)?,
                     errors: r.get(2)?,
                     input_tokens: r.get(3)?,
                     output_tokens: r.get(4)?,
+                    cache_read_tokens: r.get(5)?,
+                    cache_write_tokens: r.get(6)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })

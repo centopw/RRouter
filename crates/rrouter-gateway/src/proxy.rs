@@ -97,7 +97,13 @@ async fn handle(
     let canonical = rrouter_translate::parse_request(inbound, &body)?;
     let plan = state
         .planner
-        .plan(state.catalog.as_ref(), state.store.as_ref(), &canonical.model, canonical.stream)
+        .plan(
+            state.catalog.as_ref(),
+            state.store.as_ref(),
+            &canonical.model,
+            canonical.stream,
+            Some(affinity_of(&canonical)),
+        )
         .await?;
     let client_stream = plan.stream || canonical.stream;
     // A stream-only upstream (codex) refuses every non-streaming request, so a
@@ -108,6 +114,7 @@ async fn handle(
         state,
         inbound,
         canonical,
+        raw: &body,
         upstream_stream,
     };
 
@@ -154,13 +161,20 @@ pub async fn complete(
     let canonical = rrouter_translate::parse_request(inbound, body)?;
     let plan = state
         .planner
-        .plan(state.catalog.as_ref(), state.store.as_ref(), &canonical.model, canonical.stream)
+        .plan(
+            state.catalog.as_ref(),
+            state.store.as_ref(),
+            &canonical.model,
+            canonical.stream,
+            Some(affinity_of(&canonical)),
+        )
         .await?;
     let upstream_stream = plan.stream || canonical.stream || plan.candidates.iter().any(stream_only);
     let attempt = Attempt {
         state,
         inbound,
         canonical,
+        raw: body,
         upstream_stream,
     };
 
@@ -281,6 +295,77 @@ async fn guard_api_key(state: &AppState, headers: &axum::http::HeaderMap) -> Res
         Some(_) => Ok(()),
         None => Err(Error::Unauthorized("invalid API key".into())),
     }
+}
+
+/// Stable per-conversation key for account selection.
+///
+/// Hashing the model, the system prompt, the first turn, and an explicit
+/// `prompt_cache_key` gives every turn of one conversation the same upstream account
+/// while still spreading unrelated conversations across the pool.
+fn affinity_of(req: &ChatRequest) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    req.model.hash(&mut hasher);
+    req.system.hash(&mut hasher);
+    if let Some(first) = req.messages.first() {
+        first.joined_text().hash(&mut hasher);
+    }
+    if let Some((_, extra)) = &req.extra {
+        if let Some(key) = extra.get("prompt_cache_key").and_then(Value::as_str) {
+            key.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Forward a client body unchanged in its own dialect, patching only routing fields.
+///
+/// The canonical model cannot represent every protocol feature, and two of the losses
+/// are expensive: Anthropic `cache_control` (automatic and block-level breakpoints) and
+/// the OpenAI Responses caching fields (`prompt_cache_options`, `prompt_cache_key`,
+/// per-block `prompt_cache_breakpoint`). Rebuilding the body drops them, so a warm
+/// 0.1x cache read silently becomes a full-price prompt.
+///
+/// Only what the provider itself demands is changed: the resolved model id, streaming,
+/// `store:false` for Codex, and a bare-string `input` expanded into a message list.
+fn same_dialect_body(dialect: Dialect, raw: &Value, model: &str, stream: bool) -> Value {
+    let mut out = raw.clone();
+    let Some(obj) = out.as_object_mut() else {
+        return out;
+    };
+    obj.insert("model".into(), Value::String(model.to_string()));
+    match dialect {
+        Dialect::OpenAiResponses => {
+            // Codex rejects stored responses ("Store must be set to false").
+            obj.insert("store".into(), Value::Bool(false));
+            if let Some(Value::String(text)) = obj.get("input").cloned() {
+                obj.insert(
+                    "input".into(),
+                    serde_json::json!([{
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
+                    }]),
+                );
+            }
+        }
+        Dialect::OpenAiChat => {
+            if stream {
+                // Usage only arrives in the final chunk when asked for explicitly.
+                let mut opts = obj
+                    .get("stream_options")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                opts.insert("include_usage".into(), Value::Bool(true));
+                obj.insert("stream_options".into(), Value::Object(opts));
+            }
+        }
+        Dialect::AnthropicMessages | Dialect::OpenAiEmbeddings => {}
+    }
+    obj.insert("stream".into(), Value::Bool(stream));
+    out
 }
 
 /// Outbound URL + dialect for a candidate's provider. Public so the admin probe uses
@@ -419,6 +504,9 @@ struct Attempt<'a> {
     state: &'a Arc<AppState>,
     inbound: Dialect,
     canonical: ChatRequest,
+    /// The client's body, untouched. Same-dialect requests are forwarded from this,
+    /// because the canonical model cannot represent every protocol feature.
+    raw: &'a Value,
     /// Body the provider can accept unmodified because it speaks the inbound dialect.
     /// Upstream must stream even if the client asked for one JSON response.
     upstream_stream: bool,
@@ -443,11 +531,14 @@ impl Attempt<'_> {
     /// Build the upstream body for one attempt. Never mutates the canonical request, so
     /// concurrent attempts all see the client's original values.
     fn outbound(&self, candidate: &Candidate, dialect: Dialect) -> Result<Value> {
-        // Every request goes through the canonical model, even when the client and the
-        // provider speak the same dialect. Forwarding the client body verbatim looked
-        // cheaper but skipped protocol normalisation: a string `input` stayed a string
-        // and codex rejected it with "Input must be a list", and required fields such as
-        // `store:false` were never added.
+        if dialect == self.inbound {
+            return Ok(same_dialect_body(
+                dialect,
+                self.raw,
+                &candidate.model,
+                self.upstream_stream,
+            ));
+        }
         let mut request = self.canonical.clone();
         request.model = candidate.model.clone();
         // Unknown inbound fields travel with the same-dialect hint only, and the
@@ -706,6 +797,8 @@ fn record_once(
         connection_id: Some(candidate.connection),
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_write_tokens: usage.cache_write_tokens,
         latency_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
         status: 200,
         streamed: false,
@@ -738,7 +831,7 @@ async fn embeddings_inner(
         .to_string();
     let plan = state
         .planner
-        .plan(state.catalog.as_ref(), state.store.as_ref(), &model, false)
+        .plan(state.catalog.as_ref(), state.store.as_ref(), &model, false, None)
         .await?;
     let candidate = plan
         .candidates

@@ -8,10 +8,10 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 3;
+pub(crate) const SCHEMA_VERSION: i64 = 4;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 const V1: &str = r#"
 CREATE TABLE IF NOT EXISTS connections (
@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS models (
 /// model rather than a fact the provider lists, so it lives beside the caps blob.
 const V3: &str = r#"
 ALTER TABLE models ADD COLUMN cost TEXT;
+"#;
+
+/// V4: prompt-cache accounting. Cache reads and writes are priced differently from
+/// ordinary input, so they are stored separately to make a hit ratio measurable.
+const V4: &str = r#"
+ALTER TABLE usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// Bring `conn` up to [`SCHEMA_VERSION`]. Idempotent.

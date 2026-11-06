@@ -62,7 +62,7 @@ async fn alias_resolves_one_hop_without_looping() {
     store.upsert_alias("claude/primary-x", "claude/never-reached").await.unwrap();
     let planner = Planner::new();
     let plan = planner
-        .plan(&Catalog::builtin(), &store, "fast", false)
+        .plan(&Catalog::builtin(), &store, "fast", false, None)
         .await
         .unwrap();
     assert_eq!(plan.candidates.len(), 1);
@@ -79,7 +79,7 @@ async fn self_referential_alias_does_not_loop() {
     store.upsert_alias("loop", "loop").await.unwrap();
     let planner = Planner::new();
     // Resolves via catalog fallback/lookup and terminates.
-    let plan = planner.plan(&Catalog::builtin(), &store, "loop", false).await.unwrap();
+    let plan = planner.plan(&Catalog::builtin(), &store, "loop", false, None).await.unwrap();
     assert_eq!(plan.candidates.len(), 1);
     assert_eq!(plan.candidates[0].model, "loop");
 }
@@ -91,7 +91,7 @@ async fn explicit_provider_wins_over_catalog_guess() {
     let id = conn(&store, "github", "gpt-4.1", 0).await;
     let planner = Planner::new();
     let plan = planner
-        .plan(&Catalog::builtin(), &store, "github/gpt-4.1", false)
+        .plan(&Catalog::builtin(), &store, "github/gpt-4.1", false, None)
         .await
         .unwrap();
     assert_eq!(plan.candidates.len(), 1);
@@ -106,13 +106,13 @@ async fn combo_preserves_declared_order() {
     let b = conn(&store, "openai", "gpt-5", 9).await;
     store.upsert_combo("chain", &["xai/grok-4".into(), "openai/gpt-5".into()]).await.unwrap();
     let planner = Planner::new();
-    let plan = planner.plan(&Catalog::builtin(), &store, "combo:chain", false).await.unwrap();
+    let plan = planner.plan(&Catalog::builtin(), &store, "combo:chain", false, None).await.unwrap();
     assert_eq!(plan.candidates.len(), 2);
     assert_eq!(plan.candidates[0].connection, a);
     assert_eq!(plan.candidates[1].connection, b);
 
     // Bare combo name resolves the same way.
-    let bare = planner.plan(&Catalog::builtin(), &store, "chain", false).await.unwrap();
+    let bare = planner.plan(&Catalog::builtin(), &store, "chain", false, None).await.unwrap();
     assert_eq!(bare.candidates, plan.candidates);
 }
 
@@ -124,8 +124,8 @@ async fn round_robin_alternates_equal_priority_connections() {
     let c = conn(&store, "openai", "gpt-5", 5).await;
     let planner = Planner::new();
     let catalog = Catalog::builtin();
-    let first = planner.plan(&catalog, &store, "openai/gpt-5", false).await.unwrap();
-    let second = planner.plan(&catalog, &store, "openai/gpt-5", false).await.unwrap();
+    let first = planner.plan(&catalog, &store, "openai/gpt-5", false, None).await.unwrap();
+    let second = planner.plan(&catalog, &store, "openai/gpt-5", false, None).await.unwrap();
     assert_ne!(first.candidates[0].connection, second.candidates[0].connection);
     assert_eq!(
         std::collections::HashSet::from([first.candidates[0].connection, second.candidates[0].connection]),
@@ -136,13 +136,40 @@ async fn round_robin_alternates_equal_priority_connections() {
     assert_eq!(second.candidates[2].connection, c);
 }
 
+/// Conversations must stay on one account: KV caches are per upstream account, so
+/// rotating between turns turns every prompt into a cold cache write.
+#[tokio::test]
+async fn affinity_pins_one_conversation_but_spreads_conversations() {
+    let store = Store::open_in_memory().unwrap();
+    let a = conn(&store, "openai", "gpt-5", 0).await;
+    let b = conn(&store, "openai", "gpt-5", 0).await;
+    let planner = Planner::new();
+    let catalog = Catalog::builtin();
+    let first_for = |key: u64| planner.plan(&catalog, &store, "openai/gpt-5", false, Some(key));
+
+    let pinned = first_for(7).await.unwrap().candidates[0].connection;
+    for _ in 0..5 {
+        assert_eq!(
+            first_for(7).await.unwrap().candidates[0].connection,
+            pinned,
+            "the same conversation rotated accounts"
+        );
+    }
+
+    let mut accounts = std::collections::HashSet::new();
+    for key in 0..32u64 {
+        accounts.insert(first_for(key).await.unwrap().candidates[0].connection);
+    }
+    assert_eq!(accounts, std::collections::HashSet::from([a, b]), "affinity stopped spreading");
+}
+
 #[tokio::test]
 async fn disabled_model_is_excluded() {
     let store = Store::open_in_memory().unwrap();
     let _ = conn(&store, "openai", "gpt-5", 0).await;
     store.set_disabled("gpt-5", true).await.unwrap();
     let planner = Planner::new();
-    let err = planner.plan(&Catalog::builtin(), &store, "openai/gpt-5", false).await.unwrap_err();
+    let err = planner.plan(&Catalog::builtin(), &store, "openai/gpt-5", false, None).await.unwrap_err();
     assert!(matches!(err, Error::NoRoute { .. }), "{err:?}");
 }
 

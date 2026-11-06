@@ -105,6 +105,8 @@ export type UsageSummaryRow = {
   errors: number;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
   avg_latency_ms: number;
 };
 
@@ -115,6 +117,8 @@ export type UsageEvent = {
   connection_id: string | null;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
   latency_ms: number;
   status: number;
   streamed: boolean;
@@ -127,6 +131,8 @@ export type UsageBucket = {
   errors: number;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
   avg_latency_ms: number;
 };
 

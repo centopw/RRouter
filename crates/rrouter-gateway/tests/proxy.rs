@@ -353,6 +353,102 @@ async fn chat_client_to_a_stream_only_responses_provider_is_translated_and_reass
     assert_eq!(sent["model"], "gpt-5.6-luna");
 }
 
+/// Anthropic clients (Claude Code) mark cache breakpoints with `cache_control`. The
+/// canonical model has no place for them, so a rebuilt body would silently disable
+/// prompt caching; same-dialect requests must be forwarded as written.
+#[tokio::test]
+async fn anthropic_cache_markers_survive_the_gateway() {
+    let reply = MockReply::Json(
+        200,
+        json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "haiku",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 1}
+        }),
+    );
+    let mock = Mock::start(vec![reply]).await;
+    let h = harness(false);
+    h.connect("claude", &mock).await;
+
+    let body = json!({
+        "model": "claude/haiku",
+        "max_tokens": 16,
+        "cache_control": {"type": "ephemeral"},
+        "system": [{"type": "text", "text": "be terse", "cache_control": {"type": "ephemeral"}}],
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}]
+        }],
+        "tools": [{
+            "name": "f",
+            "input_schema": {"type": "object"},
+            "cache_control": {"type": "ephemeral"}
+        }]
+    });
+    let (status, out) = h.post("/v1/messages", body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+
+    let sent = &mock.seen()[0];
+    assert_eq!(sent["cache_control"], body["cache_control"], "top-level breakpoint lost");
+    assert_eq!(sent["system"][0]["cache_control"]["type"], "ephemeral", "system breakpoint lost");
+    assert_eq!(
+        sent["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral",
+        "message breakpoint lost"
+    );
+    assert_eq!(sent["tools"][0]["cache_control"]["type"], "ephemeral", "tool breakpoint lost");
+    // Routing still rewrites the model id.
+    assert_eq!(sent["model"], "haiku");
+}
+
+/// OpenAI Responses caching is opt-in through fields the canonical model does not
+/// carry: `prompt_cache_options`, `prompt_cache_key`, and per-block breakpoints.
+#[tokio::test]
+async fn responses_cache_markers_survive_the_gateway() {
+    let wire = concat!(
+        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\"}}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire: wire.to_string(),
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+
+    let body = json!({
+        "model": "codex/gpt-5.6-luna",
+        "input": [{
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": "hi",
+                "prompt_cache_breakpoint": {"mode": "explicit"}
+            }]
+        }],
+        "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
+        "prompt_cache_key": "conv-1",
+        "store": true
+    });
+    let (status, out) = h.post("/v1/responses", body).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+
+    let sent = &mock.seen()[0];
+    assert_eq!(sent["prompt_cache_options"]["mode"], "explicit");
+    assert_eq!(sent["prompt_cache_key"], "conv-1");
+    assert_eq!(
+        sent["input"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+    assert_eq!(sent["store"], false, "codex requires store:false");
+    assert_eq!(sent["stream"], true, "codex requires streaming");
+}
+
 #[tokio::test]
 async fn anthropic_non_streaming_round_trip() {
     let reply = MockReply::Json(
