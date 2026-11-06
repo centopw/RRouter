@@ -134,6 +134,9 @@ export type Connection = {
 /** One rewrite on a key: `from` is what the client sends, `to` a registry ref. */
 export type KeyModelMap = { from: string; to: string };
 
+/** Reset cadence for spend counters and budgets; `total` never resets. */
+export type BudgetWindow = "total" | "daily" | "weekly" | "monthly";
+
 /**
  * A gateway key with its governance limits. `rpm`/`tpm`/`budget_tokens`/
  * `budget_micros` use 0 for "unlimited"; `allowed_models` null means any model;
@@ -154,6 +157,8 @@ export type KeyResult = {
   budget_micros: number;
   /** USD spend in micros, computed per request like `spent_tokens`. */
   spent_micros: number;
+  /** Reset cadence; `spent_*` already count only the current window. */
+  budget_window: BudgetWindow;
   allowed_models: string[] | null;
   expires_at: number | null;
   models?: KeyModelMap[];
@@ -167,6 +172,8 @@ export type UpdateKey = Partial<{
   budget_tokens: number;
   /** USD budget in micros; 0 clears it. */
   budget_micros: number;
+  /** Reset cadence for the budgets; `total` never resets. */
+  budget_window: BudgetWindow;
   allowed_models: string[] | null;
   expires_at: number | null;
 }>;

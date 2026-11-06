@@ -11,6 +11,7 @@ import {
   Field,
   Input,
   Modal,
+  Select,
   PageHeader,
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
@@ -20,6 +21,7 @@ import { qk, useKeyModels, useKeys, useModels, useUpdateKey, useUpdateKeyModels 
 import {
   ApiError,
   api,
+  type BudgetWindow,
   type KeyModelMap,
   type KeyResult,
   type NewKey,
@@ -218,31 +220,53 @@ function Limits({ row }: { row: KeyResult }) {
           <span className="text-muted tnum">{usd(row.budget_micros)}</span>
         </span>
       ) : null}
+      {(row.budget_micros > 0 || row.budget_tokens > 0) && row.budget_window !== "total" ? (
+        <span title="budget reset window">
+          <span className="text-faint"> · </span>
+          <span className="text-muted">{row.budget_window}</span>
+        </span>
+      ) : null}
     </span>
   );
 }
 
+/** Spend counters are already scoped to the key's window; this only names that window. */
+const WINDOW_NOW: Record<BudgetWindow, string | null> = {
+  total: null,
+  daily: "today",
+  weekly: "this week",
+  monthly: "this month",
+};
+
 /** Money spent against the USD budget; the token budget stays a hover detail. */
 function Spend({ row }: { row: KeyResult }) {
+  const now = WINDOW_NOW[row.budget_window];
+  const dollarNote =
+    row.budget_micros > 0
+      ? `${usd(row.spent_micros)} of ${usd(row.budget_micros)} USD used`
+      : `${usd(row.spent_micros)} USD used · no USD budget`;
   const tokenNote =
     row.budget_tokens > 0
       ? `${compact(row.spent_tokens)} of ${compact(row.budget_tokens)} tokens used`
       : `${compact(row.spent_tokens)} tokens used · no token budget`;
+  const title = [dollarNote, tokenNote, ...(now ? [`resets ${row.budget_window}`] : [])].join(" · ");
   const budget = row.budget_micros;
   if (!(budget > 0)) {
     return (
-      <span className="font-mono text-[12px] text-muted tnum" title={`no USD budget · ${tokenNote}`}>
+      <span className="font-mono text-[12px] text-muted tnum" title={title}>
         {usd(row.spent_micros)}
+        {now ? <span className="ml-1 text-[11px] text-faint">{now}</span> : null}
       </span>
     );
   }
   const reached = row.spent_micros >= budget;
   const share = Math.min(100, (row.spent_micros / budget) * 100);
   return (
-    <div className="min-w-[132px]" title={tokenNote}>
+    <div className="min-w-[132px]" title={title}>
       <div className="flex items-baseline gap-1 font-mono text-[12px] tnum">
         <span className={reached ? "text-neg" : "text-fg"}>{usd(row.spent_micros)}</span>
         <span className="text-faint">/ {usd(budget)}</span>
+        {now ? <span className="text-[11px] text-faint">{now}</span> : null}
       </div>
       <span className="mt-1 block h-1.5 w-full overflow-hidden rounded-full bg-[var(--color-rule)]">
         <span
@@ -385,6 +409,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
   const [budgetProblem, setBudgetProblem] = useState<string | null>(null);
   const [expires, setExpires] = useState(toDateInput(row.expires_at));
   const [allowed, setAllowed] = useState<string[]>(row.allowed_models ?? []);
+  const [resets, setResets] = useState<BudgetWindow>(row.budget_window);
 
   // `baseline === null` until the map has been read once: until then the section shows
   // loading or its retry, and a save leaves the server's map untouched rather than clearing it.
@@ -457,6 +482,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
       tpm: toCount(tpm),
       budget_tokens: toCount(budget),
       budget_micros: parsed.micros,
+      budget_window: resets,
       allowed_models: allowed.length === 0 ? null : allowed,
       expires_at: fromDateInput(expires),
     };
@@ -557,6 +583,20 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
             ) : null}
           </div>
         </div>
+
+        <Field label="resets" hint="spend shown is for the current window; budgets are enforced against it">
+          <Select
+            value={resets}
+            onChange={(v) => setResets(v as BudgetWindow)}
+            ariaLabel="budget reset window"
+            disabled={busy}
+          >
+            <option value="total">total (never)</option>
+            <option value="daily">daily</option>
+            <option value="weekly">weekly</option>
+            <option value="monthly">monthly</option>
+          </Select>
+        </Field>
 
         <Field label="expires" hint="empty = never">
           <DateInput
