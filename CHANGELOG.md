@@ -2,7 +2,7 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
-## Unreleased — first public release (0.1.x)
+## 0.2.0 — first public release
 
 ### Gateway
 
