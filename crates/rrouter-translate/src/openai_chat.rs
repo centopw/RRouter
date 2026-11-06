@@ -48,7 +48,9 @@ pub fn parse_request(body: &Value) -> Result<ChatRequest> {
     let (system, messages) = parse_messages(body)?;
     req.system = system;
     req.messages = messages;
-    req.tools = parse_tools(body);
+    let (tools, raw_tools) = parse_tools(body);
+    req.tools = tools;
+    req.raw_tools = raw_tools.map(|t| (D, t));
     if req.tool_choice.is_some() && req.tools.is_empty() {
         req.tool_choice = None;
     }
@@ -191,21 +193,30 @@ fn data_url_media_type(url: &str) -> Option<String> {
     Some(meta.split(';').next().unwrap_or(meta).to_owned())
 }
 
-fn parse_tools(body: &Value) -> Vec<ToolDef> {
+/// Function tools in canonical form, plus the provider-native ones
+/// (`web_search`, `custom`, ...) that only the same dialect can accept.
+fn parse_tools(body: &Value) -> (Vec<ToolDef>, Option<Vec<Value>>) {
     let Some(items) = body.get("tools").and_then(Value::as_array) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let mut out = Vec::with_capacity(items.len());
+    let mut raw = Vec::new();
     for item in items {
+        let kind = req_str(item, "type").unwrap_or("function");
+        if kind != "function" {
+            raw.push(item.clone());
+            continue;
+        }
         let func = item.get("function").unwrap_or(item);
         let Some(name) = req_str(func, "name") else { continue };
         out.push(ToolDef {
             name: name.to_owned(),
             description: req_str(func, "description").map(str::to_owned),
             parameters: func.get("parameters").map(tool_schema).unwrap_or_else(|| tool_schema(&Value::Null)),
+            strict: func.get("strict").and_then(Value::as_bool).unwrap_or(false),
         });
     }
-    out
+    (out, (!raw.is_empty()).then_some(raw))
 }
 
 /// Embeddings passthrough: keep the whole body in `extra` so `build_request`
@@ -252,20 +263,28 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
     if stream {
         body.insert("stream_options".into(), json!({"include_usage": true}));
     }
-    if !req.tools.is_empty() {
-        let tools: Vec<Value> = req
-            .tools
-            .iter()
-            .map(|t| {
-                let mut func = Map::new();
-                func.insert("name".into(), Value::from(t.name.clone()));
-                if let Some(desc) = &t.description {
-                    func.insert("description".into(), Value::from(desc.clone()));
-                }
-                func.insert("parameters".into(), t.parameters.clone());
-                json!({"type": "function", "function": Value::Object(func)})
-            })
-            .collect();
+    let mut tools: Vec<Value> = req
+        .tools
+        .iter()
+        .map(|t| {
+            let mut func = Map::new();
+            func.insert("name".into(), Value::from(t.name.clone()));
+            if let Some(desc) = &t.description {
+                func.insert("description".into(), Value::from(desc.clone()));
+            }
+            func.insert("parameters".into(), t.parameters.clone());
+            if t.strict {
+                func.insert("strict".into(), Value::Bool(true));
+            }
+            json!({"type": "function", "function": Value::Object(func)})
+        })
+        .collect();
+    if let Some((src, raw)) = &req.raw_tools {
+        if *src == D {
+            tools.extend(raw.iter().cloned());
+        }
+    }
+    if !tools.is_empty() {
         body.insert("tools".into(), Value::from(tools));
     }
     if let Some(choice) = &req.tool_choice {
@@ -709,6 +728,29 @@ impl OpenAiChatEncoder {
 mod tests {
     use super::*;
     use crate::{build_request, parse_request, StreamEncoder};
+
+    #[test]
+    fn chat_native_tools_stay_with_the_chat_dialect() {
+        let body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "function", "function": {"name": "f", "strict": true, "parameters": {"type": "object"}}},
+                {"type": "web_search"},
+            ],
+        });
+        let req = parse_request(Dialect::OpenAiChat, &body).unwrap();
+        assert!(req.tools[0].strict);
+
+        let same = build_request(Dialect::OpenAiChat, &req, false).unwrap();
+        assert_eq!(same["tools"][0]["function"]["strict"], true);
+        assert_eq!(same["tools"][1], json!({"type": "web_search"}));
+
+        // Responses has no way to express the raw chat tool, so it is dropped rather
+        // than mislabelled as a function.
+        let responses = build_request(Dialect::OpenAiResponses, &req, false).unwrap();
+        assert_eq!(responses["tools"].as_array().expect("tools").len(), 1);
+    }
 
     fn drain(d: &mut OpenAiChatDecoder, chunks: &[&str]) -> Vec<StreamEvent> {
         let mut out = Vec::new();

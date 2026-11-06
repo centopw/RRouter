@@ -41,7 +41,9 @@ pub fn parse_request(body: &Value) -> Result<ChatRequest> {
     req.top_p = opt_f64(body, "top_p");
     req.system = req_str(body, "instructions").map(str::to_owned);
     req.messages = parse_input(body)?;
-    req.tools = parse_tools(body);
+    let (tools, raw_tools) = parse_tools(body);
+    req.tools = tools;
+    req.raw_tools = raw_tools.map(|t| (D, t));
     req.tool_choice = body.get("tool_choice").and_then(parse_tool_choice);
     capture_extra(body, KNOWN_KEYS, D, &mut req)?;
     Ok(req)
@@ -195,14 +197,21 @@ fn part_breaks_group(part: &Part) -> bool {
     matches!(part, Part::ToolResult { .. } | Part::ToolUse { .. })
 }
 
-fn parse_tools(body: &Value) -> Vec<ToolDef> {
+/// Split the request's `tools` into function tools and provider-native tools.
+///
+/// Native tools (`web_search`, `file_search`, `code_interpreter`, `custom`, ...) have
+/// no canonical form. Dropping them silently changes the request, so they are kept
+/// verbatim and re-emitted byte-for-byte when the outbound dialect is Responses.
+fn parse_tools(body: &Value) -> (Vec<ToolDef>, Option<Vec<Value>>) {
     let Some(items) = body.get("tools").and_then(Value::as_array) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let mut out = Vec::with_capacity(items.len());
+    let mut raw = Vec::new();
     for item in items {
         let kind = req_str(item, "type").unwrap_or("function");
         if kind != "function" {
+            raw.push(item.clone());
             continue;
         }
         let Some(name) = req_str(item, "name") else { continue };
@@ -210,9 +219,10 @@ fn parse_tools(body: &Value) -> Vec<ToolDef> {
             name: name.to_owned(),
             description: req_str(item, "description").map(str::to_owned),
             parameters: item.get("parameters").map(tool_schema).unwrap_or_else(|| tool_schema(&Value::Null)),
+            strict: item.get("strict").and_then(Value::as_bool).unwrap_or(false),
         });
     }
-    out
+    (out, (!raw.is_empty()).then_some(raw))
 }
 
 fn parse_tool_choice(v: &Value) -> Option<ToolChoice> {
@@ -304,21 +314,29 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
     if let Some(p) = req.top_p {
         body.insert("top_p".into(), Value::from(p));
     }
-    if !req.tools.is_empty() {
-        let tools: Vec<Value> = req
-            .tools
-            .iter()
-            .map(|t| {
-                let mut m = Map::new();
-                m.insert("type".into(), Value::from("function"));
-                m.insert("name".into(), Value::from(t.name.clone()));
-                if let Some(d) = &t.description {
-                    m.insert("description".into(), Value::from(d.clone()));
-                }
-                m.insert("parameters".into(), t.parameters.clone());
-                Value::Object(m)
-            })
-            .collect();
+    let mut tools: Vec<Value> = req
+        .tools
+        .iter()
+        .map(|t| {
+            let mut m = Map::new();
+            m.insert("type".into(), Value::from("function"));
+            m.insert("name".into(), Value::from(t.name.clone()));
+            if let Some(d) = &t.description {
+                m.insert("description".into(), Value::from(d.clone()));
+            }
+            m.insert("parameters".into(), t.parameters.clone());
+            if t.strict {
+                m.insert("strict".into(), Value::Bool(true));
+            }
+            Value::Object(m)
+        })
+        .collect();
+    if let Some((src, raw)) = &req.raw_tools {
+        if *src == D {
+            tools.extend(raw.iter().cloned());
+        }
+    }
+    if !tools.is_empty() {
         body.insert("tools".into(), Value::from(tools));
     }
     if let Some(choice) = &req.tool_choice {
@@ -972,6 +990,49 @@ mod tests {
 
     fn sse(event: &str, data: Value) -> String {
         render_openai(&data.to_string(), Some(event))
+    }
+
+    #[test]
+    fn native_tools_survive_only_the_responses_dialect() {
+        let body = json!({
+            "model": "m",
+            "input": "search the web",
+            "tools": [
+                {"type": "function", "name": "lookup", "parameters": {"type": "object"}},
+                {"type": "web_search", "external_web_access": true},
+                {"type": "file_search", "vector_store_ids": ["vs_1"]},
+            ],
+        });
+        let req = parse_request(Dialect::OpenAiResponses, &body).unwrap();
+        assert_eq!(req.tools.len(), 1, "only function tools are canonical");
+        assert_eq!(req.tools[0].name, "lookup");
+
+        // Same dialect: every native tool is re-emitted verbatim.
+        let same = build_request(Dialect::OpenAiResponses, &req, false).unwrap();
+        let tools = same["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[1], json!({"type": "web_search", "external_web_access": true}));
+        assert_eq!(tools[2], json!({"type": "file_search", "vector_store_ids": ["vs_1"]}));
+
+        // Different dialect: nothing the target cannot express is smuggled through.
+        let chat = build_request(Dialect::OpenAiChat, &req, false).unwrap();
+        assert_eq!(chat["tools"].as_array().expect("tools").len(), 1);
+    }
+
+    #[test]
+    fn strict_schema_flag_is_preserved() {
+        let body = json!({
+            "model": "m",
+            "input": "hi",
+            "tools": [{"type": "function", "name": "f", "strict": true,
+                       "parameters": {"type": "object", "properties": {}}}],
+        });
+        let req = parse_request(Dialect::OpenAiResponses, &body).unwrap();
+        assert!(req.tools[0].strict);
+        let same = build_request(Dialect::OpenAiResponses, &req, false).unwrap();
+        assert_eq!(same["tools"][0]["strict"], true);
+        let chat = build_request(Dialect::OpenAiChat, &req, false).unwrap();
+        assert_eq!(chat["tools"][0]["function"]["strict"], true);
     }
 
     #[test]

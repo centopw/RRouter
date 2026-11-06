@@ -160,6 +160,8 @@ fn parse_tools(body: &Value) -> Vec<ToolDef> {
             name: name.to_owned(),
             description: req_str(item, "description").map(str::to_owned),
             parameters: item.get("input_schema").map(tool_schema).unwrap_or_else(|| tool_schema(&Value::Null)),
+            // Anthropic has no strict flag; schemas are advisory only.
+            strict: false,
         });
     }
     out

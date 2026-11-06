@@ -58,6 +58,9 @@ pub struct ToolDef {
     pub description: Option<String>,
     /// JSON Schema object for the arguments.
     pub parameters: Value,
+    /// OpenAI's `strict` schema-conformance flag. Kept per tool because it changes
+    /// how the provider validates arguments; dropping it silently loosens the call.
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +81,10 @@ pub struct ChatRequest {
     pub system: Option<String>,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
+    /// Tools the dialects model as opaque provider features (`web_search`,
+    /// `file_search`, `custom`, ...). They cannot be expressed as function tools, so
+    /// they travel verbatim and only when the outbound dialect matches the source.
+    pub raw_tools: Option<(crate::Dialect, Vec<Value>)>,
     pub tool_choice: Option<ToolChoice>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
@@ -97,6 +104,7 @@ impl ChatRequest {
             system: None,
             messages: Vec::new(),
             tools: Vec::new(),
+            raw_tools: None,
             tool_choice: None,
             max_tokens: None,
             temperature: None,
