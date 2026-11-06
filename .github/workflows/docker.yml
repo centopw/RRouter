@@ -32,6 +32,12 @@ jobs:
         run: cargo test --workspace
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Release binary for the live smokes
+        run: cargo build --release --locked
+      - name: Live end-to-end smoke (mock upstream + real binary)
+        run: python3 scripts/e2e_smoke.py
+      - name: OAuth smoke (mock identity provider)
+        run: python3 scripts/oauth_smoke.py
 
   image:
     needs: test
