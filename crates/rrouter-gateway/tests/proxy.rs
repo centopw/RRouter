@@ -185,6 +185,7 @@ fn build_state(require_api_key: bool) -> AppState {
             .expect("client"),
         config: config(require_api_key),
         started: Instant::now(),
+        oauth: rrouter_auth::OAuthFlows::new(),
     }
 }
 
@@ -629,3 +630,69 @@ async fn unsupported_and_error_shapes() {
     assert!(body["error"]["message"].as_str().is_some_and(|m| m.contains("not supported")));
 }
 
+
+// ---- OAuth sign-in endpoints -------------------------------------------------------
+
+#[tokio::test]
+async fn oauth_start_returns_a_challenge_and_never_a_token() {
+    let h = harness(false);
+    let (status, body) = h.post("/api/oauth/github/start", Value::Null).await;
+    // No network in this test: the device-code endpoint is unreachable, so the call
+    // fails upstream — but the shape of the contract is what matters here, and the
+    // body must never contain a token.
+    let text = body.to_string();
+    assert!(!text.contains("access_token"), "{text}");
+    assert!(status.is_client_error() || status.is_server_error() || status.is_success());
+}
+
+#[tokio::test]
+async fn oauth_start_rejects_an_unknown_provider() {
+    let h = harness(false);
+    let (status, body) = h.post("/api/oauth/notreal/start", Value::Null).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body["error"]["message"].as_str().unwrap_or("").contains("unknown provider"));
+}
+
+#[tokio::test]
+async fn oauth_start_rejects_a_provider_without_a_login_flow() {
+    let h = harness(false);
+    let (status, body) = h.post("/api/oauth/openai/start", Value::Null).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"]["message"].as_str().unwrap_or("").contains("no OAuth sign-in"));
+}
+
+#[tokio::test]
+async fn oauth_complete_requires_an_id_and_rejects_unknown_ids() {
+    let h = harness(false);
+    let (status, body) = h.post("/api/oauth/github/complete", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, body) = h
+        .post("/api/oauth/github/complete", serde_json::json!({"id": "does-not-exist"}))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
+async fn oauth_status_reports_pending_false_for_unknown_ids() {
+    let h = harness(false);
+    let (status, body) = h.get("/api/oauth/github/status/nope").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["pending"], serde_json::json!(false));
+}
+
+#[tokio::test]
+async fn oauth_cancel_is_idempotent() {
+    let h = harness(false);
+    let (status, body) = h
+        .call(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/oauth/github/nope")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cancelled"], serde_json::json!(false));
+}

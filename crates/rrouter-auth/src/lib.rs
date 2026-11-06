@@ -10,13 +10,19 @@
 //! - [`headers`]: [`build_headers`] / [`resolve_base_url`] for one outbound call.
 
 pub mod credentials;
+pub mod flows;
 pub mod fresh;
+pub mod loopback;
+pub mod pkce;
 pub mod headers;
 pub mod registry;
 
 pub use credentials::Credentials;
 pub use fresh::{CredentialStore, Refresher, GITHUB_COPILOT_TOKEN_URL, LEAD_SECS};
+pub use flows::{Challenge, OAuthFlows, SignedIn};
+pub use loopback::LoopbackServer;
 pub use headers::{build_headers, resolve_base_url};
 pub use registry::{
-    get, is_oauth, AuthStyle, ProviderKind, ProviderSpec, RefreshBody, RefreshSpec, PROVIDERS,
+    get, is_oauth, AuthStyle, DeviceFlow, LoginFlow, PkceFlow, ProviderKind, ProviderSpec,
+    RefreshBody, RefreshSpec, PROVIDERS,
 };

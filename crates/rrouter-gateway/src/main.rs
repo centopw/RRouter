@@ -90,6 +90,7 @@ async fn serve(config: Config) -> Result<(), String> {
         http,
         config: config.clone(),
         started: Instant::now(),
+        oauth: rrouter_auth::OAuthFlows::new(),
     });
 
     // Fail closed: binding beyond loopback while the admin gate is still in its

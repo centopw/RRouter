@@ -43,9 +43,71 @@ async function table(panel, columns, load, toolbar = []) {
 const input = (placeholder, value = '') => el('input', { placeholder, value });
 const button = (label, onclick, cls = '') => el('button', { class: cls, onclick }, label);
 
-// ---------- builtin panels ----------
+// ---------- OAuth sign-in ----------
+// Providers whose sign-in RRouter implements. Kept here so the button list is
+// explicit rather than a guess from the connection list.
+const OAUTH_PROVIDERS = [
+  { id: 'claude', label: 'Claude' },
+  { id: 'codex', label: 'Codex' },
+  { id: 'github', label: 'GitHub Copilot' },
+];
+
+/// Run one sign-in end to end, showing whatever the human must do.
+async function startLogin(provider, slot, onDone) {
+  slot.replaceChildren(el('div', { class: 'muted' }, `starting ${provider} sign-in…`));
+  let started;
+  try {
+    started = await api(`/oauth/${provider}/start`, { method: 'POST' });
+  } catch (err) {
+    slot.replaceChildren(el('div', { class: 'error' }, `${provider}: ${err.message}`));
+    return;
+  }
+  const { id, challenge } = started;
+
+  if (challenge.kind === 'pkce') {
+    slot.replaceChildren(
+      el('div', { class: 'card' },
+        el('div', {}, `Authorize ${provider} in your browser, then this finishes automatically.`),
+        el('div', { class: 'toolbar' },
+          el('a', { href: challenge.authorize_url, target: '_blank', rel: 'noopener' }, 'open authorization page'),
+          button('I authorized — continue', (e) => finish(e.target, id), 'primary'),
+          button('cancel', async () => { await api(`/oauth/${provider}/${id}`, { method: 'DELETE' }); slot.replaceChildren(); }, 'danger'))),
+    );
+  } else {
+    // Device flow: show the code, open the verification page, poll until done.
+    slot.replaceChildren(
+      el('div', { class: 'card' },
+        el('div', {}, 'Enter this code on GitHub:'),
+        el('div', { class: 'secret' }, challenge.user_code),
+        el('div', { class: 'toolbar' },
+          el('a', { href: challenge.verification_uri, target: '_blank', rel: 'noopener' }, 'open verification page'),
+          button('cancel', async () => { await api(`/oauth/${provider}/${id}`, { method: 'DELETE' }); slot.replaceChildren(); }, 'danger'))),
+    );
+  }
+
+  async function finish(btn, loginId) {
+    btn.disabled = true;
+    btn.textContent = 'waiting for provider…';
+    try {
+      const out = await api(`/oauth/${provider}/complete`, { method: 'POST', body: { id: loginId } });
+      slot.replaceChildren(
+        el('div', { class: 'card ok' }, `connected ${out.provider}${out.name ? ` as ${out.name}` : ''}`),
+        out.warning ? el('div', { class: 'error' }, out.warning) : null,
+      );
+      await onDone();
+    } catch (err) {
+      slot.replaceChildren(el('div', { class: 'error' }, `${provider}: ${err.message}`));
+    }
+  }
+
+  // Device flows complete on their own: the server polls the provider.
+  if (challenge.kind === 'device_code') finish(el('button'), id);
+}
+
 const builtins = {
   async connections(panel) {
+    const loginSlot = el('div');
+    const refresh = () => render(panel.parentElement, current);
     const form = el('div', { class: 'toolbar' },
       input('provider e.g. openai', 'openai'), input('auth_type', 'api_key'),
       input('name'), input('api_key / access_token'),
@@ -54,8 +116,13 @@ const builtins = {
         const credentials = authType.value === 'api_key' ? { api_key: token.value } : { access_token: token.value };
         try { await api('/connections', { method: 'POST', body: { provider: provider.value, auth_type: authType.value, name: name.value, credentials } }); }
         catch (err) { alert(err.message); }
-        render(panel.parentElement, current);
+        refresh();
       }, 'primary'));
+    const connect = el('div', { class: 'toolbar' },
+      el('span', { class: 'muted' }, 'sign in:'),
+      OAUTH_PROVIDERS.map((p) => button(p.label, () => startLogin(p.id, loginSlot, refresh))));
+    // The table helper replaces the panel's children, so the toolbar is rendered into
+    // its own toolbar slot and prepended afterwards (see the prepend below).
     await table(panel, [
       { title: 'provider', key: 'provider' },
       { title: 'name', key: 'name' },
@@ -65,8 +132,9 @@ const builtins = {
       { title: 'state', render: (r) => (r.is_active ? 'active' : `off (${r.backoff_level})`) },
       { title: '', render: (r) => el('span', {},
           button('test', async () => { const out = await api(`/connections/${r.id}/test`, { method: 'POST' }); alert(JSON.stringify(out)); }),
-          button('delete', async () => { await api(`/connections/${r.id}`, { method: 'DELETE' }); render(panel.parentElement, current); }, 'danger')) },
-    ], async () => (await api('/connections')).data ?? [], [form]);
+          button('delete', async () => { await api(`/connections/${r.id}`, { method: 'DELETE' }); refresh(); }, 'danger')) },
+    ], async () => (await api('/connections')).data ?? []);
+    panel.prepend(el('div', { class: 'toolbar' }, form), connect, loginSlot);
   },
 
   async keys(panel) {

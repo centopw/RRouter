@@ -1265,10 +1265,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
+ "rand 0.8.8",
  "reqwest",
  "rrouter-core",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "uuid",

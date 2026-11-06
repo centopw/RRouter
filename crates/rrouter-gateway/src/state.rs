@@ -19,6 +19,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub config: Config,
     pub started: Instant,
+    /// Live OAuth sign-in sessions (one-time browser/device logins).
+    pub oauth: rrouter_auth::OAuthFlows,
 }
 
 impl AppState {

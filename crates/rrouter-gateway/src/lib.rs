@@ -85,6 +85,13 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/usage/summary", get(routes::usage::summary))
         .route("/system", get(routes::system::system))
         .route("/settings", get(routes::settings::get_settings).put(routes::settings::put_settings))
+        .route("/oauth/{provider}/start", post(routes::oauth::start))
+        .route(
+            "/oauth/{provider}/status/{id}",
+            get(routes::oauth::status),
+        )
+        .route("/oauth/{provider}/complete", post(routes::oauth::complete))
+        .route("/oauth/{provider}/{id}", axum::routing::delete(routes::oauth::cancel))
         .route("/ui/panels", get(ui::panels))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),

@@ -5,6 +5,7 @@ pub mod connections;
 pub mod health;
 pub mod keys;
 pub mod models;
+pub mod oauth;
 pub mod settings;
 pub mod system;
 pub mod usage;

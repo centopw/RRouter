@@ -52,6 +52,57 @@ pub struct RefreshSpec {
     pub body: RefreshBody,
 }
 
+/// How a user signs in to obtain an OAuth account in the first place.
+///
+/// Distinct from [`RefreshSpec`], which keeps an existing account alive: this is
+/// the one-time human step (browser consent or device code) that yields the first
+/// refresh token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginFlow {
+    /// Authorization Code + PKCE against a loopback redirect (RFC 7636).
+    Pkce(PkceFlow),
+    /// OAuth 2.0 Device Authorization Grant (RFC 8628).
+    DeviceCode(DeviceFlow),
+}
+
+/// Authorization Code + PKCE parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PkceFlow {
+    pub client_id: &'static str,
+    pub authorize_url: &'static str,
+    pub token_url: &'static str,
+    /// Space-joined scope string.
+    pub scope: &'static str,
+    /// Fixed loopback port the provider's registered redirect URI requires, if any.
+    /// `None` means bind an ephemeral port.
+    pub fixed_port: Option<u16>,
+    /// Path of the loopback callback (`/callback` or `/auth/callback`).
+    pub callback_path: &'static str,
+    /// Extra query params the provider's own CLI sends.
+    pub extra_params: &'static [(&'static str, &'static str)],
+    /// Token-endpoint request encoding.
+    pub body: RefreshBody,
+}
+
+/// Device Authorization Grant parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceFlow {
+    pub client_id: &'static str,
+    pub device_code_url: &'static str,
+    pub token_url: &'static str,
+    /// Space-joined scope string.
+    pub scope: &'static str,
+}
+
+impl LoginFlow {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Pkce(_) => "pkce",
+            Self::DeviceCode(_) => "device_code",
+        }
+    }
+}
+
 /// One provider's static transport description.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderSpec {
@@ -77,9 +128,17 @@ pub struct ProviderSpec {
     pub default_max_tokens: Option<u32>,
     /// Refresh recipe; `None` for `ApiKey`/`Local`.
     pub refresh: Option<RefreshSpec>,
+    /// One-time sign-in recipe; `None` when the provider has no browser/device login
+    /// (API-key providers) or RRouter does not implement it.
+    pub login: Option<LoginFlow>,
 }
 
 impl ProviderSpec {
+    /// The sign-in flow for this provider, when one is wired.
+    pub const fn login_flow(&self) -> Option<LoginFlow> {
+        self.login
+    }
+
     /// `true` when this provider hands out short-lived OAuth access tokens.
     pub const fn is_oauth(&self) -> bool {
         matches!(self.kind, ProviderKind::OAuth)
@@ -128,6 +187,49 @@ const GITHUB_HEADERS: &[(&str, &str)] = &[
 
 const ANTHROPIC_HEADERS: &[(&str, &str)] = &[("anthropic-version", "2023-06-01")];
 
+// ---- sign-in flows ------------------------------------------------------------------
+//
+// These mirror the login parameters of the official CLIs so a token obtained here is
+// an ordinary account token that the same refresh recipe keeps alive.
+
+/// [CC] sign-in: authorization code + PKCE on an ephemeral loopback port.
+pub const CLAUDE_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
+    client_id: ANTHROPIC_OAUTH_CLIENT,
+    authorize_url: "https://claude.ai/oauth/authorize",
+    token_url: "https://api.anthropic.com/v1/oauth/token",
+    scope: "org:create_api_key user:profile user:inference",
+    fixed_port: None,
+    callback_path: "/callback",
+    extra_params: &[("code", "true")],
+    body: RefreshBody::Json,
+});
+
+/// Codex CLI sign-in: authorization code + PKCE on the port its client registered.
+pub const CODEX_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
+    client_id: CODEX_OAUTH_CLIENT,
+    authorize_url: "https://auth.openai.com/oauth/authorize",
+    token_url: "https://auth.openai.com/oauth/token",
+    scope: "openid profile email offline_access",
+    // The registered redirect URI is bound to this exact port; a dynamic port
+    // fails the exchange with a redirect_uri mismatch.
+    fixed_port: Some(1455),
+    callback_path: "/auth/callback",
+    extra_params: &[
+        ("id_token_add_organizations", "true"),
+        ("codex_cli_simplified_flow", "true"),
+        ("originator", "codex_cli_rs"),
+    ],
+    body: RefreshBody::Form,
+});
+
+/// GitHub Copilot sign-in: device authorization grant.
+pub const GITHUB_LOGIN: LoginFlow = LoginFlow::DeviceCode(DeviceFlow {
+    client_id: "Iv1.b507a08c87ecfe98",
+    device_code_url: "https://github.com/login/device/code",
+    token_url: "https://github.com/login/oauth/access_token",
+    scope: "read:user",
+});
+
 /// Every provider this build can route to.
 pub static PROVIDERS: &[ProviderSpec] = &[
     ProviderSpec {
@@ -142,6 +244,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: CLAUDE_HEADERS,
         default_max_tokens: Some(32_000),
         refresh: Some(CLAUDE_REFRESH),
+        login: Some(CLAUDE_LOGIN),
     },
     ProviderSpec {
         id: "codex",
@@ -155,6 +258,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: CODEX_HEADERS,
         default_max_tokens: None,
         refresh: Some(CODEX_REFRESH),
+        login: Some(CODEX_LOGIN),
     },
     ProviderSpec {
         id: "github",
@@ -168,6 +272,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: GITHUB_HEADERS,
         default_max_tokens: None,
         refresh: None,
+        login: Some(GITHUB_LOGIN),
     },
     ProviderSpec {
         id: "openai",
@@ -181,6 +286,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: &[],
         default_max_tokens: None,
         refresh: None,
+        login: None,
     },
     ProviderSpec {
         id: "anthropic",
@@ -194,6 +300,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: ANTHROPIC_HEADERS,
         default_max_tokens: Some(32_000),
         refresh: None,
+        login: None,
     },
     ProviderSpec {
         id: "deepseek",
@@ -207,6 +314,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: &[],
         default_max_tokens: None,
         refresh: None,
+        login: None,
     },
     ProviderSpec {
         id: "gemini",
@@ -220,6 +328,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: &[],
         default_max_tokens: None,
         refresh: None,
+        login: None,
     },
     ProviderSpec {
         id: "groq",
@@ -233,6 +342,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: &[],
         default_max_tokens: None,
         refresh: None,
+        login: None,
     },
     ProviderSpec {
         id: "openrouter",
@@ -246,6 +356,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: &[],
         default_max_tokens: None,
         refresh: None,
+        login: None,
     },
     ProviderSpec {
         id: "xai",
@@ -259,6 +370,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: &[],
         default_max_tokens: None,
         refresh: None,
+        login: None,
     },
     ProviderSpec {
         id: "mistral",
@@ -272,6 +384,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: &[],
         default_max_tokens: None,
         refresh: None,
+        login: None,
     },
     ProviderSpec {
         id: "together",
@@ -285,6 +398,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: &[],
         default_max_tokens: None,
         refresh: None,
+        login: None,
     },
     ProviderSpec {
         id: "cerebras",
@@ -298,6 +412,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: &[],
         default_max_tokens: None,
         refresh: None,
+        login: None,
     },
     ProviderSpec {
         id: "ollama",
@@ -311,6 +426,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: &[],
         default_max_tokens: None,
         refresh: None,
+        login: None,
     },
 ];
 

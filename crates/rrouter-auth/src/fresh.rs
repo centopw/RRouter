@@ -267,12 +267,14 @@ impl Refresher {
 
 /// Response of an RFC 6749 token endpoint (superset of what any provider returns).
 #[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: String,
+pub(crate) struct TokenResponse {
+    pub(crate) access_token: String,
     #[serde(default)]
-    refresh_token: Option<String>,
+    pub(crate) refresh_token: Option<String>,
     #[serde(default)]
-    expires_in: Option<u32>,
+    pub(crate) id_token: Option<String>,
+    #[serde(default)]
+    pub(crate) expires_in: Option<u32>,
 }
 
 /// Response of the GitHub Copilot token endpoint.

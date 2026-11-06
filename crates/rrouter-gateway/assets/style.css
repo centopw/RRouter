@@ -50,3 +50,5 @@ button.danger { color: var(--bad); }
 .secret { color: var(--ok); word-break: break-all; }
 iframe.ext { width: 100%; min-height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #0b0d13; }
 .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel); }
+.error { color: var(--bad); }
+.card.ok { border-color: color-mix(in srgb, var(--ok) 55%, var(--line)); }
