@@ -9,6 +9,8 @@ import {
   type KeyResult,
   type Model,
   type ModelProvider,
+  type OAuthProvider,
+  type OAuthStatus,
   type SystemInfo,
   type UsageEvent,
   type UsageSummaryRow,
@@ -26,6 +28,8 @@ export const qk = {
   combos: ["combos"] as const,
   usage: (limit: number) => ["usage", limit] as const,
   summary: ["usage-summary"] as const,
+  oauthProviders: ["oauth-providers"] as const,
+  oauthStatus: (provider: string, id: string) => ["oauth-status", provider, id] as const,
 };
 
 export function useHealth() {
@@ -85,5 +89,25 @@ export function useUsageSummary() {
     queryKey: qk.summary,
     queryFn: () => list<UsageSummaryRow>("/api/usage/summary"),
     refetchInterval: 15_000,
+  });
+}
+
+export function useOAuthProviders() {
+  return useQuery({
+    queryKey: qk.oauthProviders,
+    queryFn: () => list<OAuthProvider>("/api/oauth/providers"),
+    staleTime: 60_000,
+  });
+}
+
+/** Poll one in-flight sign-in; stops the moment the server stops reporting pending. */
+export function useOAuthStatus(provider: string | null, id: string | null, intervalMs: number) {
+  return useQuery({
+    queryKey: qk.oauthStatus(provider ?? "", id ?? ""),
+    queryFn: () => api.get<OAuthStatus>(`/api/oauth/${provider}/status/${id}`),
+    enabled: Boolean(provider && id),
+    refetchInterval: intervalMs,
+    retry: false,
+    staleTime: 0,
   });
 }
