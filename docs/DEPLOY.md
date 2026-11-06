@@ -110,6 +110,37 @@ instead. Tags are immutable: pin a version and upgrade deliberately.
 
 ## 7. Troubleshooting
 
+## Monitoring
+
+`/metrics` is Prometheus text on the admin gate (loopback, same rule as `/api`). Scrape it from
+the same host, or authenticate at the proxy:
+
+```yaml
+scrape_configs:
+  - job_name: rrouter
+    static_configs:
+      - targets: ["127.0.0.1:20128"]
+```
+
+Queries that answer the questions operators actually ask:
+
+```promql
+# requests per second, split by the status class the client saw
+sum by (status) (rate(rrouter_requests_total[5m]))
+
+# upstream fallbacks: attempts exceed requests when an account failed first
+sum(rate(rrouter_attempts_total[5m])) - sum(rate(rrouter_requests_total[5m]))
+
+# p95 latency
+histogram_quantile(0.95, sum by (le) (rate(rrouter_request_duration_seconds_bucket[5m])))
+
+# accounts currently fenced by the breaker
+sum(rrouter_breaker_open)
+```
+
+Alert on a sustained gap between attempts and requests (fallback storm) and on
+`rrouter_breaker_open > 0` for more than a minute.
+
 | Symptom | Likely cause |
 | --- | --- |
 | Dashboard loads, `/api/*` answers 403 | Admin gate: the request did not arrive over loopback. Bind `127.0.0.1` and proxy from the same host, or set `RROUTER_ALLOW_REMOTE_ADMIN=true` deliberately. |
