@@ -312,7 +312,17 @@ pub async fn cost_micros(
     usage: rrouter_core::Usage,
 ) -> u64 {
     let vendor = rrouter_router::catalog::models_dev_provider(provider);
-    let rows = match store.model_costs(model, &[provider, vendor]).await {
+    // Usage rows record the resolved ref (`provider/id`), while the registry keys models
+    // by bare id. Strip our own provider prefix; ids that legitimately contain a slash
+    // (meta-llama/...) only lose the prefix that matches this provider.
+    let bare = model
+        .strip_prefix(provider)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or(model);
+    let rows = match store.model_costs(bare, &[provider, vendor]).await {
+        Ok(rows) if rows.is_empty() && bare != model => {
+            store.model_costs(model, &[provider, vendor]).await.unwrap_or_default()
+        }
         Ok(rows) => rows,
         Err(e) => {
             // Accounting must never fail a request; an unknown price is 0, not a panic.
@@ -743,5 +753,33 @@ mod tests {
 
         // No row at all: 0, never a guessed rate.
         assert_eq!(cost_micros(&store, "openai", "unpriced", usage).await, 0);
+    }
+
+    /// Usage records the resolved ref (`provider/id`); the registry keys bare ids. A ref
+    /// must price exactly like its bare id, or every real request would cost 0.
+    #[tokio::test]
+    async fn a_ref_prices_like_its_bare_id() {
+        let store = Store::open_in_memory().expect("store");
+        store
+            .upsert_model(&ModelRow {
+                provider: "claude".into(),
+                model: "claude-haiku-4-5".into(),
+                display: None,
+                context: None,
+                max_output: None,
+                caps: json!({}),
+                cost: Some(json!({"input": 1.0, "output": 5.0})),
+                source: SOURCE_UPSTREAM.into(),
+                updated_at: 0,
+            })
+            .await
+            .expect("row");
+        let usage = rrouter_core::Usage { input_tokens: 8, output_tokens: 4, ..Default::default() };
+        assert_eq!(
+            cost_micros(&store, "claude", "claude/claude-haiku-4-5", usage).await,
+            28,
+            "8 in at $1/M + 4 out at $5/M"
+        );
+        assert_eq!(cost_micros(&store, "claude", "claude-haiku-4-5", usage).await, 28);
     }
 }

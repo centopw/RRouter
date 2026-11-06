@@ -186,12 +186,24 @@ impl AppState {
             if spent >= key.budget_micros {
                 return Err(Error::Limited {
                     code: "budget_exhausted",
-                    message: format!(
-                        "api key {} has spent ${:.4} of its ${:.4} budget",
-                        key.id,
-                        micros_to_usd(spent),
-                        micros_to_usd(key.budget_micros)
-                    ),
+                    message: {
+                        // Sub-cent amounts need six decimals or a real spend reads as
+                        // "$0.0000" next to a "$0.0000" budget and looks like a bug.
+                        let money = |micros: u64| {
+                            let usd = micros_to_usd(micros);
+                            if usd < 0.01 {
+                                format!("{usd:.6}")
+                            } else {
+                                format!("{usd:.4}")
+                            }
+                        };
+                        format!(
+                            "api key {} has spent ${} of its ${} budget",
+                            key.id,
+                            money(spent),
+                            money(key.budget_micros)
+                        )
+                    },
                     retry_after_secs: 3600,
                 });
             }
