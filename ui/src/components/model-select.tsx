@@ -103,6 +103,7 @@ export function ModelChain({
               ariaLabel={`model ${index + 1}`}
               value={ref}
               onChange={(v) => set(index, v)}
+              allowEmpty="choose a model"
             />
           </div>
           <button

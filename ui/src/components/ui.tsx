@@ -121,7 +121,7 @@ export function Button({
       onClick={onClick}
       disabled={disabled}
       className={cx(
-        "inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[13px] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+        "inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-3 text-[13px] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
         styles[variant],
         className,
       )}
