@@ -12,17 +12,26 @@ declare -A MAP=(
   [T5]=rrouter-router
   [T6]=rrouter-gateway
 )
-TASKS=("${@:-T2 T3 T4 T5 T6}")
+# Accept both `T2 T3` and `integrate.sh T2 T3` forms; array slicing of "$@" was
+# splitting the whole target string into single characters.
+if [ "$#" -gt 0 ]; then TASKS=("$@"); else TASKS=(T2 T3 T4 T5 T6); fi
 cd "$REPO"
-git status --porcelain | grep -v '^?? target/' | head -5 &&
-  { echo "main worktree is dirty; commit or stash first" >&2; exit 1; } || true
+if [ -n "$(git status --porcelain | grep -v '^?? target/')" ]; then
+  echo "main worktree is dirty; commit or stash first" >&2
+  exit 1
+fi
 
-for t in ${TASKS[@]}; do
+for t in "${TASKS[@]}"; do
   crate=${MAP[$t]}
-  src="$WS/rr-$t-${crate#rrouter-}"
-  [ -d "$src/crates/$crate" ] || { echo "skip $t: no $src/crates/$crate" >&2; continue; }
-  rsync -a --delete "$src/crates/$crate/src/" "$REPO/crates/$crate/src/"
-  [ -d "$src/crates/$crate/tests" ] && rsync -a "$src/crates/$crate/tests/" "$REPO/crates/$crate/tests/"
-  cp "$src/crates/$crate/Cargo.toml" "$REPO/crates/$crate/Cargo.toml"
+  src="$WS/rr-$t-${crate#rrouter-}/crates/$crate"
+  [ -d "$src" ] || { echo "skip $t: no $src" >&2; continue; }
+  # Sync ONLY this crate: an unquoted/array-expanded target could otherwise
+  # rewrite sibling crates with stale stubs from the worker's branch.
+  rsync -a --delete "$src/src/" "$REPO/crates/$crate/src/"
+  if [ -d "$src/tests" ]; then
+    mkdir -p "$REPO/crates/$crate/tests"
+    rsync -a --delete "$src/tests/" "$REPO/crates/$crate/tests/"
+  fi
+  cp "$src/Cargo.toml" "$REPO/crates/$crate/Cargo.toml"
   echo "merged $t -> crates/$crate"
 done
