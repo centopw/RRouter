@@ -10,10 +10,16 @@ logging, metrics) and 9router (dashboard, providers, combos, usage).
 | 2 | Observability | `/metrics` (Prometheus), request id, one row per attempt (fallbacks visible), log filters | LiteLLM callbacks, Grafana dashboards |
 | 3 | Reliability | Retries with jitter, per-provider timeouts, graceful shutdown, concurrency cap, container healthcheck | LiteLLM router settings |
 | 4 | Routing | Weighted and least-latency strategies, per-key model mapping, budget-aware provider choice | LiteLLM router, 9router combos |
-| 5 | UX completion | Playground, Logs page, Settings page (runtime config + provider health) | 9router dashboard, LiteLLM admin UI |
+| 5 | UX completion | Playground, request attempts, Settings page (branding + runtime) | 9router dashboard, LiteLLM admin UI |
+| 6 | Cost accounting | USD per request from catalog prices, spend per key/model/day, USD budgets next to token budgets | LiteLLM spend tracking |
+| 7 | Protocol breadth | `/v1/models/{id}`, images, audio speech/transcriptions passthrough | OpenAI-compatible surface |
+| 8 | Caching | opt-in exact-match response cache with TTL and per-key bypass | LiteLLM caching |
+| 9 | Guardrails | prompt/response hooks (blocklists, max tokens per request, redaction) | LiteLLM guardrails |
+| 10 | Ops polish | structured JSON logs, OpenTelemetry export, quota reset schedules | production gateways |
 
-Later (only if phase 1–5 land cleanly): USD budgets from catalog prices, caching, guardrails,
-teams/SSO, audio/images endpoints, OpenTelemetry export, quota reset schedules.
+Status: phase 1 landed (backend + UI), phase 2 backend in progress with its UI landed, phase 5
+UI landed early (playground, attempts, settings). Phases 3–4 are specced and queued behind
+phase 2 on the same files.
 
 ## Phase 1 — key governance (contract)
 
