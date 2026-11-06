@@ -6,7 +6,7 @@
 # embedded, distroless runs it. The runtime image has no package manager, no shell,
 # and no Node — just the static binary.
 
-FROM node:22-alpine AS ui
+FROM node:25-alpine AS ui
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci --no-audit --no-fund
