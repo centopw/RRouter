@@ -48,6 +48,12 @@ Put the gateway behind TLS and never publish the port directly:
 internet -> CDN/WAF (optional) -> Caddy/nginx (TLS, auth for /api) -> 127.0.0.1:20128
 ```
 
+Remote OAuth sign-in: the provider redirects to `http://localhost:<port>/callback` on the
+machine running the browser. When the dashboard is remote, forward that port first
+(`ssh -L <port>:localhost:<port> gateway-host`) — the wizard prints the exact address — or
+connect the account from a browser on the gateway host. A paste-the-URL fallback is not
+implemented yet.
+
 For streaming endpoints the proxy must not buffer responses (`flush_interval -1` in Caddy;
 `proxy_buffering off` in nginx) and must allow long reads (15 minutes is a safe ceiling).
 Compression is fine for JSON; SSE passes best unmodified, but gzip/zstd streams are still
