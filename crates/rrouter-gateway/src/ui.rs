@@ -65,8 +65,63 @@ pub async fn panels(State(state): State<Arc<AppState>>) -> Response {
         .into_response()
 }
 
+/// `/` goes straight to the built dashboard when one is embedded; otherwise the
+/// dependency-free built-in shell keeps the binary usable without a node toolchain.
 pub async fn index() -> Response {
+    if rrouter_ui::is_built() {
+        return axum::response::Redirect::temporary("/app/").into_response();
+    }
     asset_response("text/html; charset=utf-8", INDEX_HTML, "no-cache")
+}
+
+/// `/app` and `/app/` — the dashboard entry point.
+pub async fn app_index() -> Response {
+    match rrouter_ui::index() {
+        Some(asset) => embedded(asset),
+        None => builtin_missing(),
+    }
+}
+
+/// `/app/{*path}` — an emitted file, or the entry point for a client-side route.
+pub async fn app_asset(UrlPath(path): UrlPath<String>) -> Response {
+    if let Some(asset) = rrouter_ui::get(&path) {
+        return embedded(asset);
+    }
+    // A missing *file* is a 404; a missing *route* is the SPA taking over.
+    if path.rsplit('/').next().is_some_and(|last| last.contains('.')) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    app_index().await
+}
+
+fn embedded(asset: &'static rrouter_ui::Asset) -> Response {
+    let cache = if asset.hashed {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    (
+        [
+            (header::CONTENT_TYPE, asset.content_type),
+            (header::CACHE_CONTROL, cache),
+        ],
+        asset.bytes,
+    )
+        .into_response()
+}
+
+/// The dashboard was requested from a build without `ui/dist`. Say so instead of
+/// pretending the page exists.
+fn builtin_missing() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        "no dashboard was built into this binary: run `npm run build` in ui/ and rebuild",
+    )
+        .into_response()
 }
 
 /// `/{*path}` for the three embedded assets, `/ext/*` for deployment-supplied files,

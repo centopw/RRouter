@@ -1,0 +1,8 @@
+[package]
+name = "rrouter-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embedded Vite dashboard for RRouter"
+
+[dependencies]

@@ -157,7 +157,11 @@ export default function Activity() {
           tone="neg"
           hint="no errors logged"
         />
-        <Metric label="Models in use" value={String(view.models.length)} hint={`of ${compact(view.recent.length)} recent`} />
+        <Metric
+          label="Models in use"
+          value={String(view.models.length)}
+          hint={`${cur.requests} requests served`}
+        />
       </div>
 
       <div className="mt-3 grid gap-3 lg:grid-cols-2">

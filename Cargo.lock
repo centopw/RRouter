@@ -1305,6 +1305,7 @@ dependencies = [
  "rrouter-router",
  "rrouter-store",
  "rrouter-translate",
+ "rrouter-ui",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1361,6 +1362,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "rrouter-ui"
+version = "0.1.0"
 
 [[package]]
 name = "rusqlite"

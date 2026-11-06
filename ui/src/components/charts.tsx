@@ -77,27 +77,41 @@ export function Bars({ bars, height = 220 }: { bars: Bar[]; height?: number }) {
             </div>
           );
         })}
-        <div className="absolute inset-y-0 left-12 right-0 flex items-end gap-1.5">
+        {/* Category bars: fixed width and left-aligned, so two models do not
+            stretch into two halves of the panel. */}
+        <div className="absolute inset-y-0 left-12 right-0 flex items-end gap-4 overflow-x-auto">
           {bars.map((b, i) => (
-            <div key={`${b.label}-${i}`} className="group relative flex h-full flex-1 items-end">
+            <div
+              key={`${b.label}-${i}`}
+              className="group flex h-full w-[46px] shrink-0 items-end"
+              title={`${b.label}: ${b.value.toLocaleString()} tokens`}
+            >
               <div
                 className="w-full rounded-t-[3px] transition-opacity group-hover:opacity-80"
                 style={{
                   height: `${Math.max(2, (b.value / max) * 100)}%`,
                   background: b.highlight ? "var(--color-neg)" : "#3a3a3a",
                 }}
-                title={`${b.label}: ${b.value.toLocaleString()}`}
               />
             </div>
           ))}
         </div>
       </div>
-      <div className="mt-2 flex justify-between pl-12 text-[10px] text-faint">
-        <span>{bars[0]?.label}</span>
-        <span>{bars[bars.length - 1]?.label}</span>
+      <div className="mt-2 flex gap-4 overflow-hidden pl-12">
+        {bars.map((b, i) => (
+          <div key={`${b.label}-label-${i}`} className="w-[46px] shrink-0 truncate text-[10px] text-faint" title={b.label}>
+            {shortId(b.label)}
+          </div>
+        ))}
       </div>
     </div>
   );
+}
+
+/** `codex/gpt-5.6-luna` -> `gpt-5.6-luna`; the provider is already the row's context. */
+function shortId(ref: string): string {
+  const slash = ref.indexOf("/");
+  return slash === -1 ? ref : ref.slice(slash + 1);
 }
 
 /** Big number with a period-over-period delta and an optional sparkline slot. */
