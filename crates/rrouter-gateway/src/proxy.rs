@@ -112,10 +112,7 @@ async fn handle(
     };
 
     if !client_stream && !upstream_stream {
-        let outcome = state.dispatcher.run(&plan, |c| attempt.send_once(c)).await?;
-        let candidate = outcome.candidate.clone();
-        let resp = outcome.result?;
-        record_once(state, &candidate, &plan.model, resp.usage, started);
+        let resp = complete(state, inbound, &body).await?;
         return Ok(json_response(StatusCode::OK, rrouter_translate::build_response(inbound, &resp)?));
     }
 
@@ -141,6 +138,51 @@ async fn handle(
         ));
     }
     Ok(stream_response(state, inbound, &candidate, &plan.model, open, bytes, started))
+}
+
+/// One non-streaming completion through the full routing path.
+///
+/// Shared by the proxy and the admin probe so a green "test" button means exactly what
+/// a client request would do: same planner, same fallback, same forced streaming for
+/// providers that reject non-streaming calls, same reassembly.
+pub async fn complete(
+    state: &Arc<AppState>,
+    inbound: Dialect,
+    body: &Value,
+) -> Result<rrouter_core::ChatResponse> {
+    let started = Instant::now();
+    let canonical = rrouter_translate::parse_request(inbound, body)?;
+    let plan = state
+        .planner
+        .plan(state.catalog.as_ref(), state.store.as_ref(), &canonical.model, canonical.stream)
+        .await?;
+    let upstream_stream = plan.stream || canonical.stream || plan.candidates.iter().any(stream_only);
+    let attempt = Attempt {
+        state,
+        inbound,
+        canonical,
+        upstream_stream,
+    };
+
+    if !upstream_stream {
+        let outcome = state.dispatcher.run(&plan, |c| attempt.send_once(c)).await?;
+        let candidate = outcome.candidate.clone();
+        let resp = outcome.result?;
+        record_once(state, &candidate, &plan.model, resp.usage, started);
+        return Ok(resp);
+    }
+
+    let (candidate, bytes) = state
+        .dispatcher
+        .run_streaming(&plan, |c| attempt.open_stream(c))
+        .await?;
+    let open = StreamRoute {
+        upstream: attempt.route_dialect(&candidate),
+        client_model: candidate.model.clone(),
+    };
+    let assembled = reassemble(&open, bytes).await?;
+    record_once(state, &candidate, &plan.model, assembled.usage, started);
+    Ok(assembled)
 }
 
 /// Fold a streamed response back into a single canonical response.

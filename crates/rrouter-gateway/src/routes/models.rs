@@ -10,7 +10,6 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use rrouter_auth::ProviderSpec;
 use rrouter_core::{ChatRequest, ChatResponse, Dialect, Error, Message, Part, Role};
-use rrouter_router::Candidate;
 use rrouter_store::{Connection, ModelRow};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -357,21 +356,14 @@ pub async fn test(State(state): State<Arc<AppState>>, body: Body) -> Response {
         return admin_error(&Error::BadRequest("model is required".into()));
     };
     let started = Instant::now();
-    let plan = match state
-        .planner
-        .plan(state.catalog.as_ref(), state.store.as_ref(), &model, false)
-        .await
-    {
-        Ok(plan) => plan,
-        Err(e) => return test_failure(&e, started),
-    };
-    let outcome = state
-        .dispatcher
-        .run(&plan, |candidate| send_probe(Arc::clone(&state), candidate))
-        .await;
-    let result = match outcome {
-        Ok(outcome) => outcome.result,
-        Err(e) => return test_failure(&e, started),
+    // Same entry point a client call takes, so "test" cannot pass on a code path the
+    // proxy never runs (it did once: the probe bypassed forced streaming).
+    let mut request = ChatRequest::new(model.clone());
+    request.messages.push(Message::text(Role::User, "ping"));
+    request.max_tokens = Some(16);
+    let result = match rrouter_translate::build_request(Dialect::OpenAiChat, &request, false) {
+        Ok(probe) => crate::proxy::complete(&state, Dialect::OpenAiChat, &probe).await,
+        Err(e) => Err(e),
     };
     match result {
         Ok(response) => ok_json(json!({
@@ -397,49 +389,6 @@ fn test_failure(error: &Error, started: Instant) -> Response {
 
 fn elapsed_ms(started: Instant) -> u32 {
     started.elapsed().as_millis().min(u32::MAX as u128) as u32
-}
-
-/// One non-streaming attempt, mirroring the proxy's non-streaming path.
-async fn send_probe(
-    state: Arc<AppState>,
-    candidate: Candidate,
-) -> rrouter_core::Result<ChatResponse> {
-    let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
-        model: candidate.model.clone(),
-        detail: format!("unknown provider {}", candidate.provider),
-    })?;
-    let creds = state
-        .refresher
-        .fresh(state.store.as_ref(), spec, candidate.connection)
-        .await?;
-    let (url, dialect) =
-        crate::proxy::endpoint_for(spec, creds.base_url_override.as_deref(), Dialect::OpenAiChat);
-    let mut request = ChatRequest::new(candidate.model.clone());
-    request.messages.push(Message::text(Role::User, "ping"));
-    request.max_tokens = Some(16);
-    let wire = rrouter_translate::build_request(dialect, &request, false)?;
-    let headers = provider_headers(spec, &creds)?;
-    let response = state
-        .http
-        .post(&url)
-        .headers(headers)
-        .json(&wire)
-        .timeout(state.request_timeout())
-        .send()
-        .await
-        .map_err(transport_error)?;
-    let status = response.status();
-    if !status.is_success() {
-        let body: String = response.text().await.unwrap_or_default().chars().take(512).collect();
-        return Err(Error::Upstream {
-            provider: candidate.provider.clone(),
-            status: status.as_u16(),
-            body,
-            payload: None,
-        });
-    }
-    let body: Value = response.json().await.map_err(transport_error)?;
-    rrouter_translate::parse_response(dialect, &body)
 }
 
 fn reply_text(response: &ChatResponse) -> String {

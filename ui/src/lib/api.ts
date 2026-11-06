@@ -146,7 +146,7 @@ export type Model = {
   ref: string;
   provider: string;
   id: string;
-  display: string;
+  display: string | null;
   context: number | null;
   max_output: number | null;
   capabilities: Capabilities;

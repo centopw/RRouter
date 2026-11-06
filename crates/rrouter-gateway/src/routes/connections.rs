@@ -315,10 +315,12 @@ async fn apply_patch(state: &AppState, id: Uuid, value: Value) -> Result<(), Err
         state.store.merge_credentials(id, patch).await?;
     }
     if let Some(active) = value.get("is_active").and_then(Value::as_bool) {
-        state
-            .store
-            .update_connection_status(id, if active { 0 } else { conn.backoff_level }, None, None)
-            .await?;
+        state.store.set_connection_active(id, active).await?;
+        // Re-enabling also clears backoff: the operator just asked for this account
+        // to be used, so the breaker must not keep skipping it.
+        if active && conn.backoff_level > 0 {
+            state.store.update_connection_status(id, 0, None, None).await?;
+        }
     }
     if let Some(error) = value.get("last_error").and_then(Value::as_str) {
         state

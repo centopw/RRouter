@@ -7,6 +7,7 @@ import { Shell } from "./app";
 // Route-level chunks: the shell and Activity land first, the rest on demand.
 const Activity = lazy(() => import("./pages/activity"));
 const Health = lazy(() => import("./pages/health"));
+const Models = lazy(() => import("./pages/models"));
 const Keys = lazy(() => import("./pages/keys"));
 const Aliases = lazy(() => import("./pages/aliases"));
 const Combos = lazy(() => import("./pages/combos"));
@@ -30,6 +31,7 @@ const router = createBrowserRouter(
         { index: true, element: <Navigate to="/activity" replace /> },
         { path: "activity", element: <Activity /> },
 
+        { path: "models", element: <Models /> },
         { path: "keys", element: <Keys /> },
         { path: "aliases", element: <Aliases /> },
         { path: "combos", element: <Combos /> },
