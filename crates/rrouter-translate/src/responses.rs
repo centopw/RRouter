@@ -288,6 +288,10 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
     body.insert("model".into(), Value::from(req.model.clone()));
     body.insert("input".into(), Value::from(input));
     body.insert("stream".into(), Value::Bool(stream));
+    // The Responses API only returns a response object when it stored it, and codex's
+    // endpoints reject requests that ask for storage ("Store must be set to false").
+    // RRouter never stores upstream state, so this is always false.
+    body.insert("store".into(), Value::Bool(false));
     if !instructions.is_empty() {
         body.insert("instructions".into(), Value::from(instructions));
     }

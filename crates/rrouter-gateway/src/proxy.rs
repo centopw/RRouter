@@ -100,18 +100,18 @@ async fn handle(
         .plan(state.catalog.as_ref(), state.store.as_ref(), &canonical.model, canonical.stream)
         .await?;
     let client_stream = plan.stream || canonical.stream;
+    // A stream-only upstream (codex) refuses every non-streaming request, so a
+    // non-streaming client is served by streaming upstream and reassembling.
+    let upstream_stream = client_stream || plan.candidates.iter().any(stream_only);
 
     let attempt = Attempt {
         state,
         inbound,
-        body: &body,
         canonical,
-        passthrough: native_body(inbound, &body),
-        // `codex` rejects non-streaming calls: force streaming upstream and reassemble.
-        upstream_stream: client_stream,
+        upstream_stream,
     };
 
-    if !client_stream {
+    if !client_stream && !upstream_stream {
         let outcome = state.dispatcher.run(&plan, |c| attempt.send_once(c)).await?;
         let candidate = outcome.candidate.clone();
         let resp = outcome.result?;
@@ -129,7 +129,103 @@ async fn handle(
         upstream: attempt.route_dialect(&candidate),
         client_model: candidate.model.clone(),
     };
+
+    if !client_stream {
+        // Stream-only upstream serving a non-streaming client: consume the whole
+        // stream, rebuild the canonical response, then answer in the client dialect.
+        let assembled = reassemble(&open, bytes).await?;
+        record_once(state, &candidate, &plan.model, assembled.usage, started);
+        return Ok(json_response(
+            StatusCode::OK,
+            rrouter_translate::build_response(inbound, &assembled)?,
+        ));
+    }
     Ok(stream_response(state, inbound, &candidate, &plan.model, open, bytes, started))
+}
+
+/// Fold a streamed response back into a single canonical response.
+///
+/// Used only when the upstream cannot answer non-streaming. Every event is consumed
+/// through the same decoder the streaming path uses, so the two paths cannot drift.
+async fn reassemble(open: &StreamRoute, bytes: ByteStream) -> Result<rrouter_core::ChatResponse> {
+    use futures_util::StreamExt as _;
+
+    let mut decoder = rrouter_translate::StreamDecoder::new(open.upstream, &open.client_model);
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut tools: Vec<(u32, String, String, String)> = Vec::new();
+    let mut usage = Usage::default();
+    let mut finish = rrouter_core::FinishReason::Stop;
+    let mut id = String::new();
+    let mut model = open.client_model.clone();
+    let mut stream = bytes;
+
+    let absorb = |events: Vec<StreamEvent>,
+                      text: &mut String,
+                      reasoning: &mut String,
+                      tools: &mut Vec<(u32, String, String, String)>,
+                      usage: &mut Usage,
+                      finish: &mut rrouter_core::FinishReason,
+                      id: &mut String,
+                      model: &mut String| {
+        for ev in events {
+            match ev {
+                StreamEvent::Start { id: sid, model: smodel } => {
+                    if !sid.is_empty() {
+                        *id = sid;
+                    }
+                    if !smodel.is_empty() {
+                        *model = smodel;
+                    }
+                }
+                StreamEvent::TextDelta(t) => text.push_str(&t),
+                StreamEvent::ReasoningDelta(t) => reasoning.push_str(&t),
+                StreamEvent::ToolCallStart { index, id, name } => {
+                    tools.push((index, id, name, String::new()))
+                }
+                StreamEvent::ToolCallArgsDelta { index, partial_json } => {
+                    if let Some(slot) = tools.iter_mut().find(|t| t.0 == index) {
+                        slot.3.push_str(&partial_json);
+                    }
+                }
+                StreamEvent::Done { reason, usage: u } => {
+                    *finish = reason;
+                    if let Some(u) = u {
+                        *usage = u;
+                    }
+                }
+            }
+        }
+    };
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let events = decoder.push(&chunk)?;
+        absorb(
+            events, &mut text, &mut reasoning, &mut tools, &mut usage, &mut finish, &mut id,
+            &mut model,
+        );
+    }
+    let events = decoder.finish()?;
+    absorb(
+        events, &mut text, &mut reasoning, &mut tools, &mut usage, &mut finish, &mut id, &mut model,
+    );
+
+    let mut parts: Vec<rrouter_core::Part> = Vec::with_capacity(tools.len() + 2);
+    if !reasoning.is_empty() {
+        parts.push(rrouter_core::Part::Reasoning { text: reasoning, signature: None });
+    }
+    if !text.is_empty() {
+        parts.push(rrouter_core::Part::Text(text));
+    }
+    for (_, tid, name, args) in tools {
+        parts.push(rrouter_core::Part::ToolUse {
+            id: tid,
+            name,
+            input: serde_json::from_str(&args).unwrap_or(serde_json::Value::Null),
+        });
+    }
+    Ok(rrouter_core::ChatResponse { id, model, parts, finish_reason: finish, usage })
 }
 
 async fn guard_api_key(state: &AppState, headers: &axum::http::HeaderMap) -> Result<()> {
@@ -160,7 +256,11 @@ fn native_url(spec: &ProviderSpec, inbound: Dialect) -> Option<&'static str> {
     match inbound {
         Dialect::AnthropicMessages => spec.messages_url,
         Dialect::OpenAiResponses => spec.responses_url,
-        Dialect::OpenAiChat => Some(spec.base_url),
+        // `base_url` speaks Chat only when the provider's native dialect is Chat.
+        // Codex exposes a Responses URL as its base; claiming it speaks Chat sent a
+        // chat-completions body to the Responses endpoint.
+        Dialect::OpenAiChat if spec.default_dialect == Dialect::OpenAiChat => Some(spec.base_url),
+        Dialect::OpenAiChat => None,
         Dialect::OpenAiEmbeddings => None,
     }
 }
@@ -197,14 +297,6 @@ fn rewrite_base(native: &str, override_base: &str) -> String {
 }
 
 /// A body the provider can take unmodified because it already speaks that dialect.
-fn native_body(inbound: Dialect, body: &Value) -> Option<(Dialect, Value)> {
-    matches!(
-        inbound,
-        Dialect::OpenAiChat | Dialect::AnthropicMessages | Dialect::OpenAiResponses
-    )
-    .then(|| (inbound, body.clone()))
-}
-
 fn request_headers(
     spec: &ProviderSpec,
     creds: &Credentials,
@@ -255,6 +347,11 @@ fn json_response(status: StatusCode, body: Value) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
+/// `true` when this candidate's provider cannot answer non-streaming requests.
+fn stream_only(candidate: &Candidate) -> bool {
+    rrouter_auth::get(&candidate.provider).is_some_and(|spec| spec.stream_only)
+}
+
 /// Which dialect the opened stream speaks, and the model id to label it with.
 struct StreamRoute {
     upstream: Dialect,
@@ -279,10 +376,8 @@ impl Stream for OpenStream {
 struct Attempt<'a> {
     state: &'a Arc<AppState>,
     inbound: Dialect,
-    body: &'a Value,
     canonical: ChatRequest,
     /// Body the provider can accept unmodified because it speaks the inbound dialect.
-    passthrough: Option<(Dialect, Value)>,
     /// Upstream must stream even if the client asked for one JSON response.
     upstream_stream: bool,
 }
@@ -306,23 +401,17 @@ impl Attempt<'_> {
     /// Build the upstream body for one attempt. Never mutates the canonical request, so
     /// concurrent attempts all see the client's original values.
     fn outbound(&self, candidate: &Candidate, dialect: Dialect) -> Result<Value> {
-        if let Some((d, passthrough)) = self.passthrough.as_ref() {
-            if *d == dialect {
-                let mut out = passthrough.clone();
-                if let Some(obj) = out.as_object_mut() {
-                    // The upstream model is the candidate's, not the client's alias.
-                    obj.insert("model".into(), Value::String(candidate.model.clone()));
-                    if self.upstream_stream {
-                        obj.insert("stream".into(), Value::Bool(true));
-                    }
-                }
-                return Ok(out);
-            }
-        }
+        // Every request goes through the canonical model, even when the client and the
+        // provider speak the same dialect. Forwarding the client body verbatim looked
+        // cheaper but skipped protocol normalisation: a string `input` stayed a string
+        // and codex rejected it with "Input must be a list", and required fields such as
+        // `store:false` were never added.
         let mut request = self.canonical.clone();
         request.model = candidate.model.clone();
-        // Unknown inbound fields travel with the same-dialect hint only.
-        request.extra = Some((dialect, self.body.clone()));
+        // Unknown inbound fields travel with the same-dialect hint only, and the
+        // canonical request already carries them with that hint. Replacing `extra`
+        // with the raw client body re-inserted fields the translator had rewritten:
+        // a string `input` overwrote the translated list ("Input must be a list").
         rrouter_translate::build_request(dialect, &request, self.upstream_stream)
     }
 

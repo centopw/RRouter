@@ -69,6 +69,8 @@ impl Mock {
             .route("/v1/messages", post(handle))
             .route("/v1/responses", post(handle))
             .route("/v1/embeddings", post(handle))
+            // codex's native path; the gateway must preserve it under an override.
+            .route("/backend-api/codex/responses", post(handle))
             .with_state(mock.clone());
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
@@ -307,6 +309,48 @@ async fn openai_non_streaming_round_trip() {
 
     let seen = mock.seen();
     assert_eq!(seen[0]["messages"][1]["content"], "hello");
+}
+
+/// codex is the awkward provider: its base URL is a Responses endpoint, it rejects
+/// non-streaming requests, and it refuses `store`. A chat client must still work.
+///
+/// Each assertion below failed in production before it was fixed:
+/// - a chat body reached the Responses endpoint (wrong native dialect),
+/// - a string `input` was sent instead of the translated list (`extra` re-merged
+///   the raw client body over the canonical request),
+/// - `store` was absent,
+/// - the request was non-streaming.
+#[tokio::test]
+async fn chat_client_to_a_stream_only_responses_provider_is_translated_and_reassembled() {
+    let wire = concat!(
+        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\"}}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}}\n\n",
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire: wire.to_string(),
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+
+    let (status, body) = h.post("/v1/chat/completions", openai_chat_body("codex/gpt-5.6-luna")).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(body["choices"][0]["message"]["content"], "Hello");
+    assert_eq!(body["usage"]["prompt_tokens"], 4);
+    assert_eq!(body["usage"]["completion_tokens"], 2);
+
+    assert_eq!(mock.hits(), 1);
+    assert_eq!(mock.paths()[0], "/backend-api/codex/responses");
+    let sent = &mock.seen()[0];
+    assert!(sent.get("messages").is_none(), "chat body reached a Responses endpoint: {sent}");
+    assert!(sent["input"].is_array(), "input must be the translated list: {sent}");
+    assert_eq!(sent["store"], false, "codex rejects stored responses: {sent}");
+    assert_eq!(sent["stream"], true, "codex rejects non-streaming requests: {sent}");
+    assert_eq!(sent["model"], "gpt-5.6-luna");
 }
 
 #[tokio::test]

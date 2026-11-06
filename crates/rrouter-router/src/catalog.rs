@@ -47,13 +47,16 @@ const BUILTIN: &[ProviderRow] = &[
         ],
     ),
     (
+        // Verified live against a ChatGPT account. The older ids this list used to
+        // carry (gpt-5-codex, gpt-5, codex-mini-latest, o4-mini, gpt-4.1) are all
+        // rejected with "not supported when using Codex with a ChatGPT account".
         "codex",
         &[
-            ("gpt-5-codex", Some(128_000)),
-            ("gpt-5", Some(128_000)),
-            ("codex-mini-latest", Some(32_768)),
-            ("o4-mini", Some(100_000)),
-            ("gpt-4.1", Some(32_768)),
+            ("gpt-6-luna", Some(128_000)),
+            ("gpt-6-sol", Some(128_000)),
+            ("gpt-5.6-luna", Some(128_000)),
+            ("gpt-5.6-terra", Some(128_000)),
+            ("gpt-reserve", None),
         ],
     ),
     (

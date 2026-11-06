@@ -673,6 +673,7 @@ mod tests {
             refresh: None,
             profile_url,
             login: Some(login),
+            stream_only: false,
         }))
     }
 

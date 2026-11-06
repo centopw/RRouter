@@ -7,7 +7,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use rrouter_auth::Credentials;
-use rrouter_core::{ChatRequest, Dialect, Error, Message, Role};
+use rrouter_core::{ChatRequest, Error, Message, Role};
 use rrouter_store::Connection;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -202,8 +202,11 @@ async fn probe(
     // Some providers reject a 1-token completion (minimum output length), so ask for
     // a small but legal amount.
     req.max_tokens = Some(16);
-    // The probe never streams: a single token, one JSON response.
-    let body = rrouter_translate::build_request(spec.default_dialect, &req, false)?;
+    // The probe speaks the provider's own dialect at its own endpoint. Building the
+    // body for Chat and posting it to a Responses URL (codex) is a guaranteed 400.
+    let (url, dialect) =
+        crate::proxy::endpoint_for(spec, creds.base_url_override.as_deref(), spec.default_dialect);
+    let body = rrouter_translate::build_request(dialect, &req, spec.stream_only)?;
 
     let mut headers = axum::http::HeaderMap::new();
     for (name, value) in rrouter_auth::build_headers(spec, &creds)? {
@@ -218,7 +221,6 @@ async fn probe(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json"),
     );
-    let url = crate::proxy::endpoint_for(spec, creds.base_url_override.as_deref(), Dialect::OpenAiChat).0;
     let resp = state
         .http
         .post(url)
@@ -243,6 +245,29 @@ async fn probe(
             body: text.chars().take(512).collect(),
             payload: None,
         });
+    }
+    if spec.stream_only {
+        // A stream-only upstream answers 200 before it has produced anything, so a
+        // bare status would report a broken account as healthy. Require the first
+        // chunk to arrive.
+        use futures_util::StreamExt as _;
+        let mut stream = resp.bytes_stream();
+        match stream.next().await {
+            Some(Ok(chunk)) if !chunk.is_empty() => {}
+            Some(Ok(_)) => return Err(Error::Upstream {
+                provider: conn.provider.clone(),
+                status,
+                body: "stream closed before the first chunk".into(),
+                payload: None,
+            }),
+            Some(Err(e)) => return Err(Error::Transport(e.to_string())),
+            None => return Err(Error::Upstream {
+                provider: conn.provider.clone(),
+                status,
+                body: "empty stream".into(),
+                payload: None,
+            }),
+        }
     }
     Ok(status)
 }

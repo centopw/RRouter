@@ -135,7 +135,10 @@ pub struct ProviderSpec {
     /// One-time sign-in recipe; `None` when the provider has no browser/device login
     /// (API-key providers) or RRouter does not implement it.
     pub login: Option<LoginFlow>,
-
+    /// `true` when the upstream rejects non-streaming requests (codex answers
+    /// "Stream must be set to true"). The gateway then streams upstream and
+    /// reassembles the result for a non-streaming client.
+    pub stream_only: bool,
 }
 
 impl ProviderSpec {
@@ -250,6 +253,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: Some(32_000),
         refresh: Some(CLAUDE_REFRESH),
         profile_url: Some("https://api.anthropic.com/api/oauth/profile"),
+        stream_only: false,
         login: Some(CLAUDE_LOGIN),
     },
     ProviderSpec {
@@ -266,6 +270,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: Some(CODEX_REFRESH),
         login: Some(CODEX_LOGIN),
         profile_url: Some("https://auth.openai.com/userinfo"),
+        stream_only: true,
     },
     ProviderSpec {
         id: "github",
@@ -281,6 +286,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: Some(GITHUB_LOGIN),
         profile_url: Some("https://api.github.com/user"),
+        stream_only: false,
     },
     ProviderSpec {
         id: "openai",
@@ -296,6 +302,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
     ProviderSpec {
         id: "anthropic",
@@ -311,6 +318,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
     ProviderSpec {
         id: "deepseek",
@@ -326,6 +334,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
     ProviderSpec {
         id: "gemini",
@@ -341,6 +350,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
     ProviderSpec {
         id: "groq",
@@ -356,6 +366,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
     ProviderSpec {
         id: "openrouter",
@@ -371,6 +382,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
     ProviderSpec {
         id: "xai",
@@ -386,6 +398,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
     ProviderSpec {
         id: "mistral",
@@ -401,6 +414,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
     ProviderSpec {
         id: "together",
@@ -416,6 +430,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
     ProviderSpec {
         id: "cerebras",
@@ -431,6 +446,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
     ProviderSpec {
         id: "ollama",
@@ -446,6 +462,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: None,
         profile_url: None,
+        stream_only: false,
     },
 ];
 
