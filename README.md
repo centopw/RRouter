@@ -103,8 +103,8 @@ RROUTER_DATA_DIR=/var/lib/rrouter \
 RROUTER_MASTER_KEY=$(openssl rand -hex 32) \
 RROUTER_REQUIRE_API_KEY=true \
 RROUTER_CORS_ORIGINS=https://ide.internal.example \
-RROUTER_ALLOW_REMOTE_ADMIN=false \
-rrouter serve
+RROUTER_ALLOW_REMOTE_ADMIN=true \
+rrouter
 ```
 
 | env | default | |
@@ -113,8 +113,8 @@ rrouter serve
 | `RROUTER_DATA_DIR` | `./data` | SQLite DB + master key file |
 | `RROUTER_MASTER_KEY` | unset | 64-hex-char AES key; otherwise `data/master.key` (0600) is generated |
 | `RROUTER_REQUIRE_API_KEY` | `false` | require a stored `sk-rr-…` key on `/v1/*` |
-| `RROUTER_ALLOW_REMOTE_ADMIN` | `false` | admin API is loopback-only unless enabled, even when bound to `0.0.0.0` |
-| `RROUTER_CORS_ORIGINS` | unset | comma-separated allowlist; no wildcard |
+| `RROUTER_ALLOW_REMOTE_ADMIN` | `false` | required to bind beyond loopback; the admin API would otherwise be unreachable, so startup fails instead of half-opening |
+| `RROUTER_CORS_ORIGINS` | unset | comma-separated allowlist; `*` is rejected at startup |
 | `RROUTER_STATIC_DIR` | unset | serve operator-supplied files under `/ext/*` (traversal-safe) |
 | `RROUTER_REQUEST_TIMEOUT_SECS` | `600` | upstream request timeout |
 | `RROUTER_CONNECT_TIMEOUT_SECS` | `15` | connect timeout |

@@ -43,8 +43,7 @@ impl Dispatcher {
         let mut last: Option<Error> = None;
         let mut sends = 0usize;
         while sends < self.max_attempts() {
-            let Some(idx) = order.pop_front() else { break };
-            let candidate = plan.candidates[idx].clone();
+            let Some(candidate) = self.next_claim(plan, &mut order).await else { break };
             sends += 1;
             match open(candidate.clone()).await {
                 Ok(stream) => {
@@ -53,11 +52,12 @@ impl Dispatcher {
                     return Ok((candidate, Box::pin(committed)));
                 }
                 Err(err) => {
+                    // Settle the probe claim before deciding whether to retry.
+                    self.breaker
+                        .record_failure(candidate.connection, status_of(&err), retry_after(&err));
                     if !err.is_retryable_upstream() {
                         return Err(err);
                     }
-                    self.breaker
-                        .record_failure(candidate.connection, status_of(&err), retry_after(&err));
                     last = Some(err);
                 }
             }
@@ -68,16 +68,39 @@ impl Dispatcher {
 
 /// Wraps the winning stream so breaker accounting reflects what the body did,
 /// and mid-stream failures become a single terminal error.
+///
+/// The gateway's own encoder stops polling the upstream once it has decoded the
+/// terminal event, so this stream may be dropped without ever returning
+/// `Ready(None)`. Success is therefore settled on `Drop` unless the stream
+/// already reported a failure — otherwise a streamed success would leave a
+/// claimed half-open probe slot taken forever.
 struct Committed {
     inner: ByteStream,
     breaker: std::sync::Arc<Breaker>,
     conn: uuid::Uuid,
-    done: bool,
+    /// `true` once success *or* failure has been reported to the breaker.
+    settled: bool,
 }
 
 impl Committed {
     fn new(inner: ByteStream, breaker: std::sync::Arc<Breaker>, conn: uuid::Uuid) -> Self {
-        Self { inner, breaker, conn, done: false }
+        Self { inner, breaker, conn, settled: false }
+    }
+
+    fn settle_success(&mut self) {
+        if !self.settled {
+            self.settled = true;
+            self.breaker.record_success(self.conn);
+        }
+    }
+}
+
+impl Drop for Committed {
+    fn drop(&mut self) {
+        // Reaching drop without a reported failure means the body was consumed
+        // (or the client went away after receiving output). Either way the
+        // credential worked, so close the breaker rather than leak the probe.
+        self.settle_success();
     }
 }
 
@@ -86,21 +109,20 @@ impl Stream for Committed {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        if this.done {
+        if this.settled {
             return Poll::Ready(None);
         }
         match this.inner.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(chunk))),
             Poll::Ready(Some(Err(err))) => {
-                this.done = true;
+                this.settled = true;
                 // Mid-stream: the commit point has passed, so record the failure
                 // and surface it. The gateway emits one error event and stops.
                 this.breaker.record_failure(this.conn, status_of(&err), retry_after(&err));
                 Poll::Ready(Some(Err(err)))
             }
             Poll::Ready(None) => {
-                this.done = true;
-                this.breaker.record_success(this.conn);
+                this.settle_success();
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,

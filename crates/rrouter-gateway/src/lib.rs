@@ -107,8 +107,11 @@ pub fn app(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(state, cors))
 }
 
-/// CORS: allow the configured origins, always allow same-host/loopback tooling, and
-/// answer preflights. `Access-Control-Allow-Origin: *` when `RROUTER_CORS_ORIGINS=*`.
+/// CORS: echo only the configured origins and loopback tooling.
+///
+/// No wildcard is ever emitted: `Access-Control-Allow-Origin: *` on the admin API
+/// would let any web origin read it. A request without an `Origin` header is not a
+/// CORS request at all, so it gets no `Access-Control-*` headers.
 async fn cors(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: Request,
@@ -125,18 +128,14 @@ async fn cors(
     } else {
         next.run(req).await
     };
-    let allow = match &origin {
-        Some(o) => state.config.cors_origin_for(o),
-        None => Some("*".to_string()),
+    let Some(origin) = origin else { return response };
+    let Some(allow) = state.config.cors_origin_for(&origin) else {
+        return response;
     };
     let headers = response.headers_mut();
-    if let Some(allow) = allow {
-        if let Ok(v) = HeaderValue::from_str(&allow) {
-            headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, v);
-            if allow != "*" {
-                headers.append(VARY, HeaderValue::from_static("origin"));
-            }
-        }
+    if let Ok(v) = HeaderValue::from_str(&allow) {
+        headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, v);
+        headers.append(VARY, HeaderValue::from_static("origin"));
     }
     headers.insert(
         ACCESS_CONTROL_ALLOW_METHODS,

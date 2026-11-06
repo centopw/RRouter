@@ -187,19 +187,85 @@ fn half_open_admits_exactly_one_probe() {
         breaker.record_failure(id, 500, None);
     }
     let later = Instant::now() + Duration::from_secs(31);
-    // First caller wins the probe slot...
+
+    // Reading eligibility never consumes the probe slot: every reader sees it free.
     assert!(breaker.check_at(id, later).is_none());
-    // ...everyone else is told to wait.
+    assert!(breaker.check_at(id, later).is_none());
+
+    // First caller wins the probe slot...
+    assert!(breaker.claim_at(id, later).is_none());
+    // ...everyone else is told to wait, including via the read path.
+    assert!(breaker.claim_at(id, later).is_some());
     assert!(breaker.check_at(id, later).is_some());
     assert!(!breaker.is_available(id));
+
     // A failed probe re-opens the window for the full 30 s.
     breaker.record_failure_at(id, 500, None, later);
     assert_eq!(breaker.check_at(id, later).unwrap().as_secs(), 30);
+
     // A successful probe closes it and restores full eligibility.
     let later = later + Duration::from_secs(31);
-    assert!(breaker.check_at(id, later).is_none());
+    assert!(breaker.claim_at(id, later).is_none());
     breaker.record_success(id);
     assert!(breaker.check(id).is_none());
+}
+
+#[test]
+fn unclaimed_candidate_never_leaks_a_probe_slot() {
+    // Regression: `check` used to claim the half-open slot, so a candidate that was
+    // ordered but never sent (attempt cap, earlier success) parked the account for
+    // an hour. Ordering must be side-effect free.
+    let breaker = Breaker::new();
+    let id = Uuid::new_v4();
+    for _ in 0..3 {
+        breaker.record_failure(id, 500, None);
+    }
+    let later = Instant::now() + Duration::from_secs(31);
+    assert!(breaker.check_at(id, later).is_none());
+    // No claim happened, so the slot is still free for a real attempt.
+    assert!(breaker.claim_at(id, later).is_none());
+    breaker.record_success(id);
+    assert!(breaker.check(id).is_none());
+}
+
+#[tokio::test]
+async fn streamed_success_settles_the_breaker_on_drop() {
+    // Regression: the gateway stops polling upstream once it decodes the terminal
+    // event, so the winning stream is dropped without ever returning `Ready(None)`.
+    // If success were only recorded on `Ready(None)`, two recorded failures plus the
+    // leaked probe slot would leave the account unusable (HalfOpen with the slot taken).
+    let breaker = Arc::new(Breaker::new());
+    let plan = plan_of(1);
+    let conn = plan.candidates[0].connection;
+
+    // Two prior failures: one more would trip a 3-failure policy.
+    breaker.record_failure(conn, 500, None);
+    breaker.record_failure(conn, 500, None);
+
+    let (_, committed) = Dispatcher::with_shared_breaker(breaker.clone())
+        .run_streaming(&plan, |_c| async {
+            Ok(byte_stream(futures_util::stream::iter(vec![Ok(
+                Bytes::from_static(b"data: x\n\n"),
+            )])))
+        })
+        .await
+        .expect("stream accepted");
+
+    // Never polled: dropped as soon as the gateway is done with it.
+    drop(committed);
+
+    // The dropped stream was a success, so it must have reset the failure count.
+    // Two fresh failures then leave the breaker closed; a leaked/unsettled claim
+    // would show up as HalfOpen or a taken probe slot.
+    for _ in 0..2 {
+        breaker.record_failure(conn, 500, None);
+    }
+    assert!(
+        matches!(breaker.state(conn), BreakerState::Closed),
+        "dropping a healthy committed stream must count as a success; got {:?}",
+        breaker.state(conn)
+    );
+    assert!(breaker.claim(conn).is_none(), "no probe slot may be left taken");
 }
 
 #[test]

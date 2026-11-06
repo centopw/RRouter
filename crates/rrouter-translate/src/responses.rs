@@ -897,7 +897,7 @@ impl ResponsesEncoder {
         self.open = Some(kind);
         self.open_item = Some(item);
         if kind == Open::Text {
-            let item = self.open_item.as_ref().expect("just set");
+            let Some(item) = self.open_item.as_ref() else { return };
             let frame = self.envelope(
                 "response.content_part.added",
                 self.seq,

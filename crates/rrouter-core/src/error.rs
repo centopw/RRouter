@@ -58,14 +58,16 @@ impl Error {
         }
     }
 
-    /// Upstream status codes that mean "try another account / model".
-    /// 401/403 are included: they signal a dead credential, not a dead request.
+    /// Errors that mean "this account cannot serve this request" — try the next
+    /// candidate. `Unauthorized` is included because it is what the refresher
+    /// returns for a dead refresh token or a connection with no credential: one
+    /// broken account must never fail a request that a healthy account can serve.
     pub fn is_retryable_upstream(&self) -> bool {
         match self {
             Self::Upstream { status, .. } => {
                 matches!(status, 401 | 403 | 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 529)
             }
-            Self::Transport(_) | Self::Timeout(_) => true,
+            Self::Transport(_) | Self::Timeout(_) | Self::Unauthorized(_) => true,
             _ => false,
         }
     }

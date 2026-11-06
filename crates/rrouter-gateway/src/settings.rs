@@ -65,7 +65,10 @@ pub async fn ui_settings(state: &Arc<AppState>) -> Result<Value> {
 /// Only the four documented brand keys, with `RRouter` defaults.
 pub fn brand_of(settings: &Value) -> Value {
     let mut brand = json!({ "brand_name": "RRouter", "brand_color": "#7c5cff" });
-    let obj = brand.as_object_mut().expect("brand is an object");
+    let Some(obj) = brand.as_object_mut() else {
+        // `json!` above is always an object; degrade instead of panicking if that changes.
+        return brand;
+    };
     for key in BRAND_KEYS {
         if let Some(v) = settings.get(*key) {
             obj.insert((*key).to_string(), v.clone());

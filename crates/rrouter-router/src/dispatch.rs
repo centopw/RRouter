@@ -82,8 +82,7 @@ impl Dispatcher {
         let mut last: Option<Error> = None;
         let mut sends = 0usize;
         while sends < self.max_attempts {
-            let Some(idx) = order.pop_front() else { break };
-            let candidate = plan.candidates[idx].clone();
+            let Some(candidate) = self.next_claim(plan, &mut order).await else { break };
             sends += 1;
             match send(candidate.clone()).await {
                 Ok(resp) => {
@@ -91,11 +90,13 @@ impl Dispatcher {
                     return Ok(AttemptOutcome { candidate, result: Ok(resp) });
                 }
                 Err(err) => {
+                    // Settle the claim on every path: a claimed probe slot that is
+                    // never resolved parks the account for PROBE_TAKEN.
+                    self.breaker
+                        .record_failure(candidate.connection, status_of(&err), retry_after(&err));
                     if !err.is_retryable_upstream() {
                         return Ok(AttemptOutcome { candidate, result: Err(err) });
                     }
-                    self.breaker
-                        .record_failure(candidate.connection, status_of(&err), retry_after(&err));
                     last = Some(err);
                 }
             }
@@ -106,7 +107,29 @@ impl Dispatcher {
         Err(last.unwrap_or_else(|| no_route(plan, "no attempt could be sent")))
     }
 
+    /// Pop the next candidate whose send is permitted *now*, claiming its
+    /// half-open probe slot in the same step so no slot is taken and dropped.
+    ///
+    /// `Some(wait)` from [`Breaker::claim`] means another task is already probing
+    /// that connection; the candidate is skipped rather than sent in parallel.
+    pub(crate) async fn next_claim(
+        &self,
+        plan: &Plan,
+        order: &mut std::collections::VecDeque<usize>,
+    ) -> Option<Candidate> {
+        while let Some(idx) = order.pop_front() {
+            let candidate = plan.candidates[idx].clone();
+            if self.breaker.claim(candidate.connection).is_none() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
     /// Candidates in send order, honoring the bounded pre-sleep rule.
+    ///
+    /// This is a read-only ranking: probe slots are claimed in [`Dispatcher::next_claim`],
+    /// immediately before the attempt, so an unsent candidate never holds one.
     pub(crate) async fn attempt_order(&self, plan: &Plan) -> std::collections::VecDeque<usize> {
         let mut eligible = std::collections::VecDeque::with_capacity(plan.candidates.len());
         let mut skipped: Vec<(usize, Duration)> = Vec::new();
@@ -119,11 +142,14 @@ impl Dispatcher {
         }
         if eligible.is_empty() && !skipped.is_empty() {
             // Nothing eligible: wait for the earliest skipped candidate, once,
-            // bounded by the total sleep budget.
+            // bounded by the total sleep budget. Re-check afterwards — another
+            // request may have started its probe during the sleep.
             skipped.sort_by_key(|(_, wait)| *wait);
             let (idx, wait) = skipped[0];
             tokio::time::sleep(wait.min(MAX_SKIP_WAIT)).await;
-            eligible.push_back(idx);
+            if self.breaker.check(plan.candidates[idx].connection).is_none() {
+                eligible.push_back(idx);
+            }
         }
         eligible
     }

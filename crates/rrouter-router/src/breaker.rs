@@ -89,20 +89,40 @@ impl Breaker {
 
     /// Clock-injected form of [`Breaker::check`] (deterministic tests).
     pub fn check_at(&self, conn: Uuid, now: Instant) -> Option<Duration> {
+        let map = self.lock();
+        match map.get(&conn).map(|e| e.state) {
+            None | Some(BreakerState::Closed) => None,
+            Some(BreakerState::Open { until }) if now >= until => None,
+            Some(BreakerState::Open { until }) => Some(until.duration_since(now)),
+            Some(BreakerState::HalfOpen { probes }) if probes < self.policy.probes => None,
+            Some(BreakerState::HalfOpen { .. }) => Some(PROBE_TAKEN),
+        }
+    }
+
+    /// Claim the right to send one request, consuming a half-open probe slot.
+    ///
+    /// `Some(wait)` means do not send. A successful claim **must** be settled
+    /// with [`Breaker::record_success`] or [`Breaker::record_failure`]; otherwise
+    /// the probe slot stays taken and the account is parked for [`PROBE_TAKEN`].
+    pub fn claim(&self, conn: Uuid) -> Option<Duration> {
+        self.claim_at(conn, Instant::now())
+    }
+
+    /// Clock-injected form of [`Breaker::claim`].
+    pub fn claim_at(&self, conn: Uuid, now: Instant) -> Option<Duration> {
         let mut map = self.lock();
         let entry = map.entry(conn).or_insert_with(Entry::new);
-        // Observe the state without mutating it first: an elapsed open window is
-        // *reported* as half-open, and only an actual probe claim advances it.
-        let state = match entry.state {
-            BreakerState::Open { until } if now >= until => BreakerState::HalfOpen { probes: 0 },
-            other => other,
-        };
-        entry.state = state;
-        match state {
+        // An elapsed open window is *reported* as half-open, and only an actual
+        // probe claim advances it.
+        if let BreakerState::Open { until } = entry.state {
+            if now >= until {
+                entry.state = BreakerState::HalfOpen { probes: 0 };
+            }
+        }
+        match entry.state {
             BreakerState::Closed => None,
             BreakerState::HalfOpen { probes } if probes < self.policy.probes => {
-                // Claim the probe slot. Exactly one caller wins it; concurrent
-                // callers see `probes == policy.probes` and are turned away.
+                // Exactly one caller wins the slot; the rest see it taken.
                 entry.state = BreakerState::HalfOpen { probes: probes + 1 };
                 None
             }

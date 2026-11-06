@@ -92,6 +92,19 @@ async fn serve(config: Config) -> Result<(), String> {
         started: Instant::now(),
     });
 
+    // Fail closed: binding beyond loopback while the admin gate is still in its
+    // default loopback-only mode leaves a half-open deployment — the client API is
+    // reachable, the admin API answers 403 even to the operator's own browser via a
+    // reverse proxy, and nothing explains why. Require an explicit decision.
+    if !config.host.is_loopback() && !config.allow_remote_admin {
+        return Err(format!(
+            "RROUTER_HOST={} is not loopback but RROUTER_ALLOW_REMOTE_ADMIN is false; \
+             set RROUTER_ALLOW_REMOTE_ADMIN=true to serve the admin API remotely, or \
+             bind 127.0.0.1",
+            config.host
+        ));
+    }
+
     let listener = tokio::net::TcpListener::bind(config.socket_addr())
         .await
         .map_err(|e| format!("bind {}: {e}", config.socket_addr()))?;

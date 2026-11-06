@@ -108,8 +108,14 @@ impl Refresher {
         let now = now_unix();
         let deadline = match provider.id {
             // The copilot session token is what goes on the wire; the GitHub token behind it
-            // is long-lived, so its own expiry does not matter here.
-            "github" => c.copilot_expires_at,
+            // is long-lived, so its own expiry does not matter here. A connection holding the
+            // long-lived token but no copilot token yet must derive one immediately.
+            "github" => {
+                if c.copilot_token.is_none() && c.access_token.is_some() {
+                    return true;
+                }
+                c.copilot_expires_at
+            }
             _ => match provider.kind {
                 ProviderKind::OAuth => c.expires_at,
                 ProviderKind::ApiKey | ProviderKind::Local => return false,
@@ -122,8 +128,12 @@ impl Refresher {
         }
     }
 
+    /// Per-credential lock. Entries with no waiter left are dropped, so the map
+    /// stays bounded by the credentials refreshing *right now*, not by every
+    /// credential the process has ever refreshed.
     fn lock_for(&self, id: Uuid) -> RefreshLock {
         let mut map = lock_map(&self.locks);
+        map.retain(|_, lock| Arc::strong_count(lock) > 1);
         map.entry(id).or_default().clone()
     }
 

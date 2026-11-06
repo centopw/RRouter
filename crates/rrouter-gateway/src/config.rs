@@ -35,10 +35,11 @@ pub struct Config {
 
 impl Config {
     /// The `Access-Control-Allow-Origin` value to echo, if any.
+    ///
+    /// There is deliberately no wildcard: a `*` grant would let any web origin read a
+    /// loopback-bound, unauthenticated admin API. `RROUTER_CORS_ORIGINS=*` is rejected
+    /// at parse time; see [`parse_env`].
     pub fn cors_origin_for(&self, origin: &str) -> Option<String> {
-        if self.cors_origins.iter().any(|o| o == "*") {
-            return Some("*".to_string());
-        }
         if self.cors_origins.iter().any(|o| o == origin) {
             return Some(origin.to_string());
         }
@@ -102,7 +103,7 @@ impl Config {
             secs_var("RROUTER_CONNECT_TIMEOUT_SECS", DEFAULT_CONNECT_TIMEOUT_SECS, &mut problems);
         let log_filter = var("RUST_LOG").unwrap_or_else(|| DEFAULT_LOG.into());
         let static_dir = var("RROUTER_STATIC_DIR").filter(|s| !s.is_empty()).map(PathBuf::from);
-        let cors_origins = var("RROUTER_CORS_ORIGINS")
+        let cors_origins: Vec<String> = var("RROUTER_CORS_ORIGINS")
             .map(|raw| {
                 raw.split(',')
                     .map(|o| o.trim().trim_end_matches('/').to_string())
@@ -110,6 +111,13 @@ impl Config {
                     .collect()
             })
             .unwrap_or_default();
+        // A wildcard would expose the (unauthenticated by default, loopback-bound)
+        // admin API to every web origin. Refuse it loudly rather than honour it.
+        if cors_origins.iter().any(|o| o == "*") {
+            problems.push(
+                "RROUTER_CORS_ORIGINS=* is not allowed: list explicit origins instead".into(),
+            );
+        }
         let allow_remote_admin = match var("RROUTER_ALLOW_REMOTE_ADMIN") {
             None => false,
             Some(raw) => parse_bool(&raw).unwrap_or_else(|| {
@@ -251,6 +259,8 @@ mod tests {
         assert_eq!(cfg.cors_origin_for("http://localhost:3000"), Some("http://localhost:3000".into()));
         assert_eq!(cfg.cors_origin_for("https://evil.example"), None);
         cfg.cors_origins = vec!["*".into()];
-        assert_eq!(cfg.cors_origin_for("https://evil.example"), Some("*".into()));
+        // A stored wildcard must never grant a foreign origin: an admin API that is
+        // unauthenticated by default must not be readable from any web page.
+        assert_eq!(cfg.cors_origin_for("https://evil.example"), None);
     }
 }
