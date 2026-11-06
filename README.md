@@ -114,6 +114,17 @@ Candidates are ordered by account priority, skipping providers with no active co
 accounts inside their circuit breaker. A 429 backs the account off exponentially, honouring
 `Retry-After`; a 5xx opens the breaker, and a half-open probe brings it back.
 
+## Observability
+
+- Every `/v1` response carries `x-request-id`; the same id is stored on the usage row and on
+  each candidate attempt, so a fallback is visible instead of inferred. `GET /api/usage/{id}`
+  returns the request plus its attempts (provider, status, latency, error).
+- `GET /metrics` is Prometheus text behind the admin gate: build info, requests by
+  provider/model/status, attempts by provider/status, a latency histogram, and breaker state
+  per connection.
+- Activity's request detail shows the attempt timeline and splits streamed latency into
+  time-to-first-output and generation.
+
 ## Keys and limits
 
 A gateway key is not just a password: each one carries the limits an operator needs.
