@@ -139,7 +139,8 @@ sum(rrouter_breaker_open)
 ```
 
 Alert on a sustained gap between attempts and requests (fallback storm) and on
-`rrouter_breaker_open > 0` for more than a minute.
+`rrouter_breaker_open > 0` for more than a minute. `deploy/grafana-dashboard.json` is a
+ready-to-import dashboard with those panels.
 
 | Symptom | Likely cause |
 | --- | --- |
