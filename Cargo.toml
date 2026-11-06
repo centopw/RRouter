@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rrouter-core",
+    "crates/rrouter-translate",
+    "crates/rrouter-auth",
+    "crates/rrouter-store",
+    "crates/rrouter-router",
+    "crates/rrouter-gateway",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/centopw/RRouter"
+
+[workspace.dependencies]
+rrouter-core = { path = "crates/rrouter-core" }
+rrouter-translate = { path = "crates/rrouter-translate" }
+rrouter-auth = { path = "crates/rrouter-auth" }
+rrouter-store = { path = "crates/rrouter-store" }
+rrouter-router = { path = "crates/rrouter-router" }
+rrouter-gateway = { path = "crates/rrouter-gateway" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs"] }
+tokio-stream = "0.1"
+bytes = "1"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip"] }
+http = "1"
+axum = { version = "0.8", features = ["json", "query", "macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes-gcm = "0.10"
+base64 = "0.22"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+hex = "0.4"
+hmac = "0.12"
+digest = "0.10"
