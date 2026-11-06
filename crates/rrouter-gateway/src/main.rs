@@ -176,26 +176,61 @@ async fn serve(config: Config) -> Result<(), String> {
         if config.require_api_key { " (api key required)" } else { "" }
     );
 
+    // The signal must be *observed* separately from the shutdown it triggers: bounding
+    // the whole `serve` future with the grace timer would exit the process after N
+    // seconds of normal uptime.
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let graceful = {
+        let stop = Arc::clone(&stop);
+        async move {
+            shutdown_signal().await;
+            stop.notify_one();
+        }
+    };
     let server = axum::serve(
         listener,
         app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal());
+    .with_graceful_shutdown(graceful);
 
-    // A drain is only graceful if it ends. An open SSE stream can outlive any deadline a
-    // supervisor gives us, so the grace period is authoritative: when it expires the
-    // process exits with the streams still open, and the client reconnects.
-    match config.shutdown_grace_secs {
-        0 => server.await.map_err(|e| format!("server: {e}"))?,
-        grace => match tokio::time::timeout(Duration::from_secs(grace), server).await {
-            Ok(result) => result.map_err(|e| format!("server: {e}"))?,
-            Err(_) => tracing::warn!(
-                "shutdown grace of {grace}s expired with requests still streaming; exiting"
-            ),
-        },
-    }
+    serve_until_shutdown(server, stop, config.shutdown_grace_secs)
+        .await
+        .map_err(|e| format!("server: {e}"))?;
     tracing::info!("{BANNER} stopped");
     Ok(())
+}
+
+/// Run the server until it ends or a shutdown signal arrives; after the signal, give the
+/// drain `grace_secs` (0 = wait indefinitely). A live SSE stream would otherwise let a
+/// deploy hang forever.
+async fn serve_until_shutdown<F, E>(
+    server: F,
+    stop: Arc<tokio::sync::Notify>,
+    grace_secs: u64,
+) -> std::result::Result<(), E>
+where
+    F: std::future::IntoFuture<Output = std::result::Result<(), E>>,
+{
+    // axum's graceful wrapper implements IntoFuture, not Future.
+    let server = server.into_future();
+    tokio::pin!(server);
+    if grace_secs == 0 {
+        return server.await;
+    }
+    tokio::select! {
+        result = &mut server => result,
+        () = stop.notified() => {
+            match tokio::time::timeout(Duration::from_secs(grace_secs), &mut server).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        "shutdown grace of {grace_secs}s expired with requests still streaming; exiting"
+                    );
+                    Ok(())
+                }
+            }
+        }
+    }
 }
 
 /// Resolve on SIGINT (ctrl-c) or SIGTERM, whichever comes first.
@@ -221,4 +256,43 @@ async fn shutdown_signal() {
         () = terminate => {}
     }
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The grace timer must start with the signal, not with the process: a server that
+    /// is still serving has to stay up past the grace period.
+    #[tokio::test]
+    async fn grace_starts_at_the_signal_not_at_startup() {
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let waiter = Arc::clone(&stop);
+        let handle = tokio::spawn(async move {
+            serve_until_shutdown(std::future::pending::<Result<(), &'static str>>(), waiter, 1)
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!handle.is_finished(), "no signal yet: the server must keep running");
+
+        stop.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(3), handle)
+            .await
+            .expect("the drain is bounded by the grace period")
+            .expect("join");
+        assert!(result.is_ok());
+    }
+
+    /// A real graceful shutdown does not wait for the grace: when the server future
+    /// completes, the process stops immediately.
+    #[tokio::test]
+    async fn a_finished_server_exits_without_waiting() {
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let started = Instant::now();
+        serve_until_shutdown(async { Ok::<(), &'static str>(()) }, stop, 30)
+            .await
+            .expect("no error");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 }
