@@ -193,9 +193,15 @@ async fn probe(
     conn: Connection,
 ) -> Result<u16, Error> {
     let creds = state.refresher.fresh(state.store.as_ref(), spec, conn.id).await?;
-    let mut req = ChatRequest::new("ping");
+    // The probe must name a model the provider actually serves: sending a
+    // placeholder like "ping" makes every provider answer 400 model_not_found,
+    // which reads as a broken credential. Use the provider's cheapest known model.
+    let model = probe_model(state, spec);
+    let mut req = ChatRequest::new(model);
     req.messages.push(Message::text(Role::User, "ping"));
-    req.max_tokens = Some(1);
+    // Some providers reject a 1-token completion (minimum output length), so ask for
+    // a small but legal amount.
+    req.max_tokens = Some(16);
     // The probe never streams: a single token, one JSON response.
     let body = rrouter_translate::build_request(spec.default_dialect, &req, false)?;
 
@@ -239,6 +245,21 @@ async fn probe(
         });
     }
     Ok(status)
+}
+
+/// A model this provider can serve, for connectivity probes.
+///
+/// Preference order: the connection's own `base_url_override` implies a test server
+/// the operator controls, so the catalog guess is irrelevant there — any id works.
+/// Otherwise take the first catalog entry for the provider, then the spec default.
+fn probe_model(state: &AppState, spec: &rrouter_auth::ProviderSpec) -> String {
+    state
+        .catalog
+        .all()
+        .into_iter()
+        .find(|m| m.provider == spec.id)
+        .map(|m| m.id)
+        .unwrap_or_else(|| spec.id.to_string())
 }
 
 fn default_auth_type(spec: &rrouter_auth::ProviderSpec) -> &'static str {
@@ -365,5 +386,28 @@ mod tests {
         let patch = credentials_patch(&json!({"api_key": "k"})).expect("patch");
         assert_eq!(patch.api_key.as_deref(), Some("k"));
         assert!(patch.access_token.is_none());
+    }
+
+    /// Regression: the probe used to send the literal model "ping", so every provider
+    /// answered 400 model_not_found and the dashboard showed a healthy credential as
+    /// broken. The probe must name a model the provider actually serves.
+    #[test]
+    fn probe_uses_a_real_model_for_the_provider() {
+        let catalog = rrouter_router::Catalog::builtin();
+        for id in ["claude", "codex", "github", "openai", "deepseek"] {
+            let spec = rrouter_auth::get(id).expect("registry provider");
+            let model = catalog
+                .all()
+                .into_iter()
+                .find(|m| m.provider == spec.id)
+                .map(|m| m.id)
+                .expect("catalog has a model for every routed provider");
+            assert_ne!(model, "ping", "{id} must not probe with a placeholder model");
+            assert!(!model.is_empty(), "{id} produced an empty probe model");
+            assert!(
+                catalog.is_known(&model),
+                "{id} probe model {model:?} must be routable"
+            );
+        }
     }
 }
