@@ -324,6 +324,36 @@ impl Store {
         Ok(())
     }
 
+    /// Lower `priority` values are tried first by the planner; equal values round-robin.
+    pub async fn set_connection_priority(&self, id: Uuid, priority: i32) -> Result<()> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "UPDATE connections SET priority = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id.to_string(), priority, now()],
+            )
+            .map_err(migrations::db_err)?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("connection {id}")));
+        }
+        Ok(())
+    }
+
+    /// Take a connection out of (or back into) routing without deleting its credentials.
+    pub async fn set_connection_active(&self, id: Uuid, active: bool) -> Result<()> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "UPDATE connections SET is_active = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id.to_string(), i64::from(active), now()],
+            )
+            .map_err(migrations::db_err)?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("connection {id}")));
+        }
+        Ok(())
+    }
+
     pub async fn delete_connection(&self, id: Uuid) -> Result<bool> {
         let conn = self.conn();
         let n = conn
