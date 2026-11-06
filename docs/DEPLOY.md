@@ -69,6 +69,20 @@ file, the key is not in the snapshot — keep it in the secret store.
 Losing `master.key` makes stored provider credentials unrecoverable; it is the one file to
 keep safe. Losing the database loses usage history and key hashes only.
 
+### Verify a restore
+
+A backup you have never restored is a guess. Rehearse it on the same host:
+
+```sh
+./scripts/backup.sh /tmp/restore-drill
+mkdir -p /tmp/restore-data && cp /tmp/restore-drill/{rrouter.db,master.key} /tmp/restore-data/
+RROUTER_DATA_DIR=/tmp/restore-data RROUTER_PORT=20131 ./rrouter &
+curl -s localhost:20131/api/connections | head -c 300   # has_access_token must be true
+```
+
+That `has_access_token: true` is the proof the snapshot and the key match: the credentials
+decrypted. Stop the drill instance and remove `/tmp/restore-data` afterwards.
+
 ## 5. Upgrades
 
 1. Back up (§4).
