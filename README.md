@@ -262,7 +262,9 @@ that as `HEALTHCHECK`). Publish the port on loopback unless a reverse proxy with
 authentication sits in front: the admin API is governed by the loopback gate, and exposing
 it publicly would expose provider credentials and key management.
 
-Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR by
+A single-replica Kubernetes manifest (`deploy/k8s.yaml`) and a systemd unit
+(`deploy/rrouter.service`) cover the two common non-Docker deployments. Multi-arch images
+(`linux/amd64`, `linux/arm64`) are published to GHCR by
 `.github/workflows/docker.yml` on every push to `main` and on `v*` tags. Tagged builds also
 publish standalone binaries through `.github/workflows/release.yml`; `install.sh` consumes
 those, which is why it needs no Rust toolchain.

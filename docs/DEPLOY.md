@@ -13,6 +13,7 @@ Pick one:
 | Installer | `curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh \| sh` |
 | Release tarball | download `rrouter-<os>-<arch>.tar.gz` + `.sha256`, verify, unpack to `/usr/local/bin` |
 | Docker | `docker compose up -d` (see `docker-compose.yml`) |
+| Kubernetes | `kubectl apply -f deploy/k8s.yaml` (one replica, PVC, probes) |
 | From source | `cargo build --release`, copy `target/release/rrouter` |
 
 Keep the binary and the data directory on the same host. Do not run two processes against
