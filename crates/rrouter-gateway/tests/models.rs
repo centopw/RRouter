@@ -548,10 +548,13 @@ fn sync_parser_maps_models_dev_into_rows() {
     assert_eq!(find("gemini", "gemini-2.5-pro").caps["pdf"], true);
     assert_eq!(find("gemini", "gemini-2.5-pro").caps["reasoning"], true);
 
-    // An unlisted provider falls back to its own id.
-    let vendor = find("some-new-vendor", "x1");
-    assert_eq!(vendor.caps["tools"], false);
-    assert_eq!(vendor.context, Some(1_000));
+    // A vendor this binary cannot route is dropped: storing 240 providers' models
+    // floods every list and model select with entries nobody can call.
+    assert!(
+        !rows.iter().any(|row| row.provider == "some-new-vendor"),
+        "unroutable provider kept: {:?}",
+        rows.iter().map(|r| &r.provider).collect::<Vec<_>>()
+    );
 }
 
 #[test]

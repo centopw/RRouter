@@ -174,7 +174,13 @@ pub fn merge(
             item.max_output = row.max_output;
         }
         item.capabilities.overlay(&row.caps);
-        item.source = row.source.clone();
+        // Source answers "why does this model exist here", not "who wrote last".
+        // models.dev enriching a shipped catalog entry must not relabel it as a
+        // discovery; only the operator's own row overrides a catalog entry.
+        let keep = matches!(item.source.as_str(), SOURCE_CATALOG | SOURCE_CUSTOM);
+        if !keep || row.source == SOURCE_CUSTOM {
+            item.source = row.source.clone();
+        }
     }
 
     items
@@ -190,7 +196,17 @@ pub fn merge(
 /// Live `GET /api/models` payload.
 pub async fn list(state: &AppState) -> Result<Vec<ModelItem>> {
     let store = state.store.as_ref();
-    let rows = store.list_models().await?;
+    // Custom rows are the operator's own statement, so they always list. Synced and
+    // upstream rows are dropped for providers this binary cannot route, which keeps a
+    // stale sync from flooding the UI after a provider is removed.
+    let rows: Vec<ModelRow> = store
+        .list_models()
+        .await?
+        .into_iter()
+        .filter(|row| {
+            row.source == SOURCE_CUSTOM || rrouter_auth::get(&row.provider).is_some()
+        })
+        .collect();
     let disabled: BTreeSet<String> = store.disabled_models().await?.into_iter().collect();
     let active_providers: BTreeSet<String> = store
         .list_connections(None)
@@ -248,9 +264,17 @@ pub fn parse_models_dev(document: &Value) -> Vec<ModelRow> {
         let Some(models) = provider.get("models").and_then(Value::as_object) else {
             continue;
         };
-        let mut targets = registry_providers(models_dev_id);
-        if !targets.contains(&models_dev_id.as_str()) {
+        // Only providers this gateway can route are worth storing: models.dev lists
+        // 240+, and a row nobody can call is noise in every list and select.
+        let mut targets: Vec<&str> = registry_providers(models_dev_id)
+            .into_iter()
+            .filter(|id| rrouter_auth::get(id).is_some())
+            .collect();
+        if rrouter_auth::get(models_dev_id).is_some() && !targets.contains(&models_dev_id.as_str()) {
             targets.push(models_dev_id.as_str());
+        }
+        if targets.is_empty() {
+            continue;
         }
         for (model_id, entry) in models {
             if model_id.is_empty() || !entry.is_object() {
