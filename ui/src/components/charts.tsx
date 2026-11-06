@@ -1,4 +1,3 @@
-import { useId } from "react";
 import { compact, pct } from "../lib/format";
 
 /**
@@ -19,9 +18,8 @@ export function Sparkline({
   height?: number;
   fill?: boolean;
 }) {
-  const id = useId().replace(/[:]/g, "");
-  // Brand cyan marks a trend; red is reserved for an error series.
-  const color = { pos: "var(--color-accent)", neg: "var(--color-neg)", accent: "var(--color-accent-2)" }[tone];
+  // One series, one color: cyan for traffic, red only for an error series.
+  const color = { pos: "var(--color-accent)", neg: "var(--color-neg)", accent: "var(--color-accent)" }[tone];
   const pts = normalize(values, width, height);
   if (pts.length < 2) return <div style={{ width, height }} aria-hidden />;
 
@@ -30,13 +28,7 @@ export function Sparkline({
 
   return (
     <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="trend">
-      <defs>
-        <linearGradient id={`g${id}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.28" />
-          <stop offset="100%" stopColor={color} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      {fill ? <path d={area} fill={`url(#g${id})`} /> : null}
+      {fill ? <path d={area} fill={color} fillOpacity="0.12" /> : null}
       <path d={line} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
     </svg>
   );
@@ -110,9 +102,8 @@ export function Bars({ bars, height = 220, fill = false }: { bars: Bar[]; height
                 }
                 style={{
                   height: `${Math.max(2, (b.value / max) * 100)}%`,
-                  background: b.highlight
-                    ? "linear-gradient(180deg, var(--color-accent) 0%, var(--color-accent-2) 100%)"
-                    : "var(--color-line)",
+                  background: "var(--color-accent)",
+                  opacity: b.highlight ? 1 : 0.45,
                 }}
               />
             </div>

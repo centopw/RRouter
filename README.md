@@ -132,6 +132,11 @@ npm run build   # writes ui/dist; the next cargo build embeds it
 A checkout without `ui/dist` still builds: `/` then serves a smaller dependency-free shell
 that composes itself from `GET /api/ui/panels` (and supports sandboxed extension panels).
 
+Assets are content-hashed, so a rebuilt binary ships new filenames. A tab opened before an
+upgrade reloads itself once when it asks for a chunk that no longer exists; if the reload
+cannot fix it, the page shows a recoverable "this dashboard was updated" card while the
+sidebar keeps working.
+
 ## Configuration
 
 | Variable | Default | Purpose |

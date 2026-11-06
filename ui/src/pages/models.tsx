@@ -246,7 +246,7 @@ export default function Models() {
             onClick={() => toggle.mutate(m)}
             className={cx(
               "relative inline-flex h-4 w-7 items-center rounded-full border transition-colors disabled:opacity-40",
-              m.enabled ? "border-transparent brand-gradient" : "border-line bg-surface-2",
+              m.enabled ? "border-transparent bg-accent" : "border-line bg-surface-2",
             )}
           >
             <span
@@ -314,7 +314,7 @@ export default function Models() {
     <>
       <PageHeader
         title="Models"
-        subtitle="Every model this gateway can route, with the capabilities it advertises."
+        subtitle="Every model this gateway can route, with its limits, price, and capabilities."
         actions={
           <>
             <div className="w-[190px]">

@@ -110,7 +110,7 @@ export function Button({
 }) {
   const styles: Record<ButtonVariant, string> = {
     primary:
-      "brand-gradient text-white font-semibold border border-transparent hover:brightness-110 shadow-[0_1px_0_rgba(255,255,255,0.12)_inset]",
+      "bg-accent text-[var(--color-accent-ink)] font-semibold border border-transparent hover:brightness-110",
     ghost:
       "border border-line bg-surface-2 text-fg hover:border-line-strong hover:bg-[#232b3a]",
     quiet: "border border-transparent text-muted hover:bg-surface-2 hover:text-fg",

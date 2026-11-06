@@ -88,7 +88,7 @@ export function Shell() {
                         cx(
                           "relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] transition-colors",
                           isActive
-                            ? "bg-[linear-gradient(90deg,rgba(0,212,255,0.14),rgba(138,43,255,0.06))] font-medium text-fg"
+                            ? "bg-[#00d4ff]/10 font-medium text-fg"
                             : "text-muted hover:bg-surface-2 hover:text-fg",
                         )
                       }
@@ -98,7 +98,7 @@ export function Shell() {
                           {isActive ? (
                             <span
                               aria-hidden
-                              className="brand-gradient absolute left-0 top-1.5 h-[calc(100%-12px)] w-[2px] rounded-full"
+                              className="absolute left-0 top-1.5 h-[calc(100%-12px)] w-[2px] rounded-full bg-accent"
                             />
                           ) : null}
                           <span className="shrink-0 opacity-90">{item.icon}</span>
