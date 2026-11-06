@@ -298,14 +298,36 @@ const builtins = {
 let panels = [];
 let current = null;
 
+const panelFromHash = () => {
+  if (!location.hash.startsWith('#/')) return '';
+  try { return decodeURIComponent(location.hash.slice(2)); } catch { return ''; }
+};
+
+function setMenuOpen(open) {
+  const shell = $('.shell');
+  const menu = $('#menu-button');
+  shell.classList.toggle('menu-open', open);
+  menu.setAttribute('aria-expanded', String(open));
+  menu.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
+}
+
+function navigate(id) {
+  const next = `#/${encodeURIComponent(id)}`;
+  if (location.hash === next) render($('#panel'), id);
+  else location.hash = next;
+  setMenuOpen(false);
+}
+
 function render(panel, id) {
-  current = id;
-  for (const tab of document.querySelectorAll('.tab')) {
-    tab.setAttribute('aria-selected', String(tab.dataset.id === id));
-  }
-  panel.replaceChildren(el('div', { class: 'muted' }, 'loading…'));
   const def = panels.find((p) => p.id === id);
   if (!def) return;
+  current = id;
+  $('#panel-title').textContent = def.title ?? id;
+  for (const tab of document.querySelectorAll('.tab')) {
+    if (tab.dataset.id === id) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  }
+  panel.replaceChildren(el('div', { class: 'muted' }, 'loading…'));
   if (def.kind === 'extension') return renderExtension(panel, def);
   return (builtins[def.id] || builtins.status)(panel);
 }
@@ -317,30 +339,68 @@ function renderExtension(panel, def) {
   frame.onload = () => frame.contentWindow.postMessage({ type: 'rrouter:panel-token', token, panel: def.id }, new URL(def.url, location.origin).origin);
 }
 
+function navButton(def) {
+  return el('button', {
+    class: 'tab nav-item',
+    type: 'button',
+    'data-id': def.id,
+    'aria-label': def.title,
+    onclick: () => navigate(def.id),
+  },
+  el('span', { class: 'nav-icon', 'aria-hidden': 'true' }, def.icon ?? ''),
+  el('span', { class: 'nav-label' }, def.title));
+}
+
 async function boot() {
   const [registry, settings] = await Promise.all([api('/ui/panels'), api('/settings')]);
   const brand = registry.brand ?? settings ?? {};
-  if (brand.brand_name) { $('#brand').textContent = brand.brand_name; document.title = brand.brand_name; }
+  if (brand.brand_name || brand.logo_url) {
+    const brandNode = $('#brand');
+    const brandName = el('span', { class: 'brand-name' }, brand.brand_name || 'RRouter');
+    if (brand.logo_url) brandNode.replaceChildren(el('img', { src: brand.logo_url, height: '20', alt: '' }), brandName);
+    else brandNode.replaceChildren(brandName);
+  }
+  if (brand.brand_name) document.title = brand.brand_name;
   if (brand.brand_color) document.documentElement.style.setProperty('--accent', brand.brand_color);
   if (brand.footer_text) $('#footer').textContent = brand.footer_text;
-  if (brand.logo_url) $('#brand').prepend(el('img', { src: brand.logo_url, height: '16', alt: '' }));
 
   panels = registry.data ?? [];
   const tabs = $('#tabs');
   const panel = $('#panel');
-  tabs.replaceChildren(...panels.map((p) => el('button', {
-    class: 'tab', role: 'tab', 'data-id': p.id,
-    onclick: () => render(panel, p.id),
-  }, `${p.icon ?? ''} ${p.title}`.trim())));
-  if (panels[0]) render(panel, panels[0].id);
+  const builtinPanels = panels.filter((p) => p.kind !== 'extension');
+  const extensionPanels = panels.filter((p) => p.kind === 'extension');
+  const separator = el('div', { class: 'nav-separator', role: 'separator', 'aria-hidden': 'true' });
+  separator.hidden = extensionPanels.length === 0;
+  tabs.replaceChildren(...builtinPanels.map(navButton), separator, ...extensionPanels.map(navButton));
 
-  const pill = $('#health');
+  const openPanel = panelFromHash();
+  const initial = panels.some((p) => p.id === openPanel) ? openPanel : panels[0]?.id;
+  if (initial) {
+    if (!openPanel) history.replaceState(null, '', `#/${encodeURIComponent(initial)}`);
+    render(panel, initial);
+  }
+  window.addEventListener('hashchange', () => {
+    const id = panelFromHash();
+    if (panels.some((p) => p.id === id)) render(panel, id);
+  });
+
+  $('#menu-button').onclick = () => setMenuOpen(!$('.shell').classList.contains('menu-open'));
+  $('#sidebar-scrim').onclick = () => setMenuOpen(false);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') setMenuOpen(false);
+  });
+
+  const health = $('#health');
+  const healthLabel = $('#health-label');
   const beat = async () => {
     try {
       const h = await (await fetch('/health')).json();
-      pill.textContent = `ok ${h.uptime_secs}s`;
-      pill.className = 'pill ok';
-    } catch { pill.textContent = 'down'; pill.className = 'pill bad'; }
+      healthLabel.textContent = `ok ${h.uptime_secs}s`;
+      health.className = 'health-status ok';
+    } catch {
+      healthLabel.textContent = 'down';
+      health.className = 'health-status bad';
+    }
   };
   beat();
   setInterval(beat, 5000);
