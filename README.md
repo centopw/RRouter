@@ -204,6 +204,11 @@ npm run dev     # http://localhost:5173, proxies /api and /v1 to :20128
 npm run build   # writes ui/dist; the next cargo build embeds it
 ```
 
+**Playground** sends a real request through the gateway and shows the answer as it streams —
+Chat and Messages dialects, time to first token, total latency, tokens, and the raw SSE when
+you need it. **Settings** edits the deployment's brand (name, accent, logo, footer) and shows
+the runtime facts; the shell reads the same settings, so white-labelling needs no rebuild.
+
 **Activity** is the operator's answer to "is anything wrong right now?": four readouts
 (requests, tokens, latency, error rate), a stacked traffic chart with an error lane, a models
 table, and the request log with a detail panel — clicking a model filters the log, clicking a
