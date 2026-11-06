@@ -5,7 +5,7 @@ import { useConnections, useKeys, useModels, useUsagePage, type UsageFilters } f
 import type { Model, UsageEvent } from "../lib/api";
 import { cacheLabel, RequestDetail } from "./activity/request-log";
 
-/** Incident review: every request newest first, filtered, paged backwards on demand. */
+/** Incident review: every request newest first, filtered on the server, paged backwards on demand. */
 
 const ALL = "all";
 
@@ -28,8 +28,14 @@ export default function Logs() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const range = RANGES.find((r) => r.id === rangeId) ?? RANGES[1];
-  // Any filter change is a new query key: the cursor resets and page one refetches.
-  const filters: UsageFilters = { hours: range.hours, status, provider, model, key: keyId };
+  // Every filter reaches the server and is part of the query key: a change restarts from page one.
+  const filters: UsageFilters = {
+    hours: range.hours,
+    status: status === "all" ? undefined : status === "errors" ? "error" : "2xx",
+    provider: provider === ALL ? undefined : provider,
+    model: model === ALL ? undefined : model,
+    keyId: keyId === ALL ? undefined : keyId,
+  };
   const usage = useUsagePage(filters);
   const connections = useConnections();
   const models = useModels();
@@ -46,14 +52,7 @@ export default function Logs() {
     return [...byKey.values()];
   }, [usage.data]);
 
-  // The server only understands the window; these narrow the rows already loaded.
-  const visible = useMemo(
-    () => loaded.filter((row) => matches(row, { status, provider, model, keyId })),
-    [loaded, status, provider, model, keyId],
-  );
-
-  // Selection is by request id and reads from everything loaded, so it survives a
-  // filter that hides the row.
+  // Selection is by request id, so it survives refetches and paging.
   const selected = selectedId === null ? null : (loaded.find((r) => rowKey(r) === selectedId) ?? null);
 
   const keyNames = useMemo(
@@ -154,14 +153,27 @@ export default function Logs() {
             </div>
           ) : loaded.length === 0 ? (
             <EmptyState>
-              <div>No requests in this window.</div>
-              {rangeId !== "all" ? (
-                <div className="mt-3">
-                  <Button variant="quiet" onClick={() => setRangeId("all")}>
-                    Show all time
-                  </Button>
-                </div>
-              ) : null}
+              {filtersActive ? (
+                <>
+                  <div>No requests match these filters.</div>
+                  <div className="mt-3">
+                    <Button variant="quiet" onClick={clearFilters}>
+                      Clear filters
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>No requests in this window.</div>
+                  {rangeId !== "all" ? (
+                    <div className="mt-3">
+                      <Button variant="quiet" onClick={() => setRangeId("all")}>
+                        Show all time
+                      </Button>
+                    </div>
+                  ) : null}
+                </>
+              )}
             </EmptyState>
           ) : (
             <div className="flex flex-wrap items-start gap-3 pb-3">
@@ -172,33 +184,13 @@ export default function Logs() {
                   </div>
                 ) : null}
                 <LogTable
-                  rows={visible}
+                  rows={loaded}
                   selectedId={selectedId}
                   onSelect={setSelectedId}
                   keyNames={keyNames}
                 />
-                {visible.length === 0 ? (
-                  <div className="px-6 py-8 text-center text-[13px] text-faint">
-                    <div>No loaded request matches these filters.</div>
-                    <div className="mt-3 flex flex-wrap justify-center gap-2">
-                      {filtersActive ? (
-                        <Button variant="quiet" onClick={clearFilters}>
-                          Clear filters
-                        </Button>
-                      ) : null}
-                      {usage.hasNextPage ? (
-                        <Button variant="quiet" onClick={() => void usage.fetchNextPage()} disabled={usage.isFetchingNextPage}>
-                          Load older
-                        </Button>
-                      ) : null}
-                    </div>
-                  </div>
-                ) : null}
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-6 py-2.5 text-[12px] text-faint">
-                  <span>
-                    Showing {visible.length}
-                    {visible.length !== loaded.length ? ` of ${loaded.length} loaded` : ""}
-                  </span>
+                  <span>{loaded.length} loaded</span>
                   {usage.hasNextPage ? (
                     <Button variant="quiet" onClick={() => void usage.fetchNextPage()} disabled={usage.isFetchingNextPage}>
                       {usage.isFetchingNextPage ? "Loading…" : "Load older"}
@@ -352,16 +344,4 @@ function isFailed(row: UsageEvent): boolean {
 function refOf(row: UsageEvent): string {
   const prefix = `${row.provider}/`;
   return row.model.startsWith(prefix) ? row.model : prefix + row.model;
-}
-
-function matches(
-  row: UsageEvent,
-  f: { status: Status; provider: string; model: string; keyId: string },
-): boolean {
-  if (f.status === "errors" && !isFailed(row)) return false;
-  if (f.status === "2xx" && (isFailed(row) || row.status < 200 || row.status >= 300)) return false;
-  if (f.provider !== ALL && row.provider !== f.provider) return false;
-  if (f.model !== ALL && refOf(row) !== f.model) return false;
-  if (f.keyId !== ALL && row.key_id !== f.keyId) return false;
-  return true;
 }

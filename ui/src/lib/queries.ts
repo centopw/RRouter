@@ -164,15 +164,15 @@ export const USAGE_PAGE_SIZE = 100;
 export type UsageCursor = { before: number; before_id: number };
 
 /**
- * Filters the Logs page controls. Only `hours` reaches the server; the rest are applied to
- * the loaded pages. They are part of the key so any change restarts from page one.
+ * Filters the Logs page controls. All of them reach the server, so they compose with the
+ * window and the cursor. They are part of the query key: any change restarts from page one.
  */
 export type UsageFilters = {
   hours: number | null;
-  status: string;
-  provider: string;
-  model: string;
-  key: string;
+  provider?: string;
+  model?: string;
+  keyId?: string;
+  status?: "2xx" | "error";
 };
 
 /** Keyset-paged request log, newest first. Load older until the server reports no cursor. */
@@ -182,6 +182,10 @@ export function useUsagePage(filters: UsageFilters) {
     queryFn: ({ pageParam }) => {
       const query = new URLSearchParams({ limit: String(USAGE_PAGE_SIZE) });
       if (filters.hours !== null) query.set("hours", String(filters.hours));
+      if (filters.provider) query.set("provider", filters.provider);
+      if (filters.model) query.set("model", filters.model);
+      if (filters.keyId) query.set("key_id", filters.keyId);
+      if (filters.status) query.set("status", filters.status);
       if (pageParam) {
         query.set("before", String(pageParam.before));
         query.set("before_id", String(pageParam.before_id));
