@@ -179,6 +179,23 @@ impl AppState {
                 });
             }
         }
+        if key.budget_micros > 0 {
+            // Same durable source as the token budget: the summed cost of this key's
+            // usage rows, so a restart never refunds spend.
+            let spent = self.store.api_key_cost_spend(key.id).await?;
+            if spent >= key.budget_micros {
+                return Err(Error::Limited {
+                    code: "budget_exhausted",
+                    message: format!(
+                        "api key {} has spent ${:.4} of its ${:.4} budget",
+                        key.id,
+                        micros_to_usd(spent),
+                        micros_to_usd(key.budget_micros)
+                    ),
+                    retry_after_secs: 3600,
+                });
+            }
+        }
         match self.counters.try_admit(key.id, key.rpm, key.tpm) {
             Ok(()) => Ok(()),
             Err(Cap::Rpm { limit }) => Err(Error::Limited {
@@ -232,6 +249,13 @@ impl Caller {
             Self::Key(key) => Some(key.id),
         }
     }
+}
+
+/// Micro-USD as dollars, for the message an operator reads. Four decimals is the
+/// resolution the schema stores: one micro-dollar is $0.000001, so the fourth decimal
+/// is where a budget refusal stays readable without lying about precision.
+fn micros_to_usd(micros: u64) -> f64 {
+    micros as f64 / 1_000_000.0
 }
 
 /// Does an allowlist cover `model`?

@@ -61,6 +61,9 @@ pub struct ApiKey {
     pub tpm: u32,
     /// Lifetime token budget; 0 = unlimited. Spend is the durable `usage` sum.
     pub budget_tokens: u64,
+    /// Lifetime spend budget in micro-USD (millionths of a dollar); 0 = unlimited.
+    /// Compared against the summed `usage.cost_micros` of this key.
+    pub budget_micros: u64,
     /// Exact model refs or `provider/*` globs; `None` = every model.
     pub allowed_models: Option<Vec<String>>,
     /// Unix seconds after which the key is refused; `None` = never.
@@ -75,6 +78,8 @@ pub struct ApiKeyPatch {
     pub rpm: Option<u32>,
     pub tpm: Option<u32>,
     pub budget_tokens: Option<u64>,
+    /// Integer, so `null` never clears: `0` is the "unlimited" value.
+    pub budget_micros: Option<u64>,
     /// `Some(None)` clears the allowlist (back to every model).
     pub allowed_models: Option<Option<Vec<String>>>,
     /// `Some(None)` clears the expiry (back to never).
@@ -96,6 +101,9 @@ impl ApiKeyPatch {
         }
         if let Some(v) = self.budget_tokens {
             key.budget_tokens = v;
+        }
+        if let Some(v) = self.budget_micros {
+            key.budget_micros = v;
         }
         if let Some(v) = &self.allowed_models {
             key.allowed_models = v.clone();
@@ -154,6 +162,17 @@ pub struct ModelRow {
     pub updated_at: i64,
 }
 
+/// One stored price candidate for a model: the row's `cost` blob plus the source that
+/// wrote it, so the caller can apply the same precedence the registry merge uses
+/// (`custom` > `upstream` > `synced`). Several rows can match when a vendor catalog is
+/// mirrored under a product-line provider (`openai` → `codex`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelCost {
+    pub provider: String,
+    pub cost: serde_json::Value,
+    pub source: String,
+}
+
 /// One completed request. Never contains prompt or response bodies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
@@ -169,6 +188,9 @@ pub struct UsageRecord {
     pub endpoint: Option<String>,
     /// Gateway key that paid for the request; `None` for anonymous traffic.
     pub key_id: Option<Uuid>,
+    /// What the request cost in micro-USD (millionths of a dollar), priced from the
+    /// registry's per-million-token rates at record time; 0 = no known price.
+    pub cost_micros: u64,
     pub input_tokens: u32,
     pub output_tokens: u32,
     /// Prompt-cache reads (billed at a discount) and writes (billed at a premium).
@@ -222,6 +244,8 @@ pub struct UsageModelBucket {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    /// Summed micro-USD for this bucket.
+    pub cost_micros: u64,
     pub avg_latency_ms: u32,
 }
 
@@ -236,6 +260,8 @@ pub struct UsageSummary {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    /// Summed micro-USD over the same rows.
+    pub cost_micros: u64,
     pub avg_latency_ms: u32,
 }
 
@@ -250,6 +276,8 @@ pub struct UsageBucket {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    /// Summed micro-USD over the same rows.
+    pub cost_micros: u64,
     pub avg_latency_ms: u32,
 }
 
@@ -624,7 +652,7 @@ impl Store {
     /// The key columns every read selects, in [`row_to_api_key`]'s order.
     const KEY_COLUMNS: &'static str =
         "id, key_hash, name, is_active, created_at, rpm, tpm, budget_tokens, allowed_models, \
-         expires_at";
+         expires_at, budget_micros";
 
     /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
     ///
@@ -652,6 +680,7 @@ impl Store {
                 rpm: 0,
                 tpm: 0,
                 budget_tokens: 0,
+                budget_micros: 0,
                 allowed_models: None,
                 expires_at: None,
             },
@@ -733,7 +762,7 @@ impl Store {
         };
         conn.execute(
             "UPDATE api_keys SET is_active = ?2, rpm = ?3, tpm = ?4, budget_tokens = ?5, \
-             allowed_models = ?6, expires_at = ?7 WHERE id = ?1",
+             allowed_models = ?6, expires_at = ?7, budget_micros = ?8 WHERE id = ?1",
             params![
                 id.to_string(),
                 key.is_active as i64,
@@ -742,6 +771,7 @@ impl Store {
                 key.budget_tokens,
                 allowed,
                 key.expires_at,
+                key.budget_micros,
             ],
         )
         .map_err(migrations::db_err)?;
@@ -899,6 +929,84 @@ impl Store {
             if let Ok(id) = Uuid::parse_str(&raw) {
                 out.insert(id, total.max(0) as u64);
             }
+        }
+        Ok(out)
+    }
+
+    /// Lifetime money this key has spent: the summed `usage.cost_micros` of its rows.
+    ///
+    /// Rows priced at 0 (an unknown model) contribute nothing, which is the honest
+    /// answer: the gateway must not invent a price for a model it has no rate for.
+    pub async fn api_key_cost_spend(&self, id: Uuid) -> Result<u64> {
+        let conn = self.conn();
+        let total: i64 = conn
+            .query_row(
+                "SELECT COALESCE(sum(cost_micros), 0) FROM usage WHERE key_id = ?1",
+                params![id.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(migrations::db_err)?;
+        Ok(total.max(0) as u64)
+    }
+
+    /// Money spent by every key in one statement, for `GET /api/keys`.
+    pub async fn api_key_cost_spend_all(
+        &self,
+    ) -> Result<std::collections::HashMap<Uuid, u64>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT key_id, sum(cost_micros) FROM usage \
+                 WHERE key_id IS NOT NULL GROUP BY key_id",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(migrations::db_err)?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (raw, total) = row.map_err(migrations::db_err)?;
+            if let Ok(id) = Uuid::parse_str(&raw) {
+                out.insert(id, total.max(0) as u64);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every stored price for `model` under `providers` (the registry provider and the
+    /// models.dev vendor it mirrors, so a product line without its own synced rows is
+    /// still priced). One indexed read of `models`; used when a usage row is written.
+    pub async fn model_costs(&self, model: &str, providers: &[&str]) -> Result<Vec<ModelCost>> {
+        if providers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = (2..providers.len() + 2)
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT provider, cost, source FROM models \
+             WHERE model = ?1 AND cost IS NOT NULL AND provider IN ({placeholders})"
+        );
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&sql).map_err(migrations::db_err)?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(providers.len() + 1);
+        params.push(&model);
+        for provider in providers {
+            params.push(provider);
+        }
+        let rows = stmt
+            .query_map(params.as_slice(), |r| {
+                Ok(ModelCost {
+                    provider: r.get(0)?,
+                    cost: parse_cost_blob(r.get::<_, String>(1)?),
+                    source: r.get(2)?,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(migrations::db_err)?);
         }
         Ok(out)
     }
@@ -1147,8 +1255,8 @@ impl Store {
             "INSERT INTO usage \
              (ts, request_id, provider, model, connection_id, endpoint, key_id, input_tokens, \
               output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, \
-              streamed, error) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+              streamed, error, cost_micros) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 r.ts,
                 r.request_id.map(|u| u.to_string()).unwrap_or_default(),
@@ -1166,6 +1274,7 @@ impl Store {
                 r.status,
                 r.streamed as i64,
                 r.error,
+                r.cost_micros,
             ],
         )
         .map_err(migrations::db_err)?;
@@ -1276,14 +1385,14 @@ impl Store {
                         sum(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), \
                         sum(input_tokens), sum(output_tokens), \
                         sum(cache_read_tokens), sum(cache_write_tokens), \
-                        avg(latency_ms) \
+                        sum(cost_micros), avg(latency_ms) \
                  FROM usage WHERE ?1 IS NULL OR ts >= ?1 \
                  GROUP BY provider, model ORDER BY provider ASC, model ASC",
             )
             .map_err(migrations::db_err)?;
         let rows = stmt
             .query_map(params![since], |r| {
-                let avg: f64 = r.get(8)?;
+                let avg: f64 = r.get(9)?;
                 Ok(UsageSummary {
                     provider: r.get(0)?,
                     model: r.get(1)?,
@@ -1293,6 +1402,7 @@ impl Store {
                     output_tokens: r.get(5)?,
                     cache_read_tokens: r.get(6)?,
                     cache_write_tokens: r.get(7)?,
+                    cost_micros: r.get(8)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })
@@ -1319,13 +1429,13 @@ impl Store {
                         sum(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), \
                         sum(input_tokens), sum(output_tokens), \
                         sum(cache_read_tokens), sum(cache_write_tokens), \
-                        avg(latency_ms) \
+                        sum(cost_micros), avg(latency_ms) \
                  FROM usage WHERE ts >= ?1 GROUP BY bucket ORDER BY bucket ASC",
             )
             .map_err(migrations::db_err)?;
         let rows = stmt
             .query_map(params![since, bucket_secs], |r| {
-                let avg: f64 = r.get(7)?;
+                let avg: f64 = r.get(8)?;
                 Ok(UsageBucket {
                     start: r.get(0)?,
                     requests: r.get(1)?,
@@ -1334,6 +1444,7 @@ impl Store {
                     output_tokens: r.get(4)?,
                     cache_read_tokens: r.get(5)?,
                     cache_write_tokens: r.get(6)?,
+                    cost_micros: r.get(7)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })
@@ -1362,14 +1473,14 @@ impl Store {
                         sum(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), \
                         sum(input_tokens), sum(output_tokens), \
                         sum(cache_read_tokens), sum(cache_write_tokens), \
-                        avg(latency_ms) \
+                        sum(cost_micros), avg(latency_ms) \
                  FROM usage WHERE ts >= ?1 \
                  GROUP BY bucket, provider, model ORDER BY bucket ASC, provider ASC, model ASC",
             )
             .map_err(migrations::db_err)?;
         let rows = stmt
             .query_map(params![since, bucket_secs], |r| {
-                let avg: f64 = r.get(9)?;
+                let avg: f64 = r.get(10)?;
                 Ok(UsageModelBucket {
                     start: r.get(0)?,
                     provider: r.get(1)?,
@@ -1380,6 +1491,7 @@ impl Store {
                     output_tokens: r.get(6)?,
                     cache_read_tokens: r.get(7)?,
                     cache_write_tokens: r.get(8)?,
+                    cost_micros: r.get(9)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })
@@ -1454,7 +1566,7 @@ fn uuid_col(s: String) -> rusqlite::Result<Uuid> {
 /// every reader so a new column cannot desynchronize one query from the rest.
 const USAGE_COLUMNS: &str = "id, ts, request_id, provider, model, connection_id, endpoint, \
      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, \
-     status, streamed, error, key_id";
+     status, streamed, error, key_id, cost_micros";
 
 /// Empty `request_id` is the v8 "unknown" default written before request ids existed.
 fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
@@ -1479,6 +1591,7 @@ fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         streamed: r.get::<_, i64>(14)? != 0,
         error: r.get(15)?,
         key_id: kid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
+        cost_micros: r.get(17)?,
     })
 }
 
@@ -1527,6 +1640,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         budget_tokens: r.get(7)?,
         allowed_models,
         expires_at: r.get(9)?,
+        budget_micros: r.get(10)?,
     })
 }
 
@@ -1637,6 +1751,12 @@ ON CONFLICT(provider, model) DO UPDATE SET
 WHERE CASE excluded.source WHEN 'custom' THEN 3 WHEN 'upstream' THEN 2 WHEN 'synced' THEN 1 ELSE 0 END
    >= CASE models.source   WHEN 'custom' THEN 3 WHEN 'upstream' THEN 2 WHEN 'synced' THEN 1 ELSE 0 END
 "#;
+
+/// The stored `cost` blob is JSON this crate wrote; a hand-edited value that does not
+/// parse reads as "no price" instead of failing the accounting read.
+fn parse_cost_blob(raw: String) -> serde_json::Value {
+    serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null)
+}
 
 /// Capability blob as a JSON object. Only this crate writes the column, so a malformed
 /// value means a hand-edited database; treat it as "no overrides" rather than failing

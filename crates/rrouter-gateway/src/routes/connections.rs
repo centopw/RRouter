@@ -24,6 +24,8 @@ pub struct ConnectionView {
     pub name: Option<String>,
     pub email: Option<String>,
     pub priority: i32,
+    /// Traffic share for the weighted strategy (`1..=1000`, 100 = even).
+    pub weight: u32,
     pub is_active: bool,
     pub base_url_override: Option<String>,
     pub has_access_token: bool,
@@ -47,6 +49,7 @@ impl From<&Connection> for ConnectionView {
             name: c.name.clone(),
             email: c.email.clone(),
             priority: c.priority,
+            weight: c.weight,
             is_active: c.is_active,
             base_url_override: creds.base_url_override.clone(),
             has_access_token: creds.access_token.as_deref().is_some_and(|t| !t.is_empty()),
@@ -101,8 +104,16 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
         .await
     {
         Ok(created) => {
-            if let Some(priority) = value.get("priority").and_then(Value::as_i64) {
-                if let Err(e) = apply_patch(&state, created.id, json!({ "priority": priority })).await {
+            // The routing knobs are their own columns, so they are applied after the
+            // row exists; a body that names neither leaves the defaults alone.
+            let policy = json!({
+                "priority": value.get("priority").cloned(),
+                "weight": value.get("weight").cloned(),
+            });
+            if policy.get("priority").is_some_and(|v| !v.is_null())
+                || policy.get("weight").is_some_and(|v| !v.is_null())
+            {
+                if let Err(e) = apply_patch(&state, created.id, policy).await {
                     return admin_error(&e);
                 }
             }
@@ -315,6 +326,20 @@ async fn apply_patch(state: &AppState, id: Uuid, value: Value) -> Result<(), Err
     if has_patch {
         // `email` is mirrored into the credentials blob's display label.
         state.store.merge_credentials(id, patch).await?;
+    }
+    // Routing knobs live in their own columns. `priority` orders candidates and
+    // `weight` shares traffic inside an equal-priority group; the store clamps the
+    // weight to 1..=1000, so an out-of-range value is bounded rather than refused.
+    if let Some(priority) = value.get("priority").and_then(Value::as_i64) {
+        let priority = i32::try_from(priority)
+            .map_err(|_| Error::BadRequest("priority must fit in 32 bits".into()))?;
+        state.store.set_connection_priority(id, priority).await?;
+    }
+    if let Some(weight) = value.get("weight").and_then(Value::as_u64) {
+        state
+            .store
+            .set_connection_weight(id, u32::try_from(weight).unwrap_or(u32::MAX))
+            .await?;
     }
     if let Some(active) = value.get("is_active").and_then(Value::as_bool) {
         state.store.set_connection_active(id, active).await?;

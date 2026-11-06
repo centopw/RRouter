@@ -20,9 +20,9 @@ use serde_json::{json, Value};
 use super::{admin_error, body_json, ok_json};
 use crate::state::AppState;
 
-/// The row shape shared by `GET /api/keys`, `POST` and `PATCH`. `spent_tokens` is the
-/// durable SQL sum over `usage` for this key, not a stored counter.
-fn row(key: &ApiKey, spent: u64, models: &[KeyModel]) -> Value {
+/// The row shape shared by `GET /api/keys`, `POST` and `PATCH`. `spent_tokens` and
+/// `spent_micros` are durable SQL sums over `usage` for this key, not stored counters.
+fn row(key: &ApiKey, spent: u64, spent_micros: u64, models: &[KeyModel]) -> Value {
     json!({
         "id": key.id.to_string(),
         "name": key.name,
@@ -32,6 +32,8 @@ fn row(key: &ApiKey, spent: u64, models: &[KeyModel]) -> Value {
         "tpm": key.tpm,
         "budget_tokens": key.budget_tokens,
         "spent_tokens": spent,
+        "budget_micros": key.budget_micros,
+        "spent_micros": spent_micros,
         "allowed_models": key.allowed_models,
         "expires_at": key.expires_at,
         "models": models_value(models),
@@ -50,8 +52,9 @@ fn models_value(models: &[KeyModel]) -> Value {
 
 async fn view(state: &AppState, key: &ApiKey) -> Value {
     let spent = state.store.api_key_spend(key.id).await.unwrap_or(0);
+    let spent_micros = state.store.api_key_cost_spend(key.id).await.unwrap_or(0);
     let models = state.store.key_models(key.id).await.unwrap_or_default();
-    row(key, spent, &models)
+    row(key, spent, spent_micros, &models)
 }
 
 pub async fn list(State(state): State<Arc<AppState>>) -> Response {
@@ -61,6 +64,10 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
     };
     let spend = match state.store.api_key_spend_all().await {
         Ok(spend) => spend,
+        Err(e) => return admin_error(&e),
+    };
+    let cost = match state.store.api_key_cost_spend_all().await {
+        Ok(cost) => cost,
         Err(e) => return admin_error(&e),
     };
     // One query for every key's mapping, so the list stays O(1) in statement count.
@@ -74,6 +81,7 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
             row(
                 k,
                 spend.get(&k.id).copied().unwrap_or(0),
+                cost.get(&k.id).copied().unwrap_or(0),
                 models.get(&k.id).map(Vec::as_slice).unwrap_or_default(),
             )
         })
@@ -103,7 +111,8 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
 }
 
 /// `PATCH /api/keys/{id}` — any subset of `is_active`, `rpm`, `tpm`, `budget_tokens`,
-/// `allowed_models` (null clears), `expires_at` (null clears). Returns the merged row.
+/// `budget_micros`, `allowed_models` (null clears), `expires_at` (null clears). Returns
+/// the merged row.
 pub async fn update(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -246,6 +255,8 @@ fn patch_from(value: &Value) -> Result<ApiKeyPatch, Error> {
             "rpm" => patch.rpm = Some(u32_field(raw, "rpm")?),
             "tpm" => patch.tpm = Some(u32_field(raw, "tpm")?),
             "budget_tokens" => patch.budget_tokens = Some(uint(raw, "budget_tokens")?),
+            // Micro-USD. An integer field: `null` is a type error, `0` means unlimited.
+            "budget_micros" => patch.budget_micros = Some(uint(raw, "budget_micros")?),
             "allowed_models" => {
                 patch.allowed_models = Some(match raw {
                     Value::Null => None,

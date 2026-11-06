@@ -254,6 +254,90 @@ fn parse_cost(value: &Value) -> Option<Cost> {
     })
 }
 
+/// Rates for accounting, in USD per million tokens: every field the row does not
+/// publish prices 0, which is the contract's rule for a partial price. A blob with no
+/// numeric rate at all is not a price, so it can never shadow a vendor row that has one.
+fn rates(value: &Value) -> Option<Cost> {
+    if !value.is_object() {
+        return None;
+    }
+    let rate = |key: &str| value.get(key).and_then(Value::as_f64);
+    let (input, output) = (rate("input"), rate("output"));
+    if input.is_none() && output.is_none() && rate("cache_read").is_none()
+        && rate("cache_write").is_none()
+    {
+        return None;
+    }
+    Some(Cost {
+        input: input.unwrap_or(0.0),
+        output: output.unwrap_or(0.0),
+        cache_read: rate("cache_read"),
+        cache_write: rate("cache_write"),
+    })
+}
+
+impl Cost {
+    /// Micro-USD for one request. A per-million-token rate times a token count is
+    /// already micro-dollars (`tokens × USD/Mtok = tokens × µUSD/token`), so this is a
+    /// sum and a round — no division, no float drift from scaling. A rate the catalog
+    /// does not publish prices its tokens at 0 rather than at a guess.
+    pub fn micros(&self, usage: rrouter_core::Usage) -> u64 {
+        let total = f64::from(usage.input_tokens) * self.input
+            + f64::from(usage.output_tokens) * self.output
+            + f64::from(usage.cache_read_tokens) * self.cache_read.unwrap_or(0.0)
+            + f64::from(usage.cache_write_tokens) * self.cache_write.unwrap_or(0.0);
+        if !total.is_finite() || total <= 0.0 {
+            return 0;
+        }
+        // Half away from zero; a single request cannot approach u64::MAX micro-USD, but
+        // a hand-edited price could, and saturating beats wrapping.
+        total.round().min(u64::MAX as f64) as u64
+    }
+}
+
+/// What one request cost, in micro-USD, from the registry rows that publish a price.
+///
+/// Precedence matches the registry merge — `custom` > `upstream` > `synced` — and the
+/// provider's own row wins over the models.dev vendor row it mirrors, so a `codex`
+/// request is priced from `openai`'s catalog when codex has no synced rows of its own.
+/// A model with no published price costs 0: the gateway never guesses a rate.
+///
+/// Deliberately unmemoized. The caller runs this inside the spawned usage writer, so
+/// the indexed read never touches the response path, and a price the operator just
+/// edited applies to the next request instead of waiting for a cache to expire.
+pub async fn cost_micros(
+    store: &Store,
+    provider: &str,
+    model: &str,
+    usage: rrouter_core::Usage,
+) -> u64 {
+    let vendor = rrouter_router::catalog::models_dev_provider(provider);
+    let rows = match store.model_costs(model, &[provider, vendor]).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            // Accounting must never fail a request; an unknown price is 0, not a panic.
+            tracing::warn!(error = %e, provider, model, "price lookup failed; cost recorded as 0");
+            return 0;
+        }
+    };
+    let mut best: Option<((u8, u8), Cost)> = None;
+    for row in &rows {
+        let Some(cost) = rates(&row.cost) else {
+            continue;
+        };
+        // The provider's own row first, then the registry's source precedence.
+        let key = (u8::from(row.provider == provider), source_rank(&row.source));
+        let better = match best.as_ref() {
+            Some((best_key, _)) => key > *best_key,
+            None => true,
+        };
+        if better {
+            best = Some((key, cost));
+        }
+    }
+    best.map_or(0, |(_, cost)| cost.micros(usage))
+}
+
 /// Live `GET /api/models` payload.
 pub async fn list(state: &AppState) -> Result<Vec<ModelItem>> {
     let store = state.store.as_ref();
@@ -554,5 +638,110 @@ mod tests {
         assert_eq!(parse_model_ids(&body), vec!["a", "b"]);
         assert_eq!(parse_model_ids(&json!(["x", "x", " "])), vec!["x"]);
         assert!(parse_model_ids(&json!({"nope": []})).is_empty());
+    }
+
+    #[test]
+    fn cost_in_micro_usd_is_exact_for_mixed_cache_tokens() {
+        // USD per million tokens: 3 input, 12 output, 0.30 cache read, 3.75 cache write.
+        let cost = parse_cost(&json!({
+            "input": 3.0, "output": 12.0, "cache_read": 0.3, "cache_write": 3.75
+        }))
+        .expect("published price");
+        // 1000×3 + 500×12 + 2000×0.3 + 300×3.75 = 3000 + 6000 + 600 + 1125.
+        let usage = rrouter_core::Usage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_read_tokens: 2_000,
+            cache_write_tokens: 300,
+        };
+        assert_eq!(cost.micros(usage), 10_725, "micro-USD, no rounding loss");
+
+        // A rate the catalog leaves out prices its own tokens at 0, not at input's rate.
+        let partial = rates(&json!({"input": 2.0, "output": 4.0})).expect("price");
+        assert_eq!(
+            partial.micros(rrouter_core::Usage {
+                input_tokens: 10,
+                output_tokens: 10,
+                cache_read_tokens: 1_000,
+                cache_write_tokens: 1_000,
+            }),
+            60
+        );
+        // Only output published: input is priced 0, per the contract.
+        let output_only = rates(&json!({"output": 10.0})).expect("partial price");
+        assert_eq!(
+            output_only.micros(rrouter_core::Usage {
+                input_tokens: 1_000,
+                output_tokens: 2,
+                ..Default::default()
+            }),
+            20
+        );
+        // No numeric rate at all: not a price, so it cannot shadow another row.
+        assert!(rates(&json!({})).is_none());
+        assert!(rates(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn cost_rounds_to_the_nearest_micro_usd() {
+        let cost = rates(&json!({"input": 2.5, "output": 0.0})).expect("price");
+        // 7 × 2.5 = 17.5 micro-USD; half a micro-dollar rounds away from zero.
+        assert_eq!(
+            cost.micros(rrouter_core::Usage { input_tokens: 7, ..Default::default() }),
+            18
+        );
+        // Nothing priced is nothing spent, never a negative row.
+        assert_eq!(cost.micros(rrouter_core::Usage::default()), 0);
+    }
+
+    /// The registry row that prices a model is chosen exactly the way the merge chooses
+    /// it: the provider's own row first, then `custom` > `upstream` > `synced`. A model
+    /// with no published price is 0, and a product line without its own row (`codex`)
+    /// prices from the vendor catalog it mirrors (`openai`).
+    #[tokio::test]
+    async fn price_lookup_prefers_the_provider_row_then_the_best_source() {
+        let store = Store::open_in_memory().expect("store");
+        let row = |provider: &str, model: &str, source: &str, cost: Value| ModelRow {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            display: None,
+            context: None,
+            max_output: None,
+            caps: json!({}),
+            cost: Some(cost),
+            source: source.to_string(),
+            updated_at: 0,
+        };
+        let usage = rrouter_core::Usage { input_tokens: 1_000, ..Default::default() };
+        store
+            .upsert_model(&row(
+                "openai",
+                "gpt-priced",
+                SOURCE_SYNCED,
+                json!({"input": 1.0, "output": 2.0}),
+            ))
+            .await
+            .expect("synced row");
+        assert_eq!(cost_micros(&store, "openai", "gpt-priced", usage).await, 1_000);
+        assert_eq!(
+            cost_micros(&store, "codex", "gpt-priced", usage).await,
+            1_000,
+            "codex prices from the openai catalog row it mirrors"
+        );
+
+        // The operator's own rate beats the synced one for this provider.
+        store
+            .upsert_model(&row(
+                "openai",
+                "gpt-priced",
+                SOURCE_CUSTOM,
+                json!({"input": 4.0, "output": 8.0}),
+            ))
+            .await
+            .expect("custom row");
+        assert_eq!(cost_micros(&store, "openai", "gpt-priced", usage).await, 4_000);
+
+        // No row at all: 0, never a guessed rate.
+        assert_eq!(cost_micros(&store, "openai", "unpriced", usage).await, 0);
     }
 }

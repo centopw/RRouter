@@ -18,7 +18,7 @@ use http_body_util::BodyExt;
 use rrouter_auth::Credentials;
 use rrouter_gateway::{app, config::Config, AppState};
 use rrouter_router::{Breaker, Catalog, Dispatcher, Planner};
-use rrouter_store::{Store, UsageRecord};
+use rrouter_store::{ModelRow, Store, UsageRecord};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -293,6 +293,26 @@ impl Harness {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "patch {body}: {value} (headers {headers:?})");
+        value
+    }
+
+    /// `PATCH /api/connections/{id}`, asserting the updated view came back.
+    async fn patch_connection(&self, id: &str, body: Value) -> Value {
+        let (status, headers, value) = self
+            .call_full(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/connections/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "patch connection {body}: {value} (headers {headers:?})"
+        );
         value
     }
 
@@ -1413,6 +1433,7 @@ async fn budget_exhausted_blocks_the_next_request() {
             connection_id: None,
             endpoint: Some("/v1/messages".to_string()),
             key_id: Some(uuid),
+            cost_micros: 0,
             input_tokens: 20,
             output_tokens: 5,
             cache_read_tokens: 0,
@@ -1524,6 +1545,8 @@ async fn key_rows_match_the_governance_contract() {
     assert_eq!(created["tpm"], 0);
     assert_eq!(created["budget_tokens"], 0);
     assert_eq!(created["spent_tokens"], 0);
+    assert_eq!(created["budget_micros"], 0);
+    assert_eq!(created["spent_micros"], 0);
     assert_eq!(created["allowed_models"], Value::Null);
     assert_eq!(created["expires_at"], Value::Null);
 
@@ -1548,6 +1571,8 @@ async fn key_rows_match_the_governance_contract() {
         "tpm": 90_000,
         "budget_tokens": 5_000_000,
         "spent_tokens": 0,
+        "budget_micros": 0,
+        "spent_micros": 0,
         "allowed_models": ["claude/claude-haiku-4-5-20251001"],
         "expires_at": null,
         "models": [],
@@ -2216,4 +2241,263 @@ async fn failed_attempts_do_not_record_latency_samples() {
         h.state.store.connection_latencies().await.expect("latencies").is_empty(),
         "a failed attempt must not update the EWMA"
     );
+}
+
+// ------------------------------------------------------- cost accounting (phase 6)
+
+/// A usage row seeded directly, for the cases where the test owns the durable spend.
+async fn seed_usage(
+    store: &Store,
+    key: Option<uuid::Uuid>,
+    provider: &str,
+    model: &str,
+    cost_micros: u64,
+    ts: i64,
+) {
+    store
+        .record_usage(&UsageRecord {
+            id: None,
+            ts,
+            request_id: Some(uuid::Uuid::new_v4()),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".to_string()),
+            key_id: key,
+            cost_micros,
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        })
+        .await
+        .expect("seed usage");
+}
+
+/// Wait for the spawned usage writer, then return the newest row this key wrote for
+/// `model` — accounting is asynchronous, so an assertion must not race it.
+async fn wait_for_usage(h: &Harness, key: uuid::Uuid, model: &str) -> UsageRecord {
+    for _ in 0..100 {
+        if let Ok(rows) = h.state.store.recent_usage(50, None).await {
+            if let Some(row) = rows
+                .into_iter()
+                .find(|r| r.key_id == Some(key) && r.model == model)
+            {
+                return row;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no usage row for key {key} and model {model}");
+}
+
+/// Money beside the tokens: a priced request stores the exact micro-USD amount, the
+/// usage API exposes it, the key's spend sums it, and an unpriced model stores 0.
+#[tokio::test]
+async fn priced_requests_record_micro_usd_and_unpriced_models_record_zero() {
+    let mock = Mock::start(vec![openai_reply("priced"), openai_reply("unpriced")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    // The registry is the price source: USD per million tokens from models.dev.
+    h.state
+        .store
+        .upsert_model(&ModelRow {
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            display: None,
+            context: None,
+            max_output: None,
+            caps: json!({}),
+            cost: Some(json!({"input": 10.0, "output": 20.0})),
+            source: "synced".to_string(),
+            updated_at: 0,
+        })
+        .await
+        .expect("priced model");
+    let (key, id) = h.create_key().await;
+    let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
+
+    // The mock reports 7 prompt + 3 completion tokens: 7×10 + 3×20 = 130 µUSD.
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let row = wait_for_usage(&h, uuid, "gpt-4.1").await;
+    assert_eq!(row.cost_micros, 130, "micro-USD, computed at record time");
+
+    let request_id = row.request_id.expect("request id");
+    let (status, body) = h.get(&format!("/api/usage/{request_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["request"]["cost_micros"], 130);
+
+    let (status, body) = h.get("/api/usage?limit=10").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"][0]["cost_micros"], 130, "the log row carries its cost");
+
+    let (status, body) = h.get("/api/keys").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"][0]["spent_micros"], 130);
+    assert_eq!(body["data"][0]["budget_micros"], 0, "0 means unlimited");
+
+    // A model the registry publishes no price for costs 0 — never a guessed rate.
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1-mini").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let unpriced = wait_for_usage(&h, uuid, "gpt-4.1-mini").await;
+    assert_eq!(unpriced.cost_micros, 0);
+    assert_eq!(
+        h.state.store.api_key_cost_spend(uuid).await.expect("spend"),
+        130,
+        "an unpriced row adds nothing to the spend"
+    );
+}
+
+/// A USD budget is enforced from durable spend, and the refusal names dollars.
+#[tokio::test]
+async fn usd_budget_below_durable_spend_answers_429_naming_dollars() {
+    let mock = Mock::start(vec![openai_reply("paid")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
+
+    // Prior spend for this key: $2.000000.
+    seed_usage(
+        &h.state.store,
+        Some(uuid),
+        "openai",
+        "gpt-4.1",
+        2_000_000,
+        rrouter_gateway::now_unix(),
+    )
+    .await;
+
+    let patched = h.patch_key(&id, json!({"budget_micros": 1_000_000})).await;
+    assert_eq!(patched["budget_micros"], 1_000_000);
+    assert_eq!(patched["spent_micros"], 2_000_000);
+
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(body["error"]["code"], "budget_exhausted");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(message.contains("$2.0000"), "names what was spent: {message}");
+    assert!(message.contains("$1.0000"), "names the budget: {message}");
+    assert_eq!(mock.hits(), 0, "an over-budget key is refused before dispatch");
+
+    // An integer field: `null` is a type error, `0` is the unlimited value.
+    let (status, _, body) = h
+        .call_full(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/keys/{id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"budget_micros": null}).to_string()))
+                .expect("request"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+
+    h.patch_key(&id, json!({"budget_micros": 5_000_000})).await;
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(mock.hits(), 1);
+}
+
+/// Summary and series aggregate the cost column server-side, like the tokens.
+#[tokio::test]
+async fn summary_and_series_sum_cost_per_group_and_bucket() {
+    let h = harness(false);
+    let now = rrouter_gateway::now_unix();
+    seed_usage(&h.state.store, None, "openai", "gpt-4.1", 1_000, now).await;
+    seed_usage(&h.state.store, None, "openai", "gpt-4.1", 2_500, now).await;
+
+    let (status, body) = h.get("/api/usage/summary").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"][0]["requests"], 2);
+    assert_eq!(body["data"][0]["cost_micros"], 3_500);
+
+    let (status, body) = h.get("/api/usage/series?hours=1&bucket=hour").await;
+    assert_eq!(status, StatusCode::OK);
+    let total: u64 = body["data"]
+        .as_array()
+        .expect("buckets")
+        .iter()
+        .map(|b| b["cost_micros"].as_u64().expect("bucket cost"))
+        .sum();
+    assert_eq!(total, 3_500, "both rows fall in one bucket: {body}");
+
+    // The per-model breakdown carries the same column.
+    let (status, body) = h.get("/api/usage/series?hours=1&bucket=hour&by=model").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"][0]["model"], "gpt-4.1");
+    assert_eq!(body["data"][0]["cost_micros"], 3_500);
+}
+
+/// The weighted strategy is only usable if an operator can set its inputs: `PATCH
+/// /api/connections/{id}` writes priority and weight, `GET` reads them back, and the
+/// plan follows the patched weights.
+#[tokio::test]
+async fn connection_patch_sets_priority_and_weight_and_the_plan_follows() {
+    let embedding = || {
+        MockReply::Json(
+            200,
+            json!({
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1]}],
+                "model": "text-embedding-3-small",
+                "usage": {"prompt_tokens": 1, "total_tokens": 1}
+            }),
+        )
+    };
+    let heavy = Mock::start(vec![embedding(), embedding(), embedding(), embedding()]).await;
+    let light = Mock::start(vec![embedding(), embedding(), embedding(), embedding()]).await;
+    let mut cfg = config(false);
+    cfg.strategy = rrouter_router::Strategy::Weighted;
+    let h = harness_with(cfg);
+    let heavy_id = h.connect("openai", &heavy).await;
+    let light_id = h.connect("openai", &light).await;
+
+    let patched = h
+        .patch_connection(&heavy_id.to_string(), json!({"weight": 3, "priority": 0}))
+        .await;
+    assert_eq!(patched["weight"], 3);
+    assert_eq!(patched["priority"], 0);
+    let patched = h
+        .patch_connection(&light_id.to_string(), json!({"weight": 1, "priority": 0}))
+        .await;
+    assert_eq!(patched["weight"], 1);
+
+    let (status, body) = h.get("/api/connections").await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body["data"].as_array().expect("rows").clone();
+    let by_id = |id: uuid::Uuid| {
+        rows.iter()
+            .find(|row| row["id"] == id.to_string())
+            .cloned()
+            .expect("connection row")
+    };
+    assert_eq!(by_id(heavy_id)["weight"], 3, "GET exposes the weight the plan uses");
+    assert_eq!(by_id(light_id)["weight"], 1);
+    assert_eq!(by_id(heavy_id)["priority"], 0);
+
+    for _ in 0..4 {
+        let (status, body) = h
+            .post(
+                "/v1/embeddings",
+                json!({"model": "openai/text-embedding-3-small", "input": "hi"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    assert_eq!(heavy.hits(), 3, "weight 3 leads three of four plans");
+    assert_eq!(light.hits(), 1);
+
+    // A patch only touches the fields it names, and priority is written too.
+    let patched = h
+        .patch_connection(&light_id.to_string(), json!({"priority": 7}))
+        .await;
+    assert_eq!(patched["priority"], 7);
+    assert_eq!(patched["weight"], 1, "an unnamed weight keeps its value");
 }

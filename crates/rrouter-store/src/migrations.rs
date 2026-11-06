@@ -8,10 +8,20 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 9;
+pub(crate) const SCHEMA_VERSION: i64 = 10;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
+
+/// V10: money. `usage.cost_micros` is what one request cost in millionths of a USD,
+/// priced from the registry's per-million-token rates (0 = the price was unknown, never
+/// a guess); `api_keys.budget_micros` is a lifetime USD budget in the same unit
+/// (0 = unlimited), so an operator can budget in dollars next to tokens. Existing rows
+/// default to "unknown price" and "unlimited", which is exactly their pre-v10 behaviour.
+const V10: &str = r#"
+ALTER TABLE usage ADD COLUMN cost_micros INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE api_keys ADD COLUMN budget_micros INTEGER NOT NULL DEFAULT 0;
+"#;
 
 /// V9: routing inputs. `connections.weight` is the traffic share used by the weighted
 /// strategy (clamped to 1..=1000 on read); `connection_stats` keeps one EWMA latency per

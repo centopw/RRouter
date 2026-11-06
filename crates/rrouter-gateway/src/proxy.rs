@@ -1387,6 +1387,8 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
         connection_id: Some(candidate.connection),
         endpoint: Some(r.endpoint.to_string()),
         key_id: r.key,
+        // Priced in `spawn_record`: the registry read happens off the response path.
+        cost_micros: 0,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         cache_read_tokens: usage.cache_read_tokens,
@@ -1403,10 +1405,21 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
     spawn_record(state, rec);
 }
 
-fn spawn_record(state: &AppState, rec: UsageRecord) {
+fn spawn_record(state: &AppState, mut rec: UsageRecord) {
     let store = Arc::clone(&state.store);
-    // Usage accounting must never fail a request or delay the response.
+    // Usage accounting must never fail a request or delay the response — and the same
+    // applies to pricing it. The price is read here rather than on the response path,
+    // which is why no memo cache (and no invalidation hook in `routes/models.rs`) is
+    // needed: one indexed registry read per completed request, always current.
     tokio::spawn(async move {
+        let usage = rrouter_core::Usage {
+            input_tokens: rec.input_tokens,
+            output_tokens: rec.output_tokens,
+            cache_read_tokens: rec.cache_read_tokens,
+            cache_write_tokens: rec.cache_write_tokens,
+        };
+        rec.cost_micros =
+            crate::models_registry::cost_micros(&store, &rec.provider, &rec.model, usage).await;
         if let Err(e) = store.record_usage(&rec).await {
             tracing::warn!(error = %e, "usage record failed");
         }

@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
 use rrouter_store::{
-    ApiKey, ApiKeyPatch, AttemptRecord, Credentials, KeyModel, Store, UsageRecord, API_KEY_PREFIX,
-    KEY_FILE_NAME,
+    ApiKey, ApiKeyPatch, AttemptRecord, Credentials, KeyModel, ModelRow, Store, UsageRecord,
+    API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -377,6 +377,7 @@ fn spent_tokens_sums_only_that_key() {
             connection_id: None,
             endpoint: Some("/v1/messages".to_string()),
             key_id: key,
+            cost_micros: 0,
             input_tokens: inp,
             output_tokens: out,
             cache_read_tokens: cr,
@@ -410,8 +411,117 @@ fn spent_tokens_sums_only_that_key() {
     });
 }
 
+/// Money is recorded beside the tokens: a row's micro-USD cost round-trips, and a key's
+/// spend is the sum of only its own rows.
 #[test]
-fn v6_database_migrates_to_nine() {
+fn cost_micros_round_trips_and_sums_per_key() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let (_, a) = s.create_api_key(Some("a")).await.expect("a");
+        let (_, b) = s.create_api_key(Some("b")).await.expect("b");
+        let rec = |key: Option<Uuid>, cost: u64| UsageRecord {
+            id: None,
+            ts: 1_700_000_000,
+            request_id: Some(Uuid::new_v4()),
+            provider: "claude".to_string(),
+            model: "haiku".to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/messages".to_string()),
+            key_id: key,
+            cost_micros: cost,
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        };
+        s.record_usage(&rec(Some(a.id), 1_250)).await.expect("a1");
+        s.record_usage(&rec(Some(a.id), 3_000)).await.expect("a2");
+        s.record_usage(&rec(Some(b.id), 500)).await.expect("b1");
+        s.record_usage(&rec(None, 9_999)).await.expect("anon");
+
+        assert_eq!(s.api_key_cost_spend(a.id).await.expect("a"), 4_250);
+        assert_eq!(s.api_key_cost_spend(b.id).await.expect("b"), 500);
+        assert_eq!(
+            s.api_key_cost_spend(Uuid::new_v4()).await.expect("unknown"),
+            0,
+            "a key with no rows has spent nothing"
+        );
+
+        let all = s.api_key_cost_spend_all().await.expect("all");
+        assert_eq!(all.get(&a.id).copied(), Some(4_250));
+        assert_eq!(all.get(&b.id).copied(), Some(500));
+        assert_eq!(all.len(), 2, "anonymous rows belong to no key");
+
+        // The cost is stored with the row, not recomputed on read.
+        let recent = s.recent_usage(10, None).await.expect("recent");
+        assert_eq!(recent[0].cost_micros, 9_999);
+        assert!(recent.iter().any(|r| r.cost_micros == 3_000));
+    });
+}
+
+/// The accounting lookup sees only rows that publish a price, and only for the
+/// providers it is asked about — the two ids a request can be priced under.
+#[test]
+fn model_costs_returns_published_rows_for_the_named_providers() {
+    let store = Store::open_in_memory().expect("mem");
+    let row = |provider: &str, model: &str, source: &str, cost: Option<serde_json::Value>| {
+        ModelRow {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            display: None,
+            context: None,
+            max_output: None,
+            caps: serde_json::json!({}),
+            cost,
+            source: source.to_string(),
+            updated_at: 0,
+        }
+    };
+    rt().block_on(async {
+        store
+            .upsert_model(&row(
+                "openai",
+                "gpt-test",
+                "synced",
+                Some(serde_json::json!({"input": 1.0, "output": 2.0})),
+            ))
+            .await
+            .expect("priced row");
+        store
+            .upsert_model(&row("codex", "gpt-test", "upstream", None))
+            .await
+            .expect("unpriced row");
+        store
+            .upsert_model(&row(
+                "anthropic",
+                "other-model",
+                "synced",
+                Some(serde_json::json!({"input": 3.0, "output": 4.0})),
+            ))
+            .await
+            .expect("other model");
+
+        let rows = store
+            .model_costs("gpt-test", &["codex", "openai"])
+            .await
+            .expect("costs");
+        assert_eq!(rows.len(), 1, "the unpriced row and the other model are not prices");
+        assert_eq!(rows[0].provider, "openai");
+        assert_eq!(rows[0].source, "synced");
+        assert_eq!(rows[0].cost["input"], 1.0);
+
+        assert!(store.model_costs("gpt-test", &[]).await.expect("none").is_empty());
+    });
+}
+
+#[test]
+fn v6_database_migrates_to_ten() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
@@ -470,7 +580,7 @@ fn v6_database_migrates_to_nine() {
         .expect("v6 schema");
     }
 
-    let store = Store::open(&dir.db(), None).expect("open store runs the v7-v9 steps");
+    let store = Store::open(&dir.db(), None).expect("open store runs the v7-v10 steps");
     let keys = rt().block_on(store.list_api_keys()).expect("list");
     assert_eq!(keys.len(), 1);
     let legacy = &keys[0];
@@ -482,10 +592,18 @@ fn v6_database_migrates_to_nine() {
     );
     assert_eq!(legacy.allowed_models, None);
     assert_eq!(legacy.expires_at, None);
+    assert_eq!(
+        legacy.budget_micros, 0,
+        "a pre-v10 key has no money budget: unlimited, exactly as before"
+    );
 
     let recent = rt().block_on(store.recent_usage(10, None)).expect("recent");
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].input_tokens, 42, "pre-v7 rows are untouched");
+    assert_eq!(
+        recent[0].cost_micros, 0,
+        "a pre-v10 row has no recorded price, and none is invented for it"
+    );
     assert_eq!(recent[0].key_id, None, "pre-v7 rows are anonymous");
     assert_eq!(
         recent[0].request_id, None,
@@ -502,7 +620,7 @@ fn v6_database_migrates_to_nine() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
         ("idx_usage_request", "the usage row is looked up by request id"),
@@ -523,7 +641,7 @@ fn v6_database_migrates_to_nine() {
 /// connection defaults to weight 100 (the plain round-robin share), and the two new
 /// tables start empty.
 #[test]
-fn v8_database_migrates_to_nine() {
+fn v8_database_migrates_to_ten() {
     let dir = TempDir::new("v8");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -547,18 +665,52 @@ fn v8_database_migrates_to_nine() {
              INSERT INTO connections (id, provider, auth_type, data, created_at, updated_at)
              VALUES ('11111111-1111-4111-8111-111111111111', 'openai', 'api_key', x'00',
                      1700000000, 1700000000);
+
+             -- v7/v8 shape: the later steps only add columns, and a real v8 database
+             -- always has both tables.
+             CREATE TABLE api_keys (
+               id             TEXT PRIMARY KEY,
+               key_hash       TEXT NOT NULL UNIQUE,
+               name           TEXT,
+               is_active      INTEGER NOT NULL DEFAULT 1,
+               created_at     INTEGER NOT NULL,
+               rpm            INTEGER NOT NULL DEFAULT 0,
+               tpm            INTEGER NOT NULL DEFAULT 0,
+               budget_tokens  INTEGER NOT NULL DEFAULT 0,
+               allowed_models TEXT,
+               expires_at     INTEGER
+             );
+             CREATE TABLE usage (
+               id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+               ts                 INTEGER NOT NULL,
+               request_id         TEXT NOT NULL DEFAULT '',
+               provider           TEXT NOT NULL,
+               model              TEXT NOT NULL,
+               connection_id      TEXT,
+               endpoint           TEXT,
+               input_tokens       INTEGER NOT NULL DEFAULT 0,
+               output_tokens      INTEGER NOT NULL DEFAULT 0,
+               cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+               cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+               latency_ms         INTEGER NOT NULL DEFAULT 0,
+               ttft_ms            INTEGER NOT NULL DEFAULT 0,
+               status             INTEGER NOT NULL,
+               streamed           INTEGER NOT NULL DEFAULT 0,
+               error              TEXT,
+               key_id             TEXT
+             );
              PRAGMA user_version = 8;",
         )
         .expect("v8 schema");
     }
 
-    drop(Store::open(&dir.db(), None).expect("open store runs the v9 step"));
+    drop(Store::open(&dir.db(), None).expect("open store runs the v9-v10 steps"));
 
     let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
 
     let weight: i64 = conn
         .query_row("SELECT weight FROM connections", [], |r| r.get(0))
@@ -578,6 +730,81 @@ fn v8_database_migrates_to_nine() {
             .expect("table");
         assert_eq!(found, 1, "{why}: {table}");
     }
+}
+
+/// A v9 database gains the money columns without touching existing rows: spend recorded
+/// before v10 stays at "unknown price", and every key stays unlimited.
+#[test]
+fn v9_database_migrates_to_ten() {
+    let dir = TempDir::new("v9");
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        conn.execute_batch(
+            "CREATE TABLE api_keys (
+               id             TEXT PRIMARY KEY,
+               key_hash       TEXT NOT NULL UNIQUE,
+               name           TEXT,
+               is_active      INTEGER NOT NULL DEFAULT 1,
+               created_at     INTEGER NOT NULL,
+               rpm            INTEGER NOT NULL DEFAULT 0,
+               tpm            INTEGER NOT NULL DEFAULT 0,
+               budget_tokens  INTEGER NOT NULL DEFAULT 0,
+               allowed_models TEXT,
+               expires_at     INTEGER
+             );
+             INSERT INTO api_keys (id, key_hash, name, is_active, created_at, budget_tokens)
+             VALUES ('11111111-1111-4111-8111-111111111111', 'deadbeef', 'v9', 1, 1700000000, 500);
+
+             CREATE TABLE usage (
+               id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+               ts                 INTEGER NOT NULL,
+               request_id         TEXT NOT NULL DEFAULT '',
+               provider           TEXT NOT NULL,
+               model              TEXT NOT NULL,
+               connection_id      TEXT,
+               endpoint           TEXT,
+               input_tokens       INTEGER NOT NULL DEFAULT 0,
+               output_tokens      INTEGER NOT NULL DEFAULT 0,
+               cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+               cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+               latency_ms         INTEGER NOT NULL DEFAULT 0,
+               ttft_ms            INTEGER NOT NULL DEFAULT 0,
+               status             INTEGER NOT NULL,
+               streamed           INTEGER NOT NULL DEFAULT 0,
+               error              TEXT,
+               key_id             TEXT
+             );
+             INSERT INTO usage (ts, request_id, provider, model, input_tokens, output_tokens,
+                                status, key_id)
+             VALUES (1700000000, '', 'claude', 'haiku', 42, 8, 200,
+                     '11111111-1111-4111-8111-111111111111');
+
+             PRAGMA user_version = 9;",
+        )
+        .expect("v9 schema");
+    }
+
+    let store = Store::open(&dir.db(), None).expect("open store runs the v10 step");
+    let keys = rt().block_on(store.list_api_keys()).expect("keys");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].budget_tokens, 500, "the token budget survives");
+    assert_eq!(keys[0].budget_micros, 0, "no money budget means unlimited");
+    assert_eq!(
+        rt().block_on(store.api_key_cost_spend(keys[0].id)).expect("spend"),
+        0
+    );
+
+    let rows = rt().block_on(store.recent_usage(10, None)).expect("usage");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].input_tokens, 42);
+    assert_eq!(rows[0].cost_micros, 0);
+    drop(store);
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 10);
 }
 
 // ----- 4c. routing inputs (phase 4) -------------------------------------------------
@@ -814,6 +1041,7 @@ fn usage_records_summary_and_recent_order() {
             connection_id: Some(conn_id),
             endpoint: Some("/v1/chat/completions".to_string()),
             key_id: None,
+            cost_micros: 0,
             input_tokens: inp,
             output_tokens: out,
             // Prompt-cache counters are priced separately; keep them per row.
@@ -975,6 +1203,7 @@ fn attempts_round_trip_under_the_request_id() {
             connection_id: Some(second_conn),
             endpoint: Some("/v1/chat/completions".to_string()),
             key_id: Some(key),
+            cost_micros: 0,
             input_tokens: 7,
             output_tokens: 3,
             cache_read_tokens: 0,
