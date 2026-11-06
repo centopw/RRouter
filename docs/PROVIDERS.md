@@ -23,6 +23,10 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 
 ## Dialect matrix
 
+Non-chat endpoints follow the same rule: a provider that declares one gets the client body
+forwarded (`/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`,
+`/v1/audio/voices`); every other provider answers `501` for that path without calling upstream.
+
 | Client → provider | Chat | Responses | Messages | Embeddings |
 | --- | --- | --- | --- | --- |
 | Chat provider | pass-through | translated | translated | forwarded |

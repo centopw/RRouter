@@ -8,8 +8,10 @@ All notable changes. Dates are local; versions follow semver once tagged.
 
 - One binary serving OpenAI Chat, OpenAI Responses and Anthropic Messages on `/v1`, with
   incremental translation in both directions (streaming and non-streaming).
-- `/v1/embeddings`, `/v1/models`, and forwarded `/v1/messages/count_tokens` and
-  `/v1/responses/compact` for providers that implement them (501 otherwise, never an estimate).
+- `/v1/embeddings`, `/v1/models` (list and by id), and forwarded
+  `/v1/messages/count_tokens`, `/v1/responses/compact`, `/v1/images/generations`,
+  `/v1/audio/speech`, `/v1/audio/transcriptions` and `/v1/audio/voices` for providers that
+  implement them (501 otherwise, never an estimate).
 - Subscription sign-in for Claude and Codex, GitHub Copilot device flow, API keys for OpenAI,
   Anthropic, Gemini, DeepSeek, Groq, OpenRouter, xAI, Mistral, Together, Cerebras, Ollama.
 - Credential refresh ahead of expiry with a per-account lock; encrypted at rest (AES-256-GCM).

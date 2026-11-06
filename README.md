@@ -86,6 +86,11 @@ where it goes, not the protocol.
 | `POST /v1/messages/count_tokens` | Anthropic token counting (forwarded) |
 | `POST /v1/responses/compact` | OpenAI/Codex compaction (forwarded) |
 | `GET /v1/models` | catalog + upstream + custom models |
+| `GET /v1/models/{id}` | one model object (or OpenAI-shaped 404) |
+| `POST /v1/images/generations` | forwarded to providers with an images endpoint |
+| `POST /v1/audio/speech` | forwarded; audio bytes relayed with the upstream content-type |
+| `POST /v1/audio/transcriptions` | multipart forwarded verbatim (boundary preserved) |
+| `GET /v1/audio/voices` | forwarded when the provider has one |
 | `GET/POST /api/*` | admin: providers, keys, models, aliases, combos, usage |
 
 `/v1/messages/count_tokens` and `/v1/responses/compact` are forwarded to the provider that
