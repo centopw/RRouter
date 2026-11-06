@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
@@ -26,6 +26,7 @@ use serde_json::Value;
 use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 
+use crate::config::CacheMode;
 use crate::error::{error_frame, error_response, not_implemented};
 use crate::overloaded_response;
 use crate::state::{dialect_of, AppState, Caller, Slot};
@@ -34,6 +35,9 @@ use crate::state::{dialect_of, AppState, Caller, Slot};
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// Upstream error bodies are truncated to this many bytes before being passed on.
 const MAX_ERROR_BODY: usize = 4096;
+/// Exact-match cache control: `hit`/`miss` on the response, and the client's `bypass`
+/// opt-out on the request.
+const CACHE_HEADER: &str = "x-rrouter-cache";
 
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 
@@ -956,9 +960,116 @@ async fn handle(
         trace,
     };
 
-    if !client_stream && !upstream_stream {
-        let resp = complete_traced(state, inbound, &body, key_id, trace).await?;
-        return Ok(json_response(StatusCode::OK, rrouter_translate::build_response(inbound, &resp)?));
+    // Cache eligibility is decided once, before anything is sent: a non-streaming
+    // client (a stream has no body to store), an enabled backend, no explicit bypass,
+    // and a candidate to key the exact upstream body against.
+    let cache = if state.config.cache == CacheMode::Sqlite
+        && !client_stream
+        && !cache_bypassed(headers)
+        && !plan.candidates.is_empty()
+    {
+        match attempt.cache_key(&plan.candidates[0]) {
+            Ok(key) => Some(key),
+            Err(e) => {
+                tracing::warn!(error = %e, "response cache: canonical request unavailable");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(key) = &cache {
+        match state.store.cache_get(&key.hash, crate::now_unix()).await {
+            Ok(Some(body)) => {
+                crate::metrics::cache_hit();
+                trace.set_provider(&plan.candidates[0].provider);
+                record_cache_hit(
+                    state,
+                    &plan.candidates[0],
+                    &plan.model,
+                    inbound,
+                    key_id,
+                    trace,
+                    started,
+                );
+                return Ok(cached_response(body));
+            }
+            Ok(None) => crate::metrics::cache_miss(),
+            // A cache is an optimisation: a store failure must never fail the request.
+            Err(e) => {
+                tracing::warn!(error = %e, "response cache read failed");
+                crate::metrics::cache_miss();
+            }
+        }
+    }
+
+    if !client_stream {
+        // Two ways to get one JSON body: a plain non-streaming dispatch, or a
+        // stream-only upstream whose stream is folded back into one response.
+        let (served, out) = if upstream_stream {
+            let (candidate, bytes) = state
+                .dispatcher
+                .run_streaming(&plan, |c| attempt.open_stream(c))
+                .await?;
+            let open = StreamRoute {
+                upstream: attempt.route_dialect(&candidate),
+                client_model: candidate.model.clone(),
+            };
+            let assembled = reassemble(&open, bytes).await?;
+            record_once(
+                state,
+                Recorded {
+                    candidate: &candidate,
+                    model: &plan.model,
+                    endpoint: endpoint_of(inbound),
+                    usage: assembled.usage,
+                    key: key_id,
+                    request_id: trace.request_id,
+                    started,
+                    ttft: None,
+                    streamed: false,
+                },
+            );
+            (
+                candidate,
+                rrouter_translate::build_response(inbound, &assembled)?,
+            )
+        } else {
+            let (candidate, resp) =
+                complete_traced(state, inbound, &body, key_id, trace).await?;
+            (candidate, rrouter_translate::build_response(inbound, &resp)?)
+        };
+
+        // Serialize once: the bytes stored are exactly the bytes the client receives,
+        // so a later hit is byte-identical to this response.
+        let text = out.to_string();
+        if let Some(key) = &cache {
+            // Only what this key describes may be stored: a fallback to another model,
+            // or a provider that speaks another dialect, is a different request.
+            if served.model == key.model && attempt.route_dialect(&served) == key.dialect {
+                let now = crate::now_unix();
+                let expires_at = now.saturating_add(state.config.cache_ttl_secs as i64);
+                if let Err(e) = state
+                    .store
+                    .cache_put(
+                        &key.hash,
+                        &text,
+                        now,
+                        expires_at,
+                        state.config.cache_max_entries,
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "response cache write failed");
+                }
+            }
+        }
+        let mut resp = json_text_response(text);
+        if cache.is_some() {
+            insert_cache_header(&mut resp, "miss");
+        }
+        return Ok(resp);
     }
 
     // The dispatcher only sees `Result<ByteStream>`; which dialect that stream speaks is
@@ -971,30 +1082,6 @@ async fn handle(
         upstream: attempt.route_dialect(&candidate),
         client_model: candidate.model.clone(),
     };
-
-    if !client_stream {
-        // Stream-only upstream serving a non-streaming client: consume the whole
-        // stream, rebuild the canonical response, then answer in the client dialect.
-        let assembled = reassemble(&open, bytes).await?;
-        record_once(
-            state,
-            Recorded {
-                candidate: &candidate,
-                model: &plan.model,
-                endpoint: endpoint_of(inbound),
-                usage: assembled.usage,
-                key: key_id,
-                request_id: trace.request_id,
-                started,
-                ttft: None,
-                streamed: false,
-            },
-        );
-        return Ok(json_response(
-            StatusCode::OK,
-            rrouter_translate::build_response(inbound, &assembled)?,
-        ));
-    }
     Ok(stream_response(
         inbound,
         PendingRecord {
@@ -1037,16 +1124,20 @@ pub async fn complete_for(
     // A probe is still a request: it gets its own id, its attempt rows and its usage
     // row, so nothing it does is invisible in the log.
     let trace = RequestTrace::new(Uuid::new_v4());
-    complete_traced(state, inbound, body, key, &trace).await
+    complete_traced(state, inbound, body, key, &trace)
+        .await
+        .map(|(_, resp)| resp)
 }
 
+/// Both the candidate that answered and its canonical response. The candidate is what
+/// lets the caller decide whether the answer may be cached under the key it planned.
 async fn complete_traced(
     state: &Arc<AppState>,
     inbound: Dialect,
     body: &Value,
     key: Option<Uuid>,
     trace: &RequestTrace,
-) -> Result<rrouter_core::ChatResponse> {
+) -> Result<(Candidate, rrouter_core::ChatResponse)> {
     trace.set_key(key);
     let started = Instant::now();
     let canonical = rrouter_translate::parse_request(inbound, body)?;
@@ -1091,7 +1182,7 @@ async fn complete_traced(
                 streamed: false,
             },
         );
-        return Ok(resp);
+        return Ok((candidate, resp));
     }
 
     let (candidate, bytes) = state
@@ -1117,7 +1208,7 @@ async fn complete_traced(
             streamed: false,
         },
     );
-    Ok(assembled)
+    Ok((candidate, assembled))
 }
 
 /// Fold a streamed response back into a single canonical response.
@@ -1387,6 +1478,118 @@ fn stream_only(candidate: &Candidate) -> bool {
     rrouter_auth::get(&candidate.provider).is_some_and(|spec| spec.stream_only)
 }
 
+/// One cache lookup: the hashed key plus the exact model id and wire dialect it was
+/// built from. A response may only be stored under it when the candidate that answered
+/// matches both, so a fallback to a different model never poisons the entry.
+struct CacheKey {
+    hash: String,
+    model: String,
+    dialect: Dialect,
+}
+
+/// Write `value` with object keys sorted, so two spellings of the same JSON request
+/// hash to the same key. Arrays keep their order: message and tool order are part of
+/// the request. Scalars are rendered by `serde_json`, so numbers keep their value.
+fn write_canonical(value: &Value, out: &mut String) {
+    match value {
+        Value::Object(map) => {
+            out.push('{');
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).expect("a JSON string always serializes"));
+                out.push(':');
+                write_canonical(&map[key], out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(']');
+        }
+        scalar => out.push_str(&scalar.to_string()),
+    }
+}
+
+/// `x-rrouter-cache: bypass` skips the read *and* the write: a bypassed request never
+/// observes a stored response and never extends one.
+fn cache_bypassed(headers: &HeaderMap) -> bool {
+    headers
+        .get(CACHE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("bypass"))
+}
+
+/// A JSON body that is already serialized, so the bytes stored in the cache and the
+/// bytes the client receives are the same string.
+fn json_text_response(body: String) -> Response {
+    let mut resp = Response::new(Body::from(body));
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    resp
+}
+
+fn insert_cache_header(resp: &mut Response, state: &'static str) {
+    resp.headers_mut()
+        .insert(CACHE_HEADER, HeaderValue::from_static(state));
+}
+
+/// A stored response: same JSON body the original client received, plus the header
+/// that tells this client it came from the cache.
+fn cached_response(body: String) -> Response {
+    let mut resp = json_text_response(body);
+    insert_cache_header(&mut resp, "hit");
+    resp
+}
+
+/// One usage row for a cache hit: the request happened and is joinable to the activity
+/// log by the `x-request-id` the client saw, but it cost nothing. Tokens stay zero —
+/// no prompt was sent and nothing was generated, so inventing usage here would corrupt
+/// spend, budgets and TPM accounting.
+#[allow(clippy::too_many_arguments)]
+fn record_cache_hit(
+    state: &AppState,
+    candidate: &Candidate,
+    model: &str,
+    inbound: Dialect,
+    key: Option<Uuid>,
+    trace: &RequestTrace,
+    started: Instant,
+) {
+    spawn_record(
+        state,
+        UsageRecord {
+            id: None,
+            ts: crate::now_unix(),
+            request_id: Some(trace.request_id),
+            provider: candidate.provider.clone(),
+            model: model.to_string(),
+            connection_id: Some(candidate.connection),
+            endpoint: Some(endpoint_of(inbound).to_string()),
+            key_id: key,
+            cost_micros: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        },
+    );
+}
+
 /// Which dialect the opened stream speaks, and the model id to label it with.
 struct StreamRoute {
     upstream: Dialect,
@@ -1456,6 +1659,33 @@ impl Attempt<'_> {
         // with the raw client body re-inserted fields the translator had rewritten:
         // a string `input` overwrote the translated list ("Input must be a list").
         rrouter_translate::build_request(dialect, &request, self.upstream_stream)
+    }
+
+    /// Identity of the exact upstream request this attempt would send for `candidate`.
+    ///
+    /// The key covers the canonical request the gateway would put on the wire — the
+    /// resolved model (already patched into the body), messages, system, tools, sampling
+    /// fields, and any dialect passthrough — plus both dialects. Two requests share an
+    /// entry only when they are the same request to the same API in the same shape.
+    ///
+    /// A per-key model mapping is deliberately *not* part of the key: a mapping changes
+    /// routing, and that routing is already baked into the resolved model and dialect,
+    /// so a key with a mapping and a key without one share an entry when they resolve
+    /// to the same upstream request.
+    fn cache_key(&self, candidate: &Candidate) -> Result<CacheKey> {
+        let dialect = self.route_dialect(candidate);
+        let body = self.outbound(candidate, dialect)?;
+        let mut canonical = String::with_capacity(1024);
+        canonical.push_str(self.inbound.as_str());
+        canonical.push('\n');
+        canonical.push_str(dialect.as_str());
+        canonical.push('\n');
+        write_canonical(&body, &mut canonical);
+        Ok(CacheKey {
+            hash: rrouter_store::cache_key(&canonical),
+            model: candidate.model.clone(),
+            dialect,
+        })
     }
 
     async fn prepare(
@@ -1577,6 +1807,13 @@ impl RequestTrace {
 
     fn set_model(&self, model: &str) {
         self.labels().model = model.to_string();
+    }
+
+    /// Label the request with the provider that would have served it. A cache hit has
+    /// no attempt, so this is the only provider signal its counters would otherwise
+    /// lose.
+    fn set_provider(&self, provider: &str) {
+        self.labels().provider = provider.to_string();
     }
 
     /// Number this attempt (1-based, dispatch order) and start its stopwatch.

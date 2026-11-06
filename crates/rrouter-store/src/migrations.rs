@@ -8,10 +8,24 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 10;
+pub(crate) const SCHEMA_VERSION: i64 = 11;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+
+/// V11: the opt-in exact-match response cache. `key` is the SHA-256 of the canonical
+/// request (see `Store::cache_key`), `body` is the client-facing JSON that was sent,
+/// and `expires_at` bounds how long a byte-identical request may reuse it. `hits` is
+/// bookkeeping only; eviction is by `created_at`, oldest first, when the table grows
+/// past `RROUTER_CACHE_MAX_ENTRIES`. Nothing here holds prompt text beyond the
+/// response the client already received.
+const V11: &str = r#"
+CREATE TABLE IF NOT EXISTS response_cache (
+  key TEXT PRIMARY KEY, body TEXT NOT NULL, created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, hits INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_cache_expiry ON response_cache(expires_at);
+"#;
 
 /// V10: money. `usage.cost_micros` is what one request cost in millionths of a USD,
 /// priced from the registry's per-million-token rates (0 = the price was unknown, never
@@ -239,12 +253,12 @@ mod tests {
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN \
                  ('connections','api_keys','model_aliases','disabled_models','combos','usage',\
-                  'attempts','connection_stats','key_models')",
+                  'attempts','connection_stats','key_models','response_cache')",
                 [],
                 |r| r.get(0),
             )
             .expect("count");
-        assert_eq!(tables, 9);
+        assert_eq!(tables, 10);
     }
 
     #[test]

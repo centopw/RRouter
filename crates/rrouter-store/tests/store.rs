@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
 use rrouter_store::{
-    ApiKey, ApiKeyPatch, AttemptRecord, Credentials, KeyModel, ModelRow, Store, UsageRecord,
-    API_KEY_PREFIX, KEY_FILE_NAME,
+    cache_key, ApiKey, ApiKeyPatch, AttemptRecord, Credentials, KeyModel, ModelRow, Store,
+    UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -521,7 +521,7 @@ fn model_costs_returns_published_rows_for_the_named_providers() {
 }
 
 #[test]
-fn v6_database_migrates_to_ten() {
+fn v6_database_migrates_to_eleven() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
@@ -620,7 +620,7 @@ fn v6_database_migrates_to_ten() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
         ("idx_usage_request", "the usage row is looked up by request id"),
@@ -641,7 +641,7 @@ fn v6_database_migrates_to_ten() {
 /// connection defaults to weight 100 (the plain round-robin share), and the two new
 /// tables start empty.
 #[test]
-fn v8_database_migrates_to_ten() {
+fn v8_database_migrates_to_eleven() {
     let dir = TempDir::new("v8");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -710,7 +710,7 @@ fn v8_database_migrates_to_ten() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 
     let weight: i64 = conn
         .query_row("SELECT weight FROM connections", [], |r| r.get(0))
@@ -735,7 +735,7 @@ fn v8_database_migrates_to_ten() {
 /// A v9 database gains the money columns without touching existing rows: spend recorded
 /// before v10 stays at "unknown price", and every key stays unlimited.
 #[test]
-fn v9_database_migrates_to_ten() {
+fn v9_database_migrates_to_eleven() {
     let dir = TempDir::new("v9");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -784,7 +784,7 @@ fn v9_database_migrates_to_ten() {
         .expect("v9 schema");
     }
 
-    let store = Store::open(&dir.db(), None).expect("open store runs the v10 step");
+    let store = Store::open(&dir.db(), None).expect("open store runs the v10 and v11 steps");
     let keys = rt().block_on(store.list_api_keys()).expect("keys");
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].budget_tokens, 500, "the token budget survives");
@@ -804,7 +804,41 @@ fn v9_database_migrates_to_ten() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
+}
+
+/// A v10 database gains the response cache in place: the migration only adds a table and
+/// its index, so every existing row is untouched and the version reaches 11.
+#[test]
+fn v10_database_migrates_to_eleven() {
+    let dir = TempDir::new("v10");
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        conn.execute_batch("PRAGMA user_version = 10;").expect("v10 marker");
+    }
+
+    let store = Store::open(&dir.db(), None).expect("open store runs the v11 step");
+    assert!(
+        rt().block_on(store.cache_entries()).expect("cache readable").is_empty(),
+        "a fresh v11 cache starts empty"
+    );
+    drop(store);
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 11);
+    for (kind, name) in [("table", "response_cache"), ("index", "idx_cache_expiry")] {
+        let found: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                [kind, name],
+                |r| r.get(0),
+            )
+            .expect("sqlite_master");
+        assert_eq!(found, 1, "v11 must create the {kind} {name}");
+    }
 }
 
 // ----- 4c. routing inputs (phase 4) -------------------------------------------------
@@ -1274,6 +1308,78 @@ fn connection_crud_status_and_list_filter() {
         assert!(s.delete_connection(a.id).await.expect("del"));
         assert!(!s.delete_connection(a.id).await.expect("del again"));
         assert!(s.get_connection(a.id).await.expect("get").is_none());
+    });
+}
+
+// ----- response cache (phase 8) ------------------------------------------------------
+
+/// The table is a bounded, expiring key/value store: a hit is served until `expires_at`,
+/// an expired read deletes the row, and inserts past the cap drop the oldest first.
+#[test]
+fn response_cache_expires_lazily_and_evicts_the_oldest() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let key = cache_key("identical request");
+        assert_eq!(s.cache_get(&key, 1_000).await.expect("empty"), None);
+
+        s.cache_put(&key, r#"{"id":"a"}"#, 1_000, 1_100, 10).await.expect("put");
+        assert_eq!(
+            s.cache_get(&key, 1_050).await.expect("hit"),
+            Some(r#"{"id":"a"}"#.to_string())
+        );
+        let entries = s.cache_entries().await.expect("entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].hits, 1, "a served entry counts its hits");
+        assert_eq!(entries[0].expires_at, 1_100);
+
+        // The second read is at the expiry second: no longer servable, and gone.
+        assert_eq!(s.cache_get(&key, 1_100).await.expect("expired"), None);
+        assert!(s.cache_entries().await.expect("entries").is_empty(), "an expired read deletes the row");
+
+        // Three fresh entries under a cap of two: the oldest is evicted, not the newest.
+        for (i, payload) in ["a", "b", "c"].iter().enumerate() {
+            s.cache_put(
+                &cache_key(payload),
+                payload,
+                2_000 + i as i64,
+                9_000,
+                2,
+            )
+            .await
+            .expect("put");
+        }
+        let keys: Vec<String> = s
+            .cache_entries()
+            .await
+            .expect("entries")
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
+        assert_eq!(keys, vec![cache_key("b"), cache_key("c")], "oldest created_at loses");
+        assert_eq!(
+            s.cache_get(&cache_key("a"), 2_500).await.expect("evicted"),
+            None
+        );
+    });
+}
+
+/// Re-storing an existing key replaces the body and restarts its clock: a retried
+/// request must not keep serving the earlier (possibly failing) answer.
+#[test]
+fn response_cache_upsert_replaces_the_body_and_hits() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let key = cache_key("x");
+        s.cache_put(&key, "one", 100, 9_000, 10).await.expect("first");
+        assert_eq!(s.cache_get(&key, 200).await.expect("read"), Some("one".into()));
+        s.cache_put(&key, "two", 300, 9_000, 10).await.expect("second");
+        assert_eq!(s.cache_get(&key, 400).await.expect("read"), Some("two".into()));
+        let entries = s.cache_entries().await.expect("entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].body, "two");
+        assert_eq!(entries[0].hits, 1, "the counter restarts with the new body");
     });
 }
 

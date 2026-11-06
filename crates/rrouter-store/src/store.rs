@@ -231,6 +231,20 @@ pub struct AttemptRecord {
     pub key_id: Option<Uuid>,
 }
 
+/// One stored exact-match response.
+///
+/// `key` is the hash of the canonical request ([`cache_key`]); `body` is the JSON the
+/// client received, never a prompt. `hits` counts how often the entry was served, and
+/// `expires_at` (unix seconds) is the last second it may be served.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheEntry {
+    pub key: String,
+    pub body: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub hits: u32,
+}
+
 /// One time bucket for one model: the traffic chart stacks these by model, so
 /// every segment is an honest server-side count rather than a client estimate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1246,6 +1260,108 @@ impl Store {
         Ok(n > 0)
     }
 
+    // ----- response cache ----------------------------------------------------------
+
+    /// Serve a cached response, or `None` when the key is absent or expired.
+    ///
+    /// An expired row is deleted here rather than by a sweeper: the only moment the
+    /// gateway can know an entry is useless is the read that wanted it, and a delete
+    /// costs one indexed statement on a path that already touched the row.
+    pub async fn cache_get(&self, key: &str, now: i64) -> Result<Option<String>> {
+        let conn = self.conn();
+        let row: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT body, expires_at FROM response_cache WHERE key = ?1",
+                params![key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(migrations::db_err)?;
+        let Some((body, expires_at)) = row else {
+            return Ok(None);
+        };
+        if expires_at <= now {
+            conn.execute("DELETE FROM response_cache WHERE key = ?1", params![key])
+                .map_err(migrations::db_err)?;
+            return Ok(None);
+        }
+        conn.execute(
+            "UPDATE response_cache SET hits = hits + 1 WHERE key = ?1",
+            params![key],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(Some(body))
+    }
+
+    /// Store (or replace) a cached response and keep the table bounded.
+    ///
+    /// `created_at` is the insertion time and doubles as "now" for the expiry sweep.
+    /// Eviction is by `created_at` ascending, so the entries an operator was least
+    /// recently served lose to the ones just written. The insert and both sweeps run
+    /// under the single connection mutex, so a reader in this process never observes
+    /// the table above `max_entries`.
+    pub async fn cache_put(
+        &self,
+        key: &str,
+        body: &str,
+        created_at: i64,
+        expires_at: i64,
+        max_entries: usize,
+    ) -> Result<()> {
+        let max_entries = i64::try_from(max_entries.max(1)).unwrap_or(i64::MAX);
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO response_cache (key, body, created_at, expires_at, hits) \
+             VALUES (?1, ?2, ?3, ?4, 0) \
+             ON CONFLICT(key) DO UPDATE SET \
+               body = excluded.body, created_at = excluded.created_at, \
+               expires_at = excluded.expires_at, hits = 0",
+            params![key, body, created_at, expires_at],
+        )
+        .map_err(migrations::db_err)?;
+        conn.execute(
+            "DELETE FROM response_cache WHERE expires_at <= ?1",
+            params![created_at],
+        )
+        .map_err(migrations::db_err)?;
+        conn.execute(
+            "DELETE FROM response_cache WHERE rowid IN ( \
+               SELECT rowid FROM response_cache ORDER BY created_at ASC, rowid ASC \
+               LIMIT max(0, (SELECT count(*) FROM response_cache) - ?1))",
+            params![max_entries],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Every cached entry, oldest first. Ops/debugging view: the bodies are exactly the
+    /// responses their clients already received.
+    pub async fn cache_entries(&self) -> Result<Vec<CacheEntry>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT key, body, created_at, expires_at, hits FROM response_cache \
+                 ORDER BY created_at ASC, rowid ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(CacheEntry {
+                    key: r.get(0)?,
+                    body: r.get(1)?,
+                    created_at: r.get(2)?,
+                    expires_at: r.get(3)?,
+                    hits: u32::try_from(r.get::<_, i64>(4)?).unwrap_or(u32::MAX),
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
     // ----- usage -------------------------------------------------------------------
 
     /// Append one usage row. Only counters and error text are stored, never payloads.
@@ -1729,6 +1845,15 @@ fn generate_api_key() -> String {
     key.push_str(API_KEY_PREFIX);
     key.push_str(&hex::encode(raw));
     key
+}
+
+/// Key for one response-cache entry: SHA-256 hex of the canonical request payload.
+///
+/// Derived here, next to the table it keys, so a caller cannot store under one key and
+/// read under another. The payload is the full canonical request (unbounded in length);
+/// the stored key stays 64 hex characters.
+pub fn cache_key(payload: &str) -> String {
+    hex::encode(Sha256::digest(payload.as_bytes()))
 }
 
 fn hash_api_key(plaintext: &str) -> String {

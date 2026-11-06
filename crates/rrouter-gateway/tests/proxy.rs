@@ -227,7 +227,19 @@ fn config(require_api_key: bool) -> Config {
         max_attempts: 4,
         shutdown_grace_secs: 20,
         strategy: rrouter_router::Strategy::Priority,
+        cache: rrouter_gateway::config::CacheMode::Off,
+        cache_ttl_secs: 300,
+        cache_max_entries: 1000,
     }
+}
+
+/// The same runtime settings with the exact-match cache switched on.
+fn cached_config(ttl_secs: u64, max_entries: usize) -> Config {
+    let mut cfg = config(false);
+    cfg.cache = rrouter_gateway::config::CacheMode::Sqlite;
+    cfg.cache_ttl_secs = ttl_secs;
+    cfg.cache_max_entries = max_entries;
+    cfg
 }
 
 fn harness(require_api_key: bool) -> Harness {
@@ -311,6 +323,17 @@ impl Harness {
     }
 
     async fn post_with(&self, uri: &str, body: Value, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+        let (status, _, value) = self.post_headers(uri, body, headers).await;
+        (status, value)
+    }
+
+    /// POST with extra headers, keeping the response headers (cache markers, request id).
+    async fn post_headers(
+        &self,
+        uri: &str,
+        body: Value,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
         let mut builder = Request::builder()
             .method("POST")
             .uri(uri)
@@ -318,7 +341,25 @@ impl Harness {
         for (k, v) in headers {
             builder = builder.header(*k, *v);
         }
-        self.call(builder.body(Body::from(body.to_string())).expect("request")).await
+        self.call_full(builder.body(Body::from(body.to_string())).expect("request")).await
+    }
+
+    /// Wait for the usage row written for `request_id` (recorded off the response path).
+    async fn usage_for(&self, request_id: uuid::Uuid) -> UsageRecord {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(row) = self
+                .state
+                .store
+                .usage_by_request(request_id)
+                .await
+                .expect("usage lookup")
+            {
+                return row;
+            }
+            assert!(Instant::now() < deadline, "no usage row for {request_id}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// Create a key and hand back `(plaintext, id)`.
@@ -2961,4 +3002,351 @@ async fn connection_patch_sets_priority_and_weight_and_the_plan_follows() {
         .await;
     assert_eq!(patched["priority"], 7);
     assert_eq!(patched["weight"], 1, "an unnamed weight keeps its value");
+}
+
+// -------------------------------------------------------- response cache (phase 8)
+
+/// The whole point: the same non-streaming request twice costs one upstream call, and
+/// the second response is the first one byte-for-byte under a new request id.
+#[tokio::test]
+async fn identical_non_streaming_requests_hit_the_cache() {
+    let mock = Mock::start(vec![openai_reply("cached answer"), openai_reply("second answer")]).await;
+    let h = harness_with(cached_config(300, 100));
+    h.connect("openai", &mock).await;
+
+    let (status, headers, first) =
+        h.post_headers("/v1/chat/completions", openai_chat_body("gpt-4.1"), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    assert_eq!(mock.hits(), 1);
+
+    let (status, headers, second) =
+        h.post_headers("/v1/chat/completions", openai_chat_body("gpt-4.1"), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(headers["x-rrouter-cache"], "hit");
+    assert_eq!(second, first, "a hit is the stored response body");
+    assert_eq!(mock.hits(), 1, "the upstream was not called twice");
+    let hit_id = headers["x-request-id"].to_str().expect("id").to_string();
+
+    // An explicit `stream:false` is the same request as an absent `stream`: the
+    // canonical body the gateway sends is identical, so it shares the entry.
+    let mut explicit = openai_chat_body("gpt-4.1");
+    explicit["stream"] = json!(false);
+    let (_, headers, third) = h.post_headers("/v1/chat/completions", explicit, &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "hit");
+    assert_eq!(third, first);
+    assert_eq!(mock.hits(), 1);
+    assert_ne!(
+        headers["x-request-id"].to_str().expect("id"),
+        hit_id,
+        "every request still gets its own id"
+    );
+
+    // The hit is visible in Activity as a real request that cost nothing.
+    let row = h
+        .usage_for(uuid::Uuid::parse_str(&hit_id).expect("uuid"))
+        .await;
+    assert_eq!(row.status, 200);
+    assert_eq!(row.endpoint.as_deref(), Some("/v1/chat/completions"));
+    assert_eq!(row.provider, "openai");
+    assert_eq!(row.input_tokens, 0, "no prompt was sent");
+    assert_eq!(row.output_tokens, 0, "nothing was generated");
+    assert_eq!(row.cache_read_tokens, 0);
+    assert_eq!(row.cache_write_tokens, 0);
+    assert_eq!(row.cost_micros, 0, "a cache hit is free");
+
+    // Both outcomes are visible to a Prometheus scrape.
+    let (status, _, text) = h.get_raw("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        metric_value(&text, "rrouter_cache_hits_total") >= 1,
+        "a hit is counted: {text}"
+    );
+    assert!(
+        metric_value(&text, "rrouter_cache_misses_total") >= 1,
+        "the first request was a miss: {text}"
+    );
+}
+
+/// `/v1/messages` is cached the same way, and its stored answer is the client's own
+/// dialect (an Anthropic message, not a chat completion).
+#[tokio::test]
+async fn anthropic_messages_are_cached_too() {
+    let reply = || {
+        MockReply::Json(
+            200,
+            json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "sonnet-4-5",
+                "content": [{"type": "text", "text": "bonjour"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 9, "output_tokens": 4}
+            }),
+        )
+    };
+    let mock = Mock::start(vec![reply(), reply()]).await;
+    let h = harness_with(cached_config(300, 100));
+    h.connect("claude", &mock).await;
+
+    let body = json!({
+        "model": "claude/sonnet-4-5",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let (status, headers, first) = h.post_headers("/v1/messages", body.clone(), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    let (status, headers, second) = h.post_headers("/v1/messages", body, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(headers["x-rrouter-cache"], "hit");
+    assert_eq!(second["type"], "message");
+    assert_eq!(second, first);
+    assert_eq!(mock.hits(), 1);
+}
+
+/// A non-streaming client of a stream-only provider (codex) is served by reassembly;
+/// that reassembled body is still a non-streaming response, so it caches like any other.
+#[tokio::test]
+async fn reassembled_stream_upstream_still_caches_for_a_non_streaming_client() {
+    let wire = concat!(
+        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\"}}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}}\n\n",
+    );
+    let sse = || {
+        MockReply::Sse(vec![SseStep {
+            wire: wire.to_string(),
+            await_gate: None,
+        }])
+    };
+    let mock = Mock::start(vec![sse(), sse()]).await;
+    let h = harness_with(cached_config(300, 100));
+    h.connect("codex", &mock).await;
+
+    let body = openai_chat_body("codex/gpt-5.6-luna");
+    let (status, headers, first) =
+        h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    assert_eq!(first["choices"][0]["message"]["content"], "Hello");
+
+    let (status, headers, second) = h.post_headers("/v1/chat/completions", body, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(headers["x-rrouter-cache"], "hit");
+    assert_eq!(second, first);
+    assert_eq!(mock.hits(), 1, "the second client request never reached codex");
+}
+
+/// A cache entry belongs to one canonical request: a different temperature or model is
+/// a different request and must reach the upstream.
+#[tokio::test]
+async fn cache_key_covers_temperature_and_model() {
+    let mock = Mock::start(vec![
+        openai_reply("temp0"),
+        openai_reply("temp0.7"),
+        openai_reply("mini"),
+        openai_reply("temp0 again"),
+    ])
+    .await;
+    let h = harness_with(cached_config(300, 100));
+    h.connect("openai", &mock).await;
+
+    let mut body = openai_chat_body("gpt-4.1");
+    body["temperature"] = json!(0);
+    let (_, headers, first) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    assert_eq!(first["choices"][0]["message"]["content"], "temp0");
+
+    // Same body again: no upstream call.
+    let (_, headers, repeat) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "hit");
+    assert_eq!(repeat["choices"][0]["message"]["content"], "temp0");
+    assert_eq!(mock.hits(), 1);
+
+    // Same prompt, different sampling: a miss.
+    body["temperature"] = json!(0.7);
+    let (_, headers, sampled) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    assert_eq!(sampled["choices"][0]["message"]["content"], "temp0.7");
+    assert_eq!(mock.hits(), 2);
+
+    // Same sampling, different model: a miss.
+    let mut other = openai_chat_body("gpt-4.1-mini");
+    other["temperature"] = json!(0.7);
+    let (_, headers, mini) = h.post_headers("/v1/chat/completions", other, &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    assert_eq!(mini["choices"][0]["message"]["content"], "mini");
+    assert_eq!(mock.hits(), 3);
+
+    // The earlier entry survived both misses.
+    body["temperature"] = json!(0);
+    let (_, headers, again) = h.post_headers("/v1/chat/completions", body, &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "hit");
+    assert_eq!(again["choices"][0]["message"]["content"], "temp0");
+    assert_eq!(mock.hits(), 3);
+}
+
+/// A streamed response is never stored or served from the cache: it has no single body
+/// to hand back, and the contract is about non-streaming requests only.
+#[tokio::test]
+async fn streamed_requests_never_use_the_cache() {
+    let sse = || {
+        MockReply::Sse(vec![
+            SseStep {
+                wire: rrouter_core::sse::render_openai(
+                    &json!({"id":"c1","model":"mock-model","choices":[{"index":0,"delta":{"content":"A"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}).to_string(),
+                    None,
+                ),
+                await_gate: None,
+            },
+            SseStep { wire: "data: [DONE]\n\n".to_string(), await_gate: None },
+        ])
+    };
+    let mock = Mock::start(vec![sse(), sse()]).await;
+    let h = harness_with(cached_config(300, 100));
+    h.connect("openai", &mock).await;
+
+    let mut body = openai_chat_body("gpt-4.1");
+    body["stream"] = json!(true);
+    for _ in 0..2 {
+        let (status, headers, _) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get("x-rrouter-cache").is_none(), "streams carry no cache marker");
+    }
+    assert_eq!(mock.hits(), 2, "both streamed requests reached the upstream");
+    assert!(
+        h.state.store.cache_entries().await.expect("entries").is_empty(),
+        "a stream is never stored"
+    );
+}
+
+/// `x-rrouter-cache: bypass` reads nothing and writes nothing: the entry already there
+/// is neither served nor replaced.
+#[tokio::test]
+async fn bypass_forces_a_miss_without_touching_the_entry() {
+    let mock = Mock::start(vec![openai_reply("stored"), openai_reply("fresh")]).await;
+    let h = harness_with(cached_config(300, 100));
+    h.connect("openai", &mock).await;
+    let body = openai_chat_body("gpt-4.1");
+
+    let (_, headers, first) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    assert_eq!(first["choices"][0]["message"]["content"], "stored");
+    assert_eq!(mock.hits(), 1);
+
+    let (_, headers, bypassed) = h
+        .post_headers(
+            "/v1/chat/completions",
+            body.clone(),
+            &[("x-rrouter-cache", "bypass")],
+        )
+        .await;
+    assert_eq!(bypassed["choices"][0]["message"]["content"], "fresh");
+    assert!(
+        headers.get("x-rrouter-cache").is_none(),
+        "a bypassed request is outside the cache entirely"
+    );
+    assert_eq!(mock.hits(), 2);
+
+    let (_, headers, again) = h.post_headers("/v1/chat/completions", body, &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "hit");
+    assert_eq!(
+        again["choices"][0]["message"]["content"], "stored",
+        "the bypass did not overwrite the stored response"
+    );
+    assert_eq!(mock.hits(), 2);
+}
+
+/// An entry past its `expires_at` is not served, and the miss replaces it.
+#[tokio::test]
+async fn expired_cache_entry_is_not_served() {
+    let mock = Mock::start(vec![openai_reply("stale"), openai_reply("fresh")]).await;
+    let h = harness_with(cached_config(300, 100));
+    h.connect("openai", &mock).await;
+    let body = openai_chat_body("gpt-4.1");
+
+    let (_, _, first) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    assert_eq!(first["choices"][0]["message"]["content"], "stale");
+    let entries = h.state.store.cache_entries().await.expect("entries");
+    assert_eq!(entries.len(), 1);
+    let key = entries[0].key.clone();
+
+    // Backdate the one row the way a restart would leave an old entry behind.
+    h.state
+        .store
+        .cache_put(&key, &first.to_string(), 1_000, 2_000, 100)
+        .await
+        .expect("seed expired row");
+    assert!(2_000 < rrouter_gateway::now_unix(), "the seeded expiry is in the past");
+
+    let (_, headers, second) = h.post_headers("/v1/chat/completions", body, &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    assert_eq!(second["choices"][0]["message"]["content"], "fresh");
+    assert_eq!(mock.hits(), 2);
+
+    let entries = h.state.store.cache_entries().await.expect("entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, key, "the same request reused its key");
+    assert!(
+        entries[0].expires_at > rrouter_gateway::now_unix(),
+        "the stale row was replaced with a fresh expiry"
+    );
+    assert!(entries[0].body.contains("fresh"));
+}
+
+/// Off is the default: without `RROUTER_CACHE=sqlite` nothing is read or written.
+#[tokio::test]
+async fn cache_is_off_by_default() {
+    let mock = Mock::start(vec![openai_reply("one"), openai_reply("two")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let body = openai_chat_body("gpt-4.1");
+
+    for _ in 0..2 {
+        let (status, headers, _) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get("x-rrouter-cache").is_none());
+    }
+    assert_eq!(mock.hits(), 2);
+    assert!(h.state.store.cache_entries().await.expect("entries").is_empty());
+}
+
+/// The table never grows past `RROUTER_CACHE_MAX_ENTRIES`: the oldest entry is dropped,
+/// so its request goes upstream again.
+#[tokio::test]
+async fn cache_eviction_keeps_at_most_max_entries() {
+    let mock = Mock::start(vec![
+        openai_reply("first"),
+        openai_reply("second"),
+        openai_reply("third"),
+    ])
+    .await;
+    let h = harness_with(cached_config(300, 1));
+    h.connect("openai", &mock).await;
+
+    let mut body = openai_chat_body("gpt-4.1");
+    body["temperature"] = json!(0);
+    let (_, headers, first) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    assert_eq!(first["choices"][0]["message"]["content"], "first");
+
+    body["temperature"] = json!(0.2);
+    let (_, headers, second) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    assert_eq!(second["choices"][0]["message"]["content"], "second");
+    assert_eq!(
+        h.state.store.cache_entries().await.expect("entries").len(),
+        1,
+        "max_entries=1 bounds the table"
+    );
+
+    // The first key was the oldest, so it was evicted rather than served.
+    body["temperature"] = json!(0);
+    let (_, headers, again) = h.post_headers("/v1/chat/completions", body, &[]).await;
+    assert_eq!(headers["x-rrouter-cache"], "miss");
+    assert_eq!(again["choices"][0]["message"]["content"], "third");
+    assert_eq!(mock.hits(), 3);
 }

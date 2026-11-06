@@ -88,6 +88,9 @@ fn config() -> Config {
         max_attempts: 4,
         shutdown_grace_secs: 20,
         strategy: Default::default(),
+        cache: Default::default(),
+        cache_ttl_secs: 300,
+        cache_max_entries: 1000,
     }
 }
 

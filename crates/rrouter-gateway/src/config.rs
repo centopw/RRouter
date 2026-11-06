@@ -19,6 +19,45 @@ const DEFAULT_MAX_ATTEMPTS: usize = 4;
 /// provider outage into a slow client-visible failure for no diagnostic gain.
 const MAX_ATTEMPTS_CEILING: usize = 8;
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 20;
+/// Response cache lifetime when `RROUTER_CACHE_TTL_SECS` is unset.
+const DEFAULT_CACHE_TTL_SECS: usize = 300;
+/// Upper bound on a cache entry's life: a day is the longest an operator can keep
+/// serving a response that a model/provider may since have changed.
+const MAX_CACHE_TTL_SECS: usize = 86_400;
+/// Cache rows kept when `RROUTER_CACHE_MAX_ENTRIES` is unset.
+const DEFAULT_CACHE_MAX_ENTRIES: usize = 1_000;
+/// Hard ceiling on cache rows: the whole point is a bounded amount of memory/disk.
+const MAX_CACHE_ENTRIES: usize = 100_000;
+
+/// Where the exact-match response cache keeps its entries.
+///
+/// `Off` (the default) means the gateway never reads or writes one; `Sqlite` reuses the
+/// gateway database, so a restart keeps cached responses and an operator can inspect
+/// them with `sqlite3`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CacheMode {
+    #[default]
+    Off,
+    Sqlite,
+}
+
+impl CacheMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Sqlite => "sqlite",
+        }
+    }
+
+    /// Case-insensitive, trimmed. `None` for an unknown name.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "sqlite" => Some(Self::Sqlite),
+            _ => None,
+        }
+    }
+}
 
 /// Everything the binary needs, resolved and validated once.
 #[derive(Debug, Clone)]
@@ -49,6 +88,12 @@ pub struct Config {
     pub shutdown_grace_secs: u64,
     /// Ordering of equal-priority connections. Priority itself always dominates.
     pub strategy: Strategy,
+    /// Exact-match response cache backend; `Off` by default.
+    pub cache: CacheMode,
+    /// Seconds a cached response stays servable, clamped to `1..=86400`.
+    pub cache_ttl_secs: u64,
+    /// Cached responses kept, clamped to `1..=100000`; oldest evicted first.
+    pub cache_max_entries: usize,
 }
 
 impl Config {
@@ -171,6 +216,35 @@ impl Config {
             },
         };
 
+        // An unknown cache backend is refused at startup for the same reason as an
+        // unknown strategy: silently staying off would look like the cache is working.
+        let cache = match var("RROUTER_CACHE") {
+            None => CacheMode::Off,
+            Some(raw) => match CacheMode::parse(&raw) {
+                Some(mode) => mode,
+                None => {
+                    problems.push(format!(
+                        "RROUTER_CACHE={raw:?} is not one of off, sqlite"
+                    ));
+                    CacheMode::Off
+                }
+            },
+        };
+        let cache_ttl_secs = clamp_cache_ttl(clamped_var(
+            "RROUTER_CACHE_TTL_SECS",
+            DEFAULT_CACHE_TTL_SECS,
+            1,
+            MAX_CACHE_TTL_SECS,
+            &mut problems,
+        )) as u64;
+        let cache_max_entries = clamp_cache_entries(clamped_var(
+            "RROUTER_CACHE_MAX_ENTRIES",
+            DEFAULT_CACHE_MAX_ENTRIES,
+            1,
+            MAX_CACHE_ENTRIES,
+            &mut problems,
+        ));
+
         if problems.is_empty() {
             Ok(Self {
                 host,
@@ -189,6 +263,9 @@ impl Config {
                 max_attempts,
                 shutdown_grace_secs,
                 strategy,
+                cache,
+                cache_ttl_secs,
+                cache_max_entries,
             })
         } else {
             Err(problems.join("; "))
@@ -264,6 +341,40 @@ fn clamp_attempts(raw: usize) -> usize {
     raw.clamp(1, MAX_ATTEMPTS_CEILING)
 }
 
+/// Numeric setting clamped into `min..=max`; a non-numeric value is a startup error.
+///
+/// Clamping is for "more than allowed", which is an understandable operator request;
+/// garbage is not, and must be reported before the gateway starts serving.
+fn clamped_var(
+    name: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+    problems: &mut Vec<String>,
+) -> usize {
+    match var(name) {
+        None => default,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(v) => v.clamp(min, max),
+            Err(_) => {
+                problems.push(format!("{name}={raw:?} is not a non-negative integer"));
+                default
+            }
+        },
+    }
+}
+
+/// Cache TTL is clamped, never refused: a longer life than a day only risks serving a
+/// stale answer, while failing startup would take a working gateway down.
+fn clamp_cache_ttl(raw: usize) -> usize {
+    raw.clamp(1, MAX_CACHE_TTL_SECS)
+}
+
+/// Same reasoning as [`clamp_cache_ttl`]: the entry cap is a bound, not a contract.
+fn clamp_cache_entries(raw: usize) -> usize {
+    raw.clamp(1, MAX_CACHE_ENTRIES)
+}
+
 /// Serializes configuration for `--print-config`, never echoing the master key or the
 /// admin token.
 pub struct Redacted<'a>(&'a Config);
@@ -272,7 +383,7 @@ impl Serialize for Redacted<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let c = self.0;
-        let mut st = s.serialize_struct("Config", 17)?;
+        let mut st = s.serialize_struct("Config", 20)?;
         st.serialize_field("host", &c.host.to_string())?;
         st.serialize_field("port", &c.port)?;
         st.serialize_field("data_dir", &c.data_dir.to_string_lossy())?;
@@ -293,6 +404,9 @@ impl Serialize for Redacted<'_> {
         st.serialize_field("max_attempts", &c.max_attempts)?;
         st.serialize_field("shutdown_grace_secs", &c.shutdown_grace_secs)?;
         st.serialize_field("strategy", c.strategy.as_str())?;
+        st.serialize_field("cache", c.cache.as_str())?;
+        st.serialize_field("cache_ttl_secs", &c.cache_ttl_secs)?;
+        st.serialize_field("cache_max_entries", &c.cache_max_entries)?;
         st.end()
     }
 }
@@ -326,6 +440,9 @@ mod tests {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             shutdown_grace_secs: DEFAULT_SHUTDOWN_GRACE_SECS,
             strategy: Strategy::Priority,
+            cache: CacheMode::Off,
+            cache_ttl_secs: DEFAULT_CACHE_TTL_SECS as u64,
+            cache_max_entries: DEFAULT_CACHE_MAX_ENTRIES,
         }
     }
 
@@ -336,6 +453,31 @@ mod tests {
         assert_eq!(Strategy::parse("least_latency"), Some(Strategy::LeastLatency));
         assert_eq!(Strategy::parse("least-latency"), None);
         assert_eq!(Strategy::parse(""), None);
+    }
+
+    #[test]
+    fn cache_names_parse_and_unknown_values_are_refused() {
+        assert_eq!(CacheMode::parse("off"), Some(CacheMode::Off));
+        assert_eq!(CacheMode::parse(" SQLite "), Some(CacheMode::Sqlite));
+        assert_eq!(CacheMode::parse("redis"), None);
+        assert_eq!(CacheMode::parse(""), None);
+        assert_eq!(CacheMode::default(), CacheMode::Off, "the cache is opt-in");
+        assert_eq!(CacheMode::Off.as_str(), "off");
+        assert_eq!(CacheMode::Sqlite.as_str(), "sqlite");
+    }
+
+    /// TTL and entry caps are clamped into the documented windows; the values are
+    /// operator intent, so an oversized number must not take the gateway down.
+    #[test]
+    fn cache_numbers_are_clamped_into_the_supported_range() {
+        assert_eq!(clamp_cache_ttl(0), 1, "zero would make every entry expire at once");
+        assert_eq!(clamp_cache_ttl(300), 300);
+        assert_eq!(clamp_cache_ttl(86_400), 86_400);
+        assert_eq!(clamp_cache_ttl(usize::MAX), MAX_CACHE_TTL_SECS);
+        assert_eq!(clamp_cache_entries(0), 1);
+        assert_eq!(clamp_cache_entries(1_000), 1_000);
+        assert_eq!(clamp_cache_entries(100_000), 100_000);
+        assert_eq!(clamp_cache_entries(usize::MAX), MAX_CACHE_ENTRIES);
     }
 
     #[test]
@@ -367,6 +509,9 @@ mod tests {
         cfg.max_concurrency = 7;
         cfg.max_attempts = 2;
         cfg.shutdown_grace_secs = 0;
+        cfg.cache = CacheMode::Sqlite;
+        cfg.cache_ttl_secs = 60;
+        cfg.cache_max_entries = 5;
         let json = serde_json::to_string(&cfg.redacted()).expect("serialize");
         assert!(json.contains("\"admin_token\":\"set\""));
         assert!(!json.contains(token), "the token itself must never be printed: {json}");
@@ -374,6 +519,9 @@ mod tests {
         assert!(json.contains("\"max_attempts\":2"));
         assert!(json.contains("\"shutdown_grace_secs\":0"));
         assert!(json.contains("\"strategy\":\"priority\""));
+        assert!(json.contains("\"cache\":\"sqlite\""));
+        assert!(json.contains("\"cache_ttl_secs\":60"));
+        assert!(json.contains("\"cache_max_entries\":5"));
     }
 
     #[test]

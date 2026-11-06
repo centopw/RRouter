@@ -40,6 +40,10 @@ struct Registry {
     buckets: [u64; BUCKETS.len() + 1],
     duration_sum: f64,
     count: u64,
+    /// Exact-match cache lookups that were served from the store.
+    cache_hits: u64,
+    /// Lookups that found nothing servable (absent, expired, or unreadable).
+    cache_misses: u64,
 }
 
 /// Only poisoned by a panic while counting; the numbers are still readable, so recover.
@@ -71,6 +75,16 @@ pub fn request_finished(provider: &str, model: &str, status: u16, elapsed: Durat
 pub fn attempt_finished(provider: &str, status: u16) {
     let mut reg = lock();
     *reg.attempts.entry((label(provider), status)).or_insert(0) += 1;
+}
+
+/// One exact-match cache lookup served from the store: no upstream call happened.
+pub fn cache_hit() {
+    lock().cache_hits += 1;
+}
+
+/// One exact-match cache lookup that found nothing servable and went upstream.
+pub fn cache_miss() {
+    lock().cache_misses += 1;
 }
 
 /// Replace an unknown label payload with [`UNKNOWN`]; everything else is escaped at
@@ -140,6 +154,14 @@ pub fn render(version: &str, open_connections: &[(String, bool)]) -> String {
         let labels = format!("provider=\"{}\",status=\"{status}\"", escape(provider));
         out.push_str(&format!("rrouter_attempts_total{{{labels}}} {count}\n"));
     }
+
+    out.push_str("# HELP rrouter_cache_hits_total Non-streaming requests served from the exact-match cache.\n");
+    out.push_str("# TYPE rrouter_cache_hits_total counter\n");
+    out.push_str(&format!("rrouter_cache_hits_total {}\n", reg.cache_hits));
+
+    out.push_str("# HELP rrouter_cache_misses_total Cache lookups that found no servable entry.\n");
+    out.push_str("# TYPE rrouter_cache_misses_total counter\n");
+    out.push_str(&format!("rrouter_cache_misses_total {}\n", reg.cache_misses));
 
     out.push_str("# HELP rrouter_request_duration_seconds End-to-end request latency.\n");
     out.push_str("# TYPE rrouter_request_duration_seconds histogram\n");
