@@ -136,7 +136,7 @@ export default function Setup() {
         <span aria-hidden className="h-[18px] w-px bg-line" />
         <span className="text-[14px] text-muted">Setup</span>
         <span className="ml-auto hidden text-[12.5px] text-faint min-[820px]:inline">
-          About 2 minutes · progress is saved
+          About 2 minutes · finish whenever you like
         </span>
         <Button variant="quiet" onClick={skip}>
           Skip setup
