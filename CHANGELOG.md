@@ -2,9 +2,11 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
-## Unreleased
+## 0.2.1
 
 ### Added
+- Server-side filters on the request log (`provider`, `model` ref or bare id, `key_id`,
+  `status` 2xx/error) that compose with the cursor.
 - Logs page: filterable, cursor-paginated request history with the same attempts detail as
   Activity.
 - Structured logs: `RROUTER_LOG_FORMAT=json` and one access line per finished request
