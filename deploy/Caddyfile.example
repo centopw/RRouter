@@ -1,17 +1,18 @@
 # Reverse proxy in front of RRouter.
 #
-#   your-gateway.example.com {
-#       reverse_proxy 127.0.0.1:20128
-#   }
-#
-# RRouter must see a non-loopback socket address for this to matter: with the default
-# RROUTER_HOST=127.0.0.1 the proxy talks to loopback, so the admin gate stays in loopback
-# mode and the remote caller cannot reach /api at all. If you bind a public address,
-# set RROUTER_ALLOW_REMOTE_ADMIN=true and put authentication in this proxy - the admin
-# API has no built-in user login.
+# RRouter must be bound to loopback (its default). This proxy then talks to it from
+# loopback, so the *admin* API (/api, /metrics) is reachable through the proxy even
+# though RRouter otherwise restricts it to local callers. Protect those paths here:
+# the admin API has no built-in user login.
 
 your-gateway.example.com {
     encode zstd gzip
+
+    # Generate the hash with: caddy hash-password --plaintext 'choose-a-password'
+    @admin path /api/* /metrics
+    basic_auth @admin {
+        admin $2a$14$REPLACE_WITH_A_BCRYPT_HASH
+    }
 
     # Streaming: do not buffer SSE or cap the response.
     reverse_proxy 127.0.0.1:20128 {

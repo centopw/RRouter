@@ -114,6 +114,24 @@ Candidates are ordered by account priority, skipping providers with no active co
 accounts inside their circuit breaker. A 429 backs the account off exponentially, honouring
 `Retry-After`; a 5xx opens the breaker, and a half-open probe brings it back.
 
+## Keys and limits
+
+A gateway key is not just a password: each one carries the limits an operator needs.
+
+| Limit | Effect |
+| --- | --- |
+| `rpm` | requests per minute, sliding window; over the limit `429 rate_limited` with `Retry-After` |
+| `tpm` | tokens per minute from the last 60 s of recorded usage; `429 rate_limited` |
+| `budget_tokens` | lifetime token budget; once spent, `429 budget_exhausted` until the operator raises it |
+| `allowed_models` | exact refs or `provider/*` globs; anything else is `403 model_not_allowed` |
+| `expires_at` | after that moment the key answers `403 api_key_expired` |
+
+Spend is read from the usage table (not a counter that drifts), every usage row records which
+key produced it, and the Keys page edits all of it. Enforcement applies whenever a key is
+presented; with `RROUTER_REQUIRE_API_KEY=false` a request with no key is still anonymous, and
+an unknown placeholder key is ignored so local tools keep working. A *known* key that is
+inactive or expired is always rejected.
+
 ## Providers
 
 | Kind | Providers |
@@ -202,6 +220,9 @@ cannot fix it, the page shows a recoverable "this dashboard was updated" card wh
 sidebar keeps working.
 
 ## Configuration
+
+The operational guide — exposure, TLS proxy, backups, upgrades, failure modes — lives in
+[`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
