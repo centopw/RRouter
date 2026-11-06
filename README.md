@@ -191,6 +191,7 @@ the first account falls through to the next in milliseconds, the first SSE frame
 client before the upstream finishes its stream, an Anthropic client gets Anthropic-shaped
 output from an [OI]-speaking provider, credentials are absent from the DB file in plaintext,
 the key file is `0600`, and the admin API never returns token material.
+
 ## License
 
 MIT. Behavioural inspiration from 9router (also MIT); no code is copied — wire contracts were
