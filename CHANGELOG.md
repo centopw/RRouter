@@ -51,7 +51,11 @@ All notable changes. Dates are local; versions follow semver once tagged.
 ### Operations
 
 - `usage`/`attempts` accounting, Prometheus `/metrics`, `/health` and a self-probe
-  (`rrouter --healthcheck`), graceful shutdown.
+  (`rrouter --healthcheck`), graceful shutdown with a bounded drain.
+- Request ids (`x-request-id`) and per-attempt records, so a fallback is visible in
+  `GET /api/usage/{id}` and in Activity instead of inferred.
+- `RROUTER_ADMIN_TOKEN` for the admin API, `RROUTER_MAX_CONCURRENCY` backpressure (503 +
+  Retry-After), `RROUTER_MAX_ATTEMPTS`, `RROUTER_SHUTDOWN_GRACE_SECS`.
 - Docker (distroless, nonroot, healthcheck), compose, single-replica Kubernetes manifest,
   systemd unit, Caddy example with admin auth.
 - `scripts/backup.sh` (consistent SQLite snapshot), `scripts/load_test.py`, `scripts/verify.sh`,
@@ -65,6 +69,9 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - Cache markers were dropped when a request was rebuilt; same-dialect bodies are now forwarded.
 - Activity counted requests one bucket early; windows now end in the bucket containing "now".
 - Streamed responses recorded `streamed=false`; the flag and time-to-first-output are recorded.
+- The shutdown grace started at process boot instead of on the signal, so every gateway
+  exited after 20 s; the timer now starts with SIGTERM/SIGINT and exits in milliseconds when
+  nothing is streaming.
 
 ### Known limitations
 
