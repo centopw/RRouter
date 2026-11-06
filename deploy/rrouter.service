@@ -1,0 +1,38 @@
+# systemd unit for a single-node install.
+#
+#   sudo install -m 0644 deploy/rrouter.service /etc/systemd/system/rrouter.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now rrouter
+#
+# Keep the admin API on loopback: this unit has no public reverse proxy in front, so the
+# admin gate must remain in its default mode.
+
+[Unit]
+Description=RRouter — self-hosted AI gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rrouter
+Group=rrouter
+ExecStart=/usr/local/bin/rrouter
+Restart=on-failure
+RestartSec=2
+# Long streaming responses need a longer stop window than systemd's default.
+TimeoutStopSec=30
+# 64 MB request bodies plus base64 images; keep the file descriptor budget generous.
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# The database, master key and /ext assets live here.
+ReadWritePaths=/var/lib/rrouter
+
+Environment=RROUTER_DATA_DIR=/var/lib/rrouter
+Environment=RROUTER_HOST=127.0.0.1
+Environment=RROUTER_PORT=20128
+Environment=RUST_LOG=rrouter=info
+
+[Install]
+WantedBy=multi-user.target
