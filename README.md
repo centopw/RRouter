@@ -140,6 +140,7 @@ A gateway key is not just a password: each one carries the limits an operator ne
 | `rpm` | requests per minute, sliding window; over the limit `429 rate_limited` with `Retry-After` |
 | `tpm` | tokens per minute from the last 60 s of recorded usage; `429 rate_limited` |
 | `budget_tokens` | lifetime token budget; once spent, `429 budget_exhausted` until the operator raises it |
+| `budget_micros` | the same in money: spend is computed per request from the model's catalog price, so `$1.00` means exactly that |
 | `allowed_models` | exact refs or `provider/*` globs; anything else is `403 model_not_allowed` |
 | `expires_at` | after that moment the key answers `403 api_key_expired` |
 
@@ -194,6 +195,9 @@ two ways. RRouter avoids both:
   equal-priority connections are ordered by a hash of the conversation (model, system,
   first turn, `prompt_cache_key`) instead of round-robin. Different conversations still
   spread across the pool; the same conversation never alternates accounts.
+
+Every request records what it cost (tokens × the model's per-million price, in micro-USD when
+the catalog prices it), and the Keys page shows spend in dollars next to the budget.
 
 Cache reads and writes are recorded per request, and **Activity** shows the hit rate
 (`cache_read / (input + cache_read + cache_write)`), so a regression is visible instead of
