@@ -32,6 +32,32 @@ pub struct AppState {
     pub oauth: rrouter_auth::OAuthFlows,
     /// Per-key request/token windows for the caps that cannot be answered from SQL.
     pub counters: KeyCounters,
+    /// Caps concurrent `/v1/*` proxy requests; `None` when `RROUTER_MAX_CONCURRENCY`
+    /// is 0. One permit spans a whole request, streamed body included.
+    pub concurrency: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+/// One `/v1/*` concurrency slot handed out by [`AppState::try_slot`].
+pub enum Slot {
+    /// The request may proceed. The permit (when a cap is configured) must stay alive
+    /// until the response is built — or, for a stream, until the body ends or is
+    /// dropped; dropping it is what returns the slot.
+    Granted(Option<tokio::sync::OwnedSemaphorePermit>),
+    /// Every permit is taken. Refusing at once beats queueing a request the client will
+    /// give up on, and the caller answers `503 overloaded`.
+    Full,
+}
+
+/// The semaphore for `RROUTER_MAX_CONCURRENCY` (`0` = none).
+///
+/// Any cap above tokio's permit ceiling is effectively unlimited, but constructing a
+/// semaphore with it would panic at startup — clamp instead.
+pub fn concurrency_for(max_concurrency: usize) -> Option<Arc<tokio::sync::Semaphore>> {
+    (max_concurrency > 0).then(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            max_concurrency.min(tokio::sync::Semaphore::MAX_PERMITS),
+        ))
+    })
 }
 
 impl AppState {
@@ -41,6 +67,20 @@ impl AppState {
 
     pub fn uptime_secs(&self) -> u64 {
         self.started.elapsed().as_secs()
+    }
+
+    /// Take one `/v1/*` concurrency slot.
+    ///
+    /// Nothing is queued: with every permit in flight the caller answers `503`, which is
+    /// the only backpressure a streaming gateway can apply without lying to the client.
+    pub fn try_slot(&self) -> Slot {
+        let Some(semaphore) = &self.concurrency else {
+            return Slot::Granted(None);
+        };
+        match Arc::clone(semaphore).try_acquire_owned() {
+            Ok(permit) => Slot::Granted(Some(permit)),
+            Err(_) => Slot::Full,
+        }
     }
 
     /// Resolve the presented credential and validate it.
@@ -321,6 +361,17 @@ mod tests {
 
         assert!(model_allowed(&refs(&["*"]), "whatever"));
         assert!(!model_allowed(&[], "claude/haiku"));
+    }
+
+    #[test]
+    fn concurrency_cap_is_built_only_when_requested() {
+        assert!(concurrency_for(0).is_none(), "0 means unlimited");
+        assert_eq!(concurrency_for(3).expect("cap").available_permits(), 3);
+        // A huge value must clamp instead of panicking at startup.
+        assert_eq!(
+            concurrency_for(usize::MAX).expect("cap").available_permits(),
+            tokio::sync::Semaphore::MAX_PERMITS
+        );
     }
 
     #[test]

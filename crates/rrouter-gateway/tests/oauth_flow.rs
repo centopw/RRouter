@@ -159,10 +159,15 @@ fn harness() -> Harness {
             static_dir: None,
             cors_origins: vec![],
             allow_remote_admin: false,
+            admin_token: None,
+            max_concurrency: 0,
+            max_attempts: 4,
+            shutdown_grace_secs: 20,
         },
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        concurrency: None,
     });
     Harness { router: app(state) }
 }

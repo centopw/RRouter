@@ -83,6 +83,10 @@ fn config() -> Config {
         static_dir: None,
         cors_origins: vec![],
         allow_remote_admin: false,
+        admin_token: None,
+        max_concurrency: 0,
+        max_attempts: 4,
+        shutdown_grace_secs: 20,
     }
 }
 
@@ -106,6 +110,7 @@ fn harness() -> Harness {
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        concurrency: None,
     });
     let router = app(Arc::clone(&state));
     Harness { state, router }

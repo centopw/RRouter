@@ -23,10 +23,12 @@ use rrouter_core::{ChatRequest, ChatResponse, Dialect, Error, Result, StreamEven
 use rrouter_router::{Candidate, Plan};
 use rrouter_store::{AttemptRecord, UsageRecord};
 use serde_json::Value;
+use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 
 use crate::error::{error_frame, error_response, not_implemented};
-use crate::state::{dialect_of, AppState};
+use crate::overloaded_response;
+use crate::state::{dialect_of, AppState, Slot};
 
 /// Request body limit: a 100k-token request plus base64 images still fits.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -40,6 +42,12 @@ pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response
     let inbound = dialect_of(req.uri());
     let trace = RequestTrace::new(Uuid::new_v4());
     let started = Instant::now();
+    // The slot is taken before the body is read: an overloaded gateway must not spend
+    // memory buffering a request it has already decided to refuse.
+    let permit = match state.try_slot() {
+        Slot::Granted(permit) => permit,
+        Slot::Full => return trace.respond(started, overloaded_response(inbound)),
+    };
     let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
@@ -53,7 +61,7 @@ pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response
             )
         }
     };
-    match handle(&state, inbound, &parts.headers, &raw, &trace).await {
+    match handle(&state, inbound, &parts.headers, &raw, &trace, permit).await {
         Ok(resp) => trace.respond(started, resp),
         Err(e) => trace.respond(started, error_response(inbound, &e)),
     }
@@ -63,6 +71,11 @@ pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response
 pub async fn embeddings(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let trace = RequestTrace::new(Uuid::new_v4());
     let started = Instant::now();
+    // Held for this whole scope: a non-streaming response releases it when it is built.
+    let _permit = match state.try_slot() {
+        Slot::Granted(permit) => permit,
+        Slot::Full => return trace.respond(started, overloaded_response(Dialect::OpenAiEmbeddings)),
+    };
     let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
@@ -77,6 +90,7 @@ pub async fn embeddings(State(state): State<Arc<AppState>>, req: Request) -> Res
         }
     };
     match embeddings_inner(&state, &parts.headers, &raw, &trace).await {
+        // Non-streaming: the permit dies with this scope, after the body is built.
         Ok(resp) => trace.respond(started, resp),
         Err(e) => trace.respond(started, error_response(Dialect::OpenAiEmbeddings, &e)),
     }
@@ -124,6 +138,15 @@ impl Special {
             Self::Compact => "compaction for this provider",
         }
     }
+
+    /// The client-facing path, recorded on usage rows: these endpoints have no canonical
+    /// dialect endpoint to fall back on.
+    fn endpoint(self) -> &'static str {
+        match self {
+            Self::CountTokens => "/v1/messages/count_tokens",
+            Self::Compact => "/v1/responses/compact",
+        }
+    }
 }
 
 pub async fn count_tokens(State(state): State<Arc<AppState>>, req: Request) -> Response {
@@ -137,6 +160,11 @@ pub async fn compact(State(state): State<Arc<AppState>>, req: Request) -> Respon
 async fn special(state: &Arc<AppState>, req: Request, kind: Special) -> Response {
     let trace = RequestTrace::new(Uuid::new_v4());
     let started = Instant::now();
+    // Held for this whole scope: a non-streaming response releases it when it is built.
+    let _permit = match state.try_slot() {
+        Slot::Granted(permit) => permit,
+        Slot::Full => return trace.respond(started, overloaded_response(kind.dialect())),
+    };
     let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
@@ -151,6 +179,7 @@ async fn special(state: &Arc<AppState>, req: Request, kind: Special) -> Response
         }
     };
     match special_inner(state, &parts.headers, &raw, kind, &trace).await {
+        // Non-streaming: the permit dies with this scope, after the body is built.
         Ok(resp) => trace.respond(started, resp),
         Err(e) => trace.respond(started, error_response(kind.dialect(), &e)),
     }
@@ -192,12 +221,58 @@ async fn special_inner(
     }
     let plan = Plan { candidates, ..plan };
 
+    let started = Instant::now();
     let outcome = state
         .dispatcher
         .run(&plan, |c| trace.time(state, c, |c| send_special(state, &body, kind, c)))
         .await?;
     let value = outcome.result?;
+    // These endpoints are not chat requests, so a body without usage is not a zero-cost
+    // row: it means the upstream reported nothing to account for.
+    if let Some(usage) = reported_usage(&value) {
+        record_once(
+            state,
+            Recorded {
+                candidate: &outcome.candidate,
+                model: &plan.model,
+                endpoint: kind.endpoint(),
+                usage,
+                key: caller.key_id(),
+                request_id: trace.request_id,
+                started,
+                ttft: None,
+                streamed: false,
+            },
+        );
+    }
     Ok(json_response(StatusCode::OK, value))
+}
+
+/// Token counts a passthrough body reports, in either protocol's naming.
+///
+/// `None` means the upstream said nothing about cost, which is the normal answer for
+/// `count_tokens`; `Some` means the call did billable work and belongs in the usage log.
+fn reported_usage(value: &Value) -> Option<Usage> {
+    let usage = value.get("usage")?;
+    let count = |name: &str| {
+        usage
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+    };
+    let input = count("input_tokens").or_else(|| count("prompt_tokens")).unwrap_or(0);
+    let output = count("output_tokens").or_else(|| count("completion_tokens")).unwrap_or(0);
+    let cache_read = usage
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+    Some(Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: cache_read,
+        cache_write_tokens: 0,
+    })
 }
 
 async fn send_special(
@@ -242,12 +317,16 @@ async fn send_special(
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+/// `permit` is this request's concurrency slot. It is moved into the streamed response
+/// when there is one (the stream owns it), and simply dropped otherwise — after the body
+/// has been built.
 async fn handle(
     state: &Arc<AppState>,
     inbound: Dialect,
     headers: &axum::http::HeaderMap,
     raw: &[u8],
     trace: &RequestTrace,
+    permit: Option<OwnedSemaphorePermit>,
 ) -> Result<Response> {
     let caller = state.authenticate(headers).await?;
     trace.set_key(caller.key_id());
@@ -332,6 +411,9 @@ async fn handle(
             started,
             key: key_id,
             request_id: trace.request_id,
+            // The slot belongs to the stream, not to this handler: it is released when
+            // the body ends or the client disconnects, whichever comes first.
+            _permit: permit,
         },
         open,
         bytes,
@@ -1137,6 +1219,9 @@ struct PendingRecord {
     key: Option<Uuid>,
     /// Id already echoed to the client, so the usage row joins the attempt log.
     request_id: Uuid,
+    /// This request's concurrency slot. `ResponseStream` owns it until the body ends or
+    /// is dropped, which is the whole release protocol.
+    _permit: Option<OwnedSemaphorePermit>,
 }
 
 /// The `Wire` plus the bookkeeping needed to record one usage row when it ends,
@@ -1365,7 +1450,50 @@ async fn embeddings_inner(
             return Err(err);
         }
     };
-    passthrough_response(resp).await
+    let status = resp.status();
+    let content_type = resp.headers().get(header::CONTENT_TYPE).cloned();
+    let bytes = resp.bytes().await.map_err(transport_error)?;
+    // One parse of the body, used only for accounting: an embeddings call otherwise
+    // leaves no usage row, so it would be invisible in Activity and free against a
+    // key's budget. A body that does not parse is still relayed byte for byte.
+    if status.is_success() {
+        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+            record_once(
+                state,
+                Recorded {
+                    candidate: &candidate,
+                    model: &model,
+                    endpoint: "/v1/embeddings",
+                    usage: embedding_usage(&value),
+                    key: caller.key_id(),
+                    request_id: trace.request_id,
+                    started,
+                    ttft: None,
+                    streamed: false,
+                },
+            );
+        }
+    }
+    let mut out = Response::new(Body::from(bytes));
+    *out.status_mut() = status;
+    if let Some(ct) = content_type {
+        out.headers_mut().insert(header::CONTENT_TYPE, ct);
+    }
+    Ok(out)
+}
+
+/// Tokens an embeddings response reports. Output is always 0: an embedding is one
+/// vector, not a completion, so there are no generated tokens to bill.
+fn embedding_usage(value: &Value) -> Usage {
+    Usage {
+        input_tokens: value
+            .get("usage")
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
+        ..Usage::default()
+    }
 }
 
 fn rewrite_embeddings(base: &str, native_chat_url: &str) -> String {
@@ -1379,19 +1507,6 @@ fn embeddings_url(base_url: &str) -> String {
         .strip_suffix("/chat/completions")
         .map(|prefix| format!("{prefix}/embeddings"))
         .unwrap_or_else(|| format!("{base_url}/embeddings"))
-}
-
-/// Relay an upstream JSON response verbatim: status, content type, bytes.
-async fn passthrough_response(resp: reqwest::Response) -> Result<Response> {
-    let status = resp.status();
-    let content_type = resp.headers().get(header::CONTENT_TYPE).cloned();
-    let bytes = resp.bytes().await.map_err(transport_error)?;
-    let mut out = Response::new(Body::from(bytes));
-    *out.status_mut() = status;
-    if let Some(ct) = content_type {
-        out.headers_mut().insert(header::CONTENT_TYPE, ct);
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

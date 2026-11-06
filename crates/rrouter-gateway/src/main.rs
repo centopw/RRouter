@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rrouter_gateway::{app, config::Config, AppState};
+use rrouter_gateway::{app, config::Config, state::concurrency_for, AppState};
 use rrouter_router::{Breaker, Catalog, Dispatcher};
 use rrouter_store::Store;
 use tracing_subscriber::EnvFilter;
@@ -142,12 +142,15 @@ async fn serve(config: Config) -> Result<(), String> {
         catalog: Arc::new(Catalog::builtin()),
         refresher: Arc::new(rrouter_auth::Refresher::new(http.clone())),
         planner: rrouter_router::Planner::new(),
-        dispatcher: Arc::new(Dispatcher::new(Breaker::new())),
+        dispatcher: Arc::new(
+            Dispatcher::new(Breaker::new()).with_max_attempts(config.max_attempts),
+        ),
         http,
         config: config.clone(),
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        concurrency: concurrency_for(config.max_concurrency),
     });
 
     // Fail closed: binding beyond loopback while the admin gate is still in its
@@ -173,10 +176,24 @@ async fn serve(config: Config) -> Result<(), String> {
         if config.require_api_key { " (api key required)" } else { "" }
     );
 
-    axum::serve(listener, app(state).into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| format!("server: {e}"))?;
+    let server = axum::serve(
+        listener,
+        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal());
+
+    // A drain is only graceful if it ends. An open SSE stream can outlive any deadline a
+    // supervisor gives us, so the grace period is authoritative: when it expires the
+    // process exits with the streams still open, and the client reconnects.
+    match config.shutdown_grace_secs {
+        0 => server.await.map_err(|e| format!("server: {e}"))?,
+        grace => match tokio::time::timeout(Duration::from_secs(grace), server).await {
+            Ok(result) => result.map_err(|e| format!("server: {e}"))?,
+            Err(_) => tracing::warn!(
+                "shutdown grace of {grace}s expired with requests still streaming; exiting"
+            ),
+        },
+    }
     tracing::info!("{BANNER} stopped");
     Ok(())
 }

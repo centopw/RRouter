@@ -25,7 +25,7 @@ use axum::extract::Request;
 use axum::http::header::{ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, AUTHORIZATION, VARY};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::Router;
 
@@ -128,7 +128,7 @@ pub fn app(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(routes::health::health))
-        .route("/v1/models", get(routes::models::list_models))
+        .route("/v1/models", get(v1_models))
         .route("/v1/chat/completions", post(proxy::proxy))
         .route("/v1/messages", post(proxy::proxy))
         .route("/v1/responses", post(proxy::proxy))
@@ -195,7 +195,9 @@ async fn cors(
     );
     headers.insert(
         ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("content-type, authorization, x-api-key, anthropic-version, anthropic-beta"),
+        HeaderValue::from_static(
+            "content-type, authorization, x-api-key, x-admin-token, anthropic-version, anthropic-beta",
+        ),
     );
     headers.insert(
         ACCESS_CONTROL_MAX_AGE,
@@ -204,7 +206,12 @@ async fn cors(
     response
 }
 
-/// Admin API gate: loopback peers only unless `RROUTER_ALLOW_REMOTE_ADMIN=true`.
+/// Admin API gate: `RROUTER_ADMIN_TOKEN` when set, else loopback peers only unless
+/// `RROUTER_ALLOW_REMOTE_ADMIN=true`.
+///
+/// A configured token *replaces* the loopback rule instead of adding to it: behind a
+/// reverse proxy every peer is the proxy, so the socket address proves nothing about who
+/// is calling. `X-Forwarded-For` is deliberately never consulted — it is client-written.
 ///
 /// A request without a peer address (in-process `oneshot` calls) is treated as
 /// loopback, which is what makes the integration tests exercise the same path.
@@ -213,6 +220,16 @@ async fn admin_gate(
     req: Request,
     next: Next,
 ) -> Response {
+    if let Some(expected) = state.config.admin_token.as_deref() {
+        let presented = admin_credential(req.headers());
+        let authorised = presented
+            .as_deref()
+            .is_some_and(|presented| constant_time_eq(presented, expected));
+        if !authorised {
+            return admin_unauthorized(state::dialect_of(req.uri()));
+        }
+        return next.run(req).await;
+    }
     let peer_is_loopback = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -223,11 +240,96 @@ async fn admin_gate(
         let mut resp = error::error_response(
             dialect,
             &rrouter_core::Error::Unauthorized(
-                "admin API is loopback-only (set RROUTER_ALLOW_REMOTE_ADMIN=true)".into(),
+                "admin API is loopback-only (set RROUTER_ALLOW_REMOTE_ADMIN=true or RROUTER_ADMIN_TOKEN)".into(),
             ),
         );
         *resp.status_mut() = axum::http::StatusCode::FORBIDDEN;
         return resp;
     }
     next.run(req).await
+}
+
+/// The admin credential: `Authorization: Bearer …` or `x-admin-token: …`.
+///
+/// `x-api-key` is *not* accepted here: that header belongs to model clients, and an
+/// admin call must not be authorised by a key it can spend.
+fn admin_credential(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        let value = value.trim();
+        let token = value
+            .strip_prefix("Bearer ")
+            .or_else(|| value.strip_prefix("bearer "))
+            .unwrap_or(value)
+            .trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+    headers
+        .get("x-admin-token")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Compare a presented secret with the configured one without an early exit.
+///
+/// Length is compared too (a length difference is not a secret), but every byte is
+/// touched regardless of where the first mismatch is, so the response time does not
+/// leak how much of the token a caller guessed.
+fn constant_time_eq(presented: &str, expected: &str) -> bool {
+    let a = presented.as_bytes();
+    let b = expected.as_bytes();
+    let mut diff = (a.len() ^ b.len()) as u64;
+    for i in 0..a.len().max(b.len()) {
+        let left = a.get(i).copied().unwrap_or(0);
+        let right = b.get(i).copied().unwrap_or(0);
+        diff |= u64::from(left ^ right);
+    }
+    diff == 0
+}
+
+/// `503 overloaded` with `Retry-After: 1`: the concurrency cap is a "come back in a
+/// moment", not a rate limit, so the client is told to retry rather than to give up.
+pub(crate) fn overloaded_response(inbound: rrouter_core::Dialect) -> Response {
+    let obj = error::error_object_with(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+        "too many concurrent requests; retry shortly",
+        Some("overloaded"),
+    );
+    let body = match inbound {
+        rrouter_core::Dialect::AnthropicMessages => {
+            serde_json::json!({"type": "error", "error": obj})
+        }
+        _ => serde_json::json!({"error": obj}),
+    };
+    let mut resp = (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response();
+    resp.headers_mut()
+        .insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+    resp
+}
+
+/// `/v1/models` takes a concurrency slot like every other `/v1/*` route: a client that
+/// saturates the gateway is told to back off whatever it asks for. The catalog answer is
+/// built in memory, so the permit ends with this scope.
+async fn v1_models(axum::extract::State(state): axum::extract::State<Arc<AppState>>) -> Response {
+    let _permit = match state.try_slot() {
+        state::Slot::Granted(permit) => permit,
+        state::Slot::Full => return overloaded_response(rrouter_core::Dialect::OpenAiChat),
+    };
+    routes::models::list_models(axum::extract::State(state)).await
+}
+
+/// `401 admin_unauthorized` in the inbound dialect's error shape.
+fn admin_unauthorized(dialect: rrouter_core::Dialect) -> Response {
+    let obj = error::error_object_with(
+        axum::http::StatusCode::UNAUTHORIZED.as_u16(),
+        "admin API requires RROUTER_ADMIN_TOKEN (Authorization: Bearer … or x-admin-token)",
+        Some("admin_unauthorized"),
+    );
+    let body = match dialect {
+        rrouter_core::Dialect::AnthropicMessages => serde_json::json!({"type": "error", "error": obj}),
+        _ => serde_json::json!({"error": obj}),
+    };
+    (axum::http::StatusCode::UNAUTHORIZED, axum::Json(body)).into_response()
 }

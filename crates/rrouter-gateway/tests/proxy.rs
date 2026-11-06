@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -41,6 +41,8 @@ struct MockInner {
 enum MockReply {
     /// JSON body + status (non-streaming).
     Json(u16, Value),
+    /// Bytes relayed exactly as sent, for bodies the gateway must not rewrite.
+    Raw(u16, &'static str),
     /// SSE chunks written one at a time; each may wait for a gate before it is flushed.
     Sse(Vec<SseStep>),
 }
@@ -120,6 +122,11 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             (code, axum::Json(value)).into_response()
         }
+        MockReply::Raw(status, body) => Response::builder()
+            .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .expect("raw response"),
         MockReply::Sse(steps) => {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
             tokio::spawn(async move {
@@ -149,6 +156,8 @@ struct Harness {
     router: Router,
 }
 
+const TEST_ADMIN_TOKEN: &str = "adm-test-7f3a91";
+
 fn config(require_api_key: bool) -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
@@ -162,16 +171,26 @@ fn config(require_api_key: bool) -> Config {
         static_dir: None,
         cors_origins: vec![],
         allow_remote_admin: false,
+        admin_token: None,
+        max_concurrency: 0,
+        max_attempts: 4,
+        shutdown_grace_secs: 20,
     }
 }
 
 fn harness(require_api_key: bool) -> Harness {
-    let state = Arc::new(build_state(require_api_key));
+    harness_with(config(require_api_key))
+}
+
+/// A harness whose runtime settings are the ones under test (admin token, caps).
+fn harness_with(config: Config) -> Harness {
+    let state = Arc::new(build_state(config));
     let router = app(Arc::clone(&state));
     Harness { state, router }
 }
 
-fn build_state(require_api_key: bool) -> AppState {
+fn build_state(config: Config) -> AppState {
+    let concurrency = rrouter_gateway::state::concurrency_for(config.max_concurrency);
     AppState {
         store: Arc::new(Store::open_in_memory().expect("store")),
         catalog: Arc::new(Catalog::builtin()),
@@ -182,15 +201,18 @@ fn build_state(require_api_key: bool) -> AppState {
                 .expect("client"),
         )),
         planner: Planner::new(),
-        dispatcher: Arc::new(Dispatcher::new(Breaker::new())),
+        dispatcher: Arc::new(
+            Dispatcher::new(Breaker::new()).with_max_attempts(config.max_attempts),
+        ),
         http: reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .expect("client"),
-        config: config(require_api_key),
+        config,
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        concurrency,
     }
 }
 
@@ -996,7 +1018,7 @@ async fn ext_static_rejects_traversal() {
     state_config.static_dir = Some(root.clone());
     let state = Arc::new(AppState {
         config: state_config,
-        ..build_state(false)
+        ..build_state(config(false))
     });
     // The traversal target must exist relative to the root for the test to be meaningful.
     std::fs::write(root.join("Cargo.toml"), "should never be served").expect("write");
@@ -1550,4 +1572,349 @@ async fn key_rows_match_the_governance_contract() {
             .is_some_and(|m| m.contains("rpm must be a non-negative integer")),
         "body: {body}"
     );
+}
+
+// ------------------------------------------------- phase 3: admin auth & limits
+
+/// A request that did not arrive over a loopback socket: what a reverse proxy or a
+/// shared host looks like to the gate.
+fn remote_peer() -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([203, 0, 113, 9], 5555))
+}
+
+/// Stamp a peer address on an in-process request, standing in for `ConnectInfo` that
+/// only a real TCP listener would attach.
+fn as_peer(mut req: Request<Body>, peer: std::net::SocketAddr) -> Request<Body> {
+    req.extensions_mut().insert(ConnectInfo(peer));
+    req
+}
+
+fn get_with(uri: &str, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut builder = Request::builder().method("GET").uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    builder.body(Body::empty()).expect("request")
+}
+
+/// With `RROUTER_ADMIN_TOKEN` set, the token is the only credential: the loopback rule
+/// stops applying, and `X-Forwarded-For` is never a substitute for it.
+#[tokio::test]
+async fn admin_token_gates_the_admin_api() {
+    let mut cfg = config(false);
+    cfg.admin_token = Some(TEST_ADMIN_TOKEN.into());
+    let h = harness_with(cfg);
+
+    let (status, body) = h.get("/api/system").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "admin_unauthorized");
+    assert_eq!(body["error"]["type"], "authentication_error");
+
+    let bearer = format!("Bearer {TEST_ADMIN_TOKEN}");
+    let (status, _, body) = h.call_full(get_with("/api/system", &[("authorization", &bearer)])).await;
+    assert_eq!(status, StatusCode::OK, "Authorization: Bearer must work: {body}");
+    let (status, _, body) = h
+        .call_full(get_with("/api/system", &[("x-admin-token", TEST_ADMIN_TOKEN)]))
+        .await;
+    assert_eq!(status, StatusCode::OK, "x-admin-token must work: {body}");
+
+    // Neither a wrong token nor a model key authorises an admin call.
+    let (status, _, _) = h.call_full(get_with("/api/system", &[("authorization", "Bearer nope")])).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) =
+        h.call_full(get_with("/api/system", &[("x-api-key", TEST_ADMIN_TOKEN)])).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "x-api-key is not the admin channel");
+
+    // The socket address no longer decides anything while a token is configured.
+    let res = h
+        .router
+        .clone()
+        .oneshot(as_peer(get_with("/api/system", &[]), remote_peer()))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "remote peer without the token");
+    let res = h
+        .router
+        .clone()
+        .oneshot(as_peer(
+            get_with("/api/system", &[("x-admin-token", TEST_ADMIN_TOKEN)]),
+            remote_peer(),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK, "remote peer with the token");
+
+    // A scraper shares the admin rule...
+    let (status, _, _) = h.call_full(get_with("/metrics", &[])).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = h
+        .call_full(get_with("/metrics", &[("x-admin-token", TEST_ADMIN_TOKEN)]))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // ...and client endpoints never do.
+    let (status, _) = h.get("/health").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// Without a token nothing changes: loopback peers pass, remote peers get `403`.
+#[tokio::test]
+async fn without_a_token_the_admin_api_stays_loopback_only() {
+    let h = harness(false);
+    let res = h
+        .router
+        .clone()
+        .oneshot(as_peer(get_with("/api/system", &[]), remote_peer()))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // In-process requests carry no peer address and count as loopback.
+    let (status, body) = h.get("/api/system").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// One streaming chat request; the caller drives (or drops) the body.
+async fn open_chat_stream(h: &Harness) -> axum::body::BodyDataStream {
+    let mut body = openai_chat_body("gpt-4.1");
+    body["stream"] = json!(true);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    let res = h.router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    res.into_body().into_data_stream()
+}
+
+/// Next chunk of a streaming body, with a deadline so a stalled stream fails the test
+/// instead of hanging the suite.
+async fn next_frame(stream: &mut axum::body::BodyDataStream) -> String {
+    let chunk = tokio::time::timeout(
+        Duration::from_secs(5),
+        futures_util::StreamExt::next(stream),
+    )
+    .await
+    .expect("a frame within 5s")
+    .expect("a frame")
+    .expect("bytes");
+    String::from_utf8_lossy(&chunk).into_owned()
+}
+
+/// `RROUTER_MAX_CONCURRENCY=1`: the slot belongs to the stream, so the second request is
+/// refused while the first is mid-body, and admitted once that body ends — or is
+/// abandoned by the client.
+#[tokio::test]
+async fn concurrency_cap_refuses_a_second_request_while_the_first_streams() {
+    let first_gate = Arc::new(tokio::sync::Notify::new());
+    let second_gate = Arc::new(tokio::sync::Notify::new());
+    let delta = |content: &str, finish: Value| {
+        rrouter_core::sse::render_openai(
+            &json!({"id":"c1","model":"mock-model","choices":[{"index":0,"delta":{"content":content},"finish_reason":finish}]}).to_string(),
+            None,
+        )
+    };
+    let mock = Mock::start(vec![
+        MockReply::Sse(vec![
+            SseStep { wire: delta("A", json!(null)), await_gate: None },
+            SseStep { wire: delta("B", json!("stop")), await_gate: Some(first_gate.clone()) },
+            SseStep { wire: "data: [DONE]\n\n".to_string(), await_gate: None },
+        ]),
+        openai_reply("after the stream"),
+        MockReply::Sse(vec![
+            SseStep { wire: delta("C", json!(null)), await_gate: None },
+            SseStep { wire: delta("D", json!("stop")), await_gate: Some(second_gate.clone()) },
+        ]),
+        openai_reply("after the drop"),
+    ])
+    .await;
+    let mut cfg = config(false);
+    cfg.max_concurrency = 1;
+    let h = harness_with(cfg);
+    h.connect("openai", &mock).await;
+
+    // First stream is open and has produced a frame: it owns the only permit.
+    let mut stream = open_chat_stream(&h).await;
+    assert!(next_frame(&mut stream).await.contains("\"A\""));
+
+    let (status, headers, body) = h.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+    assert_eq!(body["error"]["code"], "overloaded");
+    assert_eq!(
+        headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert_eq!(mock.hits(), 1, "the refused request is never dispatched");
+    // The cap is on `/v1/*`, not only on completions.
+    let (status, _) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "the catalog read is capped too");
+
+    // Ending the stream returns the slot.
+    first_gate.notify_one();
+    while let Some(Ok(_)) = futures_util::StreamExt::next(&mut stream).await {}
+    drop(stream);
+    let (status, _, body) = h.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "after the stream");
+    let (status, _) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "the catalog read is admitted again");
+
+    // A client that disconnects mid-stream returns it too: dropping the body is the
+    // release, so the next request must not be told the gateway is overloaded.
+    let mut stream = open_chat_stream(&h).await;
+    assert!(next_frame(&mut stream).await.contains("\"C\""));
+    drop(stream);
+    second_gate.notify_one();
+
+    let (status, _, body) = h.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "after the drop");
+    assert_eq!(mock.hits(), 4);
+}
+
+/// `RROUTER_MAX_ATTEMPTS=1` is the operator saying "no retries": the second candidate
+/// is never contacted, even though it would have served.
+#[tokio::test]
+async fn max_attempts_one_disables_provider_fallback() {
+    let mock = Mock::start(vec![
+        MockReply::Json(503, json!({"error": {"message": "overloaded"}})),
+        openai_reply("from backup"),
+    ])
+    .await;
+    let mut cfg = config(false);
+    cfg.max_attempts = 1;
+    let h = harness_with(cfg);
+    // Two accounts on the same provider: with the default cap the first 503 falls back.
+    h.connect("openai", &mock).await;
+    h.connect("openai", &mock).await;
+
+    let (status, body) = h
+        .post("/v1/chat/completions", openai_chat_body("gpt-4.1"))
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+    assert_eq!(mock.hits(), 1, "the second candidate must not be tried");
+}
+
+/// An embeddings call bills input tokens, so it must leave a usage row; a body the
+/// gateway cannot parse must still reach the client byte for byte.
+#[tokio::test]
+async fn embeddings_record_usage_and_relay_malformed_bodies_unchanged() {
+    let mock = Mock::start(vec![
+        MockReply::Json(
+            200,
+            json!({
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+                "model": "text-embedding-3-small",
+                "usage": {"prompt_tokens": 9, "total_tokens": 9}
+            }),
+        ),
+        MockReply::Raw(200, "{\"data\": [not json"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
+
+    let request = |body: Value| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/embeddings")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {key}"))
+            .body(Body::from(body.to_string()))
+            .expect("request")
+    };
+
+    let res = h
+        .router
+        .clone()
+        .oneshot(request(json!({"model": "openai/text-embedding-3-small", "input": "hello"})))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.expect("body").to_bytes();
+    let body: Value = serde_json::from_slice(&body).expect("json relayed");
+    assert_eq!(body["usage"]["prompt_tokens"], 9);
+
+    let mut row = None;
+    for _ in 0..100 {
+        if let Ok(rows) = h.state.store.recent_usage(5, None).await {
+            if let Some(found) = rows.iter().find(|r| r.key_id == Some(uuid)) {
+                row = Some(found.clone());
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let row = row.expect("an embeddings call leaves a usage row");
+    assert_eq!(row.endpoint.as_deref(), Some("/v1/embeddings"));
+    assert_eq!(row.input_tokens, 9);
+    assert_eq!(row.output_tokens, 0, "an embedding generates nothing");
+
+    // A malformed body is relayed unchanged and records nothing to attribute.
+    let res = h
+        .router
+        .clone()
+        .oneshot(request(json!({"model": "openai/text-embedding-3-small", "input": "hello"})))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    assert_eq!(String::from_utf8_lossy(&bytes), "{\"data\": [not json");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let rows = h.state.store.recent_usage(10, None).await.expect("usage");
+    assert_eq!(rows.len(), 1, "the unparseable body adds no row: {rows:?}");
+}
+
+/// `count_tokens` and `compact` are not chat requests: a row appears only when the
+/// upstream itself reports usage.
+#[tokio::test]
+async fn passthrough_endpoints_record_usage_only_when_reported() {
+    let mock = Mock::start(vec![
+        MockReply::Json(200, json!({"input_tokens": 42})),
+        MockReply::Json(
+            200,
+            json!({"id": "cmp_1", "usage": {"input_tokens": 11, "output_tokens": 0}}),
+        ),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("claude", &mock).await;
+    h.connect("codex", &mock).await;
+
+    let (status, body) = h
+        .post(
+            "/v1/messages/count_tokens",
+            json!({"model": "claude/sonnet-4-5", "messages": [{"role": "user", "content": "hello"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["input_tokens"], 42);
+
+    let (status, body) = h
+        .post(
+            "/v1/responses/compact",
+            json!({"model": "codex/gpt-5.6-luna", "input": [{"type": "message", "role": "user", "content": "hi"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline
+        && h.state.store.recent_usage(10, None).await.expect("usage").is_empty()
+    {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Give the (unwritten) count_tokens row a chance to appear before asserting absence.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let rows = h.state.store.recent_usage(10, None).await.expect("usage");
+    assert_eq!(rows.len(), 1, "count_tokens reported no usage: {rows:?}");
+    assert_eq!(rows[0].endpoint.as_deref(), Some("/v1/responses/compact"));
+    assert_eq!(rows[0].input_tokens, 11);
+    assert_eq!(rows[0].output_tokens, 0);
 }

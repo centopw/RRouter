@@ -12,6 +12,12 @@ pub const DEFAULT_DATA_DIR: &str = "./data";
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 15;
 const DEFAULT_LOG: &str = "rrouter=info";
+/// Upstream sends per client request when `RROUTER_MAX_ATTEMPTS` is unset.
+const DEFAULT_MAX_ATTEMPTS: usize = 4;
+/// Upper bound on `RROUTER_MAX_ATTEMPTS`: more sends than this per request turn a
+/// provider outage into a slow client-visible failure for no diagnostic gain.
+const MAX_ATTEMPTS_CEILING: usize = 8;
+const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 20;
 
 /// Everything the binary needs, resolved and validated once.
 #[derive(Debug, Clone)]
@@ -31,6 +37,15 @@ pub struct Config {
     pub cors_origins: Vec<String>,
     /// When false (default) the admin API rejects non-loopback peers.
     pub allow_remote_admin: bool,
+    /// Bearer token the admin API (and `/metrics`) requires. `None` keeps the
+    /// loopback rule; `Some` replaces it, so every admin request must present it.
+    pub admin_token: Option<String>,
+    /// Maximum concurrent `/v1/*` proxy requests; `0` (default) is unlimited.
+    pub max_concurrency: usize,
+    /// Upstream sends per client request, clamped to `1..=8` (default 4).
+    pub max_attempts: usize,
+    /// Seconds graceful shutdown may spend draining live streams; `0` waits forever.
+    pub shutdown_grace_secs: u64,
 }
 
 impl Config {
@@ -125,6 +140,17 @@ impl Config {
                 false
             }),
         };
+        // An admin token replaces the loopback rule rather than adding to it: behind a
+        // reverse proxy the peer is always the proxy, so loopback proves nothing.
+        let admin_token = var("RROUTER_ADMIN_TOKEN").filter(|s| !s.is_empty());
+        let max_concurrency = usize_var("RROUTER_MAX_CONCURRENCY", 0, &mut problems);
+        let max_attempts =
+            clamp_attempts(usize_var("RROUTER_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS, &mut problems));
+        let shutdown_grace_secs = secs_var_allow_zero(
+            "RROUTER_SHUTDOWN_GRACE_SECS",
+            DEFAULT_SHUTDOWN_GRACE_SECS,
+            &mut problems,
+        );
 
         if problems.is_empty() {
             Ok(Self {
@@ -139,6 +165,10 @@ impl Config {
                 static_dir,
                 cors_origins,
                 allow_remote_admin,
+                admin_token,
+                max_concurrency,
+                max_attempts,
+                shutdown_grace_secs,
             })
         } else {
             Err(problems.join("; "))
@@ -172,26 +202,57 @@ fn parse_bool(raw: &str) -> Option<bool> {
 }
 
 fn secs_var(name: &str, default: u64, problems: &mut Vec<String>) -> u64 {
+    secs_var_in(name, default, false, problems)
+}
+
+/// Like [`secs_var`] but `0` is a meaningful value (wait indefinitely).
+fn secs_var_allow_zero(name: &str, default: u64, problems: &mut Vec<String>) -> u64 {
+    secs_var_in(name, default, true, problems)
+}
+
+fn secs_var_in(name: &str, default: u64, allow_zero: bool, problems: &mut Vec<String>) -> u64 {
     match var(name) {
         None => default,
         Some(raw) => match raw.parse::<u64>() {
-            Ok(v) if v > 0 => v,
+            Ok(v) if v > 0 || (allow_zero && v == 0) => v,
             _ => {
-                problems.push(format!("{name}={raw:?} is not a positive number of seconds"));
+                problems.push(if allow_zero {
+                    format!("{name}={raw:?} is not a number of seconds (0 disables the wait)")
+                } else {
+                    format!("{name}={raw:?} is not a positive number of seconds")
+                });
                 default
             }
         },
     }
 }
 
-/// Serializes configuration for `--print-config`, never echoing the master key.
+/// Non-negative count. `0` means "unlimited" for the callers that do not clamp.
+fn usize_var(name: &str, default: usize, problems: &mut Vec<String>) -> usize {
+    match var(name) {
+        None => default,
+        Some(raw) => raw.parse::<usize>().unwrap_or_else(|_| {
+            problems.push(format!("{name}={raw:?} is not a non-negative integer"));
+            default
+        }),
+    }
+}
+
+/// Attempts are clamped, not refused: an operator who writes 100 wants "more retries",
+/// and failing startup over it would only take the gateway down.
+fn clamp_attempts(raw: usize) -> usize {
+    raw.clamp(1, MAX_ATTEMPTS_CEILING)
+}
+
+/// Serializes configuration for `--print-config`, never echoing the master key or the
+/// admin token.
 pub struct Redacted<'a>(&'a Config);
 
 impl Serialize for Redacted<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let c = self.0;
-        let mut st = s.serialize_struct("Config", 12)?;
+        let mut st = s.serialize_struct("Config", 16)?;
         st.serialize_field("host", &c.host.to_string())?;
         st.serialize_field("port", &c.port)?;
         st.serialize_field("data_dir", &c.data_dir.to_string_lossy())?;
@@ -204,6 +265,13 @@ impl Serialize for Redacted<'_> {
         st.serialize_field("cors_origins", &c.cors_origins)?;
         st.serialize_field("allow_remote_admin", &c.allow_remote_admin)?;
         st.serialize_field("log_filter", &c.log_filter)?;
+        st.serialize_field(
+            "admin_token",
+            &if c.admin_token.is_some() { "set" } else { "unset" },
+        )?;
+        st.serialize_field("max_concurrency", &c.max_concurrency)?;
+        st.serialize_field("max_attempts", &c.max_attempts)?;
+        st.serialize_field("shutdown_grace_secs", &c.shutdown_grace_secs)?;
         st.end()
     }
 }
@@ -219,30 +287,8 @@ mod tests {
         assert_eq!(parse_bool("maybe"), None);
     }
 
-    #[test]
-    fn redacted_view_hides_the_key_material() {
-        let cfg = Config {
-            host: "127.0.0.1".parse().expect("ip"),
-            port: DEFAULT_PORT,
-            data_dir: PathBuf::from("/tmp/x"),
-            master_key: Some("ab".repeat(32)),
-            require_api_key: false,
-            request_timeout_secs: 600,
-            connect_timeout_secs: 15,
-            log_filter: DEFAULT_LOG.into(),
-            static_dir: None,
-            cors_origins: vec![],
-            allow_remote_admin: false,
-        };
-        let json = serde_json::to_string(&cfg.redacted()).expect("serialize");
-        assert!(json.contains("\"port\":20128"));
-        assert!(!json.contains(&"ab".repeat(32)));
-        assert!(json.contains("\"master_key\":\"env\""));
-    }
-
-    #[test]
-    fn cors_allows_configured_and_loopback_origins_only() {
-        let mut cfg = Config {
+    fn base() -> Config {
+        Config {
             host: "127.0.0.1".parse().expect("ip"),
             port: DEFAULT_PORT,
             data_dir: PathBuf::from("/tmp/x"),
@@ -252,9 +298,56 @@ mod tests {
             connect_timeout_secs: 15,
             log_filter: DEFAULT_LOG.into(),
             static_dir: None,
-            cors_origins: vec!["https://console.example".into()],
+            cors_origins: vec![],
             allow_remote_admin: false,
-        };
+            admin_token: None,
+            max_concurrency: 0,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            shutdown_grace_secs: DEFAULT_SHUTDOWN_GRACE_SECS,
+        }
+    }
+
+    #[test]
+    fn attempts_are_clamped_into_the_supported_range() {
+        assert_eq!(clamp_attempts(0), 1, "zero sends would fail every request");
+        assert_eq!(clamp_attempts(1), 1);
+        assert_eq!(clamp_attempts(4), 4);
+        assert_eq!(clamp_attempts(8), 8);
+        assert_eq!(clamp_attempts(100), MAX_ATTEMPTS_CEILING);
+        assert_eq!(clamp_attempts(usize::MAX), MAX_ATTEMPTS_CEILING);
+    }
+
+    #[test]
+    fn redacted_view_hides_the_key_material() {
+        let mut cfg = base();
+        cfg.master_key = Some("ab".repeat(32));
+        let json = serde_json::to_string(&cfg.redacted()).expect("serialize");
+        assert!(json.contains("\"port\":20128"));
+        assert!(!json.contains(&"ab".repeat(32)));
+        assert!(json.contains("\"master_key\":\"env\""));
+        assert!(json.contains("\"admin_token\":\"unset\""));
+    }
+
+    #[test]
+    fn redacted_view_says_whether_an_admin_token_is_configured_without_showing_it() {
+        let token = "adm-0123456789abcdef";
+        let mut cfg = base();
+        cfg.admin_token = Some(token.into());
+        cfg.max_concurrency = 7;
+        cfg.max_attempts = 2;
+        cfg.shutdown_grace_secs = 0;
+        let json = serde_json::to_string(&cfg.redacted()).expect("serialize");
+        assert!(json.contains("\"admin_token\":\"set\""));
+        assert!(!json.contains(token), "the token itself must never be printed: {json}");
+        assert!(json.contains("\"max_concurrency\":7"));
+        assert!(json.contains("\"max_attempts\":2"));
+        assert!(json.contains("\"shutdown_grace_secs\":0"));
+    }
+
+    #[test]
+    fn cors_allows_configured_and_loopback_origins_only() {
+        let mut cfg = base();
+        cfg.cors_origins = vec!["https://console.example".into()];
         assert_eq!(cfg.cors_origin_for("https://console.example"), Some("https://console.example".into()));
         assert_eq!(cfg.cors_origin_for("http://localhost:3000"), Some("http://localhost:3000".into()));
         assert_eq!(cfg.cors_origin_for("https://evil.example"), None);
