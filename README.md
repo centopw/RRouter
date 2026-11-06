@@ -136,6 +136,17 @@ team keeps a stable model name while the operator repoints it.
 - Activity's request detail shows the attempt timeline and splits streamed latency into
   time-to-first-output and generation.
 
+## Caching
+
+`RROUTER_CACHE=sqlite` turns on an opt-in, byte-exact response cache for **non-streaming**
+chat, messages and responses. The key is a SHA-256 of the canonical request the gateway would
+send, so two spellings that produce the same request share an entry. A hit returns the stored
+body with `x-rrouter-cache: hit` and a fresh `x-request-id`, and records a usage row with zero
+tokens and zero cost — it shows up in Activity without pretending the provider was called.
+`x-rrouter-cache: bypass` forces a miss; streamed requests and errors are never cached.
+`RROUTER_CACHE_TTL_SECS` and `RROUTER_CACHE_MAX_ENTRIES` bound lifetime and size; expired
+rows are dropped lazily.
+
 ## Keys and limits
 
 A gateway key is not just a password: each one carries the limits an operator needs.

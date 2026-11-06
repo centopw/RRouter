@@ -52,6 +52,7 @@ All notable changes. Dates are local; versions follow semver once tagged.
 
 ### Operations
 
+- Opt-in exact-match response cache (`RROUTER_CACHE=sqlite`, TTL, size bound, hit/miss metrics).
 - `usage`/`attempts` accounting, Prometheus `/metrics`, `/health` and a self-probe
   (`rrouter --healthcheck`), graceful shutdown with a bounded drain.
 - Request ids (`x-request-id`) and per-attempt records, so a fallback is visible in
