@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Button, Card, CardHeader, ErrorNote, Field, Input, PageHeader } from "../components/ui";
+import { Button, Card, CardFooter, CardHeader, ErrorNote, Field, Input, PageHeader } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { ModelChain } from "../components/model-select";
 import { qk, useCombos } from "../lib/queries";
@@ -76,37 +76,34 @@ export default function Combos() {
         </div>
       ) : null}
 
-      <Card className="mb-3 px-5 py-4">
+      <Card className="mb-3">
         <form
-          className="flex flex-col gap-3"
           onSubmit={(e) => {
             e.preventDefault();
             save.mutate();
           }}
         >
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="w-[220px]">
+          <div className="flex flex-col gap-4 px-5 py-4">
+            <div className="sm:w-[280px]">
               <Field label="combo name" hint="the name clients send">
                 <Input value={name} onChange={setName} placeholder="smart" ariaLabel="combo name" />
               </Field>
             </div>
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={!name.trim() || !models.some(Boolean) || save.isPending}
-            >
+            <Field label="fallback order" hint="tried top to bottom">
+              <ModelChain models={models} onChange={setModels} />
+            </Field>
+          </div>
+          {save.isError ? (
+            <div className="px-5 pb-3">
+              <ErrorNote error={save.error} />
+            </div>
+          ) : null}
+          <CardFooter>
+            <Button type="submit" variant="primary" disabled={!name.trim() || !models.some(Boolean) || save.isPending}>
               save combo
             </Button>
-          </div>
-          <Field label="fallback order" hint="tried top to bottom">
-            <ModelChain models={models} onChange={setModels} />
-          </Field>
+          </CardFooter>
         </form>
-        {save.isError ? (
-          <div className="mt-3">
-            <ErrorNote error={save.error} />
-          </div>
-        ) : null}
       </Card>
 
       <Card>

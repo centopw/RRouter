@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 /** Shared primitives. Every page composes these; none of them fetches. */
 
@@ -241,6 +241,77 @@ export function Select({
     >
       {children}
     </select>
+  );
+}
+
+/** Card footer for form actions: a hairline separates actions from the fields. */
+export function CardFooter({ children }: { children: ReactNode }) {
+  return <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">{children}</div>;
+}
+
+/**
+ * A value the operator needs verbatim (an endpoint, a key): monospace, and one click
+ * away from the clipboard. Copying a truncated string would be worse than useless, so
+ * the full value is in `value` even when the visible text is shortened.
+ */
+export function CopyChip({ value, prefix }: { value: string; prefix?: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      // Clipboard API needs a secure context; fall back to a hidden textarea.
+      const area = document.createElement("textarea");
+      area.value = value;
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      area.remove();
+    }
+    setCopied(true);
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setCopied(false), 1_500);
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title={`copy ${value}`}
+      aria-label={`copy ${value}`}
+      className="group inline-flex h-7 min-w-0 items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-2 font-mono text-[11px] text-muted hover:border-line-strong hover:text-fg"
+    >
+      {prefix ? <span className="shrink-0 text-faint">{prefix}</span> : null}
+      <span className="truncate">{copied ? "copied" : value}</span>
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        aria-hidden
+        className="shrink-0 opacity-60 group-hover:opacity-100"
+      >
+        {copied ? (
+          <path d="M4 12l5 5L20 6" />
+        ) : (
+          <>
+            <rect x="9" y="9" width="11" height="11" rx="2" />
+            <path d="M15 5H6a2 2 0 00-2 2v9" />
+          </>
+        )}
+      </svg>
+    </button>
   );
 }
 

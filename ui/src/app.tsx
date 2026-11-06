@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useHealth, useModels } from "./lib/queries";
-import { Dot, cx } from "./components/ui";
+import { CopyChip, Dot, cx } from "./components/ui";
 import { uptime } from "./lib/format";
 
 type NavItem = { to: string; label: string; icon: React.ReactNode; group: string };
@@ -163,11 +163,9 @@ function TopBar({ onSearch }: { onSearch: () => void }) {
         Search
         <kbd className="ml-auto rounded border border-line-strong px-1 py-0.5 text-[10px]">⌘K</kbd>
       </button>
-      <div className="ml-auto flex items-center gap-3 text-[12px] text-muted">
-        <span className="hidden sm:inline">OpenAI-compatible gateway</span>
-        <code className="rounded border border-line-strong bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[11px] text-muted">
-          :20128/v1
-        </code>
+      <div className="ml-auto flex min-w-0 items-center gap-3 text-[12px] text-muted">
+        <span className="hidden shrink-0 sm:inline">OpenAI-compatible gateway</span>
+        <CopyChip value={`${window.location.origin}/v1`} />
       </div>
     </header>
   );

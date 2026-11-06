@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Button, Card, CardHeader, ErrorNote, Field, Input, PageHeader } from "../components/ui";
+import { Button, Card, CardFooter, CardHeader, ErrorNote, Field, Input, PageHeader } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { ModelSelect } from "../components/model-select";
 import { qk, useAliases } from "../lib/queries";
@@ -64,33 +64,32 @@ export default function Aliases() {
         </div>
       ) : null}
 
-      <Card className="mb-3 px-5 py-4">
+      <Card className="mb-3">
         <form
-          className="flex flex-wrap items-end gap-3"
           onSubmit={(e) => {
             e.preventDefault();
             save.mutate();
           }}
         >
-          <div className="w-[220px]">
+          <div className="grid gap-4 px-5 py-4 sm:grid-cols-[220px_minmax(0,1fr)]">
             <Field label="alias" hint="the name clients send">
               <Input value={name} onChange={setName} placeholder="fast" ariaLabel="alias name" />
             </Field>
-          </div>
-          <div className="w-[320px]">
             <Field label="target" hint="any model listed in this gateway">
               <ModelSelect value={target} onChange={setTarget} ariaLabel="alias target model" allowEmpty="choose a model" />
             </Field>
           </div>
-          <Button type="submit" variant="primary" disabled={!name.trim() || !target || save.isPending}>
-            save alias
-          </Button>
+          {save.isError ? (
+            <div className="px-5 pb-3">
+              <ErrorNote error={save.error} />
+            </div>
+          ) : null}
+          <CardFooter>
+            <Button type="submit" variant="primary" disabled={!name.trim() || !target || save.isPending}>
+              save alias
+            </Button>
+          </CardFooter>
         </form>
-        {save.isError ? (
-          <div className="mt-3">
-            <ErrorNote error={save.error} />
-          </div>
-        ) : null}
       </Card>
 
       <Card>

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, CardHeader, ErrorNote, Input, PageHeader } from "../components/ui";
+import { Badge, Button, Card, CardHeader, CopyChip, ErrorNote, Input, PageHeader } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { when } from "../lib/format";
 import { qk, useKeys } from "../lib/queries";
@@ -115,8 +115,12 @@ export default function Keys() {
           loading={keys.isLoading}
           empty="No keys yet. Create one to require authentication."
         />
-        <div className="border-t border-line px-5 py-3 text-[11px] text-faint">
-          Enforcement is controlled by <Badge>require_api_key</Badge> in the server config.
+        <div className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-3 text-[11px] text-faint">
+          <span>endpoint</span>
+          <CopyChip value={`${window.location.origin}/v1`} />
+          <span className="ml-auto flex items-center gap-1.5">
+            enforcement is controlled by <Badge>require_api_key</Badge> in the server config
+          </span>
         </div>
       </Card>
     </>
