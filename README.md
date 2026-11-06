@@ -89,16 +89,19 @@ race two refreshes and invalidate the session.
 
 ## Models
 
-**Models** in the dashboard is the registry behind `/v1/models`:
+**Models** in the dashboard is the registry behind `/v1/models`, and it lists exactly one
+thing: **what this gateway can call right now** — models belonging to providers you have
+connected. Disconnect the last account and the list is empty.
 
-- **Sync from models.dev** — one button (and a daily background refresh) pulls context
-  windows, output caps, and capabilities (vision, pdf, audio, tools, reasoning) for providers
-  this build can route.
-- **Fetch from a provider** — asks that provider's own `/models` endpoint; used automatically
-  where it exists, and the custom form covers the ones that do not list models (Codex).
-- **Custom models** — add any id with its limits and capabilities; custom rows win over
-  everything else and are never overwritten by a sync.
-- **Test** — sends a real 16-token completion through the same planner, dispatcher, and
+- **Provider lists** — adding a provider fetches that provider's own `/models` endpoint in
+  the background; the Fetch button re-runs it. Codex cannot enumerate, so its five verified
+  ids come from the built-in catalog.
+- **Sync from models.dev** — metadata only. One button (plus a daily refresh) fills in
+  context window, output cap, capabilities (vision, pdf, audio, tools, reasoning), and price
+  per million tokens. It never adds a model to the list.
+- **Custom models** — define any id with limits, capabilities, and price for providers that
+  do not publish a list; custom rows win over everything and survive syncs.
+- **Test** — a real 16-token completion through the same planner, dispatcher, and
   reassembly path a client uses, so a green result means what it says.
 
 Every place the dashboard asks for a model is a select grouped by provider — no free-text
