@@ -2,6 +2,16 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## Unreleased
+
+### Added
+- Budget windows: per-key budgets reset daily, weekly or monthly (UTC), enforced alongside the
+  lifetime cap; `spent_*` on the key row is scoped to the current window.
+- Opt-in exact-match response cache for non-streaming requests (`RROUTER_CACHE=sqlite`), with
+  TTL, size bound, `x-rrouter-cache` hit/miss/bypass and hit rows that record zero tokens.
+- The dashboard prompts for `RROUTER_ADMIN_TOKEN` and keeps it per tab, so a proxy-fronted
+  deployment can authenticate its own admin API.
+
 ## 0.2.0 — first public release
 
 ### Gateway
@@ -52,7 +62,6 @@ All notable changes. Dates are local; versions follow semver once tagged.
 
 ### Operations
 
-- Opt-in exact-match response cache (`RROUTER_CACHE=sqlite`, TTL, size bound, hit/miss metrics).
 - `usage`/`attempts` accounting, Prometheus `/metrics`, `/health` and a self-probe
   (`rrouter --healthcheck`), graceful shutdown with a bounded drain.
 - Request ids (`x-request-id`) and per-attempt records, so a fallback is visible in
