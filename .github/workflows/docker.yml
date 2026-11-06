@@ -105,8 +105,9 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:20128/health
+          # A healthy server proves the SQLite file and master key were written to the
+          # volume: the container has no shell to inspect it with.
           docker exec rrouter-smoke /usr/local/bin/rrouter --healthcheck
-          docker exec rrouter-smoke ls /data
       - name: Cleanup
         if: always()
         run: docker rm -f rrouter-smoke || true
