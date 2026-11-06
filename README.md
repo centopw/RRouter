@@ -84,14 +84,22 @@ Client-facing (OpenAI- and Anthropic-compatible):
 
 ## Dashboard
 
-`GET /` serves a dashboard embedded in the binary — no build step, no CDN, no internet access
-required. It is an *extension surface*, not a fixed page: the client composes itself from
-`GET /api/ui/panels`, which lists the built-in panels (Connections, API keys, Aliases, Combos,
-Usage, Health) plus any `extension` panels you register. An extension panel is a URL the
-dashboard loads in an isolated frame and hands a scoped token, so an organisation can add its
-own panels without forking RRouter.
+`GET /` redirects to `/app/`, the Vite + React dashboard (Activity, Connections, Models, API
+keys, Aliases, Combos, Health). It is embedded in the binary by `crates/rrouter-ui`, so a
+release build needs no node toolchain and serves no CDN or internet resource.
 
-White-label it from `PUT /api/settings`: brand name, accent colour, logo URL, footer text.
+```sh
+cd ui && npm install
+npm run dev              # vite on :5173, proxies /api and /v1 to :20128
+npm run build            # writes ui/dist, which the next cargo build embeds
+```
+
+`cargo build` without a `ui/dist` still succeeds: the gateway then serves the original
+dependency-free shell at `/`, which composes itself from `GET /api/ui/panels` and supports
+`extension` panels (a URL loaded in an isolated frame with a scoped token) so an organisation
+can add panels without forking RRouter.
+
+White-label from `PUT /api/settings`: brand name, accent colour, logo URL, footer text.
 
 ## Running it as a self-hosted platform
 
