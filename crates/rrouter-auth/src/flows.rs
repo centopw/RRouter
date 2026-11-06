@@ -22,7 +22,9 @@ use crate::credentials::Credentials;
 use crate::fresh::TokenResponse;
 use crate::loopback::LoopbackServer;
 use crate::pkce;
-use crate::registry::{DeviceFlow, LoginFlow, PkceFlow, ProviderSpec, RefreshBody};
+use crate::registry::{
+    get, login_flow_for, DeviceFlow, LoginFlow, PkceFlow, ProviderSpec, RefreshBody,
+};
 
 /// How long a pending login may sit unused before it is dropped.
 pub const PENDING_TTL: Duration = Duration::from_secs(15 * 60);
@@ -68,6 +70,7 @@ pub enum PendingState {
 struct Pending {
     flow: LoginFlow,
     provider: &'static str,
+    profile_url: Option<&'static str>,
     verifier: Option<String>,
     state: String,
     redirect_uri: String,
@@ -109,9 +112,13 @@ impl OAuthFlows {
         http: &reqwest::Client,
         spec: &'static ProviderSpec,
     ) -> Result<(String, Challenge)> {
-        let flow = spec.login.ok_or_else(|| {
-            Error::BadRequest(format!("provider {} has no OAuth sign-in", spec.id))
-        })?;
+        let flow = if get(spec.id).is_some_and(|registered| std::ptr::eq(registered, spec)) {
+            login_flow_for(spec.id)
+        } else {
+            None
+        }
+        .or(spec.login)
+        .ok_or_else(|| Error::BadRequest(format!("provider {} has no OAuth sign-in", spec.id)))?;
         self.sweep();
         match flow {
             LoginFlow::Pkce(p) => self.start_pkce(spec, p).await,
@@ -144,6 +151,7 @@ impl OAuthFlows {
             Pending {
                 flow: LoginFlow::Pkce(p),
                 provider: spec.id,
+                profile_url: spec.profile_url,
                 verifier: Some(verifier),
                 state,
                 redirect_uri: redirect_uri.clone(),
@@ -195,6 +203,7 @@ impl OAuthFlows {
             Pending {
                 flow: LoginFlow::DeviceCode(d),
                 provider: spec.id,
+                profile_url: spec.profile_url,
                 verifier: None,
                 state: String::new(),
                 redirect_uri: String::new(),
@@ -252,6 +261,7 @@ impl OAuthFlows {
             PendingSnapshot {
                 flow: p.flow,
                 provider: p.provider,
+                profile_url: p.profile_url,
                 verifier: p.verifier.clone(),
                 state: p.state.clone(),
                 redirect_uri: p.redirect_uri.clone(),
@@ -272,7 +282,16 @@ impl OAuthFlows {
                 match wait {
                     Err(e) => Err(e),
                     Ok(cb) => {
-                        Self::exchange_code(http, pending.provider, p, &cb.code, &pending.redirect_uri, pending.verifier.as_deref().unwrap_or_default()).await
+                        Self::exchange_code(
+                            http,
+                            pending.provider,
+                            p,
+                            pending.profile_url,
+                            &cb.code,
+                            &pending.redirect_uri,
+                            pending.verifier.as_deref().unwrap_or_default(),
+                        )
+                        .await
                     }
                 }
             }
@@ -281,7 +300,15 @@ impl OAuthFlows {
                     return Err(Error::BadRequest("this login has no device code".into()));
                 };
                 let _ = d;
-                Self::poll_device(http, pending.provider, flow, &device_code, interval).await
+                Self::poll_device(
+                    http,
+                    pending.provider,
+                    flow,
+                    pending.profile_url,
+                    &device_code,
+                    interval,
+                )
+                .await
             }
         };
 
@@ -337,6 +364,7 @@ impl OAuthFlows {
         http: &reqwest::Client,
         provider: &str,
         p: PkceFlow,
+        profile_url: Option<&'static str>,
         code: &str,
         redirect_uri: &str,
         verifier: &str,
@@ -381,7 +409,10 @@ impl OAuthFlows {
                 "provider {provider} returned an empty access token"
             )));
         }
-        let account_label = account_label_from(&tokens);
+        let account_label = match account_label_from(&tokens) {
+            Some(label) => Some(label),
+            None => profile_label(http, provider, profile_url, &tokens.access_token).await,
+        };
         Ok(SignedIn {
             provider: provider.to_string(),
             credentials: Credentials {
@@ -400,6 +431,7 @@ impl OAuthFlows {
         http: &reqwest::Client,
         provider: &str,
         d: DeviceFlow,
+        profile_url: Option<&'static str>,
         device_code: &str,
         interval: Duration,
     ) -> Result<SignedIn> {
@@ -438,7 +470,10 @@ impl OAuthFlows {
                         .and_then(Value::as_u64)
                         .map(|s| s.min(u64::from(u32::MAX)) as u32),
                 };
-                let account_label = account_label_from(&tokens);
+                let account_label = match account_label_from(&tokens) {
+                    Some(label) => Some(label),
+                    None => profile_label(http, provider, profile_url, &tokens.access_token).await,
+                };
                 return Ok(SignedIn {
                     provider: provider.to_string(),
                     credentials: Credentials {
@@ -487,6 +522,7 @@ impl OAuthFlows {
 struct PendingSnapshot {
     flow: LoginFlow,
     provider: &'static str,
+    profile_url: Option<&'static str>,
     verifier: Option<String>,
     state: String,
     redirect_uri: String,
@@ -549,6 +585,37 @@ fn label_from_jwt(jwt: &str) -> Option<String> {
     None
 }
 
+async fn profile_label(
+    http: &reqwest::Client,
+    provider: &str,
+    profile_url: Option<&'static str>,
+    access_token: &str,
+) -> Option<String> {
+    let url = profile_url?;
+    let response = http
+        .get(url)
+        .bearer_auth(access_token)
+        .timeout(POLL_TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let value: Value = response.json().await.ok()?;
+    let candidate = match provider {
+        "claude" => value
+            .pointer("/account/email_address")
+            .or_else(|| value.get("email")),
+        "codex" | "github" => value.get(if provider == "codex" { "email" } else { "login" }),
+        _ => None,
+    };
+    candidate
+        .and_then(Value::as_str)
+        .filter(|label| !label.is_empty())
+        .map(str::to_string)
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -574,7 +641,7 @@ fn truncate(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{DeviceFlow, LoginFlow, PkceFlow, ProviderKind, RefreshBody, PkceFlow as P};
+    use crate::registry::{DeviceFlow, LoginFlow, ProviderKind, RefreshBody, PkceFlow as P};
     use axum::extract::State;
     use axum::routing::post;
     use axum::{Json, Router};
@@ -582,9 +649,18 @@ mod tests {
     use std::sync::Arc;
 
     fn spec(login: LoginFlow) -> &'static ProviderSpec {
+        spec_with_profile_id("mock", login, None)
+    }
+
+
+    fn spec_with_profile_id(
+        id: &'static str,
+        login: LoginFlow,
+        profile_url: Option<&'static str>,
+    ) -> &'static ProviderSpec {
         // Leak once per test process: `start` takes &'static ProviderSpec.
         Box::leak(Box::new(ProviderSpec {
-            id: "mock",
+            id,
             display: "Mock",
             kind: ProviderKind::OAuth,
             base_url: "https://mock.test/chat",
@@ -595,6 +671,7 @@ mod tests {
             extra_headers: &[],
             default_max_tokens: None,
             refresh: None,
+            profile_url,
             login: Some(login),
         }))
     }
@@ -688,20 +765,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_endpoint_provides_account_label() {
+        let (base, _hits) = oauth_server().await;
+        let profile = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"account": {"email_address": "profile@example.test"}}),
+            ))
+            .expect(1)
+            .mount(&profile)
+            .await;
+        let profile_url = Box::leak(format!("{}/profile", profile.uri()).into_boxed_str());
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let leaked = spec_with_profile_id("claude",
+            LoginFlow::DeviceCode(DeviceFlow {
+                client_id: "cid",
+                device_code_url: Box::leak(format!("{base}/device").into_boxed_str()),
+                token_url: Box::leak(format!("{base}/token").into_boxed_str()),
+                scope: "read:user",
+            }),
+            Some(profile_url),
+        );
+
+        let (id, _) = flows.start(&http, leaked).await.unwrap();
+        let done = flows.complete(&http, &id).await.unwrap();
+        assert_eq!(done.account_label.as_deref(), Some("profile@example.test"));
+        assert_eq!(
+            done.credentials.account_label.as_deref(),
+            Some("profile@example.test")
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_endpoint_failure_does_not_fail_sign_in() {
+        let (base, _hits) = oauth_server().await;
+        let profile = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&profile)
+            .await;
+        let profile_url = Box::leak(format!("{}/profile", profile.uri()).into_boxed_str());
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let leaked = spec_with_profile_id("claude",
+            LoginFlow::DeviceCode(DeviceFlow {
+                client_id: "cid",
+                device_code_url: Box::leak(format!("{base}/device").into_boxed_str()),
+                token_url: Box::leak(format!("{base}/token").into_boxed_str()),
+                scope: "read:user",
+            }),
+            Some(profile_url),
+        );
+
+        let (id, _) = flows.start(&http, leaked).await.unwrap();
+        let done = flows.complete(&http, &id).await.unwrap();
+        assert_eq!(done.account_label, None);
+        assert_eq!(done.credentials.account_label, None);
+    }
+
+    #[tokio::test]
     async fn pkce_flow_completes_after_loopback_redirect() {
         let (base, _hits) = oauth_server().await;
         let flows = OAuthFlows::new();
         let http = reqwest::Client::new();
-        let leaked = spec(LoginFlow::Pkce(P {
-            client_id: "cid",
-            authorize_url: Box::leak(format!("{base}/authorize").into_boxed_str()),
-            token_url: Box::leak(format!("{base}/token").into_boxed_str()),
-            scope: "openid profile",
-            fixed_port: None,
-            callback_path: "/callback",
-            extra_params: &[],
-            body: RefreshBody::Form,
-        }));
+        let profile = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&profile)
+            .await;
+        let profile_url = Box::leak(format!("{}/profile", profile.uri()).into_boxed_str());
+        let leaked = spec_with_profile_id("claude",
+            LoginFlow::Pkce(P {
+                client_id: "cid",
+                authorize_url: Box::leak(format!("{base}/authorize").into_boxed_str()),
+                token_url: Box::leak(format!("{base}/token").into_boxed_str()),
+                scope: "openid profile",
+                fixed_port: None,
+                callback_path: "/callback",
+                extra_params: &[],
+                body: RefreshBody::Form,
+            }),
+            Some(profile_url),
+        );
 
         let (id, challenge) = flows.start(&http, leaked).await.unwrap();
         let (authorize_url, redirect_uri) = match challenge {

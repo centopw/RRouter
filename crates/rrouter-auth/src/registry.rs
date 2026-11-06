@@ -10,6 +10,8 @@ use std::sync::LazyLock;
 
 use rrouter_core::Dialect;
 
+use crate::overrides::{override_for, OverrideKind};
+
 /// How an account for this provider is obtained and refreshed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
@@ -128,9 +130,12 @@ pub struct ProviderSpec {
     pub default_max_tokens: Option<u32>,
     /// Refresh recipe; `None` for `ApiKey`/`Local`.
     pub refresh: Option<RefreshSpec>,
+    /// Profile endpoint used as a best-effort account-label fallback.
+    pub profile_url: Option<&'static str>,
     /// One-time sign-in recipe; `None` when the provider has no browser/device login
     /// (API-key providers) or RRouter does not implement it.
     pub login: Option<LoginFlow>,
+
 }
 
 impl ProviderSpec {
@@ -244,6 +249,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         extra_headers: CLAUDE_HEADERS,
         default_max_tokens: Some(32_000),
         refresh: Some(CLAUDE_REFRESH),
+        profile_url: Some("https://api.anthropic.com/api/oauth/profile"),
         login: Some(CLAUDE_LOGIN),
     },
     ProviderSpec {
@@ -259,6 +265,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: Some(CODEX_REFRESH),
         login: Some(CODEX_LOGIN),
+        profile_url: Some("https://auth.openai.com/userinfo"),
     },
     ProviderSpec {
         id: "github",
@@ -273,6 +280,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: Some(GITHUB_LOGIN),
+        profile_url: Some("https://api.github.com/user"),
     },
     ProviderSpec {
         id: "openai",
@@ -287,6 +295,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: None,
+        profile_url: None,
     },
     ProviderSpec {
         id: "anthropic",
@@ -301,6 +310,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: Some(32_000),
         refresh: None,
         login: None,
+        profile_url: None,
     },
     ProviderSpec {
         id: "deepseek",
@@ -315,6 +325,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: None,
+        profile_url: None,
     },
     ProviderSpec {
         id: "gemini",
@@ -329,6 +340,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: None,
+        profile_url: None,
     },
     ProviderSpec {
         id: "groq",
@@ -343,6 +355,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: None,
+        profile_url: None,
     },
     ProviderSpec {
         id: "openrouter",
@@ -357,6 +370,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: None,
+        profile_url: None,
     },
     ProviderSpec {
         id: "xai",
@@ -371,6 +385,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: None,
+        profile_url: None,
     },
     ProviderSpec {
         id: "mistral",
@@ -385,6 +400,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: None,
+        profile_url: None,
     },
     ProviderSpec {
         id: "together",
@@ -399,6 +415,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: None,
+        profile_url: None,
     },
     ProviderSpec {
         id: "cerebras",
@@ -413,6 +430,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: None,
+        profile_url: None,
     },
     ProviderSpec {
         id: "ollama",
@@ -427,6 +445,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_max_tokens: None,
         refresh: None,
         login: None,
+        profile_url: None,
     },
 ];
 
@@ -441,6 +460,31 @@ static BY_ID: LazyLock<HashMap<&'static str, &'static ProviderSpec>> = LazyLock:
 /// Look up a provider by registry id.
 pub fn get(id: &str) -> Option<&'static ProviderSpec> {
     BY_ID.get(id).copied()
+}
+
+/// Return a provider's login flow with configured endpoint overrides applied.
+pub fn login_flow_for(provider: &str) -> Option<LoginFlow> {
+    let flow = get(provider)?.login?;
+    Some(match flow {
+        LoginFlow::Pkce(mut p) => {
+            if let Some(url) = override_for(provider, OverrideKind::Authorize) {
+                p.authorize_url = url;
+            }
+            if let Some(url) = override_for(provider, OverrideKind::Token) {
+                p.token_url = url;
+            }
+            LoginFlow::Pkce(p)
+        }
+        LoginFlow::DeviceCode(mut d) => {
+            if let Some(url) = override_for(provider, OverrideKind::Token) {
+                d.token_url = url;
+            }
+            if let Some(url) = override_for(provider, OverrideKind::Device) {
+                d.device_code_url = url;
+            }
+            LoginFlow::DeviceCode(d)
+        }
+    })
 }
 
 /// `true` when `id` names a registered OAuth provider.
@@ -529,5 +573,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn endpoint_overrides_apply_and_reject_insecure_hosts() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("registry::tests::override_probe")
+            .arg("--nocapture")
+            .env(
+                "RROUTER_OAUTH_OVERRIDE_CLAUDE_AUTHORIZE",
+                "https://oauth.example.test/authorize",
+            )
+            .env(
+                "RROUTER_OAUTH_OVERRIDE_CODEX_TOKEN",
+                "http://oauth.example.test/token",
+            )
+            .env_remove("RROUTER_ALLOW_INSECURE_OAUTH")
+            .output()
+            .expect("run override probe");
+        assert!(
+            output.status.success(),
+            "override probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn override_probe() {
+        if std::env::var("RROUTER_OAUTH_OVERRIDE_CLAUDE_AUTHORIZE").as_deref()
+            != Ok("https://oauth.example.test/authorize")
+        {
+            return;
+        }
+        let flow = login_flow_for("claude").expect("claude login flow");
+        let LoginFlow::Pkce(flow) = flow else {
+            panic!("claude must use PKCE");
+        };
+        assert_eq!(flow.authorize_url, "https://oauth.example.test/authorize");
+        assert_eq!(flow.token_url, "https://api.anthropic.com/v1/oauth/token");
+        assert!(crate::invalid_overrides()
+            .iter()
+            .any(|entry| entry.contains("RROUTER_OAUTH_OVERRIDE_CODEX_TOKEN")));
     }
 }

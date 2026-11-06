@@ -272,7 +272,6 @@ const NOT_FOUND_PAGE: &str = "<!doctype html><title>RRouter</title><p>Not found.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::BufReader;
     use tokio::net::TcpStream as Client;
 
     async fn get(port: u16, target: &str) -> String {

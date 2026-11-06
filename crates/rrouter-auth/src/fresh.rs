@@ -22,6 +22,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::credentials::Credentials;
+use crate::overrides::{override_for, OverrideKind};
 use crate::registry::{ProviderKind, ProviderSpec, RefreshBody, RefreshSpec};
 
 /// Credentials are considered stale this many seconds before they actually expire, so a
@@ -165,9 +166,10 @@ impl Refresher {
         spec: RefreshSpec,
         refresh_token: &str,
     ) -> Result<Credentials> {
+        let token_url = override_for(provider_id, OverrideKind::Token).unwrap_or(spec.token_url);
         let mut req = self
             .http
-            .post(spec.token_url)
+            .post(token_url)
             .timeout(REQUEST_TIMEOUT)
             .header("accept", "application/json");
 

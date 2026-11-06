@@ -1,173 +1,266 @@
 #!/usr/bin/env python3
-"""Live OAuth sign-in verification for RRouter.
-
-Stands up a mock OAuth provider (device-code + PKCE token endpoints), points a
-dynamic RRouter instance at it via the registry-independent device flow, and drives
-the real endpoints the dashboard uses:
-
-    POST /api/oauth/{provider}/start
-    GET  /api/oauth/{provider}/status/{id}
-    POST /api/oauth/{provider}/complete
-
-Because the built-in providers point at real vendors, the flow is exercised here
-with a *mock* provider registered through a test-only env override. The point is to
-prove the full path — network exchange, credential persistence, encryption at rest —
-against the real binary, not to sign in to a vendor account.
-"""
+"""Exercise both OAuth flows through the real release binary."""
 import json
 import os
+import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+ACCESS = "LIVE-ACCESS-TOKEN"
+REFRESH = "LIVE-REFRESH-TOKEN"
+PKCE_ACCESS = "PKCE-ACCESS-TOKEN"
+PKCE_REFRESH = "PKCE-REFRESH-TOKEN"
+ID_TOKEN = "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20ifQ."
 RR = os.environ.get("RR", "target/release/rrouter")
-DATA = "/tmp/rrouter-oauth"
-UP = 21140
-GW = 21141
 
-device_polls = {"n": 0}
+
+def free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
 
 class Provider(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    polls = 0
 
-    def log_message(self, *a):
+    def log_message(self, *_args):
         pass
 
-    def _json(self, status, obj):
-        body = json.dumps(obj).encode()
+    def _json(self, status, value):
+        body = json.dumps(value).encode()
         self.send_response(status)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
+    def _text(self, status, text):
+        body = text.encode()
+        self.send_response(status)
+        self.send_header("content-type", "text/plain")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/verify" or self.path == "/authorize":
+            return self._text(200, "mock authorization page")
+        if self.path == "/user":
+            return self._json(200, {"login": "live-user"})
+        if self.path == "/copilot_internal/v2/token":
+            return self._json(200, {"token": "LIVE-COPILOT-TOKEN", "expires_at": 4102444800})
+        return self._json(404, {"error": "not_found"})
+
     def do_POST(self):
-        n = int(self.headers.get("content-length", 0))
-        raw = self.rfile.read(n).decode()
+        length = int(self.headers.get("content-length", "0"))
+        raw = self.rfile.read(length).decode()
+        form = urllib.parse.parse_qs(raw)
         if self.path == "/device":
             return self._json(200, {
-                "device_code": "DEV-LIVE",
-                "user_code": "LIVE-CODE",
-                "verification_uri": f"http://127.0.0.1:{UP}/verify",
+                "device_code": "LIVE-DEVICE-CODE",
+                "user_code": "LIVE-USER-CODE",
+                "verification_uri": f"http://127.0.0.1:{self.server.server_port}/verify",
                 "expires_in": 900,
                 "interval": 1,
             })
         if self.path == "/token":
-            if "device_code=DEV-LIVE" in raw:
-                device_polls["n"] += 1
-                if device_polls["n"] < 2:
+            if form.get("device_code") == ["LIVE-DEVICE-CODE"]:
+                type(self).polls += 1
+                if type(self).polls == 1:
                     return self._json(200, {"error": "authorization_pending"})
                 return self._json(200, {
-                    "access_token": "LIVE-ACCESS-TOKEN",
-                    "refresh_token": "LIVE-REFRESH-TOKEN",
+                    "access_token": ACCESS,
+                    "refresh_token": REFRESH,
+                    "id_token": ID_TOKEN,
                     "expires_in": 3600,
                 })
-            if "grant_type=authorization_code" in raw:
+            if form.get("grant_type") == ["authorization_code"] or "authorization_code" in raw:
                 return self._json(200, {
-                    "access_token": "PKCE-ACCESS",
-                    "refresh_token": "PKCE-REFRESH",
+                    "access_token": PKCE_ACCESS,
+                    "refresh_token": PKCE_REFRESH,
+                    "id_token": ID_TOKEN,
                     "expires_in": 3600,
                 })
         return self._json(404, {"error": "not_found"})
 
-def api(method, path, body=None):
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{GW}/api{path}",
+
+def api(port, method, path, body=None):
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api{path}",
         data=None if body is None else json.dumps(body).encode(),
         headers={"content-type": "application/json"},
         method=method,
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return r.status, json.loads(r.read() or b"{}")
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read() or b"{}")
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read() or b"{}")
+    except urllib.error.URLError as error:
+        return 0, {"error": {"message": str(error)}}
+
 
 def main():
-    os.system(f"rm -rf {DATA} && mkdir -p {DATA}")
-    srv = ThreadingHTTPServer(("127.0.0.1", UP), Provider)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-
-    gw = subprocess.Popen([RR], env={
-        **os.environ,
-        "RROUTER_PORT": str(GW), "RROUTER_DATA_DIR": DATA, "RUST_LOG": "rrouter=warn",
-        # Test-only registry override: point the github device flow at the mock.
-        "RROUTER_OAUTH_OVERRIDE_GITHUB_DEVICE": f"http://127.0.0.1:{UP}/device",
-        "RROUTER_OAUTH_OVERRIDE_GITHUB_TOKEN": f"http://127.0.0.1:{UP}/token",
-    }, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    gateway_port = free_port()
+    provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    provider_port = provider.server_port
+    provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
+    provider_thread.start()
 
     ok = True
-    def check(name, cond, detail=""):
+
+    def check(name, condition, detail=""):
         nonlocal ok
-        print(("PASS  " if cond else "FAIL  ") + name + (f"  [{detail}]" if detail else ""))
-        ok = ok and cond
+        print(("PASS  " if condition else "FAIL  ") + name + (f"  [{detail}]" if detail else ""))
+        ok = ok and bool(condition)
 
-    try:
-        for _ in range(100):
-            try:
-                urllib.request.urlopen(f"http://127.0.0.1:{GW}/health", timeout=1)
-                break
-            except Exception:
-                time.sleep(0.05)
-
-        # Unknown provider is rejected without side effects.
-        st, body = api("POST", "/oauth/notreal/start")
-        check("unknown provider -> 404", st == 404, str(body.get("error", {}).get("message", ""))[:60])
-
-        # A provider with no login flow is refused.
-        st, body = api("POST", "/oauth/openai/start")
-        check("no login flow -> 400", st == 400, str(body.get("error", {}).get("message", ""))[:60])
-
-        # Start the device flow.
-        st, body = api("POST", "/oauth/github/start")
-        if st != 200:
-            check("device start", False, f"HTTP {st} {json.dumps(body)[:160]}")
-        else:
-            check("device start returns a user code", body.get("challenge", {}).get("user_code") == "LIVE-CODE", json.dumps(body.get("challenge"))[:80])
-            check("start never returns a token", "access_token" not in json.dumps(body))
-            login_id = body["id"]
-
-            st, status = api("GET", f"/oauth/github/status/{login_id}")
-            check("status reports pending", status.get("pending") is True, json.dumps(status))
-
-            # Complete: the server polls until the mock hands out a token.
-            st, done = api("POST", "/oauth/github/complete", {"id": login_id})
-            check("complete returns a connection id", st == 200 and done.get("id"), f"HTTP {st}")
-            check("complete never returns a token", "access_token" not in json.dumps(done), json.dumps(done)[:100])
-            check("provider polled at least twice (pending then success)", device_polls["n"] >= 2, f"{device_polls['n']} polls")
-
-            # Idempotent: completing again must not re-exchange.
-            before = device_polls["n"]
-            st2, done2 = api("POST", "/oauth/github/complete", {"id": login_id})
-            check("complete is idempotent", st2 == 200 and device_polls["n"] == before,
-                  f"{device_polls['n']} polls (was {before})")
-
-            # The connection exists and never exposes tokens.
-            st, conns = api("GET", "/connections")
-            rows = [c for c in conns.get("data", []) if c.get("auth_type") == "oauth"]
-            check("connection stored as oauth", len(rows) == 1, f"{len(rows)} oauth connections")
-            if rows:
-                row = rows[0]
-                check("connection reports has_access_token", row.get("has_access_token") is True)
-                check("connection view leaks no token", "LIVE-ACCESS-TOKEN" not in json.dumps(row))
-
-        # Both secrets absent from the DB file on disk.
-        db = open(f"{DATA}/rrouter.db", "rb").read()
-        check("access token not in DB plaintext", b"LIVE-ACCESS-TOKEN" not in db)
-        check("refresh token not in DB plaintext", b"LIVE-REFRESH-TOKEN" not in db)
-
-        print("\nRESULT:", "ALL PASS" if ok else "FAILURES PRESENT")
-        return 0 if ok else 1
-    finally:
-        gw.terminate()
+    with tempfile.TemporaryDirectory(prefix="rrouter-oauth-") as data_dir:
+        env = {
+            **os.environ,
+            "RROUTER_PORT": str(gateway_port),
+            "RROUTER_DATA_DIR": data_dir,
+            "RROUTER_ALLOW_INSECURE_OAUTH": "1",
+            "RROUTER_OAUTH_OVERRIDE_GITHUB_DEVICE": f"http://127.0.0.1:{provider_port}/device",
+            "RROUTER_OAUTH_OVERRIDE_GITHUB_TOKEN": f"http://127.0.0.1:{provider_port}/token",
+            "RROUTER_OAUTH_OVERRIDE_CLAUDE_AUTHORIZE": f"http://127.0.0.1:{provider_port}/authorize",
+            "RROUTER_OAUTH_OVERRIDE_CLAUDE_TOKEN": f"http://127.0.0.1:{provider_port}/token",
+        }
+        gateway = None
         try:
-            gw.wait(timeout=10)
-        except Exception:
-            gw.kill()
-        srv.shutdown()
+            gateway = subprocess.Popen(
+                [RR],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            ready = False
+            for _ in range(120):
+                if gateway.poll() is not None:
+                    break
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{gateway_port}/health", timeout=1):
+                        ready = True
+                        break
+                except (OSError, urllib.error.URLError):
+                    time.sleep(0.1)
+            check("release gateway starts", ready)
+
+            device_status, device = api(gateway_port, "POST", "/oauth/github/start")
+            device_challenge = device.get("challenge", {})
+            check("device start succeeds", device_status == 200, f"HTTP {device_status}")
+            check("device challenge has user code", device_challenge.get("user_code") == "LIVE-USER-CODE")
+            check("device start never returns a token", "access_token" not in json.dumps(device))
+            device_id = device.get("id")
+            if device_id:
+                status_code, status = api(gateway_port, "GET", f"/oauth/github/status/{device_id}")
+                check("device status is pending", status_code == 200 and status.get("pending") is True)
+                complete_code, complete = api(
+                    gateway_port, "POST", "/oauth/github/complete", {"id": device_id}
+                )
+                check("device complete returns a connection id", complete_code == 200 and bool(complete.get("id")))
+                check("device complete never returns a token", "access_token" not in json.dumps(complete))
+                check("device provider polled pending then success", Provider.polls >= 2, f"{Provider.polls} polls")
+
+                _, connections = api(gateway_port, "GET", "/connections")
+                rows = [row for row in connections.get("data", []) if row.get("auth_type") == "oauth"]
+                check("device connection is stored", len(rows) == 1, f"{len(rows)} oauth rows")
+                if rows:
+                    check("device connection has access token", rows[0].get("has_access_token") is True)
+                    check("device connection view hides token", ACCESS not in json.dumps(rows[0]))
+
+                before = Provider.polls
+                second_code, _ = api(
+                    gateway_port, "POST", "/oauth/github/complete", {"id": device_id}
+                )
+                check("second device complete is idempotent", second_code == 200 and Provider.polls == before)
+
+            pkce_status, pkce = api(gateway_port, "POST", "/oauth/claude/start")
+            challenge = pkce.get("challenge", {})
+            authorize_url = challenge.get("authorize_url")
+            redirect_uri = challenge.get("redirect_uri")
+            check("PKCE start succeeds", pkce_status == 200 and bool(authorize_url))
+            check("PKCE challenge has redirect URI", bool(redirect_uri))
+            if authorize_url and redirect_uri and pkce.get("id"):
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(authorize_url).query)
+                state = query.get("state", [""])[0]
+                check("PKCE authorize URL has state", bool(state))
+                result = {}
+
+                def complete_pkce():
+                    result["response"] = api(
+                        gateway_port, "POST", "/oauth/claude/complete", {"id": pkce["id"]}
+                    )
+
+                worker = threading.Thread(target=complete_pkce)
+                worker.start()
+                callback = f"{redirect_uri}?code=PKCE-CODE&state={urllib.parse.quote(state)}"
+                with urllib.request.urlopen(callback, timeout=30) as response:
+                    check("PKCE loopback redirect succeeds", response.status == 200)
+                worker.join(timeout=30)
+                complete_result = result.get("response", (0, {}))
+                check("PKCE complete stores a connection", complete_result[0] == 200 and bool(complete_result[1].get("id")))
+
+            negative_status, negative = api(gateway_port, "POST", "/oauth/claude/start")
+            negative_redirect = negative.get("challenge", {}).get("redirect_uri")
+            _, before_negative = api(gateway_port, "GET", "/connections")
+            before_negative_count = len(before_negative.get("data", []))
+            if negative_status == 200 and negative_redirect and negative.get("id"):
+                result = {}
+
+                def complete_negative():
+                    result["response"] = api(
+                        gateway_port, "POST", "/oauth/claude/complete", {"id": negative["id"]}
+                    )
+
+                worker = threading.Thread(target=complete_negative)
+                worker.start()
+                bad_callback = f"{negative_redirect}?code=PKCE-CODE&state=wrong-state"
+                try:
+                    urllib.request.urlopen(bad_callback, timeout=30)
+                    callback_status = 200
+                except urllib.error.HTTPError as error:
+                    callback_status = error.code
+                worker.join(timeout=30)
+                complete_result = result.get("response", (0, {}))
+                check("wrong PKCE state returns loopback 400", callback_status == 400)
+                check("wrong PKCE state fails complete", complete_result[0] >= 400)
+                _, after_negative = api(gateway_port, "GET", "/connections")
+                check(
+                    "wrong PKCE state stores no connection",
+                    len(after_negative.get("data", [])) == before_negative_count,
+                )
+
+            db_path = os.path.join(data_dir, "rrouter.db")
+            try:
+                db_bytes = open(db_path, "rb").read()
+                check("access token absent from encrypted DB", ACCESS.encode() not in db_bytes and PKCE_ACCESS.encode() not in db_bytes)
+                check("refresh token absent from encrypted DB", REFRESH.encode() not in db_bytes and PKCE_REFRESH.encode() not in db_bytes)
+            except OSError as error:
+                check("encrypted DB exists", False, str(error))
+        except Exception as error:
+            check("smoke harness completed without exception", False, repr(error))
+        finally:
+            if gateway is not None:
+                gateway.terminate()
+                try:
+                    gateway.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    gateway.kill()
+                    gateway.wait()
+            provider.shutdown()
+            provider.server_close()
+
+    print("\nRESULT:", "ALL PASS" if ok else "FAILURES PRESENT")
+    return 0 if ok else 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -14,6 +14,7 @@ pub mod flows;
 pub mod fresh;
 pub mod loopback;
 pub mod pkce;
+pub mod overrides;
 pub mod headers;
 pub mod registry;
 
@@ -23,6 +24,7 @@ pub use flows::{Challenge, OAuthFlows, SignedIn};
 pub use loopback::LoopbackServer;
 pub use headers::{build_headers, resolve_base_url};
 pub use registry::{
-    get, is_oauth, AuthStyle, DeviceFlow, LoginFlow, PkceFlow, ProviderKind, ProviderSpec,
-    RefreshBody, RefreshSpec, PROVIDERS,
+    get, is_oauth, login_flow_for, AuthStyle, DeviceFlow, LoginFlow, PkceFlow, ProviderKind,
+    ProviderSpec, RefreshBody, RefreshSpec, PROVIDERS,
 };
+pub use overrides::{invalid_overrides, override_for, OverrideKind};
