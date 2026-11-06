@@ -15,7 +15,7 @@ import {
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { ModelPicker } from "../components/model-picker";
-import { compact, when } from "../lib/format";
+import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
 import { qk, useKeyModels, useKeys, useModels, useUpdateKey, useUpdateKeyModels } from "../lib/queries";
 import {
   ApiError,
@@ -212,26 +212,37 @@ function Limits({ row }: { row: KeyResult }) {
           )}
         </span>
       ))}
+      {row.budget_micros > 0 ? (
+        <span title="USD budget">
+          <span className="text-faint"> · </span>
+          <span className="text-muted tnum">{usd(row.budget_micros)}</span>
+        </span>
+      ) : null}
     </span>
   );
 }
 
+/** Money spent against the USD budget; the token budget stays a hover detail. */
 function Spend({ row }: { row: KeyResult }) {
-  const budget = row.budget_tokens;
-  if (budget <= 0) {
+  const tokenNote =
+    row.budget_tokens > 0
+      ? `${compact(row.spent_tokens)} of ${compact(row.budget_tokens)} tokens used`
+      : `${compact(row.spent_tokens)} tokens used · no token budget`;
+  const budget = row.budget_micros;
+  if (!(budget > 0)) {
     return (
-      <span className="font-mono text-[12px] text-faint tnum" title="no token budget set">
-        {compact(row.spent_tokens)}
+      <span className="font-mono text-[12px] text-muted tnum" title={`no USD budget · ${tokenNote}`}>
+        {usd(row.spent_micros)}
       </span>
     );
   }
-  const reached = row.spent_tokens >= budget;
-  const share = Math.min(100, (row.spent_tokens / budget) * 100);
+  const reached = row.spent_micros >= budget;
+  const share = Math.min(100, (row.spent_micros / budget) * 100);
   return (
-    <div className="min-w-[132px]">
+    <div className="min-w-[132px]" title={tokenNote}>
       <div className="flex items-baseline gap-1 font-mono text-[12px] tnum">
-        <span className={reached ? "text-neg" : "text-fg"}>{compact(row.spent_tokens)}</span>
-        <span className="text-faint">/ {compact(budget)}</span>
+        <span className={reached ? "text-neg" : "text-fg"}>{usd(row.spent_micros)}</span>
+        <span className="text-faint">/ {usd(budget)}</span>
       </div>
       <span className="mt-1 block h-1.5 w-full overflow-hidden rounded-full bg-[var(--color-rule)]">
         <span
@@ -370,6 +381,8 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
   const [rpm, setRpm] = useState(row.rpm > 0 ? String(row.rpm) : "");
   const [tpm, setTpm] = useState(row.tpm > 0 ? String(row.tpm) : "");
   const [budget, setBudget] = useState(row.budget_tokens > 0 ? String(row.budget_tokens) : "");
+  const [budgetUsd, setBudgetUsd] = useState(usdInput(row.budget_micros));
+  const [budgetProblem, setBudgetProblem] = useState<string | null>(null);
   const [expires, setExpires] = useState(toDateInput(row.expires_at));
   const [allowed, setAllowed] = useState<string[]>(row.allowed_models ?? []);
 
@@ -423,6 +436,12 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
         : `${pairs.length} rewrite${pairs.length === 1 ? "" : "s"}`;
 
   const submit = () => {
+    const parsed = parseUsd(budgetUsd);
+    if ("problem" in parsed) {
+      setBudgetProblem(parsed.problem);
+      return;
+    }
+    setBudgetProblem(null);
     const clean = pairs.map((p) => ({ from: p.from.trim(), to: p.to }));
     const invalid = validateMap(clean, refs, new Map((baseline ?? []).map((p) => [p.from, p.to])));
     if (invalid !== null) {
@@ -437,6 +456,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
       rpm: toCount(rpm),
       tpm: toCount(tpm),
       budget_tokens: toCount(budget),
+      budget_micros: parsed.micros,
       allowed_models: allowed.length === 0 ? null : allowed,
       expires_at: fromDateInput(expires),
     };
@@ -486,7 +506,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
           </span>
         </label>
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <Field label="requests/min" hint="empty = unlimited">
             <Input
               type="number"
@@ -517,6 +537,25 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
               disabled={busy}
             />
           </Field>
+          <div className="flex min-w-0 flex-col gap-1">
+            <Field label="budget (USD)" hint="empty = unlimited">
+              <Input
+                value={budgetUsd}
+                onChange={(v) => {
+                  setBudgetUsd(v);
+                  setBudgetProblem(null);
+                }}
+                placeholder="1.00"
+                ariaLabel="budget in USD"
+                disabled={busy}
+              />
+            </Field>
+            {budgetProblem ? (
+              <span role="alert" className="text-[11px] text-neg">
+                {budgetProblem}
+              </span>
+            ) : null}
+          </div>
         </div>
 
         <Field label="expires" hint="empty = never">

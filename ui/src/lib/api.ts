@@ -98,8 +98,10 @@ export type Connection = {
 export type KeyModelMap = { from: string; to: string };
 
 /**
- * A gateway key with its governance limits. `rpm`/`tpm`/`budget_tokens` use 0 for
- * "unlimited"; `allowed_models` null means any model; `expires_at` null means never.
+ * A gateway key with its governance limits. `rpm`/`tpm`/`budget_tokens`/
+ * `budget_micros` use 0 for "unlimited"; `allowed_models` null means any model;
+ * `expires_at` null means never. `spent_micros` is the key's USD spend in
+ * millionths of a dollar, so 1 USD = 1_000_000.
  * `models` is the key's rewrite map, absent when the server predates it.
  */
 export type KeyResult = {
@@ -111,6 +113,10 @@ export type KeyResult = {
   tpm: number;
   budget_tokens: number;
   spent_tokens: number;
+  /** USD budget in micros; 0 = unlimited. */
+  budget_micros: number;
+  /** USD spend in micros, computed per request like `spent_tokens`. */
+  spent_micros: number;
   allowed_models: string[] | null;
   expires_at: number | null;
   models?: KeyModelMap[];
@@ -122,6 +128,8 @@ export type UpdateKey = Partial<{
   rpm: number;
   tpm: number;
   budget_tokens: number;
+  /** USD budget in micros; 0 clears it. */
+  budget_micros: number;
   allowed_models: string[] | null;
   expires_at: number | null;
 }>;
@@ -140,6 +148,8 @@ export type UsageSummaryRow = {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+  /** USD in micros, priced from catalog prices; 0 when a model has no price. */
+  cost_micros: number;
   avg_latency_ms: number;
 };
 
@@ -160,6 +170,8 @@ export type UsageEvent = {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+  /** USD in micros for this request; 0 when prices are unknown. */
+  cost_micros: number;
   latency_ms: number;
   /** Time to the first model output; 0 when unmeasured (non-streaming, failures). */
   ttft_ms: number;
@@ -196,6 +208,8 @@ export type UsageBucket = {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+  /** USD in micros for the bucket; 0 when prices are unknown. */
+  cost_micros: number;
   avg_latency_ms: number;
 };
 
@@ -210,6 +224,8 @@ export type UsageModelBucket = {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+  /** USD in micros for this model in this bucket. */
+  cost_micros: number;
   avg_latency_ms: number;
 };
 

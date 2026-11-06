@@ -12,7 +12,7 @@ import {
   statusText,
 } from "../../components/ui";
 import { Readout, TrafficChart, type TrafficBucket, type TrafficPart } from "../../components/charts";
-import { compact, ms, pct } from "../../lib/format";
+import { compact, ms, pct, usd } from "../../lib/format";
 import {
   RANGES,
   bucketLabel,
@@ -36,6 +36,7 @@ const ALL = "__all__";
 const METRICS = [
   { id: "requests", label: "Requests" },
   { id: "tokens", label: "Tokens" },
+  { id: "cost", label: "Cost" },
 ] as const;
 
 type Metric = (typeof METRICS)[number]["id"];
@@ -47,6 +48,8 @@ type Totals = {
   errors: number;
   cacheRead: number;
   cacheWrite: number;
+  /** USD in micros, priced from catalog prices. */
+  cost: number;
   /** Request-weighted mean, in milliseconds. */
   latency: number;
 };
@@ -58,6 +61,7 @@ const ZERO: Totals = {
   errors: 0,
   cacheRead: 0,
   cacheWrite: 0,
+  cost: 0,
   latency: 0,
 };
 
@@ -323,6 +327,20 @@ export default function Activity() {
                       delta={deltaLabel(errorRate, prevErrorRate)}
                     />
                   </div>
+                  {cur.cost > 0 ? (
+                    <div className="bg-surface">
+                      <Readout
+                        label="Spend"
+                        value={usd(cur.cost)}
+                        note={
+                          cur.requests > 0
+                            ? `~${usd(cur.cost / cur.requests)} per request`
+                            : "Priced requests only"
+                        }
+                        delta={deltaLabel(cur.cost, prev.cost)}
+                      />
+                    </div>
+                  ) : null}
                   {cur.cacheRead > 0 ? (
                     <div className="bg-surface">
                       <Readout
@@ -583,6 +601,7 @@ function totalsOf(buckets: UsageBucket[]): Totals {
     t.errors += b.errors;
     t.cacheRead += b.cache_read_tokens;
     t.cacheWrite += b.cache_write_tokens;
+    t.cost += b.cost_micros;
     t.latency += b.avg_latency_ms * b.requests;
   }
   if (t.requests > 0) t.latency /= t.requests;
@@ -622,6 +641,7 @@ function modelRows(rows: UsageSummaryRow[]): ModelRow[] {
       output_tokens: prior.output_tokens + r.output_tokens,
       cache_read_tokens: prior.cache_read_tokens + r.cache_read_tokens,
       cache_write_tokens: prior.cache_write_tokens + r.cache_write_tokens,
+      cost_micros: prior.cost_micros + r.cost_micros,
       avg_latency_ms: Math.round(latency),
       tokens: prior.tokens + r.input_tokens + r.output_tokens,
     });
@@ -665,10 +685,25 @@ function dominantStatus(rows: UsageEvent[]): number | null {
   return best;
 }
 
+/** The one number the chart plots for a bucket, already in the metric's own unit. */
+type MetricRow = {
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_micros: number;
+};
+
+function metricValue(row: MetricRow, metric: Metric): number {
+  if (metric === "requests") return row.requests;
+  if (metric === "tokens") return row.input_tokens + row.output_tokens;
+  return row.cost_micros;
+}
+
 /**
  * One chart cell per aligned bucket in the window, zero cells included. Parts
  * come from the server-side per-model split; when that query has no data the
  * chart falls back to one total-coloured segment per bucket (never a guess).
+ * Cost falls back the same way while the split carries no prices.
  */
 function buildChart({
   spec,
@@ -698,9 +733,11 @@ function buildChart({
   const parts = new Map<number, Map<string, number>>();
   const partErrors = new Map<number, number>();
   let hasModelRows = false;
+  let hasModelCost = false;
   for (const b of byModel) {
     if (b.start < alignedFrom) continue;
     hasModelRows = true;
+    if (b.cost_micros > 0) hasModelCost = true;
     starts.add(b.start);
     const ref = splitModel(b.provider, b.model).ref;
     let cell = parts.get(b.start);
@@ -708,21 +745,23 @@ function buildChart({
       cell = new Map<string, number>();
       parts.set(b.start, cell);
     }
-    const value = metric === "requests" ? b.requests : b.input_tokens + b.output_tokens;
-    cell.set(ref, (cell.get(ref) ?? 0) + value);
+    cell.set(ref, (cell.get(ref) ?? 0) + metricValue(b, metric));
     partErrors.set(b.start, (partErrors.get(b.start) ?? 0) + b.errors);
   }
+
+  const splitUsable = metric === "cost" ? hasModelCost : hasModelRows;
 
   return [...starts].sort((a, b) => a - b).map((start) => {
     const total = totals.get(start);
     const cell = parts.get(start);
     let segments: TrafficPart[] = [];
-    if (cell && cell.size > 0) {
+    if (splitUsable && cell) {
       segments = rankedRefs
         .filter((ref) => (cell.get(ref) ?? 0) > 0)
         .map((ref) => ({ id: ref, value: cell.get(ref) ?? 0 }));
-    } else if (!hasModelRows && total) {
-      const value = metric === "requests" ? total.requests : total.input_tokens + total.output_tokens;
+    }
+    if (segments.length === 0 && !splitUsable && total) {
+      const value = metricValue(total, metric);
       if (value > 0) segments = [{ id: ALL, value }];
     }
     return {

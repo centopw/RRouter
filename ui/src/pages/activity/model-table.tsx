@@ -1,4 +1,4 @@
-import { compact, ms, pct, splitRef } from "../../lib/format";
+import { compact, ms, pct, splitRef, usd } from "../../lib/format";
 import { cx } from "../../components/ui";
 import type { UsageSummaryRow } from "../../lib/api";
 
@@ -24,10 +24,10 @@ export function ModelTable({
   }
   return (
     <div className="overflow-x-auto">
-      <div role="table" aria-label="models in use" className="min-w-[680px]">
+      <div role="table" aria-label="models in use" className="min-w-[760px]">
         <div
           role="row"
-          className="grid grid-cols-[minmax(0,1fr)_90px_190px_96px_72px] items-center gap-3 border-b border-line px-6 py-2 text-[11px] uppercase tracking-[0.06em] text-faint"
+          className="grid grid-cols-[minmax(0,1fr)_90px_190px_88px_96px_72px] items-center gap-3 border-b border-line px-6 py-2 text-[11px] uppercase tracking-[0.06em] text-faint"
         >
           <span role="columnheader">Model</span>
           <span role="columnheader" className="text-right">
@@ -35,6 +35,9 @@ export function ModelTable({
           </span>
           <span role="columnheader" className="text-right">
             Tokens
+          </span>
+          <span role="columnheader" className="text-right">
+            Cost
           </span>
           <span role="columnheader" className="text-right">
             Avg latency
@@ -53,7 +56,7 @@ export function ModelTable({
                 key={row.ref}
                 aria-selected={on}
                 className={cx(
-                  "grid grid-cols-[minmax(0,1fr)_90px_190px_96px_72px] items-center gap-3 border-b border-[var(--color-rule)] py-2.5 pl-5 pr-6 text-[13.5px] last:border-0",
+                  "grid grid-cols-[minmax(0,1fr)_90px_190px_88px_96px_72px] items-center gap-3 border-b border-[var(--color-rule)] py-2.5 pl-5 pr-6 text-[13.5px] last:border-0",
                   on ? "bg-[var(--color-surface-2)]" : "hover:bg-[var(--color-row-hover)]",
                 )}
               >
@@ -86,6 +89,15 @@ export function ModelTable({
                       {pct(share)}
                     </span>
                   </span>
+                </span>
+                <span
+                  role="cell"
+                  className={cx(
+                    "text-right font-mono text-[12.5px] tnum",
+                    row.cost_micros > 0 ? "text-muted" : "text-faint",
+                  )}
+                >
+                  {usd(row.cost_micros)}
                 </span>
                 <span role="cell" className="text-right font-mono text-[12.5px] text-muted tnum">
                   {ms(row.avg_latency_ms)}

@@ -24,6 +24,52 @@ export function pct(n: number): string {
   return `${n.toFixed(1)}%`;
 }
 
+/** One USD is 1,000,000 micros: the smallest unit any provider charges. */
+const MICROS = 1_000_000;
+
+/**
+ * Money from micros. Four decimals from a cent up, up to six below it so a
+ * fraction of a cent stays visible instead of rounding to nothing; `dash` shows
+ * zero or absent spend as an em dash.
+ */
+export function usd(micros: number | null | undefined, opts?: { dash?: boolean }): string {
+  if (micros === null || micros === undefined || !Number.isFinite(micros) || micros === 0) {
+    return opts?.dash ? "—" : "$0.0000";
+  }
+  const dollars = micros / MICROS;
+  if (Math.abs(dollars) < 0.01) {
+    return `$${dollars.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`;
+  }
+  return `$${dollars.toFixed(4)}`;
+}
+
+/** Micros as an editable dollar string: `2500000` -> "2.5", `1` -> "0.000001". */
+export function usdInput(micros: number): string {
+  if (!(micros > 0)) return "";
+  return (micros / MICROS)
+    .toFixed(6)
+    .replace(/0+$/, "")
+    .replace(/\.$/, "");
+}
+
+/**
+ * A dollar field's value in micros, or why it is not one: non-negative, at most
+ * six decimals (one micro is the smallest unit), empty or zero meaning unlimited.
+ */
+export function parseUsd(value: string): { micros: number } | { problem: string } {
+  const text = value.trim();
+  if (text === "") return { micros: 0 };
+  if (!/^\d*\.?\d*$/.test(text)) {
+    return { problem: "enter a non-negative dollar amount, digits only" };
+  }
+  if (!/^(\d+(\.\d{1,6})?|\.\d{1,6})$/.test(text)) {
+    return { problem: "enter a dollar amount with at most 6 decimals" };
+  }
+  const dollars = Number(text);
+  if (!Number.isFinite(dollars)) return { problem: "not a dollar amount" };
+  return { micros: Math.round(dollars * MICROS) };
+}
+
 export function when(ts: number): string {
   return new Date(ts * 1000).toLocaleString(undefined, {
     month: "short",

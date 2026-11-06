@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { Badge, Button, CopyButton, ErrorNote, StatusPill, cx, statusText } from "../../components/ui";
-import { compact, ms, splitRef, when } from "../../lib/format";
+import { compact, ms, splitRef, usd, when } from "../../lib/format";
 import { useUsageDetail } from "../../lib/queries";
 import type { UsageEvent } from "../../lib/api";
 
@@ -91,7 +91,11 @@ export function RequestLog({
                     })()}
                   </span>
                 </span>
-                <span role="cell" className="text-right font-mono text-[12px] text-muted tnum">
+                <span
+                  role="cell"
+                  className="text-right font-mono text-[12px] text-muted tnum"
+                  title={`Cost ${usd(row.cost_micros, { dash: true })}`}
+                >
                   {failed ? "—" : `${compact(row.input_tokens)} → ${compact(row.output_tokens)}`}
                 </span>
                 <span role="cell" className="text-right font-mono text-[12px] text-muted tnum">
@@ -243,6 +247,7 @@ export function RequestDetail({
           <Row k="Provider" v={row.provider} />
           {row.endpoint ? <Row k="Endpoint" v={row.endpoint} mono /> : null}
           <Row k="Tokens" v={failed ? "—" : `${row.input_tokens} in · ${row.output_tokens} out`} mono />
+          <Row k="Cost" v={usd(row.cost_micros, { dash: true })} mono />
           <Row k="Cache" v={failed ? "—" : `${row.cache_read_tokens} read · ${row.cache_write_tokens} write`} mono />
           <Row k="Connection" v={row.connection_id ?? "—"} mono />
         </dl>

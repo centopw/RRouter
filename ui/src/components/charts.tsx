@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { compact, pct } from "../lib/format";
+import { compact, pct, usd } from "../lib/format";
 import { niceMax, peakIndex, xLabelIndices } from "../lib/activity";
 import { Dot, cx } from "./ui";
 
@@ -231,6 +231,15 @@ export type TrafficBucket = {
 
 const AXIS_WIDTH = 44;
 
+/** What a chart column measures; `cost` values are USD micros, printed with `usd`. */
+type TrafficUnit = "requests" | "tokens" | "cost";
+
+/** One chart number in the current unit: money as USD, traffic as a compact count. */
+function amount(value: number, unit: TrafficUnit, round: boolean): string {
+  if (unit === "cost") return usd(Math.round(value));
+  return compact(round ? Math.round(value) : value);
+}
+
 /**
  * Stacked traffic chart: one column per bucket, one segment per model, an error lane
  * under the plot, and a CSS-only tooltip (hover/focus; the peak bucket shows by
@@ -245,7 +254,7 @@ export function TrafficChart({
 }: {
   buckets: TrafficBucket[];
   colorOf: (id: string) => string;
-  unit: "requests" | "tokens";
+  unit: TrafficUnit;
   height?: number;
   labelEvery?: number;
 }) {
@@ -264,7 +273,7 @@ export function TrafficChart({
               className="absolute right-2 -translate-y-1/2 text-[11px] text-faint tnum"
               style={{ top: `${(1 - t) * 100}%` }}
             >
-              {compact(Math.round(max * t))}
+              {amount(max * t, unit, true)}
             </span>
           ))}
         </div>
@@ -280,7 +289,7 @@ export function TrafficChart({
           <div className="absolute inset-0 flex items-end">
             {buckets.map((b, i) => {
               const left = i < buckets.length / 2;
-              const aria = `${b.full}: ${b.total} ${unit}${b.errors ? `, ${b.errors} failed` : ""}`;
+              const aria = `${b.full}: ${amount(b.total, unit, false)} ${unit}${b.errors ? `, ${b.errors} failed` : ""}`;
               const tip = <Tooltip bucket={b} colorOf={colorOf} unit={unit} />;
               return (
                 <div
@@ -378,13 +387,13 @@ function Tooltip({
 }: {
   bucket: TrafficBucket;
   colorOf: (id: string) => string;
-  unit: "requests" | "tokens";
+  unit: TrafficUnit;
 }) {
   return (
     <div className="w-[208px] rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-left shadow-xl">
       <div className="text-[11px] text-faint">{bucket.full}</div>
       <div className="mt-1 text-[13px] font-medium text-fg tnum">
-        {compact(bucket.total)} {unit}
+        {amount(bucket.total, unit, false)} {unit}
       </div>
       <div className="mt-2 space-y-1">
         {bucket.parts
@@ -398,7 +407,7 @@ function Tooltip({
                 style={{ background: colorOf(p.id) }}
               />
               <span className="min-w-0 flex-1 truncate text-muted">{p.id}</span>
-              <span className="text-fg tnum">{compact(p.value)}</span>
+              <span className="text-fg tnum">{amount(p.value, unit, false)}</span>
             </div>
           ))}
       </div>
