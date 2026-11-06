@@ -17,9 +17,10 @@ logging, metrics) and 9router (dashboard, providers, combos, usage).
 | 9 | Guardrails | prompt/response hooks (blocklists, max tokens per request, redaction) | LiteLLM guardrails |
 | 10 | Ops polish | structured JSON logs, OpenTelemetry export, quota reset schedules | production gateways |
 
-Status: phases 1–6 landed (cost accounting verified live: 8-in/4-out at $1/$5 per million =
-28 micro-USD). Phase 7 (protocol breadth) in progress. Release 0.2.0 is cut once the image
-smoke job passes.
+Status: phases 1–9 landed and verified live (key governance, observability, ops knobs,
+routing strategies, UX, cost accounting, protocol breadth, cache, budget windows). Release
+0.2.0 is published with all four binaries and the installer verified against it; phase 10
+(JSON logs) is in progress, phase 11 (log pagination) is specced.
 
 ## Phase 1 — key governance (contract)
 
