@@ -230,6 +230,8 @@ fn config(require_api_key: bool) -> Config {
         cache: rrouter_gateway::config::CacheMode::Off,
         cache_ttl_secs: 300,
         cache_max_entries: 1000,
+        log_format: rrouter_gateway::config::LogFormat::Text,
+        access_log: true,
     }
 }
 

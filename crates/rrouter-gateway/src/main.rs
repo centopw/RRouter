@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rrouter_gateway::{app, config::Config, state::concurrency_for, AppState};
+use rrouter_gateway::{app, config::{Config, LogFormat}, state::concurrency_for, AppState};
 use rrouter_router::{Breaker, Catalog, Dispatcher};
 use rrouter_store::Store;
 use tracing_subscriber::EnvFilter;
@@ -47,7 +47,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    init_tracing(&config.log_filter);
+    init_tracing(&config.log_filter, config.log_format);
     match run(config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -103,13 +103,14 @@ fn probe_health(host: &str, port: u16) -> std::io::Result<()> {
     }
 }
 
-fn init_tracing(filter: &str) {
+fn init_tracing(filter: &str, format: LogFormat) {
     let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("rrouter=info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(false)
-        .compact()
-        .init();
+    let builder = tracing_subscriber::fmt().with_env_filter(env_filter).with_target(false);
+    // Both shapes keep the same fields; json is one object per line for log pipelines.
+    match format {
+        LogFormat::Text => builder.compact().init(),
+        LogFormat::Json => builder.json().init(),
+    }
 }
 
 fn build_http_client(config: &Config) -> Result<reqwest::Client, String> {

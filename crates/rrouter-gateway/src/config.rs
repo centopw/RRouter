@@ -59,6 +59,33 @@ impl CacheMode {
     }
 }
 
+/// Shape of every log line. `Text` (default) suits a terminal; `Json` suits Loki or
+/// CloudWatch, where one object per line is queryable by field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
+}
+
+impl LogFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Json => "json",
+        }
+    }
+
+    /// Case-insensitive, trimmed. `None` for an unknown name.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "text" => Some(Self::Text),
+            "json" => Some(Self::Json),
+            _ => None,
+        }
+    }
+}
+
 /// Everything the binary needs, resolved and validated once.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -94,6 +121,10 @@ pub struct Config {
     pub cache_ttl_secs: u64,
     /// Cached responses kept, clamped to `1..=100000`; oldest evicted first.
     pub cache_max_entries: usize,
+    /// Shape of every log line: `text` (default) or `json`.
+    pub log_format: LogFormat,
+    /// Emit one `request` info line per finished request. `false` silences only that line.
+    pub access_log: bool,
 }
 
 impl Config {
@@ -244,6 +275,8 @@ impl Config {
             MAX_CACHE_ENTRIES,
             &mut problems,
         ));
+        let log_format = log_format_setting(var("RROUTER_LOG_FORMAT"), &mut problems);
+        let access_log = access_log_setting(var("RROUTER_ACCESS_LOG"), &mut problems);
 
         if problems.is_empty() {
             Ok(Self {
@@ -266,6 +299,8 @@ impl Config {
                 cache,
                 cache_ttl_secs,
                 cache_max_entries,
+                log_format,
+                access_log,
             })
         } else {
             Err(problems.join("; "))
@@ -375,6 +410,28 @@ fn clamp_cache_entries(raw: usize) -> usize {
     raw.clamp(1, MAX_CACHE_ENTRIES)
 }
 
+/// Log line shape: `text` for a terminal, `json` for Loki/CloudWatch. Unknown is refused.
+fn log_format_setting(raw: Option<String>, problems: &mut Vec<String>) -> LogFormat {
+    match raw {
+        None => LogFormat::Text,
+        Some(raw) => LogFormat::parse(&raw).unwrap_or_else(|| {
+            problems.push(format!("RROUTER_LOG_FORMAT={raw:?} is not one of text, json"));
+            LogFormat::Text
+        }),
+    }
+}
+
+/// The per-request access line is on unless the operator explicitly turns it off.
+fn access_log_setting(raw: Option<String>, problems: &mut Vec<String>) -> bool {
+    match raw {
+        None => true,
+        Some(raw) => parse_bool(&raw).unwrap_or_else(|| {
+            problems.push(format!("RROUTER_ACCESS_LOG={raw:?} is not a boolean"));
+            true
+        }),
+    }
+}
+
 /// Serializes configuration for `--print-config`, never echoing the master key or the
 /// admin token.
 pub struct Redacted<'a>(&'a Config);
@@ -383,7 +440,7 @@ impl Serialize for Redacted<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let c = self.0;
-        let mut st = s.serialize_struct("Config", 20)?;
+        let mut st = s.serialize_struct("Config", 22)?;
         st.serialize_field("host", &c.host.to_string())?;
         st.serialize_field("port", &c.port)?;
         st.serialize_field("data_dir", &c.data_dir.to_string_lossy())?;
@@ -407,6 +464,8 @@ impl Serialize for Redacted<'_> {
         st.serialize_field("cache", c.cache.as_str())?;
         st.serialize_field("cache_ttl_secs", &c.cache_ttl_secs)?;
         st.serialize_field("cache_max_entries", &c.cache_max_entries)?;
+        st.serialize_field("log_format", c.log_format.as_str())?;
+        st.serialize_field("access_log", &c.access_log)?;
         st.end()
     }
 }
@@ -443,6 +502,8 @@ mod tests {
             cache: CacheMode::Off,
             cache_ttl_secs: DEFAULT_CACHE_TTL_SECS as u64,
             cache_max_entries: DEFAULT_CACHE_MAX_ENTRIES,
+            log_format: LogFormat::Text,
+            access_log: true,
         }
     }
 
@@ -535,5 +596,29 @@ mod tests {
         // A stored wildcard must never grant a foreign origin: an admin API that is
         // unauthenticated by default must not be readable from any web page.
         assert_eq!(cfg.cors_origin_for("https://evil.example"), None);
+    }
+
+    #[test]
+    fn log_format_names_parse_and_unknown_values_are_refused() {
+        assert_eq!(LogFormat::parse("text"), Some(LogFormat::Text));
+        assert_eq!(LogFormat::parse(" JSON "), Some(LogFormat::Json));
+        assert_eq!(LogFormat::parse("pretty"), None);
+        assert_eq!(LogFormat::parse(""), None);
+        assert_eq!(LogFormat::default(), LogFormat::Text, "text stays the default");
+        assert_eq!(LogFormat::Json.as_str(), "json");
+    }
+
+    #[test]
+    fn log_settings_default_and_refuse_garbage() {
+        let mut problems = Vec::new();
+        assert_eq!(log_format_setting(None, &mut problems), LogFormat::Text);
+        assert!(access_log_setting(None, &mut problems), "the access line is on by default");
+        assert!(problems.is_empty());
+        assert_eq!(log_format_setting(Some("json".into()), &mut problems), LogFormat::Json);
+        assert!(!access_log_setting(Some("false".into()), &mut problems));
+        assert!(problems.is_empty());
+        log_format_setting(Some("yaml".into()), &mut problems);
+        access_log_setting(Some("maybe".into()), &mut problems);
+        assert_eq!(problems.len(), 2, "both bad values must fail startup: {problems:?}");
     }
 }

@@ -56,18 +56,16 @@ pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return trace.respond(
+            return trace.fail(
                 started,
-                error_response(
-                    inbound,
-                    &Error::BadRequest(format!("request body could not be read: {e}")),
-                ),
-            )
+                inbound,
+                &Error::BadRequest(format!("request body could not be read: {e}")),
+            );
         }
     };
     match handle(&state, inbound, &parts.headers, &raw, &trace, permit).await {
         Ok(resp) => trace.respond(started, resp),
-        Err(e) => trace.respond(started, error_response(inbound, &e)),
+        Err(e) => trace.fail(started, inbound, &e),
     }
 }
 
@@ -84,19 +82,17 @@ pub async fn embeddings(State(state): State<Arc<AppState>>, req: Request) -> Res
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return trace.respond(
+            return trace.fail(
                 started,
-                error_response(
-                    Dialect::OpenAiEmbeddings,
-                    &Error::BadRequest(format!("request body could not be read: {e}")),
-                ),
-            )
+                Dialect::OpenAiEmbeddings,
+                &Error::BadRequest(format!("request body could not be read: {e}")),
+            );
         }
     };
     match embeddings_inner(&state, &parts.headers, &raw, &trace).await {
         // Non-streaming: the permit dies with this scope, after the body is built.
         Ok(resp) => trace.respond(started, resp),
-        Err(e) => trace.respond(started, error_response(Dialect::OpenAiEmbeddings, &e)),
+        Err(e) => trace.fail(started, Dialect::OpenAiEmbeddings, &e),
     }
 }
 
@@ -173,19 +169,17 @@ async fn special(state: &Arc<AppState>, req: Request, kind: Special) -> Response
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return trace.respond(
+            return trace.fail(
                 started,
-                error_response(
-                    kind.dialect(),
-                    &Error::BadRequest(format!("request body could not be read: {e}")),
-                ),
-            )
+                kind.dialect(),
+                &Error::BadRequest(format!("request body could not be read: {e}")),
+            );
         }
     };
     match special_inner(state, &parts.headers, &raw, kind, &trace).await {
         // Non-streaming: the permit dies with this scope, after the body is built.
         Ok(resp) => trace.respond(started, resp),
-        Err(e) => trace.respond(started, error_response(kind.dialect(), &e)),
+        Err(e) => trace.fail(started, kind.dialect(), &e),
     }
 }
 
@@ -413,19 +407,17 @@ async fn passthrough(state: &Arc<AppState>, req: Request, kind: Pass) -> Respons
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return trace.respond(
+            return trace.fail(
                 started,
-                error_response(
-                    kind.dialect(),
-                    &Error::BadRequest(format!("request body could not be read: {e}")),
-                ),
-            )
+                kind.dialect(),
+                &Error::BadRequest(format!("request body could not be read: {e}")),
+            );
         }
     };
     match passthrough_inner(state, &parts.headers, &raw, kind, &trace).await {
         // Audio streams: the slot has to outlive this handler and die with the body.
         Ok(resp) => trace.respond(started, hold_slot(resp, permit)),
-        Err(e) => trace.respond(started, error_response(kind.dialect(), &e)),
+        Err(e) => trace.fail(started, kind.dialect(), &e),
     }
 }
 
@@ -1902,6 +1894,26 @@ impl RequestTrace {
         resp
     }
 
+    /// Log a failed request once, under its id, then answer with the error response.
+    ///
+    /// Failed requests write no usage row, so this warn is their only log line. Attempts
+    /// are not logged per attempt; the attempts table and metrics carry those.
+    fn fail(&self, started: Instant, inbound: Dialect, err: &Error) -> Response {
+        let (provider, model) = {
+            let labels = self.labels();
+            (labels.provider.clone(), labels.model.clone())
+        };
+        tracing::warn!(
+            request_id = %self.request_id,
+            provider = %provider,
+            model = %model,
+            status = err.status(),
+            error = %err,
+            "request failed"
+        );
+        self.respond(started, error_response(inbound, err))
+    }
+
     fn finish(&self, started: Instant, status: u16) {
         let (provider, model) = {
             let labels = self.labels();
@@ -2224,6 +2236,7 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
 
 fn spawn_record(state: &AppState, mut rec: UsageRecord) {
     let store = Arc::clone(&state.store);
+    let access_log = state.config.access_log;
     // Usage accounting must never fail a request or delay the response — and the same
     // applies to pricing it. The price is read here rather than on the response path,
     // which is why no memo cache (and no invalidation hook in `routes/models.rs`) is
@@ -2237,10 +2250,29 @@ fn spawn_record(state: &AppState, mut rec: UsageRecord) {
         };
         rec.cost_micros =
             crate::models_registry::cost_micros(&store, &rec.provider, &rec.model, usage).await;
-        if let Err(e) = store.record_usage(&rec).await {
-            tracing::warn!(error = %e, "usage record failed");
+        match store.record_usage(&rec).await {
+            Err(e) => tracing::warn!(error = %e, "usage record failed"),
+            Ok(()) if access_log => access_line(&rec),
+            Ok(()) => {}
         }
     });
+}
+
+/// The per-request access line, emitted by the usage writer so it joins the usage row
+/// and attempt log on `request_id`. Carries no prompt, response or token material.
+fn access_line(rec: &UsageRecord) {
+    let request_id = rec.request_id.map(|id| id.to_string()).unwrap_or_default();
+    tracing::info!(
+        request_id = %request_id,
+        provider = %rec.provider,
+        model = %rec.model,
+        status = rec.status,
+        latency_ms = rec.latency_ms,
+        ttft_ms = rec.ttft_ms,
+        key_id = rec.key_id.map(|k| k.to_string()),
+        endpoint = rec.endpoint.as_deref().unwrap_or(""),
+        "request"
+    );
 }
 
 async fn embeddings_inner(
@@ -2406,5 +2438,75 @@ mod tests {
             ),
             "http://127.0.0.1:9/v1/chat/completions"
         );
+    }
+
+    /// Captures what the subscriber writes, so the access line is checked as emitted.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn sample_row(request_id: Option<Uuid>, key_id: Option<Uuid>) -> UsageRecord {
+        UsageRecord {
+            id: None,
+            ts: 0,
+            request_id,
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".into()),
+            key_id,
+            cost_micros: 0,
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 42,
+            ttft_ms: 7,
+            status: 200,
+            streamed: true,
+            error: None,
+        }
+    }
+
+    /// The access line carries the join keys and the timings, and no token material.
+    /// With no key the `key_id` field is absent rather than failing the line.
+    #[test]
+    fn access_line_has_the_contract_fields_and_survives_no_key() {
+        let captured = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer({
+                let captured = captured.clone();
+                move || captured.clone()
+            })
+            .finish();
+        let request_id = Uuid::new_v4();
+        tracing::subscriber::with_default(subscriber, || {
+            access_line(&sample_row(Some(request_id), None));
+        });
+        let text = String::from_utf8(captured.0.lock().unwrap().clone()).expect("utf8");
+        let line: Value = serde_json::from_str(text.lines().next().expect("one line"))
+            .expect("json line");
+        let fields = &line["fields"];
+        assert_eq!(line["level"], "INFO");
+        assert_eq!(fields["message"], "request");
+        assert_eq!(fields["request_id"], request_id.to_string());
+        assert_eq!(fields["provider"], "openai");
+        assert_eq!(fields["model"], "gpt-4o");
+        assert_eq!(fields["status"], 200);
+        assert_eq!(fields["latency_ms"], 42);
+        assert_eq!(fields["ttft_ms"], 7);
+        assert_eq!(fields["endpoint"], "/v1/chat/completions");
+        assert!(fields.get("key_id").is_none(), "no key, no key_id: {fields}");
+        assert!(!text.contains("input_tokens"), "no token material: {text}");
     }
 }

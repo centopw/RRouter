@@ -91,6 +91,8 @@ fn config() -> Config {
         cache: Default::default(),
         cache_ttl_secs: 300,
         cache_max_entries: 1000,
+        log_format: rrouter_gateway::config::LogFormat::Text,
+        access_log: true,
     }
 }
 
