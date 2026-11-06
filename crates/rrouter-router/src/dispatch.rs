@@ -127,11 +127,14 @@ impl Dispatcher {
     ) -> Option<(Candidate, ProbeClaim)> {
         while let Some(idx) = order.pop_front() {
             let candidate = plan.candidates[idx].clone();
-            if self.breaker.claim(candidate.connection).is_none() {
+            if let Ok(took_slot) = self.breaker.claim(candidate.connection) {
                 let claim = ProbeClaim {
                     breaker: Arc::clone(&self.breaker),
                     conn: candidate.connection,
-                    armed: true,
+                    // Only a guard that actually took a half-open slot may give one
+                    // back; releasing a slot we never took would free someone else's
+                    // probe and admit two concurrent probes.
+                    armed: took_slot,
                 };
                 return Some((candidate, claim));
             }
@@ -201,6 +204,7 @@ pub(crate) fn no_route(plan: &Plan, detail: &str) -> Error {
     Error::NoRoute { model: plan.model.clone(), detail: detail.to_string() }
 }
 
+
 /// Upstream status for breaker bookkeeping; transport/timeout failures have no
 /// HTTP status and are recorded as 0 (generic trip).
 pub(crate) fn status_of(err: &Error) -> u16 {
@@ -219,4 +223,50 @@ pub(crate) fn retry_after(err: &Error) -> Option<Duration> {
         return Duration::try_from_secs_f64(secs.max(0.0)).ok();
     }
     value.as_str().and_then(|s| s.trim().parse::<u64>().ok()).map(Duration::from_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A guard created for a closed-breaker attempt (`armed = false`) must not hand
+    /// back a probe slot. The race: request A starts while closed (takes nothing),
+    /// another request trips the account and holds a probe, then A is cancelled.
+    /// If A's guard released anyway it would free B's probe and admit two at once.
+    #[test]
+    fn closed_breaker_claim_arms_no_release() {
+        use std::time::Instant;
+        let breaker = Arc::new(Breaker::with_policy(1, Duration::from_secs(30), 1));
+        let conn = Uuid::new_v4();
+
+        // A starts while closed: no slot taken.
+        assert_eq!(breaker.claim(conn), Ok(false));
+        let a_guard = ProbeClaim { breaker: Arc::clone(&breaker), conn, armed: false };
+
+        // Meanwhile B trips the account and takes the single half-open probe.
+        breaker.record_failure(conn, 500, None);
+        let later = Instant::now() + Duration::from_secs(31);
+        assert_eq!(breaker.claim_at(conn, later), Ok(true), "B holds the only probe");
+
+        // A is now cancelled.
+        drop(a_guard);
+
+        // B's probe must still be held: exactly one probe is allowed.
+        assert!(
+            breaker.claim_at(conn, later).is_err(),
+            "a cancelled closed-state attempt must not free another request's probe"
+        );
+    }
+
+    /// A guard that *did* take the slot returns it when cancelled.
+    #[test]
+    fn probe_claim_guard_releases_only_its_own_slot() {
+        let breaker = Arc::new(Breaker::with_policy(1, Duration::ZERO, 1));
+        let conn = Uuid::new_v4();
+        breaker.record_failure(conn, 500, None);
+        assert_eq!(breaker.claim(conn), Ok(true));
+        drop(ProbeClaim { breaker: Arc::clone(&breaker), conn, armed: true });
+        assert_eq!(breaker.claim(conn), Ok(true), "the slot was returned");
+    }
 }

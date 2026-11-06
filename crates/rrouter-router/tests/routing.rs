@@ -193,9 +193,9 @@ fn half_open_admits_exactly_one_probe() {
     assert!(breaker.check_at(id, later).is_none());
 
     // First caller wins the probe slot...
-    assert!(breaker.claim_at(id, later).is_none());
+    assert_eq!(breaker.claim_at(id, later), Ok(true));
     // ...everyone else is told to wait, including via the read path.
-    assert!(breaker.claim_at(id, later).is_some());
+    assert!(breaker.claim_at(id, later).is_err());
     assert!(breaker.check_at(id, later).is_some());
     assert!(!breaker.is_available(id));
 
@@ -205,7 +205,7 @@ fn half_open_admits_exactly_one_probe() {
 
     // A successful probe closes it and restores full eligibility.
     let later = later + Duration::from_secs(31);
-    assert!(breaker.claim_at(id, later).is_none());
+    assert_eq!(breaker.claim_at(id, later), Ok(true));
     breaker.record_success(id);
     assert!(breaker.check(id).is_none());
 }
@@ -223,7 +223,7 @@ fn unclaimed_candidate_never_leaks_a_probe_slot() {
     let later = Instant::now() + Duration::from_secs(31);
     assert!(breaker.check_at(id, later).is_none());
     // No claim happened, so the slot is still free for a real attempt.
-    assert!(breaker.claim_at(id, later).is_none());
+    assert_eq!(breaker.claim_at(id, later), Ok(true));
     breaker.record_success(id);
     assert!(breaker.check(id).is_none());
 }
@@ -265,7 +265,7 @@ async fn streamed_success_settles_the_breaker_on_drop() {
         "dropping a healthy committed stream must count as a success; got {:?}",
         breaker.state(conn)
     );
-    assert!(breaker.claim(conn).is_none(), "no probe slot may be left taken");
+    assert!(breaker.claim(conn).is_ok(), "no probe slot may be left taken");
 }
 
 #[test]
@@ -532,7 +532,7 @@ async fn cancelled_attempt_releases_the_probe_slot() {
         breaker.check(conn).is_none(),
         "a cancelled attempt must not leave the probe slot taken"
     );
-    assert!(breaker.claim(conn).is_none(), "account must be probeable again");
+    assert!(breaker.claim(conn).is_ok(), "account must be probeable again");
 }
 
 #[tokio::test]
@@ -556,5 +556,5 @@ async fn client_error_does_not_trip_a_healthy_account() {
         matches!(dispatcher.breaker().state(conn), BreakerState::Closed),
         "client errors must not count toward the account's failure streak"
     );
-    assert!(dispatcher.breaker().claim(conn).is_none(), "account must stay eligible");
+    assert!(dispatcher.breaker().claim(conn).is_ok(), "account must stay eligible");
 }

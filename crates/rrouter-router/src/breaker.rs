@@ -101,15 +101,17 @@ impl Breaker {
 
     /// Claim the right to send one request, consuming a half-open probe slot.
     ///
-    /// `Some(wait)` means do not send. A successful claim **must** be settled
-    /// with [`Breaker::record_success`] or [`Breaker::record_failure`]; otherwise
-    /// the probe slot stays taken and the account is parked for [`PROBE_TAKEN`].
-    pub fn claim(&self, conn: Uuid) -> Option<Duration> {
+    /// `Err(wait)` means do not send. `Ok(true)` means a half-open probe slot was
+    /// **taken** and the caller must give it back with [`Breaker::release_probe`] if
+    /// the attempt is cancelled without a verdict. `Ok(false)` means the breaker is
+    /// closed and no slot was consumed — releasing then would hand back a slot
+    /// another task holds.
+    pub fn claim(&self, conn: Uuid) -> Result<bool, Duration> {
         self.claim_at(conn, Instant::now())
     }
 
     /// Clock-injected form of [`Breaker::claim`].
-    pub fn claim_at(&self, conn: Uuid, now: Instant) -> Option<Duration> {
+    pub fn claim_at(&self, conn: Uuid, now: Instant) -> Result<bool, Duration> {
         let mut map = self.lock();
         let entry = map.entry(conn).or_insert_with(Entry::new);
         // An elapsed open window is *reported* as half-open, and only an actual
@@ -120,14 +122,14 @@ impl Breaker {
             }
         }
         match entry.state {
-            BreakerState::Closed => None,
+            BreakerState::Closed => Ok(false),
             BreakerState::HalfOpen { probes } if probes < self.policy.probes => {
                 // Exactly one caller wins the slot; the rest see it taken.
                 entry.state = BreakerState::HalfOpen { probes: probes + 1 };
-                None
+                Ok(true)
             }
-            BreakerState::HalfOpen { .. } => Some(PROBE_TAKEN),
-            BreakerState::Open { until } => Some(until.duration_since(now)),
+            BreakerState::HalfOpen { .. } => Err(PROBE_TAKEN),
+            BreakerState::Open { until } => Err(until.duration_since(now)),
         }
     }
 
