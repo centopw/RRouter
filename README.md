@@ -313,6 +313,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 ./scripts/verify.sh                                 # build + every gate
 python3 scripts/e2e_smoke.py                        # live binary + mock upstream
 python3 scripts/oauth_smoke.py                      # OAuth flows against a mock IdP
+python3 scripts/load_test.py --requests 20 --concurrency 5   # real load against a running gateway
+./scripts/backup.sh /var/backups/rrouter            # consistent SQLite snapshot + key
 ```
 
 Coverage includes: fallback on 401/429 without losing the client request, the first SSE frame
