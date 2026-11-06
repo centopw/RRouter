@@ -13,11 +13,43 @@ export class ApiError extends Error {
 
 type Json = Record<string, unknown>;
 
+/**
+ * Admin API token (`RROUTER_ADMIN_TOKEN`). Kept in sessionStorage, never localStorage: it
+ * should not outlive the tab, and the dashboard must be able to authenticate through a
+ * reverse proxy where the loopback shortcut does not apply.
+ */
+const ADMIN_TOKEN_KEY = "rrouter:admin-token";
+
+export const ADMIN_REQUIRED_EVENT = "rrouter:admin-token-required";
+
+export function adminToken(): string | null {
+  try {
+    return window.sessionStorage.getItem(ADMIN_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setAdminToken(token: string | null): void {
+  try {
+    if (token) window.sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+    else window.sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+  } catch {
+    // Storage can be unavailable (private mode); the request simply goes without it.
+  }
+}
+
+function isAdminPath(path: string): boolean {
+  return path.startsWith("/api/") || path.startsWith("/metrics");
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = isAdminPath(path) ? adminToken() : null;
   const res = await fetch(path, {
     ...init,
     headers: {
       ...(init?.body ? { "content-type": "application/json" } : {}),
+      ...(token ? { "x-admin-token": token } : {}),
       ...init?.headers,
     },
   });
@@ -28,6 +60,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       (isObject(body) && isObject(body.error) && typeof body.error.message === "string"
         ? body.error.message
         : null) ?? `${res.status} ${res.statusText}`;
+    if (res.status === 401 && isAdminPath(path)) {
+      window.dispatchEvent(new Event(ADMIN_REQUIRED_EVENT));
+    }
     throw new ApiError(res.status, message, body);
   }
   return body as T;

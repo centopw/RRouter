@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { api } from "./lib/api";
+import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
 import { useHealth, useModels, useSystem } from "./lib/queries";
 import { CopyChip, Dot, cx } from "./components/ui";
 import { uptime } from "./lib/format";
@@ -73,6 +73,15 @@ export function Shell() {
 
   const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Any 401 from an admin path means the deployment set RROUTER_ADMIN_TOKEN and this tab
+  // has not presented it yet (or presented a wrong one).
+  const [adminRequired, setAdminRequired] = useState(false);
+
+  useEffect(() => {
+    const require = () => setAdminRequired(true);
+    window.addEventListener(ADMIN_REQUIRED_EVENT, require);
+    return () => window.removeEventListener(ADMIN_REQUIRED_EVENT, require);
+  }, []);
 
   useEffect(() => {
     const counts = system.data?.counts;
@@ -105,6 +114,10 @@ export function Shell() {
 
   const endpoint = `${window.location.origin}/v1`;
   const running = !health.isError;
+
+  if (adminRequired) {
+    return <AdminGate onUnlock={() => setAdminRequired(false)} />;
+  }
 
   return (
     <div className="flex h-full flex-col min-[820px]:flex-row">
@@ -407,6 +420,89 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div className="mb-1">
       <div className="px-2 py-1 text-[10px] uppercase tracking-[0.1em] text-faint">{title}</div>
       {children}
+    </div>
+  );
+}
+
+/**
+ * Shown when the gateway requires `RROUTER_ADMIN_TOKEN`. The dashboard runs on the same
+ * origin, so the operator pastes the token once per tab; it is held in sessionStorage and
+ * sent as `x-admin-token` on admin calls.
+ */
+function AdminGate({ onUnlock }: { onUnlock: () => void }) {
+  const client = useQueryClient();
+  const [token, setToken] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    const value = token.trim();
+    if (!value || busy) return;
+    setBusy(true);
+    setError(null);
+    setAdminToken(value);
+    try {
+      await api.get("/api/system");
+      await client.invalidateQueries();
+      onUnlock();
+    } catch (e) {
+      setAdminToken(null);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex min-h-full items-center justify-center bg-bg px-4 py-10">
+      <form
+        className="w-full max-w-[420px] rounded-[var(--radius-card)] border border-line bg-surface p-6"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
+        <div className="flex items-center gap-2.5">
+          <img
+            src={`${import.meta.env.BASE_URL}logo-mark.png`}
+            alt=""
+            width={26}
+            height={26}
+            className="h-[26px] w-[26px]"
+          />
+          <span className="text-[15px] font-semibold">Admin token required</span>
+        </div>
+        <p className="mt-2 text-[13px] text-muted">
+          This gateway was started with <span className="font-mono text-[12px]">RROUTER_ADMIN_TOKEN</span>.
+          Paste it to manage providers, keys and models from this browser. It is kept for this
+          tab only.
+        </p>
+        <label className="mt-5 flex flex-col gap-1.5">
+          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">Token</span>
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            autoFocus
+            aria-label="admin token"
+            className="h-9 w-full rounded-lg border border-line bg-surface-2 px-2.5 font-mono text-[13px] text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
+            placeholder="the value of RROUTER_ADMIN_TOKEN"
+          />
+        </label>
+        {error ? <p className="mt-3 text-[12.5px] text-neg">{error}</p> : null}
+        <div className="mt-5 flex items-center justify-between gap-3">
+          <a href="/health" className="text-[12px] text-faint underline underline-offset-4 hover:text-fg">
+            gateway health
+          </a>
+          <button
+            type="submit"
+            disabled={busy || token.trim().length === 0}
+            className="inline-flex h-9 items-center rounded-lg bg-accent px-4 text-[13px] font-semibold text-[var(--color-accent-ink)] disabled:opacity-40"
+          >
+            {busy ? "Checking…" : "Unlock"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
