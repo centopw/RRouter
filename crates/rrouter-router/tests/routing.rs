@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use rrouter_core::{ChatResponse, Error, FinishReason, Usage};
-use rrouter_router::breaker::BreakerState;
+use rrouter_router::breaker::{BreakerState, ProbeTicket};
 use rrouter_router::dispatch::AttemptOutcome;
 use rrouter_router::stream_dispatch::{byte_stream, collect_stream};
 use rrouter_router::{Breaker, Candidate, Catalog, Dispatcher, Plan, Planner};
@@ -193,7 +193,7 @@ fn half_open_admits_exactly_one_probe() {
     assert!(breaker.check_at(id, later).is_none());
 
     // First caller wins the probe slot...
-    assert_eq!(breaker.claim_at(id, later), Ok(true));
+    assert!(matches!(breaker.claim_at(id, later), Ok(ProbeTicket::Probe { .. })));
     // ...everyone else is told to wait, including via the read path.
     assert!(breaker.claim_at(id, later).is_err());
     assert!(breaker.check_at(id, later).is_some());
@@ -205,7 +205,7 @@ fn half_open_admits_exactly_one_probe() {
 
     // A successful probe closes it and restores full eligibility.
     let later = later + Duration::from_secs(31);
-    assert_eq!(breaker.claim_at(id, later), Ok(true));
+    assert!(matches!(breaker.claim_at(id, later), Ok(ProbeTicket::Probe { .. })));
     breaker.record_success(id);
     assert!(breaker.check(id).is_none());
 }
@@ -223,7 +223,7 @@ fn unclaimed_candidate_never_leaks_a_probe_slot() {
     let later = Instant::now() + Duration::from_secs(31);
     assert!(breaker.check_at(id, later).is_none());
     // No claim happened, so the slot is still free for a real attempt.
-    assert_eq!(breaker.claim_at(id, later), Ok(true));
+    assert!(matches!(breaker.claim_at(id, later), Ok(ProbeTicket::Probe { .. })));
     breaker.record_success(id);
     assert!(breaker.check(id).is_none());
 }

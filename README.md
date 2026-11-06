@@ -181,7 +181,7 @@ crates/rrouter-gateway    axum server, /v1 proxy, admin API, embedded UI, `rrout
 ## Tests
 
 ```sh
-cargo test --workspace                             # 115 tests
+cargo test --workspace                             # 118 tests
 cargo clippy --workspace --all-targets -- -D warnings
 python3 scripts/e2e_smoke.py                       # live binary + mock upstream, 12 checks
 ```

@@ -23,6 +23,14 @@ const BACKOFF_CAP: Duration = Duration::from_secs(240);
 /// Reported wait when a half-open connection's single probe slot is in use.
 const PROBE_TAKEN: Duration = Duration::from_secs(3600);
 
+/// What [`Breaker::claim`] granted: a half-open slot from one specific episode,
+/// or nothing (breaker closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeTicket {
+    None,
+    Probe { epoch: u64 },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakerState {
     Closed,
@@ -41,11 +49,20 @@ struct Entry {
     consecutive_failures: u32,
     /// Consecutive 429s; drives exponential backoff.
     rate_limit_strikes: u32,
+    /// Incremented every time the breaker enters a new half-open episode. A probe
+    /// claim records it so a later cancellation can only release *its own* slot,
+    /// never one taken by a newer episode.
+    epoch: u64,
 }
 
 impl Entry {
     fn new() -> Self {
-        Self { state: BreakerState::Closed, consecutive_failures: 0, rate_limit_strikes: 0 }
+        Self {
+            state: BreakerState::Closed,
+            consecutive_failures: 0,
+            rate_limit_strikes: 0,
+            epoch: 0,
+        }
     }
 }
 
@@ -106,27 +123,32 @@ impl Breaker {
     /// the attempt is cancelled without a verdict. `Ok(false)` means the breaker is
     /// closed and no slot was consumed — releasing then would hand back a slot
     /// another task holds.
-    pub fn claim(&self, conn: Uuid) -> Result<bool, Duration> {
+    pub fn claim(&self, conn: Uuid) -> Result<ProbeTicket, Duration> {
         self.claim_at(conn, Instant::now())
     }
 
     /// Clock-injected form of [`Breaker::claim`].
-    pub fn claim_at(&self, conn: Uuid, now: Instant) -> Result<bool, Duration> {
+    ///
+    /// On success the ticket says whether a half-open slot was taken and, if so,
+    /// which episode it belongs to. Pass it back to [`Breaker::release_probe`] if
+    /// the attempt is cancelled without a verdict.
+    pub fn claim_at(&self, conn: Uuid, now: Instant) -> Result<ProbeTicket, Duration> {
         let mut map = self.lock();
         let entry = map.entry(conn).or_insert_with(Entry::new);
         // An elapsed open window is *reported* as half-open, and only an actual
-        // probe claim advances it.
+        // probe claim advances it. Entering a window starts a new episode.
         if let BreakerState::Open { until } = entry.state {
             if now >= until {
                 entry.state = BreakerState::HalfOpen { probes: 0 };
+                entry.epoch = entry.epoch.wrapping_add(1);
             }
         }
         match entry.state {
-            BreakerState::Closed => Ok(false),
+            BreakerState::Closed => Ok(ProbeTicket::None),
             BreakerState::HalfOpen { probes } if probes < self.policy.probes => {
                 // Exactly one caller wins the slot; the rest see it taken.
                 entry.state = BreakerState::HalfOpen { probes: probes + 1 };
-                Ok(true)
+                Ok(ProbeTicket::Probe { epoch: entry.epoch })
             }
             BreakerState::HalfOpen { .. } => Err(PROBE_TAKEN),
             BreakerState::Open { until } => Err(until.duration_since(now)),
@@ -146,11 +168,16 @@ impl Breaker {
     /// Used when a request is cancelled before it produced a verdict (client
     /// disconnect): the account is neither proven healthy nor proven broken, so
     /// the slot is returned and the state otherwise left alone.
-    pub fn release_probe(&self, conn: Uuid) {
+    pub fn release_probe(&self, conn: Uuid, ticket: ProbeTicket) {
+        let ProbeTicket::Probe { epoch } = ticket else { return };
         let mut map = self.lock();
         if let Some(entry) = map.get_mut(&conn) {
-            if let BreakerState::HalfOpen { probes } = entry.state {
-                entry.state = BreakerState::HalfOpen { probes: probes.saturating_sub(1) };
+            // Only the episode that granted this ticket may be rolled back: a stale
+            // guard must never free a probe belonging to a newer half-open window.
+            if entry.epoch == epoch {
+                if let BreakerState::HalfOpen { probes } = entry.state {
+                    entry.state = BreakerState::HalfOpen { probes: probes.saturating_sub(1) };
+                }
             }
         }
     }

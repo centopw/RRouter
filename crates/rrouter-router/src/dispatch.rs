@@ -19,7 +19,7 @@ use std::time::Duration;
 use rrouter_core::{ChatResponse, Error, Result};
 use uuid::Uuid;
 
-use crate::breaker::Breaker;
+use crate::breaker::{Breaker, ProbeTicket};
 use crate::candidate::{Candidate, Plan};
 
 /// Total time we are willing to sleep before a single retry of a skipped candidate.
@@ -127,14 +127,13 @@ impl Dispatcher {
     ) -> Option<(Candidate, ProbeClaim)> {
         while let Some(idx) = order.pop_front() {
             let candidate = plan.candidates[idx].clone();
-            if let Ok(took_slot) = self.breaker.claim(candidate.connection) {
+            if let Ok(ticket) = self.breaker.claim(candidate.connection) {
                 let claim = ProbeClaim {
                     breaker: Arc::clone(&self.breaker),
                     conn: candidate.connection,
                     // Only a guard that actually took a half-open slot may give one
-                    // back; releasing a slot we never took would free someone else's
-                    // probe and admit two concurrent probes.
-                    armed: took_slot,
+                    // back, and only within the episode that granted it.
+                    ticket,
                 };
                 return Some((candidate, claim));
             }
@@ -181,22 +180,20 @@ impl Dispatcher {
 pub(crate) struct ProbeClaim {
     breaker: Arc<Breaker>,
     conn: Uuid,
-    armed: bool,
+    ticket: ProbeTicket,
 }
 
 impl ProbeClaim {
     /// Mark the claim as already settled by an explicit `record_success` /
     /// `record_failure`. Must be called before those, so a panic cannot double-report.
     pub(crate) fn disarm(&mut self) {
-        self.armed = false;
+        self.ticket = ProbeTicket::None;
     }
 }
 
 impl Drop for ProbeClaim {
     fn drop(&mut self) {
-        if self.armed {
-            self.breaker.release_probe(self.conn);
-        }
+        self.breaker.release_probe(self.conn, self.ticket);
     }
 }
 
@@ -241,13 +238,13 @@ mod tests {
         let conn = Uuid::new_v4();
 
         // A starts while closed: no slot taken.
-        assert_eq!(breaker.claim(conn), Ok(false));
-        let a_guard = ProbeClaim { breaker: Arc::clone(&breaker), conn, armed: false };
+        assert_eq!(breaker.claim(conn), Ok(ProbeTicket::None));
+        let a_guard = ProbeClaim { breaker: Arc::clone(&breaker), conn, ticket: ProbeTicket::None };
 
         // Meanwhile B trips the account and takes the single half-open probe.
         breaker.record_failure(conn, 500, None);
         let later = Instant::now() + Duration::from_secs(31);
-        assert_eq!(breaker.claim_at(conn, later), Ok(true), "B holds the only probe");
+        assert!(matches!(breaker.claim_at(conn, later), Ok(ProbeTicket::Probe { .. })), "B holds the only probe");
 
         // A is now cancelled.
         drop(a_guard);
@@ -265,8 +262,38 @@ mod tests {
         let breaker = Arc::new(Breaker::with_policy(1, Duration::ZERO, 1));
         let conn = Uuid::new_v4();
         breaker.record_failure(conn, 500, None);
-        assert_eq!(breaker.claim(conn), Ok(true));
-        drop(ProbeClaim { breaker: Arc::clone(&breaker), conn, armed: true });
-        assert_eq!(breaker.claim(conn), Ok(true), "the slot was returned");
+        assert!(matches!(breaker.claim(conn), Ok(ProbeTicket::Probe { .. })));
+        drop(ProbeClaim { breaker: Arc::clone(&breaker), conn, ticket: ProbeTicket::Probe { epoch: 1 } });
+        assert!(matches!(breaker.claim(conn), Ok(ProbeTicket::Probe { .. })), "the slot was returned");
+    }
+
+    /// A stale guard must not free a probe belonging to a *newer* half-open episode.
+    /// Sequence: probe episode N is taken and held; the account trips again and a new
+    /// episode N+1 is entered; the stale N guard is dropped. N+1's slot must survive.
+    #[test]
+    fn stale_guard_cannot_release_a_newer_episode_probe() {
+        use std::time::Instant;
+        let breaker = Arc::new(Breaker::with_policy(1, Duration::ZERO, 1));
+        let conn = Uuid::new_v4();
+
+        // Episode N: trip, then claim the probe past the window.
+        breaker.record_failure(conn, 500, None);
+        let later = Instant::now() + Duration::from_secs(31);
+        let Ok(old_ticket) = breaker.claim_at(conn, later) else { panic!("probe N must be taken") };
+
+        // The account trips again, opening a new window, which then elapses.
+        breaker.record_failure(conn, 500, None);
+        let later2 = later + Duration::from_secs(31);
+        assert!(
+            matches!(breaker.claim_at(conn, later2), Ok(ProbeTicket::Probe { .. })),
+            "probe N+1 taken"
+        );
+
+        // The stale guard from episode N is finally dropped: it must not free N+1.
+        breaker.release_probe(conn, old_ticket);
+        assert!(
+            breaker.claim_at(conn, later2).is_err(),
+            "a stale guard must not release a newer episode's probe"
+        );
     }
 }
