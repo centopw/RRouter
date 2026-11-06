@@ -54,9 +54,11 @@ cargo build --release
 # listening on http://127.0.0.1:20128
 ```
 
-Open <http://127.0.0.1:20128> — it redirects to the dashboard at `/app`. Add a provider:
-sign in with a Claude/ChatGPT/Copilot subscription, or paste an API key. Then create a
-gateway key under **API Keys** and point a client at the gateway.
+Open <http://127.0.0.1:20128> — it redirects to the dashboard at `/app`. A first run with no
+accounts and no keys lands on **Setup**, which walks the three steps in order: connect an
+account (Claude browser sign-in, Codex device code, or a pasted API key), create a gateway
+key, then send a request while the page waits for it to arrive. The wizard can be reopened
+from **Health**.
 
 ```sh
 # Anthropic-shaped client

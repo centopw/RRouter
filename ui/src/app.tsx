@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { useHealth, useModels } from "./lib/queries";
+import { useHealth, useModels, useSystem } from "./lib/queries";
 import { CopyChip, Dot, cx } from "./components/ui";
 import { uptime } from "./lib/format";
 
@@ -32,9 +32,23 @@ const NAV: NavItem[] = [
   { to: "/health", label: "Health", icon: icon("M3 12h4l2-5 3 10 2-5h7"), group: "System" },
 ];
 
+/** A first run (no accounts, no keys) lands on the wizard once; the flag is set by the
+ *  wizard itself when the operator skips or finishes, so this never fights a choice. */
+const SETUP_DISMISSED = "rrouter:setup-dismissed";
+
 export function Shell() {
   const health = useHealth();
+  const system = useSystem();
+  const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
+
+  useEffect(() => {
+    const counts = system.data?.counts;
+    if (!counts) return;
+    if (counts.connections > 0 || counts.api_keys > 0) return;
+    if (window.localStorage.getItem(SETUP_DISMISSED) === "1") return;
+    navigate("/setup", { replace: true });
+  }, [system.data, navigate]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -213,7 +227,7 @@ function SidebarFooter({
       <div className="rounded-lg border border-line bg-surface px-2.5 py-2">
         <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-faint">Endpoint</div>
         <div className="mt-1 flex min-w-0">
-          <CopyChip value={endpoint} />
+          <CopyChip value={endpoint} display={endpoint.replace(/^https?:\/\//, "")} />
         </div>
         <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
           <RunningDot running={running} />

@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { Badge, Card, CardHeader, Dot, ErrorNote, PageHeader } from "../components/ui";
 import { useConnections, useHealth, useSystem } from "../lib/queries";
 import { uptime } from "../lib/format";
@@ -17,10 +18,18 @@ export default function Health() {
         title="Health"
         subtitle="Process, storage, and provider state as the gateway itself reports it."
         actions={
-          <Badge tone={health.isError ? "neg" : "pos"}>
-            <Dot tone={health.isError ? "neg" : "pos"} />
-            {health.isError ? "unreachable" : "serving"}
-          </Badge>
+          <>
+            <Link
+              to="/setup"
+              className="inline-flex h-8 items-center rounded-lg border border-line bg-surface-2 px-3 text-[13px] text-fg hover:border-line-strong"
+            >
+              Run setup again
+            </Link>
+            <Badge tone={health.isError ? "neg" : "pos"}>
+              <Dot tone={health.isError ? "neg" : "pos"} />
+              {health.isError ? "unreachable" : "serving"}
+            </Badge>
+          </>
         }
       />
 

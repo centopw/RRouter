@@ -55,9 +55,12 @@ const Aliases = page(() => import("./pages/aliases"));
 const Combos = page(() => import("./pages/combos"));
 const Models = page(() => import("./pages/models"));
 const Providers = page(() => import("./pages/providers"));
+const Setup = page(() => import("./pages/setup"));
 
 const router = createBrowserRouter(
   [
+    // The wizard owns its chrome: no sidebar, its own top bar.
+    { path: "setup", element: <Setup />, errorElement: <RouteError /> },
     {
       path: "/",
       element: <Shell />,
