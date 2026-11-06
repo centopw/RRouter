@@ -280,7 +280,7 @@ fn api_key_limits_default_then_patch_merges_and_clears() {
         assert_eq!(key.allowed_models, None);
         assert_eq!(key.expires_at, None);
         assert!(key.is_active);
-        assert_eq!(s.api_key_spend(key.id).await.expect("spend"), 0);
+        assert_eq!(s.api_key_spend(key.id, None).await.expect("spend"), 0);
 
         // A partial patch changes only the named field.
         let patched = s
@@ -394,11 +394,11 @@ fn spent_tokens_sums_only_that_key() {
         s.record_usage(&rec(Some(b.id), 300, 7, 0, 0, 0)).await.expect("b1");
         s.record_usage(&rec(None, 400, 99, 0, 0, 0)).await.expect("anon");
 
-        assert_eq!(s.api_key_spend(a.id).await.expect("a spend"), 130);
-        assert_eq!(s.api_key_spend(b.id).await.expect("b spend"), 7);
-        assert_eq!(s.api_key_spend(Uuid::new_v4()).await.expect("none"), 0);
+        assert_eq!(s.api_key_spend(a.id, None).await.expect("a spend"), 130);
+        assert_eq!(s.api_key_spend(b.id, None).await.expect("b spend"), 7);
+        assert_eq!(s.api_key_spend(Uuid::new_v4(), None).await.expect("none"), 0);
 
-        let all = s.api_key_spend_all().await.expect("all");
+        let all = s.api_key_spend_all(None).await.expect("all");
         assert_eq!(all.get(&a.id).copied(), Some(130));
         assert_eq!(all.get(&b.id).copied(), Some(7));
         assert_eq!(all.len(), 2, "anonymous rows belong to no key");
@@ -445,15 +445,15 @@ fn cost_micros_round_trips_and_sums_per_key() {
         s.record_usage(&rec(Some(b.id), 500)).await.expect("b1");
         s.record_usage(&rec(None, 9_999)).await.expect("anon");
 
-        assert_eq!(s.api_key_cost_spend(a.id).await.expect("a"), 4_250);
-        assert_eq!(s.api_key_cost_spend(b.id).await.expect("b"), 500);
+        assert_eq!(s.api_key_cost_spend(a.id, None).await.expect("a"), 4_250);
+        assert_eq!(s.api_key_cost_spend(b.id, None).await.expect("b"), 500);
         assert_eq!(
-            s.api_key_cost_spend(Uuid::new_v4()).await.expect("unknown"),
+            s.api_key_cost_spend(Uuid::new_v4(), None).await.expect("unknown"),
             0,
             "a key with no rows has spent nothing"
         );
 
-        let all = s.api_key_cost_spend_all().await.expect("all");
+        let all = s.api_key_cost_spend_all(None).await.expect("all");
         assert_eq!(all.get(&a.id).copied(), Some(4_250));
         assert_eq!(all.get(&b.id).copied(), Some(500));
         assert_eq!(all.len(), 2, "anonymous rows belong to no key");
@@ -521,7 +521,7 @@ fn model_costs_returns_published_rows_for_the_named_providers() {
 }
 
 #[test]
-fn v6_database_migrates_to_eleven() {
+fn v6_database_migrates_to_twelve() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
@@ -620,7 +620,7 @@ fn v6_database_migrates_to_eleven() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
         ("idx_usage_request", "the usage row is looked up by request id"),
@@ -641,7 +641,7 @@ fn v6_database_migrates_to_eleven() {
 /// connection defaults to weight 100 (the plain round-robin share), and the two new
 /// tables start empty.
 #[test]
-fn v8_database_migrates_to_eleven() {
+fn v8_database_migrates_to_twelve() {
     let dir = TempDir::new("v8");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -710,7 +710,7 @@ fn v8_database_migrates_to_eleven() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
 
     let weight: i64 = conn
         .query_row("SELECT weight FROM connections", [], |r| r.get(0))
@@ -735,7 +735,7 @@ fn v8_database_migrates_to_eleven() {
 /// A v9 database gains the money columns without touching existing rows: spend recorded
 /// before v10 stays at "unknown price", and every key stays unlimited.
 #[test]
-fn v9_database_migrates_to_eleven() {
+fn v9_database_migrates_to_twelve() {
     let dir = TempDir::new("v9");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -790,7 +790,7 @@ fn v9_database_migrates_to_eleven() {
     assert_eq!(keys[0].budget_tokens, 500, "the token budget survives");
     assert_eq!(keys[0].budget_micros, 0, "no money budget means unlimited");
     assert_eq!(
-        rt().block_on(store.api_key_cost_spend(keys[0].id)).expect("spend"),
+        rt().block_on(store.api_key_cost_spend(keys[0].id, None)).expect("spend"),
         0
     );
 
@@ -804,20 +804,27 @@ fn v9_database_migrates_to_eleven() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
 }
 
 /// A v10 database gains the response cache in place: the migration only adds a table and
-/// its index, so every existing row is untouched and the version reaches 11.
+/// its index, so every existing row is untouched and the version reaches 12.
 #[test]
-fn v10_database_migrates_to_eleven() {
+fn v10_database_migrates_to_twelve() {
     let dir = TempDir::new("v10");
     {
+        // A real v10 database: the current schema with the v11 table and the v12 column
+        // removed, so the upgrade path is the one a deployed v10 database takes.
+        drop(Store::open(&dir.db(), None).expect("current schema"));
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
-        conn.execute_batch("PRAGMA user_version = 10;").expect("v10 marker");
+        conn.execute_batch(
+            "DROP TABLE response_cache; ALTER TABLE api_keys DROP COLUMN budget_window; \
+             PRAGMA user_version = 10;",
+        )
+        .expect("rewind to v10");
     }
 
-    let store = Store::open(&dir.db(), None).expect("open store runs the v11 step");
+    let store = Store::open(&dir.db(), None).expect("open store runs the v11 and v12 steps");
     assert!(
         rt().block_on(store.cache_entries()).expect("cache readable").is_empty(),
         "a fresh v11 cache starts empty"
@@ -828,7 +835,7 @@ fn v10_database_migrates_to_eleven() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     for (kind, name) in [("table", "response_cache"), ("index", "idx_cache_expiry")] {
         let found: i64 = conn
             .query_row(
@@ -1407,4 +1414,116 @@ fn flip_last_byte(db: &Path, id: Uuid) {
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+// ----- 4d. budget windows (phase 9) -------------------------------------------------
+
+/// A v11 database gains `budget_window` in place: an existing key reads as `total`
+/// (lifetime, unchanged behaviour), and the version reaches 12.
+#[test]
+fn v11_database_migrates_to_twelve_with_total_windows() {
+    let dir = TempDir::new("v11");
+    let id = Uuid::new_v4();
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        // Build the v11 schema by running the real migrations up to 11, then rewind the
+        // marker and drop the column so the table is exactly what v11 shipped.
+        drop(Store::open(&dir.db(), None).expect("current schema"));
+        conn.execute_batch(
+            "ALTER TABLE api_keys DROP COLUMN budget_window; PRAGMA user_version = 11;",
+        )
+        .expect("rewind to v11");
+        conn.execute(
+            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at, budget_micros, \
+             budget_tokens) VALUES (?1, 'h', 'legacy', 1, 1, 5000000, 100)",
+            [id.to_string()],
+        )
+        .expect("legacy key");
+    }
+
+    let store = Store::open(&dir.db(), None).expect("open runs the v12 step");
+    let key = rt()
+        .block_on(store.get_api_key(id))
+        .expect("read")
+        .expect("legacy key survives");
+    assert_eq!(key.budget_window, rrouter_store::BudgetWindow::Total);
+    assert_eq!(key.budget_tokens, 100, "existing caps are untouched");
+    assert_eq!(key.budget_micros, 5_000_000);
+    drop(store);
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 12);
+}
+
+/// Spend queries honour `since`: a key with rows inside and outside the window reports
+/// only the inside ones, for tokens and micros alike, and `None` still means all time.
+#[test]
+fn spend_since_counts_only_rows_inside_the_window() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let (_, a) = s.create_api_key(Some("a")).await.expect("a");
+        let rec = |key: Uuid, ts: i64, tokens: u32, micros: u64| UsageRecord {
+            id: None,
+            ts,
+            request_id: Some(Uuid::new_v4()),
+            provider: "claude".to_string(),
+            model: "haiku".to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/messages".to_string()),
+            key_id: Some(key),
+            cost_micros: micros,
+            input_tokens: tokens,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        };
+        let since = 1_000;
+        s.record_usage(&rec(a.id, 999, 40, 400)).await.expect("before");
+        s.record_usage(&rec(a.id, 1_000, 10, 100)).await.expect("at boundary");
+        s.record_usage(&rec(a.id, 2_000, 5, 50)).await.expect("inside");
+
+        assert_eq!(s.api_key_spend(a.id, Some(since)).await.expect("tokens"), 15);
+        assert_eq!(s.api_key_cost_spend(a.id, Some(since)).await.expect("micros"), 150);
+        assert_eq!(s.api_key_spend(a.id, None).await.expect("all tokens"), 55);
+        assert_eq!(s.api_key_cost_spend(a.id, None).await.expect("all micros"), 550);
+
+        let tokens_all = s.api_key_spend_all(Some(since)).await.expect("tokens all");
+        assert_eq!(tokens_all.get(&a.id).copied(), Some(15));
+        let micros_all = s.api_key_cost_spend_all(Some(since)).await.expect("micros all");
+        assert_eq!(micros_all.get(&a.id).copied(), Some(150));
+    });
+}
+
+/// `budget_window` round-trips through create, patch and read.
+#[test]
+fn budget_window_round_trips_through_patch() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let (_, key) = s.create_api_key(Some("w")).await.expect("create");
+        assert_eq!(key.budget_window, rrouter_store::BudgetWindow::Total);
+        let patched = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    budget_window: Some(rrouter_store::BudgetWindow::Monthly),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("patch")
+            .expect("exists");
+        assert_eq!(patched.budget_window, rrouter_store::BudgetWindow::Monthly);
+        let read = s.get_api_key(key.id).await.expect("read").expect("row");
+        assert_eq!(read.budget_window, rrouter_store::BudgetWindow::Monthly);
+    });
 }

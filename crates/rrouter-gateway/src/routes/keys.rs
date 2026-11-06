@@ -8,20 +8,23 @@
 //! model name and the operator repoints it for that key alone. Validation is here, not
 //! in the store, because "resolves to a known provider" is a routing fact.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use rrouter_core::Error;
-use rrouter_store::{ApiKey, ApiKeyPatch, KeyModel};
+use rrouter_store::{window_start, ApiKey, ApiKeyPatch, BudgetWindow, KeyModel};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use super::{admin_error, body_json, ok_json};
 use crate::state::AppState;
 
 /// The row shape shared by `GET /api/keys`, `POST` and `PATCH`. `spent_tokens` and
-/// `spent_micros` are durable SQL sums over `usage` for this key, not stored counters.
+/// `spent_micros` are durable SQL sums over `usage` for this key, scoped to its
+/// `budget_window`, not stored counters.
 fn row(key: &ApiKey, spent: u64, spent_micros: u64, models: &[KeyModel]) -> Value {
     json!({
         "id": key.id.to_string(),
@@ -31,6 +34,7 @@ fn row(key: &ApiKey, spent: u64, spent_micros: u64, models: &[KeyModel]) -> Valu
         "rpm": key.rpm,
         "tpm": key.tpm,
         "budget_tokens": key.budget_tokens,
+        "budget_window": key.budget_window.as_str(),
         "spent_tokens": spent,
         "budget_micros": key.budget_micros,
         "spent_micros": spent_micros,
@@ -51,8 +55,9 @@ fn models_value(models: &[KeyModel]) -> Value {
 }
 
 async fn view(state: &AppState, key: &ApiKey) -> Value {
-    let spent = state.store.api_key_spend(key.id).await.unwrap_or(0);
-    let spent_micros = state.store.api_key_cost_spend(key.id).await.unwrap_or(0);
+    let since = window_start(key.budget_window, crate::now_unix());
+    let spent = state.store.api_key_spend(key.id, since).await.unwrap_or(0);
+    let spent_micros = state.store.api_key_cost_spend(key.id, since).await.unwrap_or(0);
     let models = state.store.key_models(key.id).await.unwrap_or_default();
     row(key, spent, spent_micros, &models)
 }
@@ -62,14 +67,25 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
         Ok(keys) => keys,
         Err(e) => return admin_error(&e),
     };
-    let spend = match state.store.api_key_spend_all().await {
-        Ok(spend) => spend,
-        Err(e) => return admin_error(&e),
-    };
-    let cost = match state.store.api_key_cost_spend_all().await {
-        Ok(cost) => cost,
-        Err(e) => return admin_error(&e),
-    };
+    // Each key is measured over its own window, so the spend is one aggregate per
+    // distinct window start (at most four), never one query per key.
+    let now = crate::now_unix();
+    let mut spend: HashMap<Option<i64>, HashMap<Uuid, u64>> = HashMap::new();
+    let mut cost: HashMap<Option<i64>, HashMap<Uuid, u64>> = HashMap::new();
+    for key in &keys {
+        let since = window_start(key.budget_window, now);
+        if spend.contains_key(&since) {
+            continue;
+        }
+        match state.store.api_key_spend_all(since).await {
+            Ok(s) => spend.insert(since, s),
+            Err(e) => return admin_error(&e),
+        };
+        match state.store.api_key_cost_spend_all(since).await {
+            Ok(c) => cost.insert(since, c),
+            Err(e) => return admin_error(&e),
+        };
+    }
     // One query for every key's mapping, so the list stays O(1) in statement count.
     let models = match state.store.key_models_all().await {
         Ok(models) => models,
@@ -78,10 +94,11 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
     let data: Vec<Value> = keys
         .iter()
         .map(|k| {
+            let since = window_start(k.budget_window, now);
             row(
                 k,
-                spend.get(&k.id).copied().unwrap_or(0),
-                cost.get(&k.id).copied().unwrap_or(0),
+                spend.get(&since).and_then(|m| m.get(&k.id)).copied().unwrap_or(0),
+                cost.get(&since).and_then(|m| m.get(&k.id)).copied().unwrap_or(0),
                 models.get(&k.id).map(Vec::as_slice).unwrap_or_default(),
             )
         })
@@ -111,8 +128,8 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
 }
 
 /// `PATCH /api/keys/{id}` — any subset of `is_active`, `rpm`, `tpm`, `budget_tokens`,
-/// `budget_micros`, `allowed_models` (null clears), `expires_at` (null clears). Returns
-/// the merged row.
+/// `budget_micros`, `budget_window` (`total`, `daily`, `weekly`, `monthly`),
+/// `allowed_models` (null clears), `expires_at` (null clears). Returns the merged row.
 pub async fn update(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -253,6 +270,14 @@ fn patch_from(value: &Value) -> Result<ApiKeyPatch, Error> {
                 })?);
             }
             "rpm" => patch.rpm = Some(u32_field(raw, "rpm")?),
+            "budget_window" => {
+                let raw = raw.as_str().unwrap_or_default();
+                patch.budget_window = Some(BudgetWindow::parse(raw).ok_or_else(|| {
+                    Error::BadRequest(
+                        "budget_window must be one of total, daily, weekly, monthly".into(),
+                    )
+                })?);
+            }
             "tpm" => patch.tpm = Some(u32_field(raw, "tpm")?),
             "budget_tokens" => patch.budget_tokens = Some(uint(raw, "budget_tokens")?),
             // Micro-USD. An integer field: `null` is a type error, `0` means unlimited.

@@ -165,8 +165,11 @@ impl AppState {
                 });
             }
         }
+        // Both budgets are measured over the key's own window; outside-window spend
+        // does not count, so a daily/weekly/monthly key renews at the boundary.
+        let since = rrouter_store::window_start(key.budget_window, crate::now_unix());
         if key.budget_tokens > 0 {
-            let spent = self.store.api_key_spend(key.id).await?;
+            let spent = self.store.api_key_spend(key.id, since).await?;
             if spent >= key.budget_tokens {
                 return Err(Error::Limited {
                     code: "budget_exhausted",
@@ -181,8 +184,8 @@ impl AppState {
         }
         if key.budget_micros > 0 {
             // Same durable source as the token budget: the summed cost of this key's
-            // usage rows, so a restart never refunds spend.
-            let spent = self.store.api_key_cost_spend(key.id).await?;
+            // usage rows inside the window, so a restart never refunds spend.
+            let spent = self.store.api_key_cost_spend(key.id, since).await?;
             if spent >= key.budget_micros {
                 return Err(Error::Limited {
                     code: "budget_exhausted",

@@ -1662,6 +1662,7 @@ async fn key_rows_match_the_governance_contract() {
         "rpm": 60,
         "tpm": 90_000,
         "budget_tokens": 5_000_000,
+        "budget_window": "total",
         "spent_tokens": 0,
         "budget_micros": 0,
         "spent_micros": 0,
@@ -2850,7 +2851,7 @@ async fn priced_requests_record_micro_usd_and_unpriced_models_record_zero() {
     let unpriced = wait_for_usage(&h, uuid, "gpt-4.1-mini").await;
     assert_eq!(unpriced.cost_micros, 0);
     assert_eq!(
-        h.state.store.api_key_cost_spend(uuid).await.expect("spend"),
+        h.state.store.api_key_cost_spend(uuid, None).await.expect("spend"),
         130,
         "an unpriced row adds nothing to the spend"
     );
@@ -2905,6 +2906,140 @@ async fn usd_budget_below_durable_spend_answers_429_naming_dollars() {
     let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(mock.hits(), 1);
+}
+
+/// A monthly token budget is measured from the 1st of the current UTC month. Spend from
+/// before that boundary no longer counts, so the key is admitted again without an edit;
+/// spend inside the window still blocks it.
+#[tokio::test]
+async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
+    let now = rrouter_gateway::now_unix();
+    let month_start = rrouter_store::window_start(rrouter_store::BudgetWindow::Monthly, now)
+        .expect("monthly has a start");
+
+    // Outside the window: the budget is exhausted, but the spend is last month's.
+    let mock = Mock::start(vec![openai_reply("paid")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
+    h.state
+        .store
+        .record_usage(&UsageRecord {
+            id: None,
+            ts: month_start - 1,
+            request_id: Some(uuid::Uuid::new_v4()),
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".to_string()),
+            key_id: Some(uuid),
+            cost_micros: 0,
+            input_tokens: 500,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        })
+        .await
+        .expect("seed last month");
+    h.patch_key(&id, json!({"budget_tokens": 100, "budget_window": "monthly"})).await;
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "last month's spend must not count: {body}");
+    assert_eq!(mock.hits(), 1);
+
+    // Inside the window: the same budget refuses the next request.
+    h.state
+        .store
+        .record_usage(&UsageRecord {
+            id: None,
+            ts: now,
+            request_id: Some(uuid::Uuid::new_v4()),
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".to_string()),
+            key_id: Some(uuid),
+            cost_micros: 0,
+            input_tokens: 60,
+            output_tokens: 60,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        })
+        .await
+        .expect("seed this month");
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(body["error"]["code"], "budget_exhausted");
+    assert_eq!(mock.hits(), 1, "an exhausted key is refused before dispatch");
+
+    // The list reports only the in-window spend.
+    let (_, listed) = h.get("/api/keys").await;
+    assert_eq!(listed["data"][0]["budget_window"], "monthly");
+    assert_eq!(listed["data"][0]["spent_tokens"], 120);
+}
+
+/// A monthly key with a USD budget spent before the window is admitted.
+#[tokio::test]
+async fn monthly_usd_window_ignores_last_months_spend() {
+    let now = rrouter_gateway::now_unix();
+    let month_start = rrouter_store::window_start(rrouter_store::BudgetWindow::Monthly, now)
+        .expect("monthly has a start");
+    let mock = Mock::start(vec![openai_reply("paid")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
+    seed_usage(&h.state.store, Some(uuid), "openai", "gpt-4.1", 2_000_000, month_start - 1).await;
+
+    h.patch_key(&id, json!({"budget_micros": 1_000_000, "budget_window": "monthly"})).await;
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(mock.hits(), 1);
+
+    let (_, listed) = h.get("/api/keys").await;
+    assert_eq!(listed["data"][0]["spent_micros"], 0);
+}
+
+/// `budget_window` accepts the four spellings and refuses anything else with a 400 that
+/// names the allowed values; a refused patch leaves the stored window untouched.
+#[tokio::test]
+async fn budget_window_patch_validates_the_spelling() {
+    let h = harness(false);
+    let (_, id) = h.create_key().await;
+
+    for window in ["total", "daily", "weekly", "monthly"] {
+        let patched = h.patch_key(&id, json!({"budget_window": window})).await;
+        assert_eq!(patched["budget_window"], window);
+    }
+
+    let (status, _, body) = h
+        .call_full(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/keys/{id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"budget_window": "hourly"}).to_string()))
+                .expect("request"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        message.ends_with("budget_window must be one of total, daily, weekly, monthly"),
+        "names the allowed values: {message}"
+    );
+    let (_, listed) = h.get("/api/keys").await;
+    assert_eq!(listed["data"][0]["budget_window"], "monthly", "refusal changed nothing");
 }
 
 /// Summary and series aggregate the cost column server-side, like the tokens.

@@ -59,15 +59,17 @@ pub struct ApiKey {
     /// Tokens per minute allowed; 0 = unlimited. Measured post-hoc from the tokens
     /// recorded for this key in the last 60 s — a single request can overshoot it.
     pub tpm: u32,
-    /// Lifetime token budget; 0 = unlimited. Spend is the durable `usage` sum.
+    /// Token budget per `budget_window`; 0 = unlimited. Spend is the durable `usage` sum.
     pub budget_tokens: u64,
-    /// Lifetime spend budget in micro-USD (millionths of a dollar); 0 = unlimited.
-    /// Compared against the summed `usage.cost_micros` of this key.
+    /// Spend budget per `budget_window` in micro-USD (millionths of a dollar); 0 = unlimited.
+    /// Compared against the summed `usage.cost_micros` of this key inside the window.
     pub budget_micros: u64,
     /// Exact model refs or `provider/*` globs; `None` = every model.
     pub allowed_models: Option<Vec<String>>,
     /// Unix seconds after which the key is refused; `None` = never.
     pub expires_at: Option<i64>,
+    /// Span of time the two budgets are measured over; see [`BudgetWindow`].
+    pub budget_window: BudgetWindow,
 }
 
 /// A partial update of an [`ApiKey`]. Absent = leave alone; `Some(None)` = clear a
@@ -84,6 +86,7 @@ pub struct ApiKeyPatch {
     pub allowed_models: Option<Option<Vec<String>>>,
     /// `Some(None)` clears the expiry (back to never).
     pub expires_at: Option<Option<i64>>,
+    pub budget_window: Option<BudgetWindow>,
 }
 
 impl ApiKeyPatch {
@@ -111,7 +114,94 @@ impl ApiKeyPatch {
         if let Some(v) = self.expires_at {
             key.expires_at = v;
         }
+        if let Some(v) = self.budget_window {
+            key.budget_window = v;
+        }
     }
+}
+
+/// The span of time a key's budgets are measured over. `Total` is lifetime, the
+/// pre-v12 behaviour; the others reset at UTC boundaries (see [`window_start`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BudgetWindow {
+    #[default]
+    Total,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl BudgetWindow {
+    /// The wire and column spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Total => "total",
+            Self::Daily => "daily",
+            Self::Weekly => "weekly",
+            Self::Monthly => "monthly",
+        }
+    }
+
+    /// Strict parse for client input: anything but the four spellings is `None`.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "total" => Some(Self::Total),
+            "daily" => Some(Self::Daily),
+            "weekly" => Some(Self::Weekly),
+            "monthly" => Some(Self::Monthly),
+            _ => None,
+        }
+    }
+
+    /// Lenient read for a stored value. An unknown spelling reads as `Total`, the
+    /// strictest window: all-time spend can only refuse more, never less.
+    pub fn from_stored(raw: &str) -> Self {
+        Self::parse(raw).unwrap_or_default()
+    }
+}
+
+/// Start of the budget window containing `now` (unix seconds), or `None` for
+/// [`BudgetWindow::Total`] (all time). Windows are UTC calendar spans: a day starts at
+/// 00:00, a week at Monday 00:00, a month on its 1st at 00:00.
+pub fn window_start(window: BudgetWindow, now: i64) -> Option<i64> {
+    const DAY: i64 = 86_400;
+    let days = now.div_euclid(DAY);
+    let first_day = match window {
+        BudgetWindow::Total => return None,
+        BudgetWindow::Daily => days,
+        // 1970-01-01 was a Thursday; with Monday = 0 that is weekday index 3.
+        BudgetWindow::Weekly => days - (days + 3).rem_euclid(7),
+        BudgetWindow::Monthly => {
+            let (year, month, _) = civil_from_days(days);
+            days_from_civil(year, month, 1)
+        }
+    };
+    Some(first_day * DAY)
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (H. Hinnant's algorithm).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12; // March = 0
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// (year, month, day) of `days` since 1970-01-01 (H. Hinnant's algorithm).
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
 }
 
 /// Model alias -> `"provider/model"` target.
@@ -666,7 +756,7 @@ impl Store {
     /// The key columns every read selects, in [`row_to_api_key`]'s order.
     const KEY_COLUMNS: &'static str =
         "id, key_hash, name, is_active, created_at, rpm, tpm, budget_tokens, allowed_models, \
-         expires_at, budget_micros";
+         expires_at, budget_micros, budget_window";
 
     /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
     ///
@@ -697,6 +787,7 @@ impl Store {
                 budget_micros: 0,
                 allowed_models: None,
                 expires_at: None,
+                budget_window: BudgetWindow::Total,
             },
         ))
     }
@@ -776,7 +867,8 @@ impl Store {
         };
         conn.execute(
             "UPDATE api_keys SET is_active = ?2, rpm = ?3, tpm = ?4, budget_tokens = ?5, \
-             allowed_models = ?6, expires_at = ?7, budget_micros = ?8 WHERE id = ?1",
+             allowed_models = ?6, expires_at = ?7, budget_micros = ?8, budget_window = ?9 \
+             WHERE id = ?1",
             params![
                 id.to_string(),
                 key.is_active as i64,
@@ -786,6 +878,7 @@ impl Store {
                 allowed,
                 key.expires_at,
                 key.budget_micros,
+                key.budget_window.as_str(),
             ],
         )
         .map_err(migrations::db_err)?;
@@ -910,32 +1003,39 @@ impl Store {
         Ok(true)
     }
 
-    /// Lifetime tokens this key has spent: input + output + cache reads + cache writes,
-    /// summed in SQL so a budget check never has to read events into Rust.
-    pub async fn api_key_spend(&self, id: Uuid) -> Result<u64> {
+    /// Tokens this key spent since `since` (unix seconds; `None` = all time): input +
+    /// output + cache reads + cache writes, summed in SQL so a budget check never has to
+    /// read events into Rust. Pass [`window_start`] to measure one budget window.
+    pub async fn api_key_spend(&self, id: Uuid, since: Option<i64>) -> Result<u64> {
         let conn = self.conn();
         let total: i64 = conn
             .query_row(
                 "SELECT COALESCE(sum(input_tokens + output_tokens + cache_read_tokens + \
-                 cache_write_tokens), 0) FROM usage WHERE key_id = ?1",
-                params![id.to_string()],
+                 cache_write_tokens), 0) FROM usage WHERE key_id = ?1 AND ts >= ?2",
+                params![id.to_string(), since.unwrap_or(i64::MIN)],
                 |r| r.get(0),
             )
             .map_err(migrations::db_err)?;
         Ok(total.max(0) as u64)
     }
 
-    /// Spend for every key in one statement, for `GET /api/keys`.
-    pub async fn api_key_spend_all(&self) -> Result<std::collections::HashMap<Uuid, u64>> {
+    /// Token spend since `since` for every key in one statement, for `GET /api/keys`.
+    pub async fn api_key_spend_all(
+        &self,
+        since: Option<i64>,
+    ) -> Result<std::collections::HashMap<Uuid, u64>> {
         let conn = self.conn();
         let mut stmt = conn
             .prepare(
                 "SELECT key_id, sum(input_tokens + output_tokens + cache_read_tokens + \
-                 cache_write_tokens) FROM usage WHERE key_id IS NOT NULL GROUP BY key_id",
+                 cache_write_tokens) FROM usage WHERE key_id IS NOT NULL AND ts >= ?1 \
+                 GROUP BY key_id",
             )
             .map_err(migrations::db_err)?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .query_map(params![since.unwrap_or(i64::MIN)], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
             .map_err(migrations::db_err)?;
         let mut out = std::collections::HashMap::new();
         for row in rows {
@@ -947,35 +1047,40 @@ impl Store {
         Ok(out)
     }
 
-    /// Lifetime money this key has spent: the summed `usage.cost_micros` of its rows.
+    /// Money this key spent since `since` (unix seconds; `None` = all time): the summed
+    /// `usage.cost_micros` of its rows.
     ///
     /// Rows priced at 0 (an unknown model) contribute nothing, which is the honest
     /// answer: the gateway must not invent a price for a model it has no rate for.
-    pub async fn api_key_cost_spend(&self, id: Uuid) -> Result<u64> {
+    pub async fn api_key_cost_spend(&self, id: Uuid, since: Option<i64>) -> Result<u64> {
         let conn = self.conn();
         let total: i64 = conn
             .query_row(
-                "SELECT COALESCE(sum(cost_micros), 0) FROM usage WHERE key_id = ?1",
-                params![id.to_string()],
+                "SELECT COALESCE(sum(cost_micros), 0) FROM usage \
+                 WHERE key_id = ?1 AND ts >= ?2",
+                params![id.to_string(), since.unwrap_or(i64::MIN)],
                 |r| r.get(0),
             )
             .map_err(migrations::db_err)?;
         Ok(total.max(0) as u64)
     }
 
-    /// Money spent by every key in one statement, for `GET /api/keys`.
+    /// Money spent since `since` by every key in one statement, for `GET /api/keys`.
     pub async fn api_key_cost_spend_all(
         &self,
+        since: Option<i64>,
     ) -> Result<std::collections::HashMap<Uuid, u64>> {
         let conn = self.conn();
         let mut stmt = conn
             .prepare(
                 "SELECT key_id, sum(cost_micros) FROM usage \
-                 WHERE key_id IS NOT NULL GROUP BY key_id",
+                 WHERE key_id IS NOT NULL AND ts >= ?1 GROUP BY key_id",
             )
             .map_err(migrations::db_err)?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .query_map(params![since.unwrap_or(i64::MIN)], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
             .map_err(migrations::db_err)?;
         let mut out = std::collections::HashMap::new();
         for row in rows {
@@ -1757,6 +1862,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         allowed_models,
         expires_at: r.get(9)?,
         budget_micros: r.get(10)?,
+        budget_window: BudgetWindow::from_stored(&r.get::<_, String>(11)?),
     })
 }
 
@@ -1890,5 +1996,141 @@ fn parse_caps(raw: String) -> serde_json::Value {
     match serde_json::from_str::<serde_json::Value>(&raw) {
         Ok(v @ serde_json::Value::Object(_)) => v,
         _ => serde_json::Value::Object(serde_json::Map::new()),
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::{window_start, BudgetWindow};
+
+    /// Unix seconds of a UTC wall-clock instant, written out so the expected values are
+    /// independent of the code under test.
+    const fn ts(y: i64, mo: i64, d: i64, h: i64, mi: i64) -> i64 {
+        // Hinnant days-from-civil, duplicated here on purpose (not the code under test).
+        let yy = if mo <= 2 { y - 1 } else { y };
+        let era = yy / 400;
+        let yoe = yy - era * 400;
+        let mp = (mo + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        days * 86_400 + h * 3_600 + mi * 60
+    }
+
+    #[test]
+    fn total_is_all_time() {
+        assert_eq!(window_start(BudgetWindow::Total, ts(2025, 6, 15, 12, 0)), None);
+    }
+
+    #[test]
+    fn daily_starts_at_utc_midnight() {
+        // Sun 2025-06-15 12:34 UTC -> Sun 2025-06-15 00:00 UTC.
+        let now = ts(2025, 6, 15, 12, 34);
+        assert_eq!(window_start(BudgetWindow::Daily, now), Some(ts(2025, 6, 15, 0, 0)));
+        // Exactly midnight belongs to the new day.
+        assert_eq!(
+            window_start(BudgetWindow::Daily, ts(2025, 6, 16, 0, 0)),
+            Some(ts(2025, 6, 16, 0, 0))
+        );
+        // One second before midnight is still the previous day.
+        assert_eq!(
+            window_start(BudgetWindow::Daily, ts(2025, 6, 16, 0, 0) - 1),
+            Some(ts(2025, 6, 15, 0, 0))
+        );
+    }
+
+    #[test]
+    fn weekly_starts_on_monday() {
+        // 2025-06-16 is a Monday; a Monday mid-day starts its own week.
+        assert_eq!(
+            window_start(BudgetWindow::Weekly, ts(2025, 6, 16, 9, 0)),
+            Some(ts(2025, 6, 16, 0, 0))
+        );
+        // Sunday 2025-06-22 belongs to the week that began Monday 2025-06-16.
+        assert_eq!(
+            window_start(BudgetWindow::Weekly, ts(2025, 6, 22, 23, 59)),
+            Some(ts(2025, 6, 16, 0, 0))
+        );
+        // Monday 00:00 starts a new week, Sunday 23:59:59 before it closes the old one.
+        assert_eq!(
+            window_start(BudgetWindow::Weekly, ts(2025, 6, 23, 0, 0)),
+            Some(ts(2025, 6, 23, 0, 0))
+        );
+        assert_eq!(
+            window_start(BudgetWindow::Weekly, ts(2025, 6, 23, 0, 0) - 1),
+            Some(ts(2025, 6, 16, 0, 0))
+        );
+    }
+
+    #[test]
+    fn weekly_handles_the_unix_epoch_weekday() {
+        // 1970-01-01 was a Thursday, so the week of Mon 1969-12-29 is the epoch's week.
+        assert_eq!(window_start(BudgetWindow::Weekly, 0), Some(ts(1969, 12, 29, 0, 0)));
+        assert_eq!(
+            window_start(BudgetWindow::Weekly, ts(1970, 1, 4, 23, 0)),
+            Some(ts(1969, 12, 29, 0, 0))
+        );
+    }
+
+    #[test]
+    fn monthly_starts_on_the_first() {
+        assert_eq!(
+            window_start(BudgetWindow::Monthly, ts(2025, 6, 15, 12, 0)),
+            Some(ts(2025, 6, 1, 0, 0))
+        );
+        // The 1st itself opens the month; the last second of the previous month does not.
+        assert_eq!(
+            window_start(BudgetWindow::Monthly, ts(2025, 7, 1, 0, 0)),
+            Some(ts(2025, 7, 1, 0, 0))
+        );
+        assert_eq!(
+            window_start(BudgetWindow::Monthly, ts(2025, 7, 1, 0, 0) - 1),
+            Some(ts(2025, 6, 1, 0, 0))
+        );
+    }
+
+    #[test]
+    fn monthly_rolls_over_january_first() {
+        assert_eq!(
+            window_start(BudgetWindow::Monthly, ts(2026, 1, 1, 0, 0) - 1),
+            Some(ts(2025, 12, 1, 0, 0))
+        );
+        assert_eq!(
+            window_start(BudgetWindow::Monthly, ts(2026, 1, 1, 0, 0)),
+            Some(ts(2026, 1, 1, 0, 0))
+        );
+    }
+
+    #[test]
+    fn daily_and_weekly_roll_over_the_year_end() {
+        // Wed 2025-12-31 is the last day of 2025; its day and week start in 2025.
+        let now = ts(2025, 12, 31, 18, 0);
+        assert_eq!(window_start(BudgetWindow::Daily, now), Some(ts(2025, 12, 31, 0, 0)));
+        assert_eq!(window_start(BudgetWindow::Weekly, now), Some(ts(2025, 12, 29, 0, 0)));
+        // The next day crosses into 2026 without a gap.
+        assert_eq!(
+            window_start(BudgetWindow::Daily, ts(2026, 1, 1, 0, 0)),
+            Some(ts(2026, 1, 1, 0, 0))
+        );
+    }
+
+    #[test]
+    fn leap_day_is_a_real_month_boundary() {
+        // 2024 is a leap year: Feb has 29 days, so Mar 1 opens after Feb 29.
+        assert_eq!(
+            window_start(BudgetWindow::Monthly, ts(2024, 3, 1, 0, 0) - 1),
+            Some(ts(2024, 2, 1, 0, 0))
+        );
+        assert_eq!(
+            window_start(BudgetWindow::Monthly, ts(2024, 2, 29, 12, 0)),
+            Some(ts(2024, 2, 1, 0, 0))
+        );
+    }
+
+    #[test]
+    fn stored_unknown_window_reads_as_total() {
+        assert_eq!(BudgetWindow::from_stored("hourly"), BudgetWindow::Total);
+        assert_eq!(BudgetWindow::parse("hourly"), None);
+        assert_eq!(BudgetWindow::parse("monthly"), Some(BudgetWindow::Monthly));
     }
 }

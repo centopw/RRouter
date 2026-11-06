@@ -8,10 +8,10 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 11;
+pub(crate) const SCHEMA_VERSION: i64 = 12;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
 
 /// V11: the opt-in exact-match response cache. `key` is the SHA-256 of the canonical
 /// request (see `Store::cache_key`), `body` is the client-facing JSON that was sent,
@@ -25,6 +25,13 @@ CREATE TABLE IF NOT EXISTS response_cache (
   expires_at INTEGER NOT NULL, hits INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_cache_expiry ON response_cache(expires_at);
+"#;
+
+/// V12: budget reset windows. `api_keys.budget_window` says which span of time the
+/// token and USD budgets are measured over: `total` (lifetime, the pre-v12 behaviour),
+/// `daily`, `weekly` or `monthly`. The default keeps every existing key lifetime-capped.
+const V12: &str = r#"
+ALTER TABLE api_keys ADD COLUMN budget_window TEXT NOT NULL DEFAULT 'total';
 "#;
 
 /// V10: money. `usage.cost_micros` is what one request cost in millionths of a USD,
