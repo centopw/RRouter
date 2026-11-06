@@ -248,6 +248,10 @@ The operational guide — exposure, TLS proxy, backups, upgrades, failure modes 
 | `RROUTER_MASTER_KEY` | auto-generated | 64 hex chars; otherwise created on first run |
 | `RROUTER_REQUIRE_API_KEY` | `false` | Require `sk-rr-…` on `/v1/*` |
 | `RROUTER_ALLOW_REMOTE_ADMIN` | `false` | Serve admin routes beyond loopback |
+| `RROUTER_ADMIN_TOKEN` | unset | Require this token (`Authorization: Bearer` or `x-admin-token`) on every `/api/*` and `/metrics` request; loopback stops being a shortcut |
+| `RROUTER_MAX_CONCURRENCY` | `0` | Cap concurrent `/v1` requests; over the cap answers `503 overloaded` instead of queueing |
+| `RROUTER_MAX_ATTEMPTS` | `4` | Upstream sends per request before giving up (1–8) |
+| `RROUTER_SHUTDOWN_GRACE_SECS` | `20` | How long a graceful shutdown waits for live streams |
 | `RROUTER_CORS_ORIGINS` | unset | Comma-separated allowlist; `*` is rejected |
 | `RROUTER_REQUEST_TIMEOUT_SECS` | `600` | Upstream request timeout |
 | `RROUTER_CONNECT_TIMEOUT_SECS` | `15` | TCP/TLS connect timeout |
