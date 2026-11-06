@@ -5,6 +5,8 @@ All notable changes. Dates are local; versions follow semver once tagged.
 ## Unreleased
 
 ### Added
+- Structured logs: `RROUTER_LOG_FORMAT=json` and one access line per finished request
+  (request id, provider, model, status, latency, first-output time, endpoint, key id).
 - Budget windows: per-key budgets reset daily, weekly or monthly (UTC), enforced alongside the
   lifetime cap; `spent_*` on the key row is scoped to the current window.
 - Opt-in exact-match response cache for non-streaming requests (`RROUTER_CACHE=sqlite`), with

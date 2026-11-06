@@ -285,6 +285,8 @@ The operational guide — exposure, TLS proxy, backups, upgrades, failure modes 
 | `RROUTER_REQUEST_TIMEOUT_SECS` | `600` | Upstream request timeout |
 | `RROUTER_CONNECT_TIMEOUT_SECS` | `15` | TCP/TLS connect timeout |
 | `RROUTER_STATIC_DIR` | unset | Serve extra extension assets under `/ext` |
+| `RROUTER_LOG_FORMAT` | `text` | `json` for machine-readable logs (Loki/CloudWatch) |
+| `RROUTER_ACCESS_LOG` | `true` | One structured line per finished request; `false` silences it |
 | `RUST_LOG` | `rrouter=info` | Log filter |
 
 ### Docker
