@@ -1,7 +1,10 @@
 version: 2
-# Weekly dependency updates, grouped so one PR moves one ecosystem. Rust and the
-# dashboard are reviewed together with the full test suite; actions and the Docker base
-# image move less often.
+# Weekly dependency updates, grouped so one PR moves one ecosystem.
+#
+# Major versions are ignored for Rust and the dashboard on purpose: this gateway pins
+# protocol behaviour (rand, reqwest, axum, vite) and a grouped major bump is a deliberate
+# migration, not a chore. Security fixes still arrive through minor/patch updates and the
+# advisory databases (`cargo audit`, `npm audit`).
 updates:
   - package-ecosystem: cargo
     directory: "/"
@@ -11,6 +14,9 @@ updates:
     groups:
       rust:
         patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: "/ui"
@@ -20,6 +26,9 @@ updates:
     groups:
       dashboard:
         patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
@@ -30,3 +39,6 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
