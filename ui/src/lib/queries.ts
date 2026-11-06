@@ -13,6 +13,7 @@ import {
   type OAuthProvider,
   type OAuthStatus,
   type SystemInfo,
+  type UpdateConnection,
   type UpdateKey,
   type UsageBucket,
   type UsageDetail,
@@ -59,6 +60,22 @@ export function useConnections() {
 
 export function useKeys() {
   return useQuery({ queryKey: qk.keys, queryFn: () => list<KeyResult>("/api/keys") });
+}
+
+/**
+ * Routing knobs live on the connection row, and `PATCH` returns the updated row. The
+ * active strategy is env-only, so nothing here can widen or narrow its effect.
+ */
+export function useUpdateConnection() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: UpdateConnection }) =>
+      api.patch<Connection>(`/api/connections/${id}`, patch),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: qk.connections });
+      void client.invalidateQueries({ queryKey: qk.system });
+    },
+  });
 }
 
 /**

@@ -15,7 +15,7 @@ import {
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { OAuthDialog } from "../components/oauth-dialog";
-import { qk, useConnections, useModelProviders, useOAuthProviders } from "../lib/queries";
+import { qk, useConnections, useModelProviders, useOAuthProviders, useUpdateConnection } from "../lib/queries";
 import { api, type Connection, type ModelProvider, type OAuthProvider } from "../lib/api";
 
 type AddStep = "kind" | "provider" | "key";
@@ -32,6 +32,7 @@ export default function Providers() {
   const [signIn, setSignIn] = useState<OAuthProvider | null>(null);
   const [authWindow, setAuthWindow] = useState<Window | null>(null);
   const [notice, setNotice] = useState<{ tone: "pos" | "neg"; text: string } | null>(null);
+  const [routing, setRouting] = useState<Connection | null>(null);
 
   const accounts = connections.data ?? [];
   const connectedIds = useMemo(() => new Set(accounts.map((a) => a.provider)), [accounts]);
@@ -118,6 +119,19 @@ export default function Providers() {
     },
     { key: "priority", title: "priority", align: "right", render: (r) => r.priority },
     {
+      key: "weight",
+      title: "weight",
+      align: "right",
+      render: (r) => (
+        <span
+          className={r.weight === 100 ? "text-faint" : "text-fg"}
+          title="traffic share inside this priority group"
+        >
+          {r.weight}
+        </span>
+      ),
+    },
+    {
       key: "state",
       title: "state",
       render: (r) =>
@@ -135,6 +149,9 @@ export default function Providers() {
       align: "right",
       render: (r) => (
         <span className="flex justify-end gap-1.5">
+          <Button onClick={() => setRouting(r)} title="edit routing priority and weight">
+            edit
+          </Button>
           <TestButton id={r.id} onResult={(text, tone) => setNotice({ tone, text })} />
           <Button
             onClick={() => toggle.mutate({ id: r.id, active: !r.is_active })}
@@ -239,6 +256,10 @@ export default function Providers() {
         }}
       />
 
+      {routing ? (
+        <RoutingModal key={routing.id} connection={routing} onClose={() => setRouting(null)} />
+      ) : null}
+
       {signIn ? (
         <OAuthDialog
           provider={signIn}
@@ -259,6 +280,119 @@ export default function Providers() {
         />
       ) : null}
     </>
+  );
+}
+
+/** Whole number inside `min..=max`; the server clamps, but a silent clamp would hide typos. */
+function intProblem(value: string, min: number, max: number): string | null {
+  const text = value.trim();
+  if (text === "") return "required";
+  if (!/^-?\d+$/.test(text)) return "whole number only";
+  const n = Number(text);
+  if (!Number.isSafeInteger(n) || n < min || n > max) return `must be ${min}…${max}`;
+  return null;
+}
+
+/**
+ * Routing fields for one account. The strategy itself is env-only, so this modal cannot tell
+ * whether weight is in play; the hint says when it is.
+ */
+function RoutingModal({ connection, onClose }: { connection: Connection; onClose: () => void }) {
+  const update = useUpdateConnection();
+  const [priority, setPriority] = useState(String(connection.priority));
+  const [weight, setWeight] = useState(String(connection.weight));
+  const [failure, setFailure] = useState<unknown>(null);
+
+  const priorityProblem = intProblem(priority, -100, 100);
+  const weightProblem = intProblem(weight, 1, 1000);
+  const invalid = priorityProblem !== null || weightProblem !== null;
+  const busy = update.isPending;
+
+  const save = () => {
+    if (invalid || busy) return;
+    setFailure(null);
+    update.mutate(
+      { id: connection.id, patch: { priority: Number(priority.trim()), weight: Number(weight.trim()) } },
+      {
+        // A failed PATCH keeps the modal open with the edits and the error; the list is stale
+        // until the next successful save, so `qk.connections` invalidation only runs on success.
+        onSuccess: onClose,
+        onError: setFailure,
+      },
+    );
+  };
+
+  return (
+    <Modal
+      title="Routing"
+      open
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            cancel
+          </Button>
+          <Button variant="primary" disabled={invalid || busy} onClick={save}>
+            {busy ? "saving…" : "save"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <p className="text-[12px] leading-relaxed text-muted">
+          Priority groups accounts (lower first); weight only splits traffic inside one priority
+          group when <span className="font-mono text-[11px] text-fg">RROUTER_STRATEGY=weighted</span>.
+        </p>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="flex min-w-0 flex-col gap-1">
+            <Field label="priority" hint="−100…100; lower groups are tried first">
+              <Input
+                type="number"
+                value={priority}
+                onChange={(v) => {
+                  setPriority(v);
+                  setFailure(null);
+                }}
+                ariaLabel="routing priority"
+                disabled={busy}
+              />
+            </Field>
+            {priorityProblem ? (
+              <span role="alert" className="text-[11px] text-neg">
+                {priorityProblem}
+              </span>
+            ) : null}
+          </div>
+          <div className="flex min-w-0 flex-col gap-1">
+            <Field label="weight" hint="1…1000; share of traffic in this group">
+              <Input
+                type="number"
+                value={weight}
+                onChange={(v) => {
+                  setWeight(v);
+                  setFailure(null);
+                }}
+                ariaLabel="routing weight"
+                disabled={busy}
+              />
+            </Field>
+            {weightProblem ? (
+              <span role="alert" className="text-[11px] text-neg">
+                {weightProblem}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-3 text-[11px] text-faint">
+          <span>{connection.name ?? connection.email ?? connection.provider}</span>
+          <span className="font-mono">{connection.id}</span>
+        </div>
+
+        {failure ? <ErrorNote error={failure} /> : null}
+      </div>
+    </Modal>
   );
 }
 

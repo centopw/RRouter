@@ -86,6 +86,8 @@ export type Connection = {
   email: string | null;
   auth_type: string;
   priority: number;
+  /** Share of traffic inside one priority group; only used by the weighted strategy. */
+  weight: number;
   is_active: boolean;
   backoff_level: number;
   has_access_token: boolean;
@@ -132,6 +134,12 @@ export type UpdateKey = Partial<{
   budget_micros: number;
   allowed_models: string[] | null;
   expires_at: number | null;
+}>;
+
+/** Exactly the fields `PATCH /api/connections/{id}` accepts; weight is clamped to 1..=1000. */
+export type UpdateConnection = Partial<{
+  priority: number;
+  weight: number;
 }>;
 
 export type NewKey = { id: string; key: string };
