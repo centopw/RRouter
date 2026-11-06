@@ -96,7 +96,7 @@ export function Bars({ bars, height = 220, fill = false }: { bars: Bar[]; height
               key={`${b.label}-${i}`}
               className={
                 fill
-                  ? "group flex h-full min-w-0 flex-1 items-end"
+                  ? "group flex h-full min-w-0 flex-1 items-end justify-start"
                   : "group flex h-full w-[46px] shrink-0 items-end"
               }
               title={`${b.label}: ${b.value.toLocaleString()} tokens`}
@@ -116,7 +116,7 @@ export function Bars({ bars, height = 220, fill = false }: { bars: Bar[]; height
         {fill ? (
           <>
             <span>{bars[0]?.label}</span>
-            <span>{bars[bars.length - 1]?.label}</span>
+            {bars.length > 1 ? <span>{bars[bars.length - 1]?.label}</span> : null}
           </>
         ) : (
           bars.map((b, i) => (

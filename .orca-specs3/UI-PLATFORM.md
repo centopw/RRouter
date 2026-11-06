@@ -59,6 +59,21 @@ Status: decided 2026-11-06. Supersedes ad-hoc growth of `assets/app.js`.
 | Next.js / SSR React | Second runtime and second deployable for a seven-panel admin; no benefit over a static SPA. |
 | Full React SPA as the only UI | ~45 KB gz runtime for a dashboard that must load instantly on a LAN box. |
 
+## Measured today (Vite app, `npm run build`)
+
+```
+index.js (vendor: react+router+query)  361 kB · 113 kB gzip
+activity chunk                           9 kB · 3.4 kB gzip
+other page chunks                    2–4 kB · 1 kB gzip each
+index.css                             21 kB · 5 kB gzip
+```
+
+113 kB gzip is the shared baseline, above the 50 kB budget for an embedded shell.
+That is accepted while this is an opt-in `/app` layer served from the same host;
+if the baseline has to come down, drop TanStack Query and react-router first
+(≈33 kB gzip), then alias `react`/`react-dom` to `preact/compat` (≈45 kB gzip).
+Decide with `tab.vitals()` numbers, not vibes.
+
 ## Performance budget (measured, not asserted)
 
 - Shell: **≤ 50 KB gzip** total JS+CSS on first load; each panel ≤ 30 KB gzip.
