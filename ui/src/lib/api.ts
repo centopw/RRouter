@@ -51,6 +51,8 @@ export const api = {
     request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) }),
   put: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "PUT", body: body === undefined ? undefined : JSON.stringify(body) }),
+  patch: <T>(path: string, body?: unknown) =>
+    request<T>(path, { method: "PATCH", body: body === undefined ? undefined : JSON.stringify(body) }),
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
 
@@ -92,7 +94,38 @@ export type Connection = {
   last_error: string | null;
 };
 
-export type KeyResult = { id: string; name: string | null; created_at: number };
+/** One rewrite on a key: `from` is what the client sends, `to` a registry ref. */
+export type KeyModelMap = { from: string; to: string };
+
+/**
+ * A gateway key with its governance limits. `rpm`/`tpm`/`budget_tokens` use 0 for
+ * "unlimited"; `allowed_models` null means any model; `expires_at` null means never.
+ * `models` is the key's rewrite map, absent when the server predates it.
+ */
+export type KeyResult = {
+  id: string;
+  name: string | null;
+  created_at: number;
+  is_active: boolean;
+  rpm: number;
+  tpm: number;
+  budget_tokens: number;
+  spent_tokens: number;
+  allowed_models: string[] | null;
+  expires_at: number | null;
+  models?: KeyModelMap[];
+};
+
+/** Exactly the fields `PATCH /api/keys/{id}` accepts; null clears a nullable field. */
+export type UpdateKey = Partial<{
+  is_active: boolean;
+  rpm: number;
+  tpm: number;
+  budget_tokens: number;
+  allowed_models: string[] | null;
+  expires_at: number | null;
+}>;
+
 export type NewKey = { id: string; key: string };
 
 export type Alias = { alias: string; target: string };
@@ -111,8 +144,12 @@ export type UsageSummaryRow = {
 };
 
 export type UsageEvent = {
-  /** Usage row id: the request id the log copies. */
+  /** Usage row id: what the master/detail list selects on. */
   id: number | null;
+  /** Stable across fallback attempts; `/api/usage/{request_id}` takes this. */
+  request_id: string;
+  /** Key that authenticated the request; null for unauthenticated calls. */
+  key_id: string | null;
   ts: number;
   provider: string;
   model: string;
@@ -129,6 +166,26 @@ export type UsageEvent = {
   status: number;
   streamed: boolean;
   error: string | null;
+};
+
+/** One dispatch attempt behind a request; attempt 1 is the first send, not the winner. */
+export type RequestAttempt = {
+  /** 1-based, in dispatch order. */
+  attempt: number;
+  ts: number;
+  provider: string;
+  model: string;
+  connection_id: string | null;
+  /** 0 means no response at all: transport failure or an open breaker. */
+  status: number;
+  error: string | null;
+  latency_ms: number;
+};
+
+/** `GET /api/usage/{request_id}`: the usage row plus every attempt it dispatched. */
+export type UsageDetail = {
+  request: UsageEvent;
+  attempts: RequestAttempt[];
 };
 
 export type UsageBucket = {

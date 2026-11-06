@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
-import { Badge, Button, CopyButton, StatusPill, cx, statusText } from "../../components/ui";
+import { useEffect, useRef, type ReactNode } from "react";
+import { Badge, Button, CopyButton, ErrorNote, StatusPill, cx, statusText } from "../../components/ui";
 import { compact, ms, splitRef, when } from "../../lib/format";
+import { useUsageDetail } from "../../lib/queries";
 import type { UsageEvent } from "../../lib/api";
 
 /** Master/detail for one request: what it cost, how long it took, where it went. */
@@ -146,12 +147,36 @@ export function RequestDetail({
   // the stream ended; otherwise the split would be an invention.
   const measured = !failed && row.ttft_ms > 0 && row.ttft_ms < row.latency_ms;
   const generation = row.latency_ms - row.ttft_ms;
+
+  const detail = useUsageDetail(row.request_id || null);
+  const { refetch } = detail;
+  // Attempts land when the request finishes, so reload on the transition from the
+  // in-flight status the log polled to the final one. Selecting another row is
+  // already a fresh query and must not double-fetch.
+  const seen = useRef({ id: row.request_id, status: row.status });
+  useEffect(() => {
+    const prev = seen.current;
+    seen.current = { id: row.request_id, status: row.status };
+    if (prev.id === row.request_id && prev.status !== row.status) void refetch();
+  }, [row.request_id, row.status, refetch]);
+
+  const attempts = detail.data?.attempts ?? [];
+  // Status 0 means the attempt got no response at all, so it is a failure too.
+  const failedAttempts = attempts.filter(
+    (a) => a.status === 0 || a.status >= 400 || a.error !== null,
+  );
+  const showAttempts =
+    row.request_id !== "" &&
+    (detail.isPending || detail.isError || attempts.length > 1 || failedAttempts.length > 0);
   return (
     <aside aria-label="request detail" className="min-w-0">
       <div className="flex items-start gap-2 border-b border-line px-5 py-3">
         <div className="min-w-0 flex-1">
-          <div className="font-mono text-[11px] text-faint">
-            {row.id !== null ? `request #${row.id}` : "request"}
+          <div
+            className="truncate font-mono text-[11px] text-faint"
+            title={row.request_id || undefined}
+          >
+            {row.request_id ? `request ${row.request_id.slice(0, 8)}` : "request"}
           </div>
           <div className="mt-1 truncate text-[15px] font-semibold">
             {(() => {
@@ -222,8 +247,68 @@ export function RequestDetail({
           <Row k="Connection" v={row.connection_id ?? "—"} mono />
         </dl>
 
+        {showAttempts ? (
+          <section aria-label="attempts" className="space-y-2">
+            <div className="flex items-baseline justify-between gap-2">
+              <h3 className="text-[12px] font-medium text-muted">Attempts</h3>
+              {attempts.length > 1 ? (
+                <span className="text-[11.5px] text-faint">{attempts.length} in dispatch order</span>
+              ) : null}
+            </div>
+            {detail.isError ? (
+              <ErrorNote error={detail.error} onRetry={() => void detail.refetch()} />
+            ) : detail.isPending ? (
+              <div aria-hidden className="rounded-lg border border-line px-3 py-2.5">
+                <div className="h-3 w-2/3 rounded bg-[var(--color-surface-2)]" />
+              </div>
+            ) : (
+              <ol className="divide-y divide-[var(--color-rule)] rounded-lg border border-line">
+                {attempts.map((attempt, i) => {
+                  const attemptFailed = failedAttempts.includes(attempt);
+                  const { provider, id } = splitRef(attempt.model);
+                  const served = !attemptFailed && i === attempts.length - 1;
+                  return (
+                    <li key={attempt.attempt} className="px-3 py-2">
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[12px]">
+                        <span className="font-mono text-faint tnum">#{attempt.attempt}</span>
+                        <span className="min-w-0 flex-1 truncate font-mono">
+                          <span className="text-faint">{provider ?? attempt.provider}/</span>
+                          {id}
+                        </span>
+                        <span aria-hidden className="text-faint">
+                          ·
+                        </span>
+                        <Badge
+                          tone={attemptFailed ? "neg" : "pos"}
+                          title={
+                            attempt.status === 0
+                              ? "no response: transport failure or open breaker"
+                              : statusText(attempt.status)
+                          }
+                        >
+                          <span className="font-mono">{attempt.status || "err"}</span>
+                        </Badge>
+                        <span aria-hidden className="text-faint">
+                          ·
+                        </span>
+                        <span className="font-mono text-muted tnum">{ms(attempt.latency_ms)}</span>
+                        {served ? <span className="text-[11px] text-faint">served</span> : null}
+                      </div>
+                      {attemptFailed && attempt.error ? (
+                        <p className="mt-1 break-words text-[12px] leading-[1.45] text-neg">
+                          {attempt.error}
+                        </p>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </section>
+        ) : null}
+
         <div className="flex flex-wrap gap-2 pt-1">
-          {row.id !== null ? <CopyButton value={String(row.id)} label="Copy request ID" /> : null}
+          {row.request_id ? <CopyButton value={row.request_id} label="Copy request ID" /> : null}
           <CopyButton
             value={curlFor(baseUrl, endpoint, row.model)}
             label="Copy as cURL"

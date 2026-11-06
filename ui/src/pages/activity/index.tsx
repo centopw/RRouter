@@ -7,6 +7,7 @@ import {
   ErrorNote,
   FilterChip,
   Segmented,
+  Select,
   cx,
   statusText,
 } from "../../components/ui";
@@ -24,7 +25,7 @@ import {
   type RangeId,
   type RangeSpec,
 } from "../../lib/activity";
-import { useUsage, useUsageByModel, useUsageSeries, useUsageSummary } from "../../lib/queries";
+import { useKeys, useUsage, useUsageByModel, useUsageSeries, useUsageSummary } from "../../lib/queries";
 import type { UsageBucket, UsageEvent, UsageModelBucket, UsageSummaryRow } from "../../lib/api";
 import { ModelTable, type ModelRow } from "./model-table";
 import { RequestDetail, RequestLog } from "./request-log";
@@ -64,6 +65,7 @@ export default function Activity() {
   const [rangeId, setRangeId] = useState<RangeId>("7d");
   const [metric, setMetric] = useState<Metric>("requests");
   const [modelFilter, setModelFilter] = useState<string | null>(null);
+  const [keyFilter, setKeyFilter] = useState<string | null>(null);
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showAll, setShowAll] = useState(false);
@@ -82,6 +84,8 @@ export default function Activity() {
   const byModel = useUsageByModel(spec.hours, spec.bucket);
   const summary = useUsageSummary(spec.hours);
   const usage = useUsage(200, spec.hours);
+  // Key names come from the same list the API Keys page edits.
+  const keys = useKeys();
   // One row proves the gateway has ever served traffic; the window-scoped
   // queries cannot tell "never used" from "quiet right now".
   const ever = useUsage(1);
@@ -99,9 +103,12 @@ export default function Activity() {
   const filtered = useMemo(
     () =>
       events.filter(
-        (e) => (!errorsOnly || isFailure(e)) && (!modelFilter || splitModel(e.provider, e.model).ref === modelFilter),
+        (e) =>
+          (!errorsOnly || isFailure(e)) &&
+          (!modelFilter || splitModel(e.provider, e.model).ref === modelFilter) &&
+          (!keyFilter || e.key_id === keyFilter),
       ),
-    [events, errorsOnly, modelFilter],
+    [events, errorsOnly, modelFilter, keyFilter],
   );
   // Selection survives refetch by id; a filter that hides the row falls back to
   // the first visible one. Closing the panel is an explicit "show nothing".
@@ -438,11 +445,30 @@ export default function Activity() {
                   <span className="text-[12.5px] text-faint">Most recent first</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
+                  <div className="w-[148px]">
+                    <Select
+                      ariaLabel="filter requests by key"
+                      value={keyFilter ?? ""}
+                      onChange={(v) => {
+                        setKeyFilter(v || null);
+                        setSelectedId(null);
+                        setClosed(false);
+                      }}
+                    >
+                      <option value="">All keys</option>
+                      {(keys.data ?? []).map((k) => (
+                        <option key={k.id} value={k.id}>
+                          {k.name ?? k.id.slice(0, 8)}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
                   <FilterChip
-                    on={!errorsOnly && !modelFilter}
+                    on={!errorsOnly && !modelFilter && !keyFilter}
                     onClick={() => {
                       setErrorsOnly(false);
                       setModelFilter(null);
+                      setKeyFilter(null);
                     }}
                   >
                     All {events.length}
@@ -496,6 +522,7 @@ export default function Activity() {
                         onClick={() => {
                           setErrorsOnly(false);
                           setModelFilter(null);
+                          setKeyFilter(null);
                         }}
                       >
                         Clear filters

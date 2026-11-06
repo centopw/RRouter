@@ -36,12 +36,14 @@ const DEFAULT_NAME = "RRouter";
 
 const NAV: NavItem[] = [
   { to: "/activity", label: "Activity", icon: icon("M3 12h4l2-6 3 12 2-6h5"), group: "Gateway" },
+  { to: "/playground", label: "Playground", icon: icon("M4 5h16v11H8l-4 4V5z"), group: "Gateway" },
   { to: "/providers", label: "Providers", icon: icon("M9 15l6-6M8 7H6a4 4 0 000 8h2M16 17h2a4 4 0 000-8h-2"), group: "Gateway" },
   { to: "/models", label: "Models", icon: icon("M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3zM4 7.5l8 4.5 8-4.5M12 12v9"), group: "Gateway" },
   { to: "/keys", label: "API Keys", icon: icon("M15 7a4 4 0 11-3.5 5.9L4 20H2v-3l8.1-8.1A4 4 0 0115 7z"), group: "Access" },
   { to: "/aliases", label: "Aliases", icon: icon("M4 8h13l-3-3M20 16H7l3 3"), group: "Routing" },
   { to: "/combos", label: "Combos", icon: icon("M4 7h4l8 10h4M20 7h-4L8 17H4"), group: "Routing" },
   { to: "/health", label: "Health", icon: icon("M3 12h4l2-5 3 10 2-5h7"), group: "System" },
+  { to: "/settings", label: "Settings", icon: icon("M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M16 4v4M8 10v4M16 16v4"), group: "System" },
 ];
 
 /** A first run (no accounts, no keys) lands on the wizard once; the flag is set by the
