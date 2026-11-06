@@ -77,10 +77,28 @@ pub async fn list(
     let since = param("hours")
         .and_then(|v| v.parse::<i64>().ok())
         .map(|hours| crate::now_unix() - hours.clamp(1, 24 * 365) * 3600);
-    match state.store.recent_usage(limit, since).await {
+    // Keyset cursor: `before` is the `ts` of the last row on the previous page and
+    // `before_id` its `id`. Both together page exactly past that row, even when rows
+    // share a timestamp; `before` alone keeps only strictly older rows.
+    let before_ts = param("before").and_then(|v| v.parse::<i64>().ok());
+    let before_id = param("before_id").and_then(|v| v.parse::<i64>().ok());
+    match state
+        .store
+        .recent_usage(limit, since, before_ts, before_id)
+        .await
+    {
         Ok(records) => {
+            // A short page is the last one: there is nothing older to ask for.
+            let next = (records.len() == limit).then(|| records.last()).flatten();
+            let next_before = next.map(|r| r.ts);
+            let next_before_id = next.and_then(|r| r.id);
             let data: Vec<Value> = records.iter().map(row_json).collect();
-            ok_json(json!({ "data": data, "limit": limit }))
+            ok_json(json!({
+                "data": data,
+                "limit": limit,
+                "next_before": next_before,
+                "next_before_id": next_before_id,
+            }))
         }
         Err(e) => admin_error(&e),
     }

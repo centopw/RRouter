@@ -1576,18 +1576,31 @@ impl Store {
         .map_err(migrations::db_err)
     }
 
-    /// Most recent records first.
-    pub async fn recent_usage(&self, limit: usize, since: Option<i64>) -> Result<Vec<UsageRecord>> {
+    /// Most recent records first, ordered `(ts, id)` descending.
+    ///
+    /// `before_ts` is an exclusive cursor. With `before_id` as well, the cursor is the
+    /// pair: rows strictly after `(before_ts, before_id)` in that order are excluded, so
+    /// rows sharing a timestamp across a page boundary are neither dropped nor repeated.
+    /// Without `before_id`, only `ts < before_ts` is kept. `since` filters `ts >= since`.
+    pub async fn recent_usage(
+        &self,
+        limit: usize,
+        since: Option<i64>,
+        before_ts: Option<i64>,
+        before_id: Option<i64>,
+    ) -> Result<Vec<UsageRecord>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let conn = self.conn();
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT {USAGE_COLUMNS} FROM usage WHERE ?2 IS NULL OR ts >= ?2 \
+                "SELECT {USAGE_COLUMNS} FROM usage \
+                 WHERE (?2 IS NULL OR ts >= ?2) \
+                 AND (?3 IS NULL OR ts < ?3 OR (?4 IS NOT NULL AND ts = ?3 AND id < ?4)) \
                  ORDER BY ts DESC, id DESC LIMIT ?1"
             ))
             .map_err(migrations::db_err)?;
         let rows = stmt
-            .query_map(params![limit, since], row_to_usage)
+            .query_map(params![limit, since, before_ts, before_id], row_to_usage)
             .map_err(migrations::db_err)?;
         let mut out = Vec::new();
         for r in rows {

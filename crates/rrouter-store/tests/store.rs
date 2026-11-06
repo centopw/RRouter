@@ -404,7 +404,7 @@ fn spent_tokens_sums_only_that_key() {
         assert_eq!(all.len(), 2, "anonymous rows belong to no key");
 
         // Attribution is readable back, which is what `/api/usage` exposes.
-        let recent = s.recent_usage(10, None).await.expect("recent");
+        let recent = s.recent_usage(10, None, None, None).await.expect("recent");
         assert_eq!(recent[0].key_id, None, "newest row is the anonymous one");
         assert!(recent.iter().any(|r| r.key_id == Some(a.id)));
         assert!(recent.iter().any(|r| r.key_id == Some(b.id)));
@@ -459,7 +459,7 @@ fn cost_micros_round_trips_and_sums_per_key() {
         assert_eq!(all.len(), 2, "anonymous rows belong to no key");
 
         // The cost is stored with the row, not recomputed on read.
-        let recent = s.recent_usage(10, None).await.expect("recent");
+        let recent = s.recent_usage(10, None, None, None).await.expect("recent");
         assert_eq!(recent[0].cost_micros, 9_999);
         assert!(recent.iter().any(|r| r.cost_micros == 3_000));
     });
@@ -597,7 +597,7 @@ fn v6_database_migrates_to_twelve() {
         "a pre-v10 key has no money budget: unlimited, exactly as before"
     );
 
-    let recent = rt().block_on(store.recent_usage(10, None)).expect("recent");
+    let recent = rt().block_on(store.recent_usage(10, None, None, None)).expect("recent");
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].input_tokens, 42, "pre-v7 rows are untouched");
     assert_eq!(
@@ -794,7 +794,7 @@ fn v9_database_migrates_to_twelve() {
         0
     );
 
-    let rows = rt().block_on(store.recent_usage(10, None)).expect("usage");
+    let rows = rt().block_on(store.recent_usage(10, None, None, None)).expect("usage");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].input_tokens, 42);
     assert_eq!(rows[0].cost_micros, 0);
@@ -1101,7 +1101,7 @@ fn usage_records_summary_and_recent_order() {
         s.record_usage(&rec(200, "claude", "sonnet", 0, 0, 200, 429)).await.expect("r3");
         s.record_usage(&rec(400, "groq", "llama", 5, 5, 400, 200)).await.expect("r4");
 
-        let recent = s.recent_usage(3, None).await.expect("recent");
+        let recent = s.recent_usage(3, None, None, None).await.expect("recent");
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].ts, 400, "newest first");
         assert_eq!(recent[1].ts, 300);
@@ -1111,7 +1111,7 @@ fn usage_records_summary_and_recent_order() {
         assert_eq!(recent[2].error.as_deref(), Some("upstream 429"));
         assert_eq!(recent[0].connection_id, Some(conn_id));
         let cached = s
-            .recent_usage(4, None)
+            .recent_usage(4, None, None, None)
             .await
             .expect("recent all")
             .into_iter()
@@ -1525,5 +1525,122 @@ fn budget_window_round_trips_through_patch() {
         assert_eq!(patched.budget_window, rrouter_store::BudgetWindow::Monthly);
         let read = s.get_api_key(key.id).await.expect("read").expect("row");
         assert_eq!(read.budget_window, rrouter_store::BudgetWindow::Monthly);
+    });
+}
+
+/// A minimal usage row at `ts`, identified by `marker` in the model name so a test can
+/// tell which rows a page returned.
+fn page_row(ts: i64, marker: &str) -> UsageRecord {
+    UsageRecord {
+        id: None,
+        ts,
+        request_id: Some(Uuid::from_u128(ts as u128)),
+        provider: "claude".to_string(),
+        model: marker.to_string(),
+        connection_id: None,
+        endpoint: None,
+        key_id: None,
+        cost_micros: 0,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        latency_ms: 1,
+        ttft_ms: 0,
+        status: 200,
+        streamed: false,
+        error: None,
+    }
+}
+
+/// Walks every page with the `(ts, id)` cursor and returns the rows in page order.
+fn walk_pages(s: &Store, limit: usize, since: Option<i64>) -> Vec<UsageRecord> {
+    rt().block_on(async {
+        let mut all = Vec::new();
+        let mut cursor: Option<(i64, i64)> = None;
+        loop {
+            let (bt, bi) = match cursor {
+                Some((t, i)) => (Some(t), Some(i)),
+                None => (None, None),
+            };
+            let page = s.recent_usage(limit, since, bt, bi).await.expect("page");
+            let short = page.len() < limit;
+            cursor = page.last().map(|r| (r.ts, r.id.expect("id read back")));
+            all.extend(page);
+            if short {
+                break;
+            }
+        }
+        all
+    })
+}
+
+#[test]
+fn usage_cursor_pages_disjoint_and_ordered() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        for (ts, m) in [(10, "a"), (20, "b"), (30, "c"), (40, "d"), (50, "e")] {
+            store.record_usage(&page_row(ts, m)).await.expect("insert");
+        }
+        let first = store.recent_usage(2, None, None, None).await.expect("first");
+        assert_eq!(first.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![50, 40]);
+        let cursor_ts = first.last().expect("row").ts;
+        let cursor_id = first.last().expect("row").id.expect("id");
+        let second = store
+            .recent_usage(2, None, Some(cursor_ts), Some(cursor_id))
+            .await
+            .expect("second");
+        assert_eq!(second.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![30, 20]);
+    });
+    let all = walk_pages(&store, 2, None);
+    let ts: Vec<i64> = all.iter().map(|r| r.ts).collect();
+    assert_eq!(ts, vec![50, 40, 30, 20, 10], "every row once, newest first");
+    let mut ids: Vec<i64> = all.iter().map(|r| r.id.expect("id")).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 5, "no id repeats across pages");
+}
+
+#[test]
+fn usage_cursor_equal_timestamps_neither_drop_nor_repeat() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        // Five rows share ts=100; with limit 2 every page boundary splits the group.
+        for m in ["a", "b", "c", "d", "e"] {
+            store.record_usage(&page_row(100, m)).await.expect("insert");
+        }
+        store.record_usage(&page_row(200, "newer")).await.expect("insert");
+    });
+    let all = walk_pages(&store, 2, None);
+    assert_eq!(all.len(), 6, "all rows returned: {all:?}");
+    let mut ids: Vec<i64> = all.iter().map(|r| r.id.expect("id")).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 6, "no row repeats across pages");
+    assert_eq!(all[0].model, "newer");
+    // Within the tied group the id order is strictly descending across pages.
+    let tied: Vec<i64> = all.iter().filter(|r| r.ts == 100).map(|r| r.id.expect("id")).collect();
+    assert!(tied.windows(2).all(|w| w[0] > w[1]), "tied rows in id-desc order: {tied:?}");
+}
+
+#[test]
+fn usage_cursor_composes_with_hours_window() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        for ts in [100, 200, 300, 400, 500] {
+            store.record_usage(&page_row(ts, "x")).await.expect("insert");
+        }
+        // `since` keeps ts >= 200; the pair cursor then pages strictly past the ts-400 row.
+        let at_400 = store.recent_usage(10, Some(400), None, None).await.expect("400");
+        let row_400 = at_400.iter().find(|r| r.ts == 400).expect("row 400").id.expect("id");
+        let page = store
+            .recent_usage(2, Some(200), Some(400), Some(row_400))
+            .await
+            .expect("page");
+        assert_eq!(page.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![300, 200]);
+        let none = store.recent_usage(10, Some(600), Some(600), None).await.expect("none");
+        assert!(none.is_empty(), "cursor and window agree on empty");
+        let below = store.recent_usage(10, Some(200), Some(200), Some(0)).await.expect("below");
+        assert!(below.is_empty(), "nothing in the window is older than ts 200: {below:?}");
     });
 }

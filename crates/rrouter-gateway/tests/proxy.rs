@@ -1367,7 +1367,7 @@ async fn streaming_records_time_to_first_output() {
 
     let mut row = None;
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(5, None).await {
+        if let Ok(rows) = h.state.store.recent_usage(5, None, None, None).await {
             if let Some(first) = rows.first() {
                 row = Some(first.clone());
                 break;
@@ -1568,7 +1568,7 @@ async fn usage_rows_carry_the_key_id() {
 
     let mut row = None;
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(5, None).await {
+        if let Ok(rows) = h.state.store.recent_usage(5, None, None, None).await {
             if let Some(found) = rows.iter().find(|r| r.key_id == Some(uuid)) {
                 row = Some(found.clone());
                 break;
@@ -1967,7 +1967,7 @@ async fn embeddings_record_usage_and_relay_malformed_bodies_unchanged() {
 
     let mut row = None;
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(5, None).await {
+        if let Ok(rows) = h.state.store.recent_usage(5, None, None, None).await {
             if let Some(found) = rows.iter().find(|r| r.key_id == Some(uuid)) {
                 row = Some(found.clone());
                 break;
@@ -1991,7 +1991,7 @@ async fn embeddings_record_usage_and_relay_malformed_bodies_unchanged() {
     let bytes = res.into_body().collect().await.expect("body").to_bytes();
     assert_eq!(String::from_utf8_lossy(&bytes), "{\"data\": [not json");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let rows = h.state.store.recent_usage(10, None).await.expect("usage");
+    let rows = h.state.store.recent_usage(10, None, None, None).await.expect("usage");
     assert_eq!(rows.len(), 1, "the unparseable body adds no row: {rows:?}");
 }
 
@@ -2030,13 +2030,13 @@ async fn passthrough_endpoints_record_usage_only_when_reported() {
 
     let deadline = Instant::now() + Duration::from_secs(1);
     while Instant::now() < deadline
-        && h.state.store.recent_usage(10, None).await.expect("usage").is_empty()
+        && h.state.store.recent_usage(10, None, None, None).await.expect("usage").is_empty()
     {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     // Give the (unwritten) count_tokens row a chance to appear before asserting absence.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let rows = h.state.store.recent_usage(10, None).await.expect("usage");
+    let rows = h.state.store.recent_usage(10, None, None, None).await.expect("usage");
     assert_eq!(rows.len(), 1, "count_tokens reported no usage: {rows:?}");
     assert_eq!(rows[0].endpoint.as_deref(), Some("/v1/responses/compact"));
     assert_eq!(rows[0].input_tokens, 11);
@@ -2788,7 +2788,7 @@ async fn seed_usage(
 /// `model` — accounting is asynchronous, so an assertion must not race it.
 async fn wait_for_usage(h: &Harness, key: uuid::Uuid, model: &str) -> UsageRecord {
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(50, None).await {
+        if let Ok(rows) = h.state.store.recent_usage(50, None, None, None).await {
             if let Some(row) = rows
                 .into_iter()
                 .find(|r| r.key_id == Some(key) && r.model == model)
@@ -2857,6 +2857,64 @@ async fn priced_requests_record_micro_usd_and_unpriced_models_record_zero() {
         130,
         "an unpriced row adds nothing to the spend"
     );
+}
+
+/// `/api/usage` pages backwards with `before` + `before_id`: pages are disjoint and
+/// newest-first, a tied timestamp is never split into a duplicate or a gap, and the
+/// last page reports `next_before: null`.
+#[tokio::test]
+async fn usage_api_pages_backwards_without_overlap() {
+    let h = harness(false);
+    // Four rows; two share ts=200 so the second page boundary falls inside a tie.
+    for (ts, model) in [(100, "m1"), (200, "m2"), (200, "m3"), (300, "m4")] {
+        h.state
+            .store
+            .record_usage(&UsageRecord {
+                id: None,
+                ts,
+                request_id: Some(uuid::Uuid::new_v4()),
+                provider: "openai".to_string(),
+                model: model.to_string(),
+                connection_id: None,
+                endpoint: Some("/v1/chat/completions".to_string()),
+                key_id: None,
+                cost_micros: 0,
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                latency_ms: 1,
+                ttft_ms: 0,
+                status: 200,
+                streamed: false,
+                error: None,
+            })
+            .await
+            .expect("record usage");
+    }
+
+    let (status, first) = h.get("/api/usage?limit=2").await;
+    assert_eq!(status, StatusCode::OK);
+    let first_models: Vec<&str> =
+        first["data"].as_array().expect("rows").iter().map(|r| r["model"].as_str().unwrap()).collect();
+    assert_eq!(first_models, vec!["m4", "m3"], "newest first");
+    assert_eq!(first["next_before"], 200, "oldest returned row's ts");
+    let before_id = first["next_before_id"].as_i64().expect("pair cursor id");
+
+    let (status, second) =
+        h.get(&format!("/api/usage?limit=2&before=200&before_id={before_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let second_models: Vec<&str> =
+        second["data"].as_array().expect("rows").iter().map(|r| r["model"].as_str().unwrap()).collect();
+    assert_eq!(second_models, vec!["m2", "m1"], "disjoint from page one, tie not dropped");
+    assert_eq!(second["next_before"], 100, "a full page still points at its oldest row");
+    let before_id = second["next_before_id"].as_i64().expect("pair cursor id");
+
+    let (status, last) =
+        h.get(&format!("/api/usage?limit=2&before=100&before_id={before_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(last["data"].as_array().expect("rows").is_empty(), "nothing older: {last}");
+    assert!(last["next_before"].is_null(), "an empty page ends the walk");
 }
 
 /// A USD budget is enforced from durable spend, and the refusal names dollars.
