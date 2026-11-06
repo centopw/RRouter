@@ -24,7 +24,7 @@ const icon = (path: string) => (
 
 const NAV: NavItem[] = [
   { to: "/activity", label: "Activity", icon: icon("M3 12h4l2-6 3 12 2-6h5"), group: "Gateway" },
-  { to: "/connections", label: "Connections", icon: icon("M9 15l6-6M8 7H6a4 4 0 000 8h2M16 17h2a4 4 0 000-8h-2"), group: "Gateway" },
+  { to: "/providers", label: "Providers", icon: icon("M9 15l6-6M8 7H6a4 4 0 000 8h2M16 17h2a4 4 0 000-8h-2"), group: "Gateway" },
   { to: "/models", label: "Models", icon: icon("M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3zM4 7.5l8 4.5 8-4.5M12 12v9"), group: "Gateway" },
   { to: "/keys", label: "API Keys", icon: icon("M15 7a4 4 0 11-3.5 5.9L4 20H2v-3l8.1-8.1A4 4 0 0115 7z"), group: "Access" },
   { to: "/aliases", label: "Aliases", icon: icon("M4 8h13l-3-3M20 16H7l3 3"), group: "Routing" },
@@ -61,16 +61,15 @@ export function Shell() {
     <div className="flex h-full">
       <aside className="flex w-[236px] shrink-0 flex-col border-r border-line bg-[#0d0d0d]">
         <div className="px-3 pt-3">
-          <div className="flex items-center gap-2.5 rounded-lg px-2 py-2">
-            <span className="grid h-7 w-7 place-items-center rounded-full bg-accent text-[12px] font-semibold text-[var(--color-accent-ink)]">
-              R
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px] font-medium">RRouter</span>
-              <span className="block truncate text-[11px] text-faint">
-                v{health.data?.version ?? "—"}
-              </span>
-            </span>
+          <div className="flex items-center gap-2 rounded-lg px-2 py-2">
+            <img
+              src={`${import.meta.env.BASE_URL}logo-mark.png`}
+              alt=""
+              width={30}
+              height={30}
+              className="h-[30px] w-[30px] shrink-0 select-none"
+            />
+            <span className="truncate text-[14px] font-semibold tracking-[-0.01em]">RRouter</span>
           </div>
         </div>
 
@@ -104,17 +103,23 @@ export function Shell() {
           ))}
         </nav>
 
-        <div className="flex items-center gap-2 border-t border-line px-4 py-3 text-[11px] text-faint">
-          <Dot tone={health.isError ? "neg" : "pos"} />
-          <span className="truncate">
-            {health.isError ? "unreachable" : `up ${uptime(health.data?.uptime_secs ?? 0)}`}
-          </span>
-          <button
-            onClick={() => setPaletteOpen(true)}
-            className="ml-auto rounded border border-line-strong px-1.5 py-0.5 text-[10px] text-muted hover:text-fg"
-          >
-            ⌘K
-          </button>
+        <div className="border-t border-line px-4 py-3 text-[11px] text-faint">
+          <div className="flex items-center gap-2">
+            <Dot tone={health.isError ? "neg" : "pos"} />
+            <span className="truncate">
+              {health.isError ? "unreachable" : `up ${uptime(health.data?.uptime_secs ?? 0)}`}
+            </span>
+            <button
+              onClick={() => setPaletteOpen(true)}
+              className="ml-auto rounded border border-line-strong px-1.5 py-0.5 text-[10px] text-muted hover:text-fg"
+            >
+              ⌘K
+            </button>
+          </div>
+          <div className="mt-1.5 flex items-center justify-between">
+            <span>v{health.data?.version ?? "—"}</span>
+            <span className="text-[10px] text-faint">MIT · self-hosted</span>
+          </div>
         </div>
       </aside>
 

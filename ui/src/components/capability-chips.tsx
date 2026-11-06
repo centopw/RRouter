@@ -30,17 +30,33 @@ export const CAPABILITY_LABELS: Record<keyof Capabilities, { chip: string; title
  * Only the capabilities that are actually true, each with the sentence that
  * explains it. Sparse capability maps (older rows) read as false, never as
  * unknown, so an empty row is honestly `—`.
+ *
+ * Rows stay one line tall in the table: at most `max` chips, the rest folded into
+ * a `+N` badge whose tooltip names them.
  */
-export function CapabilityChips({ capabilities }: { capabilities: Partial<Capabilities> | null | undefined }) {
+export function CapabilityChips({
+  capabilities,
+  max = 3,
+}: {
+  capabilities: Partial<Capabilities> | null | undefined;
+  max?: number;
+}) {
   const on = CAPABILITY_KEYS.filter((key) => capabilities?.[key] === true);
   if (on.length === 0) return <span className="text-faint">—</span>;
+  const shown = on.slice(0, max);
+  const rest = on.slice(max);
   return (
-    <span className="flex flex-wrap items-center gap-1">
-      {on.map((key) => (
+    <span className="flex flex-nowrap items-center gap-1">
+      {shown.map((key) => (
         <Badge key={key} tone="neutral" title={CAPABILITY_LABELS[key].title}>
           {CAPABILITY_LABELS[key].chip}
         </Badge>
       ))}
+      {rest.length > 0 ? (
+        <Badge tone="neutral" title={rest.map((key) => CAPABILITY_LABELS[key].title).join(", ")}>
+          +{rest.length}
+        </Badge>
+      ) : null}
     </span>
   );
 }

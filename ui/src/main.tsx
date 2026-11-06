@@ -8,7 +8,7 @@ import { Shell } from "./app";
 const Activity = lazy(() => import("./pages/activity"));
 const Health = lazy(() => import("./pages/health"));
 const Models = lazy(() => import("./pages/models"));
-const Connections = lazy(() => import("./pages/connections"));
+const Providers = lazy(() => import("./pages/providers"));
 const Keys = lazy(() => import("./pages/keys"));
 const Aliases = lazy(() => import("./pages/aliases"));
 const Combos = lazy(() => import("./pages/combos"));
@@ -32,7 +32,8 @@ const router = createBrowserRouter(
         { index: true, element: <Navigate to="/activity" replace /> },
         { path: "activity", element: <Activity /> },
 
-        { path: "connections", element: <Connections /> },
+        { path: "providers", element: <Providers /> },
+        { path: "connections", element: <Navigate to="/providers" replace /> },
         { path: "models", element: <Models /> },
         { path: "keys", element: <Keys /> },
         { path: "aliases", element: <Aliases /> },

@@ -1,213 +1,202 @@
+![RRouter — one endpoint, smarter routing](docs/brand/banner.png)
+
 # RRouter
 
-A Rust-native local AI gateway: one endpoint that every coding agent ([CC], Codex CLI, Cline,
-Cursor, OpenCode, aider) points at. Each request goes to the provider/account most likely to
-serve it right now, with wire-protocol translation on the fly.
+**One endpoint for every model, in one Rust binary.**
 
-Fast and boring on purpose: no Next.js, no JS runtime, no dashboard build step, one binary,
-one SQLite file.
+RRouter is a self-hosted AI gateway. Point Cursor, Cline, Codex CLI, Aider, or your own
+backend at it, and it routes each request to whichever account you configured — translating
+between the OpenAI Chat, OpenAI Responses, and Anthropic Messages protocols on the way in
+and out.
 
-## Design bar
+No Node runtime, no Redis, no external database, no telemetry. SQLite, the encryption key
+material, and the dashboard all live inside the binary and the data directory.
 
-Inspired by [9router](https://github.com/decolua/9router)'s feature set — OAuth subscription
-accounts, round-robin across accounts, automatic fallback. Not a reimplementation of it: every
-layer is rebuilt against a stricter bar.
+- **Single binary, embedded storage.** SQLite is compiled in; the dashboard is compiled in.
+- **Protocol translation, not a proxy.** Anthropic clients can talk to a Codex account, and
+  OpenAI clients get OpenAI-shaped streams back.
+- **Account failover.** Rate-limited or broken accounts are skipped; a circuit breaker takes
+  them out of rotation and half-opens to probe recovery.
+- **Secrets stay secret.** Credentials are AES-256-GCM at rest; gateway keys are stored as
+  SHA-256 hashes and printed once.
+- **A real model registry.** Model lists, capabilities, and limits converge from the catalog,
+  the provider's own `/models` endpoint, and [models.dev](https://models.dev).
 
-1. **Correctness first** — exactly one token-refresh path, proven by concurrent tests;
-   byte-level SSE framing that cannot desync.
-2. **Security as a default, not an option** — credentials AES-256-GCM at rest (per-write nonce,
-   authenticated), gateway keys stored only as SHA-256, secrets never echoed through the admin
-   API, loopback bind by default.
-3. **Latency is the product** — zero-copy streaming; fallback decided in microseconds (no
-   sleeping on 429/5xx while another candidate is eligible); half-open breakers so a recovered
-   account is used again immediately instead of waiting out a timer.
-4. **Lightweight deployment** — a single `rrouter` binary with embedded UI and embedded
-   SQLite: no npm, no Node, no build pipeline at deploy time, millisecond cold start.
-
-What that means concretely versus the Node implementation:
-
-| 9router (Node/Next.js) | RRouter (Rust) |
-|---|---|
-| Next.js app + ~140 route handlers + 85 dashboard files (~19k LoC) to proxy bytes | ~8k LoC across 6 crates, axum + reqwest |
-| JS object-heavy SSE parsing; desyncs on chunk splits | byte-level SSE codec, tested at 7-byte chunk boundaries |
-| Token refresh races: reactive 401 paths bypass the refresh lock | one refresh path, per-credential mutex + double-check, proven by a 20-task concurrency test |
-| Binary model lock on failure (no half-open) | closed / open / half-open breaker per connection, 429 backoff honors `Retry-After` |
-| Plaintext OAuth tokens in SQLite | AES-256-GCM at rest, SHA-256 gateway keys, GCM nonce per write |
-| `npm i -g`, ~200 MB runtime | static-ish single binary, cold start in milliseconds |
+---
 
 ## Quick start
 
 ```sh
+git clone https://github.com/centopw/RRouter && cd RRouter
 cargo build --release
-./target/release/rrouter            # 127.0.0.1:20128, data/ created on first run
-open http://127.0.0.1:20128         # dashboard: add a provider connection, copy an API key
+./target/release/rrouter
+# listening on http://127.0.0.1:20128
 ```
 
-Recurring account setup lives in the dashboard. From the CLI it is two calls:
+Open <http://127.0.0.1:20128> — it redirects to the dashboard at `/app`. Add a provider:
+sign in with a Claude/ChatGPT/Copilot subscription, or paste an API key. Then create a
+gateway key under **API Keys** and point a client at the gateway.
 
 ```sh
-# store an [OI]-compatible provider key (encrypted at rest immediately)
-curl -s localhost:20128/api/connections -H 'content-type: application/json' -d '{
-  "provider":"openai","auth_type":"api_key","name":"personal",
-  "credentials":{"api_key":"sk-..."}}'
-
-# optional gateway key: clients then need "Authorization: Bearer sk-rr-..."
-curl -s -X POST localhost:20128/api/keys -d '{"name":"laptop"}'
-```
-
-Point a client at it:
-
-```sh
+# Anthropic-shaped client
 export ANTHROPIC_BASE_URL=http://127.0.0.1:20128
-export ANTHROPIC_AUTH_TOKEN=sk-rr-...      # only if RROUTER_REQUIRE_API_KEY=true
-cc -m "claude/sonnet-4-5"                  # or any alias/combo you defined
+export ANTHROPIC_AUTH_TOKEN=sk-rr-...
+
+# OpenAI-shaped client
+curl -s localhost:20128/v1/chat/completions \
+  -H "Authorization: Bearer sk-rr-..." \
+  -H "Content-Type: application/json" \
+  -d '{"model":"codex/gpt-5.6-luna","messages":[{"role":"user","content":"ping"}]}'
 ```
 
-```sh
-curl -s localhost:20128/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -d '{"model":"github/gpt-5","messages":[{"role":"user","content":"hi"}]}'
-```
+The same traffic can be sent as `/v1/messages` or `/v1/responses`; the model string decides
+where it goes, not the protocol.
 
 ## Endpoints
 
-Client-facing (OpenAI- and Anthropic-compatible):
+| Path | Dialect |
+| --- | --- |
+| `POST /v1/chat/completions` | OpenAI Chat Completions |
+| `POST /v1/responses` | OpenAI Responses (Codex-style) |
+| `POST /v1/messages` | Anthropic Messages |
+| `POST /v1/embeddings` | OpenAI Embeddings |
+| `GET /v1/models` | catalog + upstream + custom models |
+| `GET/POST /api/*` | admin: providers, keys, models, aliases, combos, usage |
 
-| path | notes |
-|---|---|
-| `POST /v1/chat/completions` | OpenAI Chat Completions in, any provider out |
-| `POST /v1/messages` | Anthropic Messages in, any provider out |
-| `POST /v1/responses` | OpenAI Responses in |
-| `POST /v1/embeddings` | passthrough for OpenAI-compatible providers |
-| `GET /v1/models` | union of catalog, aliases, combos, connected providers |
-| `GET /health` | liveness + version |
+`/v1/responses/compact` and `/v1/messages/count_tokens` are deliberately unimplemented and
+answer `501` rather than pretending.
 
-## Dashboard
+## Routing
 
-`GET /` redirects to `/app/`, the Vite + React dashboard (Activity, Connections, Models, API
-keys, Aliases, Combos, Health). It is embedded in the binary by `crates/rrouter-ui`, so a
-release build needs no node toolchain and serves no CDN or internet resource.
+- **`provider/model`** — `openai/gpt-4.1`, `claude/sonnet-4-5`, `codex/gpt-5.6-luna`.
+- **Aliases** — give a model a stable internal name (`prod-default`) so clients never change.
+- **Combos** — an ordered fallback chain; the next candidate is tried when a provider fails.
 
-```sh
-cd ui && npm install
-npm run dev              # vite on :5173, proxies /api and /v1 to :20128
-npm run build            # writes ui/dist, which the next cargo build embeds
-```
-
-`cargo build` without a `ui/dist` still succeeds: the gateway then serves the original
-dependency-free shell at `/`, which composes itself from `GET /api/ui/panels` and supports
-`extension` panels (a URL loaded in an isolated frame with a scoped token) so an organisation
-can add panels without forking RRouter.
-
-White-label from `PUT /api/settings`: brand name, accent colour, logo URL, footer text.
-
-## Running it as a self-hosted platform
-
-Everything runs on your own hardware; there is no vendor service in the path and no telemetry.
-
-```sh
-RROUTER_HOST=0.0.0.0 \
-RROUTER_DATA_DIR=/var/lib/rrouter \
-RROUTER_MASTER_KEY=$(openssl rand -hex 32) \
-RROUTER_REQUIRE_API_KEY=true \
-RROUTER_CORS_ORIGINS=https://ide.internal.example \
-RROUTER_ALLOW_REMOTE_ADMIN=true \
-rrouter
-```
-
-| env | default | |
-|---|---|---|
-| `RROUTER_HOST` | `127.0.0.1` | bind address |
-| `RROUTER_DATA_DIR` | `./data` | SQLite DB + master key file |
-| `RROUTER_MASTER_KEY` | unset | 64-hex-char AES key; otherwise `data/master.key` (0600) is generated |
-| `RROUTER_REQUIRE_API_KEY` | `false` | require a stored `sk-rr-…` key on `/v1/*` |
-| `RROUTER_ALLOW_REMOTE_ADMIN` | `false` | required to bind beyond loopback; the admin API would otherwise be unreachable, so startup fails instead of half-opening |
-| `RROUTER_CORS_ORIGINS` | unset | comma-separated allowlist; `*` is rejected at startup |
-| `RROUTER_STATIC_DIR` | unset | serve operator-supplied files under `/ext/*` (traversal-safe) |
-| `RROUTER_REQUEST_TIMEOUT_SECS` | `600` | upstream request timeout |
-| `RROUTER_CONNECT_TIMEOUT_SECS` | `15` | connect timeout |
-| `RUST_LOG` | `rrouter=info` | tracing filter |
-
-Admin API: `/api/connections`, `/api/keys`, `/api/aliases`, `/api/combos`, `/api/usage`,
-`/api/settings`, `/api/system`, `/api/ui/panels`. No endpoint ever returns token material;
-`/api/system` exposes booleans and counters only.
-
-## Model strings
-
-- `provider/model` — explicit, e.g. `claude/sonnet-4-5`, `github/gpt-5`, `deepseek/deepseek-chat`
-- `alias` — an alias you registered, pointing at another model string
-- `combo:<name>` — ordered fallback chain; the router walks it until one succeeds
-
-## Configuration
-
-| env | default | |
-|---|---|---|
-| `RROUTER_PORT` | `20128` | same port as 9router, so existing client configs keep working |
-| `RROUTER_HOST` | `127.0.0.1` | bind address |
-| `RROUTER_DATA_DIR` | `./data` | SQLite DB + master key file |
-| `RROUTER_MASTER_KEY` | unset | 64-hex-char AES key; otherwise `data/master.key` (0600) is generated |
-| `RROUTER_REQUIRE_API_KEY` | `false` | require a stored `sk-rr-…` key on `/v1/*` |
-| `RROUTER_REQUEST_TIMEOUT_SECS` | `600` | upstream request timeout |
-| `RROUTER_CONNECT_TIMEOUT_SECS` | `15` | connect timeout |
-| `RUST_LOG` | `rrouter=info` | tracing filter |
+Candidates are ordered by account priority, skipping providers with no active connection and
+accounts inside their circuit breaker. A 429 backs the account off exponentially, honouring
+`Retry-After`; a 5xx opens the breaker, and a half-open probe brings it back.
 
 ## Providers
 
-OAuth/subscription transports: `claude`, `codex`, `github` (Copilot).
-API-key transports: `openai`, `anthropic`, `deepseek`, `gemini`, `groq`, `openrouter`,
-`xai`, `mistral`, `together`, `cerebras`.
-Local: `ollama`. Any provider accepts a `base_url_override` per connection.
+| Kind | Providers |
+| --- | --- |
+| Subscription sign-in (OAuth) | Claude, Codex (ChatGPT), GitHub Copilot |
+| API key | OpenAI, Anthropic, Google Gemini, DeepSeek, Groq, OpenRouter, xAI, Mistral, Together, Cerebras |
+| Local / custom | Ollama, or anything reachable through `base_url_override` |
 
-## How a request flows
+OAuth tokens refresh ahead of expiry with a per-account lock, so concurrent requests never
+race two refreshes and invalidate the session.
+
+## Models
+
+**Models** in the dashboard is the registry behind `/v1/models`:
+
+- **Sync from models.dev** — one button (and a daily background refresh) pulls context
+  windows, output caps, and capabilities (vision, pdf, audio, tools, reasoning) for providers
+  this build can route.
+- **Fetch from a provider** — asks that provider's own `/models` endpoint; used automatically
+  where it exists, and the custom form covers the ones that do not list models (Codex).
+- **Custom models** — add any id with its limits and capabilities; custom rows win over
+  everything else and are never overwritten by a sync.
+- **Test** — sends a real 16-token completion through the same planner, dispatcher, and
+  reassembly path a client uses, so a green result means what it says.
+
+Every place the dashboard asks for a model is a select grouped by provider — no free-text
+model fields, so a typo cannot silently route to nothing.
+
+## Security
+
+- Credentials encrypted with AES-256-GCM, unique nonce per write; the key lives in
+  `<data dir>/master.key` created `0600` (or comes from `RROUTER_MASTER_KEY`).
+- Gateway keys are stored as SHA-256 hashes; the plaintext is shown once at creation.
+- The admin API never returns token material, only `has_*` booleans.
+- `RROUTER_ALLOW_REMOTE_ADMIN=false` by default: admin routes are loopback-only unless the
+  operator says otherwise. `RROUTER_CORS_ORIGINS=*` is rejected at startup.
+- Upstream payloads are never persisted; usage rows record tokens, latency, status, and the
+  model — not prompts or completions.
+
+## Dashboard
+
+The dashboard is a Vite + React app served at `/app`, embedded in the binary at build time.
+It needs Node only to build, never to run.
+
+```sh
+cd ui && npm install
+npm run dev     # http://localhost:5173, proxies /api and /v1 to :20128
+npm run build   # writes ui/dist; the next cargo build embeds it
+```
+
+A checkout without `ui/dist` still builds: `/` then serves a smaller dependency-free shell
+that composes itself from `GET /api/ui/panels` (and supports sandboxed extension panels).
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RROUTER_HOST` | `127.0.0.1` | Bind address |
+| `RROUTER_PORT` | `20128` | Listen port |
+| `RROUTER_DATA_DIR` | `./data` | SQLite database, master key, `/ext` assets |
+| `RROUTER_MASTER_KEY` | auto-generated | 64 hex chars; otherwise created on first run |
+| `RROUTER_REQUIRE_API_KEY` | `false` | Require `sk-rr-…` on `/v1/*` |
+| `RROUTER_ALLOW_REMOTE_ADMIN` | `false` | Serve admin routes beyond loopback |
+| `RROUTER_CORS_ORIGINS` | unset | Comma-separated allowlist; `*` is rejected |
+| `RROUTER_REQUEST_TIMEOUT_SECS` | `600` | Upstream request timeout |
+| `RROUTER_CONNECT_TIMEOUT_SECS` | `15` | TCP/TLS connect timeout |
+| `RROUTER_STATIC_DIR` | unset | Serve extra extension assets under `/ext` |
+| `RUST_LOG` | `rrouter=info` | Log filter |
+
+### Docker
+
+The image is two stages: Rust builds the binary, distroless runs it. `ui/dist` is copied in,
+so the image ships the full dashboard with no Node in the final layer.
+
+```sh
+docker build -t rrouter .
+docker run -p 20128:20128 -v rrouter-data:/data rrouter
+```
+
+## Architecture
+
+Seven crates, each with one job:
 
 ```
-client ──/v1/messages──► gateway
-                          │ auth (optional API key)
-                          │ translate → canonical request
-                          │ plan: model → candidates (alias, provider/model, combo, priority)
-                          ▼
-                     dispatcher (circuit breaker, fallback)
-                          │ refresher: guarantee ≥5 min of token life (one refresh per credential)
-                          │ translate canonical → provider dialect
-                          ▼
-                     provider HTTP ──SSE bytes──► decoder → canonical events → encoder ──► client
-                          │
-                          └── usage recorded (tokens, latency, status; never bodies)
+client ──▶ gateway ──▶ translate ──▶ router ──▶ upstream
+             │            │            │
+             │            │            └── planner, breaker, dispatcher
+             │            └── canonical request/response + SSE codecs
+             └── axum routes, admin API, embedded dashboard
+
+core        shared types (ChatRequest, StreamEvent, Usage, errors)
+auth        provider registry, credential refresh, OAuth flows
+store       SQLite, encryption, connections/keys/models/usage
+translate   Chat ⇄ Responses ⇄ Anthropic, request and stream
+router      model resolution, aliases, combos, circuit breaker
+gateway     HTTP surface, proxying, admin routes
+ui          the embedded Vite dashboard (build-time asset table)
 ```
 
-## Workspace
-
-```
-crates/rrouter-core       canonical model, dialects, errors, SSE codec
-crates/rrouter-translate  OpenAI Chat · Anthropic Messages · OpenAI Responses  ↔ canonical
-crates/rrouter-auth       provider registry, credentials, mutex-locked refresh
-crates/rrouter-store      SQLite persistence, AES-256-GCM credentials, keys, usage
-crates/rrouter-router     model resolution, fallback, circuit breaker
-crates/rrouter-gateway    axum server, /v1 proxy, admin API, embedded UI, `rrouter` binary
-```
+The proxy parses the client body into one canonical request, picks candidates, builds the
+provider's wire body, and decodes the upstream stream incrementally — a client frame is
+emitted as soon as the chunk carrying it arrives. A stream-only upstream (Codex) serving a
+non-streaming client is reassembled from the same decoder.
 
 ## Tests
 
 ```sh
-cargo test --workspace                             # 118 tests
+cargo test --workspace                              # 174 tests
 cargo clippy --workspace --all-targets -- -D warnings
-python3 scripts/e2e_smoke.py                       # live binary + mock upstream, 12 checks
+./scripts/verify.sh                                 # build + every gate
+python3 scripts/e2e_smoke.py                        # live binary + mock upstream
+python3 scripts/oauth_smoke.py                      # OAuth flows against a mock IdP
 ```
 
-`scripts/e2e_smoke.py` starts a mock provider and the release binary, then proves: a 401 on
-the first account falls through to the next in milliseconds, the first SSE frame reaches the
-client before the upstream finishes its stream, an Anthropic client gets Anthropic-shaped
-output from an [OI]-speaking provider, credentials are absent from the DB file in plaintext,
-the key file is `0600`, and the admin API never returns token material.
-
-Every regression test was checked to fail against the code before its fix: breaker settlement
-on stream drop, probe release on cancellation, dead-credential fallthrough, and client errors
-not tripping a healthy account.
-
-`design/architecture-contract.md` holds the frozen crate contract (the exact public API every
-crate compiles against); `design/build-plan.md` holds the task decomposition.
+Coverage includes: fallback on 401/429 without losing the client request, the first SSE frame
+arriving before the upstream finishes, Anthropic clients receiving Anthropic shapes from an
+OpenAI-speaking provider, tool calls and tool results crossing dialects, `strict` schemas and
+provider-native tools surviving translation, credential material absent from the database
+file, and the admin API never returning tokens.
 
 ## License
 
-MIT. Behavioural inspiration from 9router (also MIT); no code is copied — wire contracts were
-re-derived from published behaviour and the providers' own APIs.
+MIT. Behavioural inspiration from 9router (also MIT); no code is copied. Wire formats were
+re-derived from the providers' published APIs and observed behaviour.

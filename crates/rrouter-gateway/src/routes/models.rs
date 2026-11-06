@@ -172,6 +172,13 @@ pub async fn providers(State(state): State<Arc<AppState>>) -> Response {
             json!({
                 "id": spec.id,
                 "display": spec.display,
+                // How this provider authenticates, so the dashboard can offer
+                // "subscription" and "API key" as separate paths instead of guessing.
+                "kind": match spec.kind {
+                    rrouter_auth::ProviderKind::OAuth => "oauth",
+                    rrouter_auth::ProviderKind::ApiKey => "api_key",
+                    rrouter_auth::ProviderKind::Local => "local",
+                },
                 "has_connection": active.contains(spec.id),
                 "listed": models_registry::can_list(spec.id),
             })

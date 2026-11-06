@@ -300,17 +300,19 @@ export function Modal({
       <div
         ref={ref}
         tabIndex={-1}
+        // Focus lands here for screen readers; the accent focus ring is for controls.
+        style={{ outline: "none" }}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="w-full max-w-lg rounded-[var(--radius-card)] border border-line-strong bg-surface shadow-2xl focus:outline-none"
+        className="w-full max-w-lg rounded-[var(--radius-card)] border border-line-strong bg-surface shadow-2xl focus:outline-none focus-visible:outline-none"
       >
         <div className="flex items-center justify-between border-b border-line px-5 py-3">
           <h2 id={titleId} className="text-[15px] font-medium">
             {title}
           </h2>
           <Button variant="quiet" onClick={onClose}>
-            esc
+            close
           </Button>
         </div>
         <div className="max-h-[65vh] overflow-auto px-5 py-4">{children}</div>

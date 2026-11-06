@@ -7,6 +7,9 @@ FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+# The dashboard is prebuilt: crates/rrouter-ui embeds these files at compile time.
+# Without ui/dist the image still builds and serves the built-in fallback shell.
+COPY ui/dist ./ui/dist
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config \
  && cargo build --release --locked \
  && strip target/release/rrouter

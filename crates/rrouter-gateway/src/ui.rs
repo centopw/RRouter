@@ -24,7 +24,7 @@ const STYLE_CSS: &str = include_str!("../assets/style.css");
 /// Built-in panels, in display order.
 pub fn builtin_panels() -> serde_json::Value {
     json!([
-        { "id": "connections", "title": "Connections", "icon": "\u{1f517}", "order": 10, "kind": "builtin" },
+        { "id": "connections", "title": "Providers", "icon": "\u{1f517}", "order": 10, "kind": "builtin" },
         { "id": "keys", "title": "API Keys", "icon": "\u{1f511}", "order": 20, "kind": "builtin" },
         { "id": "models", "title": "Models", "icon": "\u{1f9e0}", "order": 25, "kind": "builtin" },
         { "id": "aliases", "title": "Aliases", "icon": "\u{21aa}", "order": 30, "kind": "builtin" },

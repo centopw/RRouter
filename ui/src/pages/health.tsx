@@ -99,7 +99,7 @@ export default function Health() {
         <CardHeader title="Connection state" action={<span className="text-[11px] text-faint">live from /api/connections</span>} />
         <div className="px-5 pb-4">
           {(connections.data ?? []).length === 0 ? (
-            <p className="text-[13px] text-faint">No connections. Add one under Connections.</p>
+            <p className="text-[13px] text-faint">No connections. Add one under Providers.</p>
           ) : (
             <ul className="divide-y divide-[#1a1a1a]">
               {(connections.data ?? []).map((c) => (

@@ -158,6 +158,8 @@ export type Model = {
 export type ModelProvider = {
   id: string;
   display: string;
+  /** How the provider authenticates: a subscription sign-in, an API key, or local. */
+  kind: "oauth" | "api_key" | "local";
   has_connection: boolean;
   listed: boolean;
 };
