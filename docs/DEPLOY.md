@@ -36,9 +36,18 @@ configuration with secrets redacted. The ones that matter in production:
 
 The admin API (`/api/*`, `/metrics`, the dashboard) is gated by the socket address: it
 answers only loopback callers unless `RROUTER_ALLOW_REMOTE_ADMIN=true`. A reverse proxy on
-the same host connects from loopback, so **the proxy makes the admin API reachable**. Protect
-`/api/*` and `/metrics` there (basic auth, OIDC, IP allowlist). `deploy/Caddyfile.example` does
-this.
+the same host connects from loopback, so **the proxy makes the admin API reachable**.
+
+Two ways to close that:
+
+- set `RROUTER_ADMIN_TOKEN` — every admin request then needs `Authorization: Bearer <token>`
+  (or `x-admin-token`), and the loopback shortcut no longer applies. This works even when the
+  proxy cannot add auth.
+- keep the token unset and authenticate `/api/*` and `/metrics` at the proxy (basic auth,
+  OIDC, IP allowlist); `deploy/Caddyfile.example` does this.
+
+`RROUTER_MAX_CONCURRENCY` is the backpressure knob: at the cap a request is answered
+`503 overloaded` with `Retry-After` instead of queueing for minutes.
 
 ## 3. Exposure
 
