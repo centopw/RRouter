@@ -1,5 +1,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { api } from "./lib/api";
 import { useHealth, useModels, useSystem } from "./lib/queries";
 import { CopyChip, Dot, cx } from "./components/ui";
 import { uptime } from "./lib/format";
@@ -22,6 +24,16 @@ const icon = (path: string) => (
   </svg>
 );
 
+/** White-label settings written through `/api/settings`; every field is optional. */
+type Brand = {
+  brand_name?: string;
+  brand_color?: string;
+  logo_url?: string;
+  footer_text?: string;
+};
+
+const DEFAULT_NAME = "RRouter";
+
 const NAV: NavItem[] = [
   { to: "/activity", label: "Activity", icon: icon("M3 12h4l2-6 3 12 2-6h5"), group: "Gateway" },
   { to: "/providers", label: "Providers", icon: icon("M9 15l6-6M8 7H6a4 4 0 000 8h2M16 17h2a4 4 0 000-8h-2"), group: "Gateway" },
@@ -39,6 +51,24 @@ const SETUP_DISMISSED = "rrouter:setup-dismissed";
 export function Shell() {
   const health = useHealth();
   const system = useSystem();
+  const settings = useQuery({
+    queryKey: ["gateway-settings"],
+    queryFn: () => api.get<Brand>("/api/settings"),
+    staleTime: 60_000,
+  });
+  const brand = settings.data ?? {};
+  const name = brand.brand_name?.trim() || DEFAULT_NAME;
+  const logo = brand.logo_url?.trim();
+  const logoOk = logo !== undefined && /^(https?:\/\/|data:image\/)/.test(logo);
+
+  useEffect(() => {
+    document.title = name;
+    const color = brand.brand_color?.trim();
+    if (color && /^#[0-9a-f]{3,8}$/i.test(color)) {
+      document.documentElement.style.setProperty("--color-accent", color);
+    }
+  }, [name, brand.brand_color]);
+
   const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -80,13 +110,13 @@ export function Shell() {
         <div className="px-3 pt-3">
           <div className="flex items-center gap-2 rounded-lg px-2 py-2">
             <img
-              src={`${import.meta.env.BASE_URL}logo-mark.png`}
+              src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark.png`}
               alt=""
               width={30}
               height={30}
-              className="h-[30px] w-[30px] shrink-0 select-none"
+              className="h-[30px] w-[30px] shrink-0 select-none object-contain"
             />
-            <span className="truncate text-[14px] font-semibold tracking-[-0.01em]">RRouter</span>
+            <span className="truncate text-[14px] font-semibold tracking-[-0.01em]">{name}</span>
           </div>
         </div>
 
@@ -116,18 +146,20 @@ export function Shell() {
           running={running}
           uptimeSecs={health.data?.uptime_secs ?? 0}
           version={health.data?.version}
+          note={brand.footer_text}
         />
       </aside>
 
       <header className="shrink-0 border-b border-line bg-[var(--color-sidebar)] min-[820px]:hidden">
         <div className="flex h-14 items-center gap-3 px-3">
           <img
-            src={`${import.meta.env.BASE_URL}logo-mark.png`}
+            src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark.png`}
             alt=""
             width={24}
             height={24}
-            className="h-6 w-6 shrink-0 select-none"
+            className="h-6 w-6 shrink-0 select-none object-contain"
           />
+          <span className="text-[13px] font-semibold">{name}</span>
           <span className="flex items-center gap-1.5">
             <RunningDot running={running} />
             <span className="sr-only">{running ? "Gateway running" : "Gateway unreachable"}</span>
@@ -216,11 +248,13 @@ function SidebarFooter({
   running,
   uptimeSecs,
   version,
+  note,
 }: {
   endpoint: string;
   running: boolean;
   uptimeSecs: number;
   version?: string;
+  note?: string;
 }) {
   return (
     <div className="border-t border-line px-3 py-3">
@@ -235,7 +269,9 @@ function SidebarFooter({
             {running ? `Running · up ${uptime(uptimeSecs)}` : "unreachable"}
           </span>
         </div>
-        <div className="mt-0.5 text-[11px] text-faint">v{version ?? "—"} · MIT</div>
+        <div className="mt-0.5 truncate text-[11px] text-faint">
+          v{version ?? "—"} · {note?.trim() || "MIT"}
+        </div>
       </div>
     </div>
   );
