@@ -8,10 +8,10 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 2;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1];
+const MIGRATIONS: &[&str] = &[V1, V2];
 
 const V1: &str = r#"
 CREATE TABLE IF NOT EXISTS connections (
@@ -70,6 +70,22 @@ CREATE TABLE IF NOT EXISTS usage (
   error         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts DESC);
+"#;
+
+/// V2: the model registry. One row per `(provider, model)`; `source` says where it
+/// came from and therefore how much authority it carries (see `Store::upsert_model`).
+const V2: &str = r#"
+CREATE TABLE IF NOT EXISTS models (
+  provider   TEXT NOT NULL,
+  model      TEXT NOT NULL,
+  display    TEXT,
+  context    INTEGER,
+  max_output INTEGER,
+  caps       TEXT NOT NULL DEFAULT '{}',
+  source     TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (provider, model)
+);
 "#;
 
 /// Bring `conn` up to [`SCHEMA_VERSION`]. Idempotent.
