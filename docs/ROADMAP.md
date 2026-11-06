@@ -17,9 +17,8 @@ logging, metrics) and 9router (dashboard, providers, combos, usage).
 | 9 | Guardrails | prompt/response hooks (blocklists, max tokens per request, redaction) | LiteLLM guardrails |
 | 10 | Ops polish | structured JSON logs, OpenTelemetry export, quota reset schedules | production gateways |
 
-Status: phase 1 landed (backend + UI), phase 2 backend in progress with its UI landed, phase 5
-UI landed early (playground, attempts, settings). Phases 3–4 are specced and queued behind
-phase 2 on the same files.
+Status: phases 1–5 landed. Phase 6 (cost) backend in progress with its UI landed; phase 7
+(protocol breadth) specced and queued. Release 0.2.0 is cut once the image smoke job passes.
 
 ## Phase 1 — key governance (contract)
 
