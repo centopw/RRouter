@@ -37,6 +37,16 @@ jobs:
             asset: darwin-amd64
     runs-on: ${{ matrix.runner }}
     steps:
+      - name: Require a tag
+        # workflow_dispatch needs an explicit tag; a branch name would publish a
+        # release nobody can install from.
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          case "$tag" in
+            v*) ;;
+            *) echo "publish needs a v* tag, got '$tag'" >&2; exit 1 ;;
+          esac
+
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
