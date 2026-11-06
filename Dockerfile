@@ -19,12 +19,18 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 # crates/rrouter-ui/build.rs embeds ../../ui/dist at compile time.
 COPY --from=ui /ui/dist ./ui/dist
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config \
+# Cargo registry and target live in cache mounts: the multi-arch CI build compiles the
+# same dependencies twice per platform, and pulling them from cache is the difference
+# between a 3-minute and a 12-minute image.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    apt-get update && apt-get install -y --no-install-recommends pkg-config \
  && cargo build --release --locked \
- && strip target/release/rrouter
+ && cp target/release/rrouter /rrouter \
+ && strip /rrouter
 
 FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=build /src/target/release/rrouter /usr/local/bin/rrouter
+COPY --from=build /rrouter /usr/local/bin/rrouter
 # Credentials DB, key file, and any operator-supplied /ext assets live here.
 VOLUME ["/data"]
 ENV RROUTER_DATA_DIR=/data \
