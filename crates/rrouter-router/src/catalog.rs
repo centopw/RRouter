@@ -195,6 +195,42 @@ fn core_of(model: &str) -> &str {
     }
 }
 
+/// Registry provider id → models.dev provider id.
+///
+/// The registry spells an OAuth product line separately from the API product line
+/// (`codex` vs `openai`), while models.dev groups everything under the vendor. Providers
+/// absent from this table are already spelled the models.dev way.
+const MODELS_DEV_ALIASES: &[(&str, &str)] = &[
+    ("codex", "openai"),
+    ("claude", "anthropic"),
+    ("gemini", "google"),
+    ("github", "github-copilot"),
+    ("glm", "zai"),
+    ("kimi", "moonshotai"),
+    ("qwen", "alibaba"),
+    ("hunyuan", "tencent"),
+];
+
+/// The models.dev provider a registry provider's models live under.
+pub fn models_dev_provider(id: &str) -> &str {
+    MODELS_DEV_ALIASES
+        .iter()
+        .find(|(ours, _)| *ours == id)
+        .map(|(_, dev)| *dev)
+        .unwrap_or(id)
+}
+
+/// Every registry provider whose models.dev id is `models_dev_id` (the inverse of
+/// [`models_dev_provider`]). Empty for a models.dev provider the registry does not
+/// wrap; callers decide whether that id is itself routable.
+pub fn registry_providers(models_dev_id: &str) -> Vec<&'static str> {
+    MODELS_DEV_ALIASES
+        .iter()
+        .filter(|(_, dev)| *dev == models_dev_id)
+        .map(|(ours, _)| *ours)
+        .collect()
+}
+
 /// What each registry provider serves.
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
@@ -323,5 +359,15 @@ mod tests {
         let hit = catalog.resolve("gpt-4.1");
         assert_eq!(hit.len(), 1);
         assert_eq!(hit[0].provider, "ollama");
+    }
+
+    #[test]
+    fn models_dev_alias_is_a_bijection_on_listed_providers() {
+        assert_eq!(models_dev_provider("codex"), "openai");
+        assert_eq!(models_dev_provider("github"), "github-copilot");
+        assert_eq!(models_dev_provider("deepseek"), "deepseek");
+        assert_eq!(registry_providers("openai"), vec!["codex"]);
+        assert_eq!(registry_providers("google"), vec!["gemini"]);
+        assert!(registry_providers("deepseek").is_empty());
     }
 }

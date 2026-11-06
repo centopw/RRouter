@@ -65,6 +65,26 @@ pub struct Combo {
     pub created_at: i64,
 }
 
+/// One row of the model registry.
+///
+/// `source` decides precedence — `custom` > `upstream` > `synced` > `catalog`
+/// (`catalog` rows are never stored, they come from [`rrouter_router::Catalog`]) —
+/// and [`Store::upsert_model`] refuses to lower it. `caps` is the stored JSON object
+/// of capability overrides: a key that is absent falls through to the row this one
+/// overlays.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelRow {
+    pub provider: String,
+    pub model: String,
+    pub display: Option<String>,
+    pub context: Option<u32>,
+    pub max_output: Option<u32>,
+    pub caps: serde_json::Value,
+    pub source: String,
+    /// Set by [`Store::upsert_model`]; the field is ignored on write.
+    pub updated_at: i64,
+}
+
 /// One completed request. Never contains prompt or response bodies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
@@ -539,6 +559,87 @@ impl Store {
         Ok(out)
     }
 
+    // ----- model registry ----------------------------------------------------------
+
+    /// Insert or replace one registry row.
+    ///
+    /// Precedence is enforced in SQL: a `synced` refresh or an `upstream` fetch never
+    /// overwrites a higher-precedence row for the same `(provider, model)`, and a
+    /// `synced` row never overwrites an `upstream` one. `updated_at` is set here.
+    pub async fn upsert_model(&self, row: &ModelRow) -> Result<()> {
+        let caps = serde_json::to_string(&row.caps)?;
+        let conn = self.conn();
+        conn.execute(
+            UPSERT_MODEL_SQL,
+            params![
+                row.provider,
+                row.model,
+                row.display,
+                row.context,
+                row.max_output,
+                caps,
+                row.source,
+                now()
+            ],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Delete a `custom` row. Returns whether something was deleted; a row of another
+    /// source is left alone, so the route can answer `404` for both absent and
+    /// non-custom rows.
+    pub async fn delete_model(&self, provider: &str, model: &str) -> Result<bool> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "DELETE FROM models WHERE provider = ?1 AND model = ?2 AND source = 'custom'",
+                params![provider, model],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
+    }
+
+    /// Every stored registry row, ordered by `provider`, then `model`.
+    pub async fn list_models(&self) -> Result<Vec<ModelRow>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT provider, model, display, context, max_output, caps, source, updated_at \
+                 FROM models ORDER BY provider ASC, model ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ModelRow {
+                    provider: r.get(0)?,
+                    model: r.get(1)?,
+                    display: r.get(2)?,
+                    context: r.get(3)?,
+                    max_output: r.get(4)?,
+                    caps: parse_caps(r.get::<_, String>(5)?),
+                    source: r.get(6)?,
+                    updated_at: r.get(7)?,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    /// Drop every row of one `source`; returns how many were removed. Used by the
+    /// models.dev refresh, which replaces its own rows wholesale.
+    pub async fn clear_models_by_source(&self, source: &str) -> Result<usize> {
+        let conn = self.conn();
+        let n = conn
+            .execute("DELETE FROM models WHERE source = ?1", params![source])
+            .map_err(migrations::db_err)?;
+        Ok(n)
+    }
+
     // ----- combos ------------------------------------------------------------------
 
     /// Insert or replace the chain named `name`. Order is preserved; duplicates are dropped.
@@ -877,4 +978,30 @@ fn generate_api_key() -> String {
 
 fn hash_api_key(plaintext: &str) -> String {
     hex::encode(Sha256::digest(plaintext.as_bytes()))
+}
+
+/// Upsert that never lowers a row's source precedence. Kept as one statement so the
+/// read-compare-write happens under SQLite's write lock.
+const UPSERT_MODEL_SQL: &str = r#"
+INSERT INTO models (provider, model, display, context, max_output, caps, source, updated_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+ON CONFLICT(provider, model) DO UPDATE SET
+  display    = excluded.display,
+  context    = excluded.context,
+  max_output = excluded.max_output,
+  caps       = excluded.caps,
+  source     = excluded.source,
+  updated_at = excluded.updated_at
+WHERE CASE excluded.source WHEN 'custom' THEN 3 WHEN 'upstream' THEN 2 WHEN 'synced' THEN 1 ELSE 0 END
+   >= CASE models.source   WHEN 'custom' THEN 3 WHEN 'upstream' THEN 2 WHEN 'synced' THEN 1 ELSE 0 END
+"#;
+
+/// Capability blob as a JSON object. Only this crate writes the column, so a malformed
+/// value means a hand-edited database; treat it as "no overrides" rather than failing
+/// the whole registry listing.
+fn parse_caps(raw: String) -> serde_json::Value {
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(v @ serde_json::Value::Object(_)) => v,
+        _ => serde_json::Value::Object(serde_json::Map::new()),
+    }
 }

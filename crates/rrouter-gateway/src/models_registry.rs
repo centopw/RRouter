@@ -1,0 +1,449 @@
+//! The model registry: the merged, deduplicated view behind `GET /api/models`.
+//!
+//! One row per `(provider, model)`. Sources stack in a fixed order —
+//! `catalog` (compiled-in), `synced` (models.dev), `upstream` (the provider's own
+//! `/v1/models`), `custom` (operator-defined) — and a later source wins on a collision.
+//! Capabilities merge per field, so a partial capability object never erases what the
+//! row underneath already knew.
+//!
+//! Nothing here performs I/O beyond the `Store` reads handed in, except
+//! [`download_models_dev`], which owns the models.dev fetch.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use rrouter_core::{Error, Result};
+use rrouter_router::catalog::registry_providers;
+use rrouter_router::ModelInfo;
+use rrouter_store::{ModelRow, Store};
+use serde::Serialize;
+use serde_json::{Map, Value};
+
+use crate::state::AppState;
+
+/// Compiled-in catalog [`Catalog::all`].
+pub const SOURCE_CATALOG: &str = "catalog";
+/// models.dev download.
+pub const SOURCE_SYNCED: &str = "synced";
+/// The provider's own model list endpoint.
+pub const SOURCE_UPSTREAM: &str = "upstream";
+/// Operator-defined row.
+pub const SOURCE_CUSTOM: &str = "custom";
+
+/// URL of the models.dev catalog.
+pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+
+/// A provider's model list is capped here so one bad download cannot fill the database.
+pub const MAX_FETCHED_IDS: usize = 5000;
+
+/// The nine capability flags every model object carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Capabilities {
+    pub vision: bool,
+    pub pdf: bool,
+    pub audio_input: bool,
+    pub video_input: bool,
+    pub image_output: bool,
+    pub audio_output: bool,
+    pub tools: bool,
+    pub reasoning: bool,
+    pub search: bool,
+}
+
+/// Catalog defaults: a curated chat model is assumed to support tools and nothing else
+/// the catalog cannot know. `search` is never derived from models.dev — it has no such
+/// field — so it is only ever set by an operator.
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self {
+            vision: false,
+            pdf: false,
+            audio_input: false,
+            video_input: false,
+            image_output: false,
+            audio_output: false,
+            tools: true,
+            reasoning: false,
+            search: false,
+        }
+    }
+}
+
+impl Capabilities {
+    /// Layer a stored capability object over these values. Only keys present as booleans
+    /// change; everything else falls through to the row underneath.
+    pub fn overlay(&mut self, caps: &Value) {
+        let Some(object) = caps.as_object() else { return };
+        for (key, flag) in object {
+            let Some(flag) = flag.as_bool() else { continue };
+            match key.as_str() {
+                "vision" => self.vision = flag,
+                "pdf" => self.pdf = flag,
+                "audio_input" => self.audio_input = flag,
+                "video_input" => self.video_input = flag,
+                "image_output" => self.image_output = flag,
+                "audio_output" => self.audio_output = flag,
+                "tools" => self.tools = flag,
+                "reasoning" => self.reasoning = flag,
+                "search" => self.search = flag,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// One item of the `GET /api/models` payload.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModelItem {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub provider: String,
+    pub id: String,
+    pub display: Option<String>,
+    pub context: Option<u32>,
+    pub max_output: Option<u32>,
+    pub capabilities: Capabilities,
+    pub source: String,
+    pub enabled: bool,
+    pub available: bool,
+}
+
+impl ModelItem {
+    fn new(provider: &str, id: &str, source: &str) -> Self {
+        Self {
+            reference: format!("{provider}/{id}"),
+            provider: provider.to_string(),
+            id: id.to_string(),
+            display: None,
+            context: None,
+            max_output: None,
+            capabilities: Capabilities::default(),
+            source: source.to_string(),
+            enabled: true,
+            available: false,
+        }
+    }
+}
+
+/// Precedence of a stored source. Higher wins; unknown values rank lowest.
+fn source_rank(source: &str) -> u8 {
+    match source {
+        SOURCE_CUSTOM => 3,
+        SOURCE_UPSTREAM => 2,
+        SOURCE_SYNCED => 1,
+        _ => 0,
+    }
+}
+
+/// Merge catalog rows and stored rows into the contract's item list, sorted by
+/// `provider`, then `id`.
+pub fn merge(
+    catalog_rows: Vec<ModelInfo>,
+    rows: &[ModelRow],
+    disabled: &BTreeSet<String>,
+    active_providers: &BTreeSet<String>,
+) -> Vec<ModelItem> {
+    let mut items: BTreeMap<(String, String), ModelItem> = BTreeMap::new();
+
+    for info in catalog_rows {
+        let mut item = ModelItem::new(&info.provider, &info.id, SOURCE_CATALOG);
+        // The catalog records an output cap, not a context window.
+        item.max_output = info.max_tokens;
+        items.insert((info.provider, info.id), item);
+    }
+
+    // Later sources win. Sorting by rank (stable) makes the store's own ordering
+    // irrelevant: rows of one source keep their `(provider, model)` order.
+    let mut ordered: Vec<&ModelRow> = rows.iter().collect();
+    ordered.sort_by_key(|row| source_rank(&row.source));
+
+    for row in ordered {
+        let key = (row.provider.clone(), row.model.clone());
+        let item = match items.get_mut(&key) {
+            Some(item) => item,
+            None => items
+                .entry(key)
+                .or_insert_with(|| ModelItem::new(&row.provider, &row.model, &row.source)),
+        };
+        if row.display.is_some() {
+            item.display = row.display.clone();
+        }
+        if row.context.is_some() {
+            item.context = row.context;
+        }
+        if row.max_output.is_some() {
+            item.max_output = row.max_output;
+        }
+        item.capabilities.overlay(&row.caps);
+        item.source = row.source.clone();
+    }
+
+    items
+        .into_values()
+        .map(|mut item| {
+            item.enabled = !disabled.contains(&item.id);
+            item.available = active_providers.contains(&item.provider);
+            item
+        })
+        .collect()
+}
+
+/// Live `GET /api/models` payload.
+pub async fn list(state: &AppState) -> Result<Vec<ModelItem>> {
+    let store = state.store.as_ref();
+    let rows = store.list_models().await?;
+    let disabled: BTreeSet<String> = store.disabled_models().await?.into_iter().collect();
+    let active_providers: BTreeSet<String> = store
+        .list_connections(None)
+        .await?
+        .into_iter()
+        .filter(|conn| conn.is_active)
+        .map(|conn| conn.provider)
+        .collect();
+    Ok(merge(state.catalog.all(), &rows, &disabled, &active_providers))
+}
+
+/// One merged item, for the `POST /api/models/custom` echo.
+pub async fn item(state: &AppState, provider: &str, id: &str) -> Result<Option<ModelItem>> {
+    Ok(list(state)
+        .await?
+        .into_iter()
+        .find(|item| item.provider == provider && item.id == id))
+}
+
+/// Download models.dev and return the parsed rows. Network failures are
+/// [`Error::Transport`] so the route answers `502` and no row is touched.
+pub async fn download_models_dev(state: &AppState) -> Result<Vec<ModelRow>> {
+    let response = state
+        .http
+        .get(MODELS_DEV_URL)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        // Every download failure is a `Transport` error, which the admin envelope renders
+        // as 502 — the contract's status for a failed refresh.
+        .map_err(|e| Error::Transport(format!("models.dev: {e}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(Error::Transport(format!("models.dev answered {status}")));
+    }
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Transport(format!("models.dev body: {e}")))?;
+    Ok(parse_models_dev(&value))
+}
+
+/// Parse a models.dev document into `synced` rows.
+///
+/// Every models.dev provider is mirrored under its own id, and additionally under each
+/// registry provider that aliases to it (`openai` → `codex` as well as `openai`), so a
+/// codex account and an OpenAI API key both see the vendor's models. Pure: the tests
+/// feed a fixture here instead of the network.
+pub fn parse_models_dev(document: &Value) -> Vec<ModelRow> {
+    let Some(providers) = document.as_object() else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for (models_dev_id, provider) in providers {
+        let Some(models) = provider.get("models").and_then(Value::as_object) else {
+            continue;
+        };
+        let mut targets = registry_providers(models_dev_id);
+        if !targets.contains(&models_dev_id.as_str()) {
+            targets.push(models_dev_id.as_str());
+        }
+        for (model_id, entry) in models {
+            if model_id.is_empty() || !entry.is_object() {
+                continue;
+            }
+            for target in &targets {
+                rows.push(ModelRow {
+                    provider: (*target).to_string(),
+                    model: model_id.clone(),
+                    display: entry
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .filter(|name| !name.is_empty()),
+                    context: limit(entry, "context"),
+                    max_output: limit(entry, "output"),
+                    caps: caps_from_models_dev(entry),
+                    source: SOURCE_SYNCED.to_string(),
+                    updated_at: 0,
+                });
+            }
+        }
+    }
+    rows
+}
+
+/// `limit.<key>` as a token count.
+fn limit(entry: &Value, key: &str) -> Option<u32> {
+    entry
+        .get("limit")
+        .and_then(|limit| limit.get(key))
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+/// Capability overrides derived from one models.dev entry.
+///
+/// Only what models.dev states is stored. `tools`/`reasoning` appear when the entry has
+/// `tool_call`/`reasoning`; the modality lists are authoritative only when present.
+/// `search` is never derived.
+fn caps_from_models_dev(entry: &Value) -> Value {
+    let mut caps = Map::new();
+    if let Some(flag) = entry.get("tool_call").and_then(Value::as_bool) {
+        caps.insert("tools".into(), Value::Bool(flag));
+    }
+    if let Some(flag) = entry.get("reasoning").and_then(Value::as_bool) {
+        caps.insert("reasoning".into(), Value::Bool(flag));
+    }
+    let modalities = entry.get("modalities");
+    let input = modalities.and_then(|m| m.get("input")).and_then(Value::as_array);
+    if let Some(input) = input {
+        let listed = |name: &str| input.iter().any(|value| value.as_str() == Some(name));
+        for (key, name) in [
+            ("vision", "image"),
+            ("pdf", "pdf"),
+            ("audio_input", "audio"),
+            ("video_input", "video"),
+        ] {
+            caps.insert(key.into(), Value::Bool(listed(name)));
+        }
+    }
+    let output = modalities.and_then(|m| m.get("output")).and_then(Value::as_array);
+    if let Some(output) = output {
+        let listed = |name: &str| output.iter().any(|value| value.as_str() == Some(name));
+        for (key, name) in [("image_output", "image"), ("audio_output", "audio")] {
+            caps.insert(key.into(), Value::Bool(listed(name)));
+        }
+    }
+    Value::Object(caps)
+}
+
+/// The provider's model-list URL.
+///
+/// Rule: take the provider's chat endpoint (or the connection's `base_url_override`),
+/// drop the trailing operation path, then append `/v1/models` — except when the
+/// remainder already ends in `/v1`, in which case only `/models` is appended. That
+/// keeps `https://api.openai.com/v1/chat/completions` from becoming
+/// `…/v1/v1/models` while a bare override origin still gets `/v1/models`.
+pub fn models_url(base: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    let root = ["/chat/completions", "/v1/messages", "/messages"]
+        .iter()
+        .find_map(|suffix| trimmed.strip_suffix(suffix))
+        .unwrap_or(trimmed);
+    if root.ends_with("/v1") {
+        format!("{root}/models")
+    } else {
+        format!("{root}/v1/models")
+    }
+}
+
+/// Extract `data[].id` from a provider's model-list response, dropping empty ids and
+/// duplicates. Also accepts a bare array of strings.
+pub fn parse_model_ids(body: &Value) -> Vec<String> {
+    let entries = match body {
+        Value::Array(entries) => entries,
+        Value::Object(object) => match object.get("data").and_then(Value::as_array) {
+            Some(entries) => entries,
+            None => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    let mut ids: Vec<String> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let id = match entry {
+            Value::String(id) => id.trim(),
+            Value::Object(object) => object
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or(""),
+            _ => "",
+        };
+        if !id.is_empty() && !ids.iter().any(|seen| seen == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
+/// Whether a provider can enumerate its models over HTTP. Codex has no such endpoint
+/// (its models arrive through the ChatGPT OAuth session), so the UI offers the custom
+/// form instead of a fetch button.
+pub fn can_list(provider: &str) -> bool {
+    provider != "codex"
+}
+
+/// Replace every `synced` row with a fresh models.dev download. Returns
+/// `(rows stored, distinct providers, unix seconds)`.
+///
+/// The download and parse happen before the delete, so a failed refresh leaves the
+/// existing rows untouched.
+pub async fn sync(state: &AppState) -> Result<(usize, usize, i64)> {
+    let rows = download_models_dev(state).await?;
+    let store: &Store = state.store.as_ref();
+    store.clear_models_by_source(SOURCE_SYNCED).await?;
+    for row in &rows {
+        store.upsert_model(row).await?;
+    }
+    // Count what is actually stored: an `upstream` or `custom` row keeps its source, so
+    // the download's row count can be larger than the number of `synced` rows written.
+    let stored = store.list_models().await?;
+    let synced: Vec<&ModelRow> = stored
+        .iter()
+        .filter(|row| row.source == SOURCE_SYNCED)
+        .collect();
+    let providers = synced
+        .iter()
+        .map(|row| row.provider.as_str())
+        .collect::<BTreeSet<&str>>()
+        .len();
+    Ok((synced.len(), providers, crate::now_unix()))
+}
+
+/// Keep the registry fresh without an operator: first run after a minute (so a restart
+/// is never slowed by the download), then daily. Failures are logged, never fatal.
+pub fn spawn_daily_sync(state: std::sync::Arc<AppState>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        loop {
+            match sync(&state).await {
+                Ok((models, providers, at)) => {
+                    tracing::info!(models, providers, at, "models.dev synced")
+                }
+                Err(error) => tracing::warn!(%error, "models.dev sync failed"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn models_url_drops_operation_and_avoids_v1_v1() {
+        assert_eq!(
+            models_url("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(models_url("https://api.anthropic.com/v1/messages"), "https://api.anthropic.com/v1/models");
+        assert_eq!(models_url("https://api.githubcopilot.com/chat/completions"), "https://api.githubcopilot.com/v1/models");
+        assert_eq!(models_url("http://127.0.0.1:9/"), "http://127.0.0.1:9/v1/models");
+        assert_eq!(models_url("https://api.groq.com/openai/v1"), "https://api.groq.com/openai/v1/models");
+    }
+
+    #[test]
+    fn parse_ids_dedupes_and_ignores_empty() {
+        let body = json!({"data": [{"id": "a"}, {"id": "a"}, {"id": ""}, {"id": "b"}]});
+        assert_eq!(parse_model_ids(&body), vec!["a", "b"]);
+        assert_eq!(parse_model_ids(&json!(["x", "x", " "])), vec!["x"]);
+        assert!(parse_model_ids(&json!({"nope": []})).is_empty());
+    }
+}

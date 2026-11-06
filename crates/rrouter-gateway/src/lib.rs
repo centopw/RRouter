@@ -11,6 +11,7 @@
 
 pub mod config;
 pub mod error;
+pub mod models_registry;
 pub mod proxy;
 pub mod routes;
 pub mod settings;
@@ -59,6 +60,7 @@ pub fn auth_header(headers: &HeaderMap) -> Option<String> {
 
 /// Build the full application router.
 pub fn app(state: Arc<AppState>) -> Router {
+    spawn_model_sync(&state);
     let api = Router::new()
         .route("/connections", get(routes::connections::list).post(routes::connections::create))
         .route(
@@ -77,6 +79,15 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/disabled/{model}", put(routes::models::disable))
         .route("/disabled/{model}/enable", put(routes::models::enable))
+        .route("/models", get(routes::models::registry_list))
+        .route("/models/providers", get(routes::models::providers))
+        .route("/models/sync", post(routes::models::sync))
+        .route("/models/fetch", post(routes::models::fetch))
+        .route(
+            "/models/custom",
+            post(routes::models::custom).delete(routes::models::delete_custom),
+        )
+        .route("/models/test", post(routes::models::test))
         .route(
             "/combos",
             get(routes::combos::list).post(routes::combos::create).delete(routes::combos::remove),
@@ -113,6 +124,19 @@ pub fn app(state: Arc<AppState>) -> Router {
         .nest("/api", api)
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(state, cors))
+}
+
+/// Starts the models.dev refresh loop exactly once per process.
+///
+/// `app()` is the only startup hook this crate owns, so the timer starts here; the
+/// background task sleeps a minute first and never blocks serving. Outside a tokio
+/// runtime (a plain library build) there is nothing to schedule and it is skipped.
+fn spawn_model_sync(state: &Arc<AppState>) {
+    static START: std::sync::Once = std::sync::Once::new();
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    START.call_once(|| models_registry::spawn_daily_sync(Arc::clone(state)));
 }
 
 /// CORS: echo only the configured origins and loopback tooling.
