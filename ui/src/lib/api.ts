@@ -111,10 +111,14 @@ export type UsageSummaryRow = {
 };
 
 export type UsageEvent = {
+  /** Usage row id: the request id the log copies. */
+  id: number | null;
   ts: number;
   provider: string;
   model: string;
   connection_id: string | null;
+  /** Client endpoint, e.g. `/v1/messages`. */
+  endpoint: string | null;
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
@@ -127,6 +131,20 @@ export type UsageEvent = {
 
 export type UsageBucket = {
   start: number;
+  requests: number;
+  errors: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  avg_latency_ms: number;
+};
+
+/** One chart cell for one model (`/api/usage/series?by=model`). */
+export type UsageModelBucket = {
+  start: number;
+  provider: string;
+  model: string;
   requests: number;
   errors: number;
   input_tokens: number;

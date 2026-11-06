@@ -14,6 +14,7 @@ import {
   type SystemInfo,
   type UsageBucket,
   type UsageEvent,
+  type UsageModelBucket,
   type UsageSummaryRow,
 } from "./api";
 
@@ -28,8 +29,9 @@ export const qk = {
   aliases: ["aliases"] as const,
   combos: ["combos"] as const,
   usage: (limit: number) => ["usage", limit] as const,
-  series: (hours: number) => ["usage-series", hours] as const,
-  summary: ["usage-summary"] as const,
+  series: (hours: number, bucket?: string, by?: string) =>
+    ["usage-series", hours, bucket ?? "", by ?? ""] as const,
+  summary: (hours: number | null) => ["usage-summary", hours ?? "all"] as const,
   oauthProviders: ["oauth-providers"] as const,
   oauthStatus: (provider: string, id: string) => ["oauth-status", provider, id] as const,
 };
@@ -78,27 +80,44 @@ export function useCombos() {
   return useQuery({ queryKey: qk.combos, queryFn: () => list<Combo>("/api/combos") });
 }
 
-export function useUsage(limit = 1000) {
+export function useUsage(limit = 1000, hours?: number) {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (hours !== undefined) query.set("hours", String(hours));
   return useQuery({
-    queryKey: qk.usage(limit),
-    queryFn: () => list<UsageEvent>(`/api/usage?limit=${limit}`),
+    queryKey: [...qk.usage(limit), hours ?? "all"] as const,
+    queryFn: () => list<UsageEvent>(`/api/usage?${query}`),
     refetchInterval: 15_000,
   });
 }
 
 /** Buckets aggregated server-side, so the window is real regardless of volume. */
-export function useUsageSeries(hours: number) {
+export function useUsageSeries(hours: number, bucket?: string) {
+  const query = new URLSearchParams({ hours: String(hours) });
+  if (bucket) query.set("bucket", bucket);
   return useQuery({
-    queryKey: qk.series(hours),
-    queryFn: () => list<UsageBucket>(`/api/usage/series?hours=${hours}`),
+    queryKey: qk.series(hours, bucket),
+    queryFn: () => list<UsageBucket>(`/api/usage/series?${query}`),
     refetchInterval: 30_000,
   });
 }
 
-export function useUsageSummary() {
+/** The same series split by model, for the stacked traffic chart. */
+export function useUsageByModel(hours: number, bucket?: string) {
+  const query = new URLSearchParams({ hours: String(hours), by: "model" });
+  if (bucket) query.set("bucket", bucket);
   return useQuery({
-    queryKey: qk.summary,
-    queryFn: () => list<UsageSummaryRow>("/api/usage/summary"),
+    queryKey: qk.series(hours, bucket, "model"),
+    queryFn: () => list<UsageModelBucket>(`/api/usage/series?${query}`),
+    refetchInterval: 30_000,
+  });
+}
+
+/** Per-model totals, scoped to the last `hours` when given (the Activity table). */
+export function useUsageSummary(hours: number | null = null) {
+  return useQuery({
+    queryKey: qk.summary(hours),
+    queryFn: () =>
+      list<UsageSummaryRow>(`/api/usage/summary${hours === null ? "" : `?hours=${hours}`}`),
     refetchInterval: 15_000,
   });
 }

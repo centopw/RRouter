@@ -57,9 +57,12 @@ export function Shell() {
     return [...out.entries()];
   }, []);
 
+  const endpoint = `${window.location.origin}/v1`;
+  const running = !health.isError;
+
   return (
-    <div className="flex h-full">
-      <aside className="flex w-[236px] shrink-0 flex-col border-r border-line bg-[var(--color-sidebar)]">
+    <div className="flex h-full flex-col min-[820px]:flex-row">
+      <aside className="hidden w-[236px] shrink-0 flex-col border-r border-line bg-[var(--color-sidebar)] min-[820px]:flex">
         <div className="px-3 pt-3">
           <div className="flex items-center gap-2 rounded-lg px-2 py-2">
             <img
@@ -73,6 +76,10 @@ export function Shell() {
           </div>
         </div>
 
+        <div className="px-3 pb-2">
+          <JumpButton onClick={() => setPaletteOpen(true)} />
+        </div>
+
         <nav className="mt-3 flex-1 overflow-y-auto px-2 pb-3" aria-label="Dashboard">
           {groups.map(([group, items]) => (
             <div key={group} className="mb-4">
@@ -82,30 +89,7 @@ export function Shell() {
               <ul className="space-y-0.5">
                 {items.map((item) => (
                   <li key={item.to}>
-                    <NavLink
-                      to={item.to}
-                      className={({ isActive }) =>
-                        cx(
-                          "relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] transition-colors",
-                          isActive
-                            ? "bg-[#00d4ff]/10 font-medium text-fg"
-                            : "text-muted hover:bg-surface-2 hover:text-fg",
-                        )
-                      }
-                    >
-                      {({ isActive }) => (
-                        <>
-                          {isActive ? (
-                            <span
-                              aria-hidden
-                              className="absolute left-0 top-1.5 h-[calc(100%-12px)] w-[2px] rounded-full bg-accent"
-                            />
-                          ) : null}
-                          <span className="shrink-0 opacity-90">{item.icon}</span>
-                          {item.label}
-                        </>
-                      )}
-                    </NavLink>
+                    <NavItemLink item={item} variant="sidebar" />
                   </li>
                 ))}
               </ul>
@@ -113,61 +97,171 @@ export function Shell() {
           ))}
         </nav>
 
-        <div className="border-t border-line px-4 py-3 text-[11px] text-faint">
-          <div className="flex items-center gap-2">
-            <Dot tone={health.isError ? "neg" : "pos"} />
-            <span className="truncate">
-              {health.isError ? "unreachable" : `up ${uptime(health.data?.uptime_secs ?? 0)}`}
-            </span>
-            <button
-              onClick={() => setPaletteOpen(true)}
-              className="ml-auto rounded border border-line-strong px-1.5 py-0.5 text-[10px] text-muted hover:text-fg"
-            >
-              ⌘K
-            </button>
-          </div>
-          <div className="mt-1.5 flex items-center justify-between">
-            <span>v{health.data?.version ?? "—"}</span>
-            <span className="text-[10px] text-faint">MIT · self-hosted</span>
-          </div>
-        </div>
+        <SidebarFooter
+          endpoint={endpoint}
+          running={running}
+          uptimeSecs={health.data?.uptime_secs ?? 0}
+          version={health.data?.version}
+        />
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar onSearch={() => setPaletteOpen(true)} />
-        <main className="min-h-0 flex-1 overflow-y-auto px-8 py-7">
-          <div className="mx-auto max-w-[1180px]">
-            <Suspense fallback={<div className="text-[13px] text-faint">loading…</div>}>
-              <Outlet />
-            </Suspense>
-          </div>
-        </main>
-      </div>
+      <header className="shrink-0 border-b border-line bg-[var(--color-sidebar)] min-[820px]:hidden">
+        <div className="flex h-14 items-center gap-3 px-3">
+          <img
+            src={`${import.meta.env.BASE_URL}logo-mark.png`}
+            alt=""
+            width={24}
+            height={24}
+            className="h-6 w-6 shrink-0 select-none"
+          />
+          <span className="flex items-center gap-1.5">
+            <RunningDot running={running} />
+            <span className="sr-only">{running ? "Gateway running" : "Gateway unreachable"}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            aria-label="Jump to a page or model"
+            className="ml-auto flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-surface text-muted transition-colors hover:text-fg"
+          >
+            <SearchIcon size={18} />
+          </button>
+        </div>
+        <nav className="flex gap-1 overflow-x-auto px-2 pb-2" aria-label="Dashboard">
+          {NAV.map((item) => (
+            <NavItemLink key={item.to} item={item} variant="tab" />
+          ))}
+        </nav>
+      </header>
+
+      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 min-[820px]:px-10 min-[820px]:pb-14 min-[820px]:pt-8">
+        <div className="mx-auto w-full max-w-[1160px]">
+          <Suspense fallback={<div className="text-[13px] text-faint">loading…</div>}>
+            <Outlet />
+          </Suspense>
+        </div>
+      </main>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   );
 }
 
-function TopBar({ onSearch }: { onSearch: () => void }) {
+function SearchIcon({ size = 14 }: { size?: number }) {
   return (
-    <header className="flex h-[52px] shrink-0 items-center gap-4 border-b border-line px-8">
-      <button
-        onClick={onSearch}
-        className="flex h-8 w-[320px] items-center gap-2 rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 text-left text-[13px] text-faint hover:border-[var(--color-line-strong)]"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-          <circle cx="11" cy="11" r="7" />
-          <path d="M20 20l-3.5-3.5" />
-        </svg>
-        Search
-        <kbd className="ml-auto rounded border border-line-strong px-1 py-0.5 text-[10px]">⌘K</kbd>
-      </button>
-      <div className="ml-auto flex min-w-0 items-center gap-3 text-[12px] text-muted">
-        <span className="hidden shrink-0 sm:inline">OpenAI-compatible gateway</span>
-        <CopyChip value={`${window.location.origin}/v1`} />
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      aria-hidden
+      className="shrink-0"
+    >
+      <circle cx="11" cy="11" r="7" />
+      <path d="M20 20l-3.5-3.5" />
+    </svg>
+  );
+}
+
+/** The sidebar's palette affordance. It is a button, not an input: the real field lives
+ *  in the dialog, so ⌘K and the click share one entry point. */
+function JumpButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="Jump to a page or model"
+      className="flex h-9 w-full items-center gap-2 rounded-lg border border-line bg-surface px-2.5 text-left text-[13px] text-faint transition-colors hover:border-line-strong hover:text-fg"
+    >
+      <SearchIcon />
+      <span className="truncate">Jump to…</span>
+      <kbd className="ml-auto shrink-0 rounded border border-line bg-surface-2 px-1 py-0.5 font-sans text-[10px] text-muted">
+        ⌘K
+      </kbd>
+    </button>
+  );
+}
+
+/** Status reads from colour alone nowhere: the dot is paired with text everywhere. */
+function RunningDot({ running }: { running: boolean }) {
+  if (!running) return <Dot tone="neg" />;
+  return (
+    <span className="pulse inline-flex">
+      <Dot tone="pos" />
+    </span>
+  );
+}
+
+/** Endpoint, liveness and version in one card. `CopyChip` carries its own aria-label,
+ *  and truncates rather than widening the 236px rail. */
+function SidebarFooter({
+  endpoint,
+  running,
+  uptimeSecs,
+  version,
+}: {
+  endpoint: string;
+  running: boolean;
+  uptimeSecs: number;
+  version?: string;
+}) {
+  return (
+    <div className="border-t border-line px-3 py-3">
+      <div className="rounded-lg border border-line bg-surface px-2.5 py-2">
+        <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-faint">Endpoint</div>
+        <div className="mt-1 flex min-w-0">
+          <CopyChip value={endpoint} />
+        </div>
+        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
+          <RunningDot running={running} />
+          <span className="truncate">
+            {running ? `Running · up ${uptime(uptimeSecs)}` : "unreachable"}
+          </span>
+        </div>
+        <div className="mt-0.5 text-[11px] text-faint">v{version ?? "—"} · MIT</div>
       </div>
-    </header>
+    </div>
+  );
+}
+
+/** One nav item, two orientations: the rail stacks a left accent bar, the mobile tab row
+ *  a bottom one. `NavLink` owns `aria-current`, so active state is announced, not just seen. */
+function NavItemLink({ item, variant }: { item: NavItem; variant: "sidebar" | "tab" }) {
+  return (
+    <NavLink
+      to={item.to}
+      className={({ isActive }) =>
+        cx(
+          "relative flex items-center text-[13px] transition-colors",
+          variant === "tab"
+            ? "h-11 shrink-0 gap-2 whitespace-nowrap rounded-lg px-3"
+            : "gap-2.5 rounded-lg px-2.5 py-2",
+          isActive ? "font-medium text-fg" : "text-muted hover:bg-row-hover hover:text-fg",
+          variant === "sidebar" && isActive && "bg-surface-2",
+        )
+      }
+    >
+      {({ isActive }) => (
+        <>
+          {isActive ? (
+            <span
+              aria-hidden
+              className={cx(
+                "absolute rounded-full bg-accent",
+                variant === "tab"
+                  ? "inset-x-2 bottom-0 h-[2px]"
+                  : "left-0 top-1.5 h-[calc(100%-12px)] w-[2px]",
+              )}
+            />
+          ) : null}
+          <span className="shrink-0 opacity-90">{item.icon}</span>
+          {item.label}
+        </>
+      )}
+    </NavLink>
   );
 }
 

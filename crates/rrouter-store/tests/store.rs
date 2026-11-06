@@ -374,10 +374,12 @@ fn usage_records_summary_and_recent_order() {
     let conn_id = Uuid::new_v4();
     let rec = |ts: i64, provider: &str, model: &str, inp: u32, out: u32, ms: u32, st: u16| {
         UsageRecord {
+            id: None,
             ts,
             provider: provider.to_string(),
             model: model.to_string(),
             connection_id: Some(conn_id),
+            endpoint: Some("/v1/chat/completions".to_string()),
             input_tokens: inp,
             output_tokens: out,
             // Prompt-cache counters are priced separately; keep them per row.
@@ -395,7 +397,7 @@ fn usage_records_summary_and_recent_order() {
         s.record_usage(&rec(200, "claude", "sonnet", 0, 0, 200, 429)).await.expect("r3");
         s.record_usage(&rec(400, "groq", "llama", 5, 5, 400, 200)).await.expect("r4");
 
-        let recent = s.recent_usage(3).await.expect("recent");
+        let recent = s.recent_usage(3, None).await.expect("recent");
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].ts, 400, "newest first");
         assert_eq!(recent[1].ts, 300);
@@ -405,7 +407,7 @@ fn usage_records_summary_and_recent_order() {
         assert_eq!(recent[2].error.as_deref(), Some("upstream 429"));
         assert_eq!(recent[0].connection_id, Some(conn_id));
         let cached = s
-            .recent_usage(4)
+            .recent_usage(4, None)
             .await
             .expect("recent all")
             .into_iter()
@@ -414,7 +416,7 @@ fn usage_records_summary_and_recent_order() {
         assert_eq!(cached.cache_read_tokens, 900);
         assert_eq!(cached.cache_write_tokens, 100);
 
-        let sum = s.usage_summary().await.expect("summary");
+        let sum = s.usage_summary(None).await.expect("summary");
         assert_eq!(sum.len(), 2);
         let claude = &sum[0];
         assert_eq!((claude.provider.as_str(), claude.model.as_str()), ("claude", "sonnet"));
@@ -427,6 +429,29 @@ fn usage_records_summary_and_recent_order() {
         assert_eq!(claude.avg_latency_ms, 200, "(100+300+200)/3");
         let groq = &sum[1];
         assert_eq!((groq.requests, groq.errors, groq.avg_latency_ms), (1, 0, 400));
+
+        // A range-scoped summary is what the Activity page shows; it must not leak
+        // older traffic into the window.
+        let recent_only = s.usage_summary(Some(250)).await.expect("scoped");
+        assert_eq!(recent_only.len(), 2);
+        assert_eq!(recent_only[0].requests, 1, "claude rows at 300 only");
+        assert_eq!(recent_only[1].requests, 1, "groq row at 400 only");
+
+        // Rows read back carry the id the log copies, and the endpoint they came from.
+        let newest = &recent[0];
+        assert!(newest.id.is_some(), "usage ids are exposed for the request log");
+        assert_eq!(newest.endpoint.as_deref(), Some("/v1/chat/completions"));
+
+        // Stacked chart data: one row per bucket and model, with its own counters.
+        let by_model = s.usage_series_by_model(0, 200).await.expect("by model");
+        assert_eq!(by_model.len(), 3, "claude@0, claude@200+300, groq@400");
+        let claude_bucket = by_model
+            .iter()
+            .find(|b| b.provider == "claude" && b.start == 200)
+            .expect("bucket 200");
+        assert_eq!((claude_bucket.requests, claude_bucket.errors), (2, 1));
+        assert_eq!(claude_bucket.input_tokens, 30);
+        assert_eq!(claude_bucket.output_tokens, 40);
     });
 }
 

@@ -164,6 +164,148 @@ export function Badge({
   );
 }
 
+/** A small set of mutually exclusive options: range pickers, chart metrics. */
+export function Segmented<T extends string>({
+  options,
+  value,
+  onChange,
+  ariaLabel,
+  className,
+}: {
+  options: ReadonlyArray<{ id: T; label: string }>;
+  value: T;
+  onChange: (v: T) => void;
+  ariaLabel: string;
+  className?: string;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className={cx(
+        "inline-flex items-center gap-0.5 rounded-[10px] border border-line bg-surface-2 p-0.5",
+        className,
+      )}
+    >
+      {options.map((o) => {
+        const on = o.id === value;
+        return (
+          <button
+            key={o.id}
+            type="button"
+            aria-pressed={on}
+            onClick={() => onChange(o.id)}
+            className={cx(
+              "h-[26px] rounded-lg px-2.5 text-[12px] transition-colors max-[820px]:h-9",
+              on ? "bg-fg font-medium text-bg" : "text-muted hover:text-fg",
+            )}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A pill that filters a list; `on` marks the active filter, `bad` an error count. */
+export function FilterChip({
+  children,
+  on = false,
+  bad = false,
+  onClick,
+  ariaLabel,
+}: {
+  children: ReactNode;
+  on?: boolean;
+  bad?: boolean;
+  onClick: () => void;
+  ariaLabel?: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      aria-label={ariaLabel}
+      onClick={onClick}
+      className={cx(
+        "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[12px] transition-colors max-[820px]:h-10",
+        on
+          ? "border-fg bg-fg font-medium text-bg"
+          : bad
+            ? "border-[var(--color-neg)]/45 bg-[var(--color-neg)]/10 text-[#fca5a5] hover:border-[var(--color-neg)]/70"
+            : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-fg",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+const STATUS_TEXT: Record<number, string> = {
+  200: "OK",
+  201: "Created",
+  400: "Bad Request",
+  401: "Unauthorized",
+  402: "Payment Required",
+  403: "Forbidden",
+  404: "Not Found",
+  408: "Timeout",
+  413: "Payload Too Large",
+  422: "Unprocessable",
+  429: "Too Many Requests",
+  499: "Client Closed",
+  500: "Internal Error",
+  502: "Bad Gateway",
+  503: "Unavailable",
+  504: "Gateway Timeout",
+};
+
+export function statusText(status: number): string {
+  return STATUS_TEXT[status] ?? (status >= 500 ? "Server Error" : status >= 400 ? "Client Error" : "OK");
+}
+
+/** HTTP outcome as a pill: tinted by class, and always carrying the code in text. */
+export function StatusPill({ status, title }: { status: number; title?: string }) {
+  const ok = status >= 200 && status < 400;
+  return (
+    <Badge tone={ok ? "pos" : "neg"} title={title}>
+      <span className="font-mono">
+        {status} {statusText(status)}
+      </span>
+    </Badge>
+  );
+}
+
+/** One loud line for a real problem; silent when everything is healthy. */
+export function AlertBanner({
+  title,
+  children,
+  actions,
+}: {
+  title: string;
+  children: ReactNode;
+  actions?: ReactNode;
+}) {
+  return (
+    <div
+      role="alert"
+      className="mb-5 rounded-[var(--radius-card)] border border-[var(--color-neg)]/30 bg-[var(--color-neg)]/8 px-5 py-4"
+    >
+      <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 text-[14px] font-semibold text-[#fca5a5]">
+            <Dot tone="neg" />
+            {title}
+          </div>
+          <div className="mt-1 text-[13px] text-muted">{children}</div>
+        </div>
+        {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
+      </div>
+    </div>
+  );
+}
+
 export function Dot({ tone = "pos" }: { tone?: "pos" | "neg" | "warn" | "muted" }) {
   const color = { pos: "bg-pos", neg: "bg-neg", warn: "bg-warn", muted: "bg-faint" }[tone];
   return <span aria-hidden className={cx("inline-block h-1.5 w-1.5 rounded-full", color)} />;
@@ -312,6 +454,57 @@ export function CopyChip({ value, prefix }: { value: string; prefix?: string }) 
         )}
       </svg>
     </button>
+  );
+}
+
+/** Clipboard write with the pre-Clipboard-API fallback; returns a transient flag. */
+export function useCopy(): [string | null, (value: string) => void] {
+  const [copied, setCopied] = useState<string | null>(null);
+  const timer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
+  return [
+    copied,
+    (value: string) => {
+      const done = () => {
+        setCopied(value);
+        if (timer.current !== null) window.clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => setCopied(null), 1_500);
+      };
+      void navigator.clipboard
+        .writeText(value)
+        .then(done)
+        .catch(() => {
+          const area = document.createElement("textarea");
+          area.value = value;
+          area.style.position = "fixed";
+          area.style.opacity = "0";
+          document.body.appendChild(area);
+          area.select();
+          document.execCommand("copy");
+          area.remove();
+          done();
+        });
+    },
+  ];
+}
+
+export function CopyButton({
+  value,
+  label = "Copy",
+  className,
+}: {
+  value: string;
+  label?: string;
+  className?: string;
+}) {
+  const [copied, copy] = useCopy();
+  const done = copied === value;
+  return (
+    <Button variant="quiet" onClick={() => copy(value)} className={className}>
+      {done ? "Copied" : label}
+    </Button>
   );
 }
 

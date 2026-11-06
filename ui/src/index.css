@@ -37,6 +37,18 @@
   --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+/* Categorical series for charts and the models table: assigned per model in a stable
+   order, never used for status. `static` because the chart tints segments through
+   inline styles, which Tailwind's usage scan cannot see. */
+@theme static {
+  --color-series-1: #00d4ff; /* = accent */
+  --color-series-2: #b58cff;
+  --color-series-3: #f59e0b;
+  --color-series-4: #f472b6;
+  --color-series-5: #3b82f6;
+  --color-series-6: #94a3b8; /* "other" */
+}
+
 html,
 body,
 #root {
@@ -82,6 +94,13 @@ body {
   outline-offset: 2px;
 }
 
+/* The traffic chart shows the peak bucket's tooltip until the chart is touched;
+   hovering any column (including the peak) takes over from CSS alone. */
+.traffic:hover .traffic-peak-tip,
+.traffic:focus-within .traffic-peak-tip {
+  display: none;
+}
+
 @keyframes rrouter-pulse {
   0%,
   100% {
@@ -93,4 +112,13 @@ body {
 }
 .pulse {
   animation: rrouter-pulse 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
 }

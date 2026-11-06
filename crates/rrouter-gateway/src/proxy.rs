@@ -138,7 +138,7 @@ async fn handle(
         // Stream-only upstream serving a non-streaming client: consume the whole
         // stream, rebuild the canonical response, then answer in the client dialect.
         let assembled = reassemble(&open, bytes).await?;
-        record_once(state, &candidate, &plan.model, assembled.usage, started);
+        record_once(state, &candidate, &plan.model, endpoint_of(inbound), assembled.usage, started);
         return Ok(json_response(
             StatusCode::OK,
             rrouter_translate::build_response(inbound, &assembled)?,
@@ -182,7 +182,7 @@ pub async fn complete(
         let outcome = state.dispatcher.run(&plan, |c| attempt.send_once(c)).await?;
         let candidate = outcome.candidate.clone();
         let resp = outcome.result?;
-        record_once(state, &candidate, &plan.model, resp.usage, started);
+        record_once(state, &candidate, &plan.model, endpoint_of(inbound), resp.usage, started);
         return Ok(resp);
     }
 
@@ -195,7 +195,7 @@ pub async fn complete(
         client_model: candidate.model.clone(),
     };
     let assembled = reassemble(&open, bytes).await?;
-    record_once(state, &candidate, &plan.model, assembled.usage, started);
+    record_once(state, &candidate, &plan.model, endpoint_of(inbound), assembled.usage, started);
     Ok(assembled)
 }
 
@@ -730,7 +730,7 @@ impl ResponseStream {
             return;
         };
         let tokens = self.inner.usage.unwrap_or_default();
-        record_once(&state, &candidate, &model, tokens, started);
+        record_once(&state, &candidate, &model, endpoint_of(self.inner.inbound), tokens, started);
         if !ok {
             tracing::debug!(provider = %candidate.provider, "client disconnected mid-stream");
         }
@@ -783,18 +783,32 @@ fn stream_response(
     resp
 }
 
+/// The client endpoint that a dialect is served from. Usage rows record it so the
+/// request log can say which protocol a call used without guessing from the model.
+fn endpoint_of(dialect: Dialect) -> &'static str {
+    match dialect {
+        Dialect::AnthropicMessages => "/v1/messages",
+        Dialect::OpenAiResponses => "/v1/responses",
+        Dialect::OpenAiChat => "/v1/chat/completions",
+        Dialect::OpenAiEmbeddings => "/v1/embeddings",
+    }
+}
+
 fn record_once(
     state: &AppState,
     candidate: &Candidate,
     model: &str,
+    endpoint: &'static str,
     usage: Usage,
     started: Instant,
 ) {
     let rec = UsageRecord {
+        id: None,
         ts: crate::now_unix(),
         provider: candidate.provider.clone(),
         model: model.to_string(),
         connection_id: Some(candidate.connection),
+        endpoint: Some(endpoint.to_string()),
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         cache_read_tokens: usage.cache_read_tokens,

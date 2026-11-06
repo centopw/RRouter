@@ -87,6 +87,15 @@ where it goes, not the protocol.
 `/v1/responses/compact` and `/v1/messages/count_tokens` are deliberately unimplemented and
 answer `501` rather than pretending.
 
+Usage reads are windowed and aggregated in SQL, so the dashboard never pages through events:
+
+| Query | Answers |
+| --- | --- |
+| `GET /api/usage?hours=&limit=` | the request log: one row per request with id, endpoint, tokens, cache, latency, status |
+| `GET /api/usage/series?hours=&bucket=5m\|hour\|day` | one row per time bucket (requests, errors, tokens, cache, avg latency) |
+| `GET /api/usage/series?by=model` | the same buckets split per model, for the stacked traffic chart |
+| `GET /api/usage/summary?hours=` | per-model totals for the window; omit `hours` for all time |
+
 ## Routing
 
 - **`provider/model`** — `openai/gpt-4.1`, `claude/sonnet-4-5`, `codex/gpt-5.6-luna`.
@@ -169,6 +178,12 @@ npm run dev     # http://localhost:5173, proxies /api and /v1 to :20128
 npm run build   # writes ui/dist; the next cargo build embeds it
 ```
 
+**Activity** is the operator's answer to "is anything wrong right now?": four readouts
+(requests, tokens, latency, error rate), a stacked traffic chart with an error lane, a models
+table, and the request log with a detail panel — clicking a model filters the log, clicking a
+request opens its tokens, latency, endpoint and error. Empty, sparse and failing states are
+explicit; no number on the page is estimated client-side.
+
 A checkout without `ui/dist` still builds: `/` then serves a smaller dependency-free shell
 that composes itself from `GET /api/ui/panels` (and supports sandboxed extension panels).
 
@@ -238,7 +253,7 @@ non-streaming client is reassembled from the same decoder.
 ## Tests
 
 ```sh
-cargo test --workspace                              # 174 tests
+cargo test --workspace                              # 182 tests
 cargo clippy --workspace --all-targets -- -D warnings
 ./scripts/verify.sh                                 # build + every gate
 python3 scripts/e2e_smoke.py                        # live binary + mock upstream

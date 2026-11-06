@@ -16,20 +16,31 @@ pub async fn list(
     State(state): State<Arc<AppState>>,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Response {
-    let limit = query
-        .iter()
-        .find(|(k, _)| k == "limit")
-        .and_then(|(_, v)| v.parse::<usize>().ok())
+    let param = |key: &str| {
+        query
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    let limit = param("limit")
+        .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_LIMIT)
         .clamp(1, MAX_LIMIT);
-    match state.store.recent_usage(limit).await {
+    // The request log is scoped to the same window as the chart; `hours` is optional
+    // so existing callers still get the latest rows.
+    let since = param("hours")
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|hours| crate::now_unix() - hours.clamp(1, 24 * 365) * 3600);
+    match state.store.recent_usage(limit, since).await {
         Ok(records) => {
             let data: Vec<serde_json::Value> = records
                 .iter()
                 .map(|r| {
                     json!({
+                        "id": r.id,
                         "ts": r.ts,
                         "provider": r.provider,
+                        "endpoint": r.endpoint,
                         "model": r.model,
                         "connection_id": r.connection_id.map(|c| c.to_string()),
                         "input_tokens": r.input_tokens,
@@ -71,10 +82,37 @@ pub async fn series(
         Some("hour") => 3600,
         Some("day") => 86_400,
         Some("minute") => 60,
+        Some("5m") => 300,
         _ if hours <= 48 => 3600,
         _ => 86_400,
     };
     let since = crate::now_unix() - hours * 3600;
+    // `by=model` answers the stacked traffic chart: one row per bucket and model.
+    if param("by").as_deref() == Some("model") {
+        return match state.store.usage_series_by_model(since, bucket_secs).await {
+            Ok(rows) => {
+                let data: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|b| {
+                        json!({
+                            "start": b.start,
+                            "provider": b.provider,
+                            "model": b.model,
+                            "requests": b.requests,
+                            "errors": b.errors,
+                            "input_tokens": b.input_tokens,
+                            "output_tokens": b.output_tokens,
+                            "cache_read_tokens": b.cache_read_tokens,
+                            "cache_write_tokens": b.cache_write_tokens,
+                            "avg_latency_ms": b.avg_latency_ms,
+                        })
+                    })
+                    .collect();
+                ok_json(json!({ "data": data, "hours": hours, "bucket_secs": bucket_secs, "by": "model" }))
+            }
+            Err(e) => admin_error(&e),
+        };
+    }
     match state.store.usage_series(since, bucket_secs).await {
         Ok(buckets) => {
             let data: Vec<serde_json::Value> = buckets
@@ -98,8 +136,16 @@ pub async fn series(
     }
 }
 
-pub async fn summary(State(state): State<Arc<AppState>>) -> Response {
-    match state.store.usage_summary().await {
+pub async fn summary(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<Vec<(String, String)>>,
+) -> Response {
+    let since = query
+        .iter()
+        .find(|(k, _)| k == "hours")
+        .and_then(|(_, v)| v.parse::<i64>().ok())
+        .map(|hours| crate::now_unix() - hours.clamp(1, 24 * 365) * 3600);
+    match state.store.usage_summary(since).await {
         Ok(rows) => {
             let data: Vec<serde_json::Value> = rows
                 .iter()

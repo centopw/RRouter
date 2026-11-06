@@ -1,4 +1,7 @@
+import type { ReactNode } from "react";
 import { compact, pct } from "../lib/format";
+import { niceMax, peakIndex, xLabelIndices } from "../lib/activity";
+import { Dot, cx } from "./ui";
 
 /**
  * Dependency-free charts. The dashboard draws a few dozen points; a chart library
@@ -175,3 +178,234 @@ export function Metric({
     </div>
   );
 }
+
+/** A single number with its label and an optional second line. */
+export function Readout({
+  label,
+  value,
+  note,
+  dot,
+  tone,
+  delta,
+}: {
+  label: string;
+  value: string;
+  note?: ReactNode;
+  dot?: "pos" | "neg" | "warn" | "muted";
+  tone?: "neg" | "fg";
+  delta?: { up: boolean; text: string } | null;
+}) {
+  return (
+    <div className="px-6 py-5">
+      <div className="text-[13px] text-muted">{label}</div>
+      <div
+        className={cx(
+          "mt-2 font-mono text-[34px] font-medium leading-none tracking-[-0.02em] tnum",
+          tone === "neg" ? "text-neg" : "text-fg",
+        )}
+      >
+        {value}
+      </div>
+      <div className="mt-2.5 flex min-h-[16px] flex-wrap items-center gap-1.5 text-[12.5px] text-faint">
+        {dot ? <Dot tone={dot} /> : null}
+        {note}
+        {delta ? (
+          <span className={delta.up && tone === "neg" ? "text-neg" : "text-muted"}>{delta.text}</span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export type TrafficPart = { id: string; value: number };
+
+export type TrafficBucket = {
+  /** Short x-axis label. */
+  label: string;
+  /** Tooltip heading, e.g. "Aug 3, 14:00–15:00". */
+  full: string;
+  parts: TrafficPart[];
+  total: number;
+  errors: number;
+};
+
+const AXIS_WIDTH = 44;
+
+/**
+ * Stacked traffic chart: one column per bucket, one segment per model, an error lane
+ * under the plot, and a CSS-only tooltip (hover/focus; the peak bucket shows by
+ * default). No chart library, no JS hover state.
+ */
+export function TrafficChart({
+  buckets,
+  colorOf,
+  unit,
+  height = 200,
+  labelEvery,
+}: {
+  buckets: TrafficBucket[];
+  colorOf: (id: string) => string;
+  unit: "requests" | "tokens";
+  height?: number;
+  labelEvery?: number;
+}) {
+  const max = niceMax(Math.max(0, ...buckets.map((b) => b.total)));
+  const peak = peakIndex(buckets.map((b) => b.total));
+  const ticks = [1, 0.5, 0];
+  const labelIdx = new Set(xLabelIndices(buckets.length, labelEvery ?? Math.ceil(buckets.length / 6)));
+
+  return (
+    <div className="traffic px-6 pb-4">
+      <div className="flex">
+        <div className="relative shrink-0" style={{ width: AXIS_WIDTH, height }}>
+          {ticks.map((t) => (
+            <span
+              key={t}
+              className="absolute right-2 -translate-y-1/2 text-[11px] text-faint tnum"
+              style={{ top: `${(1 - t) * 100}%` }}
+            >
+              {compact(Math.round(max * t))}
+            </span>
+          ))}
+        </div>
+        <div className="relative min-w-0 flex-1" style={{ height }}>
+          {ticks.map((t) => (
+            <span
+              key={t}
+              aria-hidden
+              className="absolute inset-x-0 h-px bg-[var(--color-rule)]"
+              style={{ top: `${(1 - t) * 100}%` }}
+            />
+          ))}
+          <div className="absolute inset-0 flex items-end">
+            {buckets.map((b, i) => {
+              const left = i < buckets.length / 2;
+              const aria = `${b.full}: ${b.total} ${unit}${b.errors ? `, ${b.errors} failed` : ""}`;
+              const tip = <Tooltip bucket={b} colorOf={colorOf} unit={unit} />;
+              return (
+                <div
+                  key={b.full + i}
+                  tabIndex={0}
+                  role="img"
+                  aria-label={aria}
+                  className="group relative flex h-full min-w-0 flex-1 items-end justify-center focus-visible:outline-none"
+                >
+                  <div
+                    className="flex h-full w-full max-w-[56px] flex-col-reverse rounded-t-[3px] outline-none group-focus-visible:ring-2 group-focus-visible:ring-[var(--color-accent)]"
+                    style={{ opacity: peak === i || peak === -1 ? 1 : 0.92 }}
+                  >
+                    {b.total === 0 ? (
+                      <div
+                        aria-hidden
+                        className="w-full rounded-t-[1px] bg-[var(--color-rule)]"
+                        style={{ height: 2 }}
+                      />
+                    ) : null}
+                    {b.parts
+                      .filter((part) => part.value > 0)
+                      .map((part) => (
+                        <div
+                          key={part.id}
+                          className="w-full border-t border-[var(--color-surface)] first:border-t-0"
+                          style={{
+                            height: `${(part.value / max) * 100}%`,
+                            minHeight: 3,
+                            background: colorOf(part.id),
+                          }}
+                        />
+                      ))}
+                  </div>
+                  <div
+                    className="pointer-events-none absolute top-1/2 z-20 hidden w-[208px] -translate-y-1/2 group-hover:block group-focus-within:block"
+                    style={left ? { left: "calc(100% + 8px)" } : { right: "calc(100% + 8px)" }}
+                  >
+                    {tip}
+                  </div>
+                  {i === peak ? (
+                    <div
+                      className="traffic-peak-tip pointer-events-none absolute top-1/2 z-10 block w-[208px] -translate-y-1/2"
+                      style={left ? { left: "calc(100% + 8px)" } : { right: "calc(100% + 8px)" }}
+                    >
+                      {tip}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Error lane: one cell per bucket, aligned with the plot columns. */}
+      <div className="mt-1 flex">
+        <div className="shrink-0 text-[10px] leading-4 text-faint" style={{ width: AXIS_WIDTH }}>
+          Errors
+        </div>
+        <div className="flex min-w-0 flex-1 gap-px">
+          {buckets.map((b, i) => (
+            <div
+              key={`err-${i}`}
+              title={`${b.full}: ${b.errors} failed`}
+              className={cx(
+                "h-1.5 min-w-0 flex-1 rounded-[1px]",
+                b.errors > 0 ? "bg-[var(--color-neg)]" : "bg-[var(--color-rule)]",
+              )}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-2 flex">
+        <div className="shrink-0" style={{ width: AXIS_WIDTH }} />
+        <div className="flex min-w-0 flex-1">
+          {buckets.map((b, i) => (
+            <div key={`x-${i}`} className="min-w-0 flex-1 text-center">
+              {labelIdx.has(i) ? (
+                <span className="whitespace-nowrap text-[10.5px] text-faint">{b.label}</span>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Tooltip({
+  bucket,
+  colorOf,
+  unit,
+}: {
+  bucket: TrafficBucket;
+  colorOf: (id: string) => string;
+  unit: "requests" | "tokens";
+}) {
+  return (
+    <div className="w-[208px] rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-left shadow-xl">
+      <div className="text-[11px] text-faint">{bucket.full}</div>
+      <div className="mt-1 text-[13px] font-medium text-fg tnum">
+        {compact(bucket.total)} {unit}
+      </div>
+      <div className="mt-2 space-y-1">
+        {bucket.parts
+          .filter((p) => p.value > 0)
+          .slice(0, 5)
+          .map((p) => (
+            <div key={p.id} className="flex items-center gap-2 text-[11.5px]">
+              <span
+                aria-hidden
+                className="h-2 w-2 shrink-0 rounded-[2px]"
+                style={{ background: colorOf(p.id) }}
+              />
+              <span className="min-w-0 flex-1 truncate text-muted">{p.id}</span>
+              <span className="text-fg tnum">{compact(p.value)}</span>
+            </div>
+          ))}
+      </div>
+      {bucket.errors > 0 ? (
+        <div className="mt-1.5 text-[11.5px] text-neg tnum">{bucket.errors} failed</div>
+      ) : null}
+    </div>
+  );
+}
+
