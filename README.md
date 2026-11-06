@@ -83,11 +83,17 @@ where it goes, not the protocol.
 | `POST /v1/responses` | OpenAI Responses (Codex-style) |
 | `POST /v1/messages` | Anthropic Messages |
 | `POST /v1/embeddings` | OpenAI Embeddings |
+| `POST /v1/messages/count_tokens` | Anthropic token counting (forwarded) |
+| `POST /v1/responses/compact` | OpenAI/Codex compaction (forwarded) |
 | `GET /v1/models` | catalog + upstream + custom models |
 | `GET/POST /api/*` | admin: providers, keys, models, aliases, combos, usage |
 
-`/v1/responses/compact` and `/v1/messages/count_tokens` are deliberately unimplemented and
-answer `501` rather than pretending.
+`/v1/messages/count_tokens` and `/v1/responses/compact` are forwarded to the provider that
+implements them (Anthropic and OpenAI/GitHub respectively), because both are provider-native
+shapes the canonical request cannot represent. A provider without the endpoint answers `501`
+with its dialect's error envelope rather than an invented estimate. Codex's subscription
+backend does not serve `/responses/compact` today, so that one answers its own `404`; an
+OpenAI API-key connection does.
 
 Usage reads are windowed and aggregated in SQL, so the dashboard never pages through events:
 
@@ -255,7 +261,7 @@ non-streaming client is reassembled from the same decoder.
 ## Tests
 
 ```sh
-cargo test --workspace                              # 183 tests
+cargo test --workspace                              # 186 tests
 cargo clippy --workspace --all-targets -- -D warnings
 ./scripts/verify.sh                                 # build + every gate
 python3 scripts/e2e_smoke.py                        # live binary + mock upstream

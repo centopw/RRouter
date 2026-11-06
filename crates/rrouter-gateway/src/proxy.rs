@@ -18,7 +18,7 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use rrouter_auth::{Credentials, ProviderSpec};
 use rrouter_core::{ChatRequest, ChatResponse, Dialect, Error, Result, StreamEvent, Usage};
-use rrouter_router::Candidate;
+use rrouter_router::{Candidate, Plan};
 use rrouter_store::UsageRecord;
 use serde_json::Value;
 
@@ -69,19 +69,155 @@ pub async fn embeddings(State(state): State<Arc<AppState>>, req: Request) -> Res
     }
 }
 
-/// Endpoints RRouter deliberately does not implement (`/v1/responses/compact`,
-/// `/v1/messages/count_tokens`). The path decides the error envelope, because
-/// `Dialect::from_path` only maps the four proxied endpoints.
-pub async fn unsupported(req: Request) -> Response {
-    let path = req.uri().path();
-    let inbound = if path.starts_with("/v1/messages") {
-        Dialect::AnthropicMessages
-    } else if path.starts_with("/v1/responses") {
-        Dialect::OpenAiResponses
-    } else {
-        Dialect::OpenAiChat
+/// Endpoints that only some providers implement. RRouter forwards the client body to the
+/// resolved provider instead of translating it: both are provider-native JSON shapes the
+/// canonical request cannot represent, and pretending with an estimate would be worse
+/// than a clear 501 for providers that do not have the endpoint.
+#[derive(Clone, Copy)]
+enum Special {
+    /// `POST /v1/messages/count_tokens` — Anthropic counts exactly.
+    CountTokens,
+    /// `POST /v1/responses/compact` — OpenAI/Codex conversation compaction.
+    Compact,
+}
+
+impl Special {
+    fn dialect(self) -> Dialect {
+        match self {
+            Self::CountTokens => Dialect::AnthropicMessages,
+            Self::Compact => Dialect::OpenAiResponses,
+        }
+    }
+
+    /// Provider base URL for this endpoint family, when the provider has one.
+    fn base(self, spec: &ProviderSpec) -> Option<&'static str> {
+        match self {
+            Self::CountTokens => spec.messages_url,
+            Self::Compact => spec.responses_url,
+        }
+    }
+
+    fn url(self, base: &str) -> String {
+        let base = base.trim_end_matches('/');
+        match self {
+            Self::CountTokens => format!("{base}/count_tokens"),
+            Self::Compact => format!("{base}/compact"),
+        }
+    }
+
+    fn unsupported(self) -> &'static str {
+        match self {
+            Self::CountTokens => "count_tokens for this provider",
+            Self::Compact => "compaction for this provider",
+        }
+    }
+}
+
+pub async fn count_tokens(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    special(&state, req, Special::CountTokens).await
+}
+
+pub async fn compact(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    special(&state, req, Special::Compact).await
+}
+
+async fn special(state: &Arc<AppState>, req: Request, kind: Special) -> Response {
+    let (parts, body) = req.into_parts();
+    let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                kind.dialect(),
+                &Error::BadRequest(format!("request body could not be read: {e}")),
+            )
+        }
     };
-    not_implemented(inbound, path)
+    match special_inner(state, &parts.headers, &raw, kind).await {
+        Ok(resp) => resp,
+        Err(e) => error_response(kind.dialect(), &e),
+    }
+}
+
+async fn special_inner(
+    state: &Arc<AppState>,
+    headers: &axum::http::HeaderMap,
+    raw: &[u8],
+    kind: Special,
+) -> Result<Response> {
+    guard_api_key(state, headers).await?;
+    let body: Value = serde_json::from_slice(raw)?;
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::BadRequest("missing model".into()))?
+        .to_string();
+    let plan = state
+        .planner
+        .plan(state.catalog.as_ref(), state.store.as_ref(), &model, false, None)
+        .await?;
+    // Fallback only makes sense between providers that have the endpoint; asking the
+    // next candidate would answer with a NoRoute that stops the chain anyway.
+    let candidates: Vec<Candidate> = plan
+        .candidates
+        .iter()
+        .filter(|c| {
+            rrouter_auth::get(&c.provider).is_some_and(|spec| kind.base(spec).is_some())
+        })
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        return Ok(not_implemented(kind.dialect(), kind.unsupported()));
+    }
+    let plan = Plan { candidates, ..plan };
+
+    let outcome = state
+        .dispatcher
+        .run(&plan, |c| send_special(state, &body, kind, c))
+        .await?;
+    let value = outcome.result?;
+    Ok(json_response(StatusCode::OK, value))
+}
+
+async fn send_special(
+    state: &Arc<AppState>,
+    body: &Value,
+    kind: Special,
+    candidate: Candidate,
+) -> Result<Value> {
+    let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
+        model: candidate.model.clone(),
+        detail: format!("unknown provider {}", candidate.provider),
+    })?;
+    let native = kind.base(spec).ok_or_else(|| Error::NoRoute {
+        model: candidate.model.clone(),
+        detail: format!("{} has no {}", candidate.provider, kind.unsupported()),
+    })?;
+    let creds = state
+        .refresher
+        .fresh(state.store.as_ref(), spec, candidate.connection)
+        .await?;
+    let url = match creds.base_url_override.as_deref() {
+        Some(base) => rewrite_base(&kind.url(native), base),
+        None => kind.url(native),
+    };
+    let mut wire = body.clone();
+    wire["model"] = Value::String(candidate.model.clone());
+    let resp = state
+        .http
+        .post(&url)
+        .headers(request_headers(spec, &creds)?)
+        .json(&wire)
+        .timeout(state.request_timeout())
+        .send()
+        .await
+        .map_err(transport_error)?;
+    let status = resp.status();
+    if !status.is_success() {
+        let bytes = resp.bytes().await.map_err(transport_error)?;
+        return Err(upstream_error(&candidate, status.as_u16(), &bytes));
+    }
+    let bytes = resp.bytes().await.map_err(transport_error)?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 async fn handle(

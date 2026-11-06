@@ -359,7 +359,7 @@ async fn fallback_uses_second_candidate_and_opens_first_breaker() {
     let plan = plan_of(2);
     let first = plan.candidates[0].connection;
     let seen = AtomicUsize::new(0);
-    let outcome: AttemptOutcome = dispatcher
+    let outcome: AttemptOutcome<ChatResponse> = dispatcher
         .run(&plan, |_c| {
             let n = seen.fetch_add(1, Ordering::SeqCst);
             async move { if n == 0 { Err(upstream(503)) } else { Ok(resp("m")) } }

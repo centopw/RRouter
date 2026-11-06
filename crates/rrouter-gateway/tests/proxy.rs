@@ -69,8 +69,10 @@ impl Mock {
             .route("/v1/messages", post(handle))
             .route("/v1/responses", post(handle))
             .route("/v1/embeddings", post(handle))
+            .route("/v1/messages/count_tokens", post(handle))
             // codex's native path; the gateway must preserve it under an override.
             .route("/backend-api/codex/responses", post(handle))
+            .route("/backend-api/codex/responses/compact", post(handle))
             .with_state(mock.clone());
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
@@ -760,14 +762,26 @@ async fn admin_api_never_reports_paths_or_keys() {
 
 #[tokio::test]
 async fn unsupported_and_error_shapes() {
+    // A connected provider without the endpoint is the 501 case; both envelopes keep
+    // their dialect's shape.
+    let mock = Mock::start(vec![]).await;
     let h = harness(false);
-    let (status, body) = h.post("/v1/messages/count_tokens", json!({"model": "x"})).await;
+    h.connect("openai", &mock).await;
+    h.connect("groq", &mock).await;
+
+    let (status, body) = h
+        .post("/v1/messages/count_tokens", json!({"model": "openai/gpt-4.1"}))
+        .await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
     assert_eq!(body["type"], "error", "anthropic envelope: {body}");
-    let (status, body) = h.post("/v1/responses/compact", json!({"model": "x"})).await;
+    assert!(body["error"]["message"].as_str().is_some_and(|m| m.contains("not supported")));
+
+    // groq has neither endpoint; openai has a Responses URL, so it would forward.
+    let (status, body) = h.post("/v1/responses/compact", json!({"model": "groq/llama-3.3-70b"})).await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
     assert!(body.get("type").is_none(), "openai shape: {body}");
     assert!(body["error"]["message"].as_str().is_some_and(|m| m.contains("not supported")));
+    assert_eq!(mock.hits(), 0, "nothing is sent upstream");
 }
 
 
@@ -835,4 +849,70 @@ async fn oauth_cancel_is_idempotent() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["cancelled"], serde_json::json!(false));
+}
+
+/// Providers that implement the endpoint get the client body forwarded verbatim (with
+/// the resolved model id); the response comes back untouched.
+#[tokio::test]
+async fn count_tokens_is_forwarded_to_anthropic() {
+    let mock = Mock::start(vec![MockReply::Json(200, json!({"input_tokens": 42}))]).await;
+    let h = harness(false);
+    h.connect("claude", &mock).await;
+
+    let (status, body) = h
+        .post(
+            "/v1/messages/count_tokens",
+            json!({
+                "model": "claude/sonnet-4-5",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["input_tokens"], 42);
+    assert_eq!(mock.paths(), vec!["/v1/messages/count_tokens"]);
+    let seen = mock.seen();
+    assert_eq!(seen[0]["model"], "sonnet-4-5", "the provider gets the bare id");
+    assert_eq!(seen[0]["messages"][0]["content"], "hello");
+}
+
+#[tokio::test]
+async fn compact_is_forwarded_to_a_responses_provider() {
+    let mock = Mock::start(vec![MockReply::Json(
+        200,
+        json!({"id": "cmp_1", "object": "response.compaction"}),
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+
+    let (status, body) = h
+        .post(
+            "/v1/responses/compact",
+            json!({"model": "codex/gpt-5.6-luna", "input": [{"type": "message", "role": "user", "content": "hi"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["id"], "cmp_1");
+    assert_eq!(mock.paths(), vec!["/backend-api/codex/responses/compact"]);
+    assert_eq!(mock.seen()[0]["model"], "gpt-5.6-luna");
+}
+
+/// A provider without the endpoint answers 501 instead of receiving a body it cannot
+/// parse; the client can fall back to its own counter.
+#[tokio::test]
+async fn count_tokens_on_a_provider_without_the_endpoint_is_501() {
+    let mock = Mock::start(vec![]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (status, body) = h
+        .post(
+            "/v1/messages/count_tokens",
+            json!({"model": "openai/gpt-4.1", "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "body: {body}");
+    assert_eq!(mock.hits(), 0, "nothing is sent upstream");
+    assert!(body["error"]["message"].as_str().unwrap_or_default().contains("count_tokens"));
 }

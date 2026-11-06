@@ -16,7 +16,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rrouter_core::{ChatResponse, Error, Result};
+use rrouter_core::{Error, Result};
 use uuid::Uuid;
 
 use crate::breaker::{Breaker, ProbeTicket};
@@ -29,9 +29,9 @@ pub const DEFAULT_MAX_ATTEMPTS: usize = 4;
 
 /// One attempt's result, tagged with the candidate it was sent to.
 #[derive(Debug)]
-pub struct AttemptOutcome {
+pub struct AttemptOutcome<T> {
     pub candidate: Candidate,
-    pub result: Result<ChatResponse>,
+    pub result: Result<T>,
 }
 
 /// Drives [`Plan`]s against a caller-supplied transport.
@@ -70,10 +70,10 @@ impl Dispatcher {
     }
 
     /// Non-streaming fallback run. `send` performs exactly one upstream attempt.
-    pub async fn run<F, Fut>(&self, plan: &Plan, send: F) -> Result<AttemptOutcome>
+    pub async fn run<T, F, Fut>(&self, plan: &Plan, send: F) -> Result<AttemptOutcome<T>>
     where
         F: Fn(Candidate) -> Fut,
-        Fut: Future<Output = Result<ChatResponse>>,
+        Fut: Future<Output = Result<T>>,
     {
         let mut order = self.attempt_order(plan).await;
         if order.is_empty() {
