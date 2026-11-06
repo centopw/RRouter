@@ -105,6 +105,33 @@ iframe.ext { width: 100%; min-height: 70vh; border: 1px solid var(--line); borde
 .user-code { font-size: 1.8rem; letter-spacing: .12em; padding: 8px 0; user-select: all; }
 .oauth-status:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
 
+/* models panel */
+.chips { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.chip {
+  padding: 1px 6px; border: 1px solid var(--line); border-radius: 999px;
+  background: #202432; color: var(--dim); font-size: 11px; line-height: 1.5;
+}
+.test-result { font-size: 12px; }
+.test-result.ok { color: var(--ok); }
+.test-result.bad { color: var(--bad); }
+.test-cell { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.multi-select { display: grid; gap: 6px; }
+.toolbar > .multi-select { flex-basis: 100%; }
+.multi-rows { display: grid; gap: 4px; }
+.multi-row { display: flex; gap: 6px; align-items: center; }
+.multi-row select { flex: 1 1 auto; min-width: 220px; }
+.model-form { display: grid; gap: 10px; }
+.form-title { font-weight: 600; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 12px; }
+.form-grid label { display: grid; gap: 4px; color: var(--dim); }
+.form-grid input, .form-grid select { width: 100%; }
+.capabilities { margin: 0; padding: 6px 10px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.capabilities legend { padding: 0 4px; color: var(--dim); }
+.checks { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.check { display: inline-flex; align-items: center; gap: 5px; }
+.check input { min-width: 0; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
 @media (max-width: 899px) {
   .shell { grid-template-columns: 56px minmax(0, 1fr); }
   .sidebar { width: 56px; overflow: visible; transition: width .18s ease; }
