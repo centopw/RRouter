@@ -1,0 +1,82 @@
+# Single-replica deployment for Kubernetes.
+#
+# SQLite means exactly one process may write the database, so the strategy is Recreate
+# and the replica count must never be scaled up. Point ingress at the Service and add
+# authentication for /api and /metrics there (the admin API trusts loopback only; with
+# this manifest every pod-local caller is loopback, including anything that can reach
+# the container network).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rrouter-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rrouter
+  labels: { app: rrouter }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: rrouter }
+  template:
+    metadata:
+      labels: { app: rrouter }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: rrouter
+          image: ghcr.io/centopw/rrouter:latest
+          ports:
+            - { name: http, containerPort: 20128 }
+          env:
+            - { name: RROUTER_HOST, value: "0.0.0.0" }
+            - { name: RROUTER_PORT, value: "20128" }
+            - { name: RROUTER_DATA_DIR, value: "/data" }
+            - { name: RROUTER_ALLOW_REMOTE_ADMIN, value: "true" }
+            - { name: RUST_LOG, value: "rrouter=info" }
+            # Prefer a secret for the master key in real clusters:
+            # - name: RROUTER_MASTER_KEY
+            #   valueFrom: { secretKeyRef: { name: rrouter-master-key, key: key } }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          livenessProbe:
+            exec: { command: ["/usr/local/bin/rrouter", "--healthcheck"] }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec: { command: ["/usr/local/bin/rrouter", "--healthcheck"] }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { memory: "1Gi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rrouter-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rrouter
+spec:
+  selector: { app: rrouter }
+  ports:
+    - { name: http, port: 80, targetPort: http }
