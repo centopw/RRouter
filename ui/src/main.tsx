@@ -58,6 +58,7 @@ const Playground = page(() => import("./pages/playground"));
 const Settings = page(() => import("./pages/settings"));
 const Providers = page(() => import("./pages/providers"));
 const Setup = page(() => import("./pages/setup"));
+const Logs = page(() => import("./pages/logs"));
 
 const router = createBrowserRouter(
   [
@@ -75,6 +76,7 @@ const router = createBrowserRouter(
           children: [
             { index: true, element: <Navigate to="/activity" replace /> },
             { path: "activity", element: <Activity /> },
+            { path: "logs", element: <Logs /> },
             { path: "providers", element: <Providers /> },
             { path: "connections", element: <Navigate to="/providers" replace /> },
             { path: "models", element: <Models /> },

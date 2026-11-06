@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
   list,
+  listPage,
   type Alias,
   type Combo,
   type Connection,
@@ -35,6 +36,7 @@ export const qk = {
   combos: ["combos"] as const,
   usage: (limit: number) => ["usage", limit] as const,
   usageDetail: (requestId: string) => ["usage-detail", requestId] as const,
+  usagePages: (filters: UsageFilters) => ["usage-pages", filters] as const,
   series: (hours: number, bucket?: string, by?: string) =>
     ["usage-series", hours, bucket ?? "", by ?? ""] as const,
   summary: (hours: number | null) => ["usage-summary", hours ?? "all"] as const,
@@ -152,6 +154,45 @@ export function useUsage(limit = 1000, hours?: number) {
     queryKey: [...qk.usage(limit), hours ?? "all"] as const,
     queryFn: () => list<UsageEvent>(`/api/usage?${query}`),
     refetchInterval: 15_000,
+  });
+}
+
+/** Rows per `/api/usage` page; the cursor walks back from the last row of each page. */
+export const USAGE_PAGE_SIZE = 100;
+
+/** The pair cursor: both halves go back together so rows sharing a `ts` are not skipped. */
+export type UsageCursor = { before: number; before_id: number };
+
+/**
+ * Filters the Logs page controls. Only `hours` reaches the server; the rest are applied to
+ * the loaded pages. They are part of the key so any change restarts from page one.
+ */
+export type UsageFilters = {
+  hours: number | null;
+  status: string;
+  provider: string;
+  model: string;
+  key: string;
+};
+
+/** Keyset-paged request log, newest first. Load older until the server reports no cursor. */
+export function useUsagePage(filters: UsageFilters) {
+  return useInfiniteQuery({
+    queryKey: qk.usagePages(filters),
+    queryFn: ({ pageParam }) => {
+      const query = new URLSearchParams({ limit: String(USAGE_PAGE_SIZE) });
+      if (filters.hours !== null) query.set("hours", String(filters.hours));
+      if (pageParam) {
+        query.set("before", String(pageParam.before));
+        query.set("before_id", String(pageParam.before_id));
+      }
+      return listPage<UsageEvent>(`/api/usage?${query}`);
+    },
+    initialPageParam: null as UsageCursor | null,
+    getNextPageParam: (last): UsageCursor | undefined =>
+      last.next_before === null || last.next_before_id === null
+        ? undefined
+        : { before: last.next_before, before_id: last.next_before_id },
   });
 }
 

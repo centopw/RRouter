@@ -130,7 +130,7 @@ export function RequestLog({
   );
 }
 
-function cacheLabel(row: UsageEvent): string {
+export function cacheLabel(row: UsageEvent): string {
   if (row.cache_read_tokens > 0) return "hit";
   if (row.cache_write_tokens > 0) return "write";
   return "miss";

@@ -362,3 +362,20 @@ export async function list<T>(path: string): Promise<T[]> {
   const body = await api.get<{ data?: T[] }>(path);
   return body.data ?? [];
 }
+
+/** One page of a keyset-paged list: `next_*` are null once the walk has reached the end. */
+export type Page<T> = {
+  data: T[];
+  next_before: number | null;
+  next_before_id: number | null;
+};
+
+/** Like `list()`, but keeps the cursor fields the envelope carries. */
+export async function listPage<T>(path: string): Promise<Page<T>> {
+  const body = await api.get<Partial<Page<T>>>(path);
+  return {
+    data: body.data ?? [],
+    next_before: body.next_before ?? null,
+    next_before_id: body.next_before_id ?? null,
+  };
+}
