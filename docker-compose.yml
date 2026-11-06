@@ -1,0 +1,34 @@
+# Local, single-node deployment. Publish the port on loopback only: the admin API is
+# protected by the loopback gate, so exposing 20128 on a public interface would expose
+# provider credentials and key management to anyone who can reach it. Put a reverse
+# proxy with authentication in front if it must be reachable remotely.
+services:
+  rrouter:
+    image: ghcr.io/centopw/rrouter:latest
+    container_name: rrouter
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:20128:20128"
+    environment:
+      # Inside a container the admin requests arrive from the bridge address, not
+      # loopback, so the gate needs an explicit decision. Combined with the loopback
+      # port binding above, only this host can reach it.
+      RROUTER_ALLOW_REMOTE_ADMIN: "true"
+      RROUTER_REQUIRE_API_KEY: "false"
+      RROUTER_DATA_DIR: /data
+      RROUTER_PORT: "20128"
+      RUST_LOG: rrouter=info
+    volumes:
+      - rrouter-data:/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/rrouter", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    # Streaming responses are long-lived; do not let a proxy cap them below the
+    # gateway's own RROUTER_REQUEST_TIMEOUT_SECS.
+    stop_grace_period: 20s
+
+volumes:
+  rrouter-data:

@@ -31,11 +31,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /rrouter /usr/local/bin/rrouter
-# Credentials DB, key file, and any operator-supplied /ext assets live here.
+# Credentials DB, key file, and any operator-supplied /ext assets live here. Creating the
+# directory with the runtime user's ownership makes a fresh named volume writable: Docker
+# seeds a new volume from the image path, including its owner.
+COPY --chown=nonroot:nonroot --from=ui /ui/package.json /data/.keep
 VOLUME ["/data"]
 ENV RROUTER_DATA_DIR=/data \
     RROUTER_HOST=0.0.0.0 \
     RROUTER_PORT=20128
 EXPOSE 20128
 USER nonroot:nonroot
+# The binary probes itself: the runtime image has no shell, curl or wget.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["/usr/local/bin/rrouter", "--healthcheck"]
 ENTRYPOINT ["/usr/local/bin/rrouter"]

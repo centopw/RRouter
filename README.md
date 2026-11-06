@@ -223,11 +223,18 @@ The image is three stages — Node builds the dashboard, Rust embeds it and buil
 distroless runs it — so the runtime layer has no shell, package manager, or Node.
 
 ```sh
-docker run -p 20128:20128 -v rrouter-data:/data \
+docker run -p 127.0.0.1:20128:20128 -v rrouter-data:/data \
   ghcr.io/centopw/rrouter:latest
 
-docker build -t rrouter .        # or build it yourself
+docker compose up -d              # compose file with healthcheck and volume
+docker build -t rrouter .         # or build it yourself
 ```
+
+The image is distroless, so the container probes itself: `rrouter --healthcheck` does a
+`GET /health` over a socket and exits non-zero when the gateway is down (the image declares
+that as `HEALTHCHECK`). Publish the port on loopback unless a reverse proxy with
+authentication sits in front: the admin API is governed by the loopback gate, and exposing
+it publicly would expose provider credentials and key management.
 
 Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR by
 `.github/workflows/docker.yml` on every push to `main` and on `v*` tags. Tagged builds also

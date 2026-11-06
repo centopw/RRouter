@@ -20,10 +20,13 @@ fn main() -> ExitCode {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "usage: rrouter [--version] [--print-config]\n\n\
+            "usage: rrouter [--version] [--print-config] [--healthcheck]\n\n\
              Every option is an environment variable; see README."
         );
         return ExitCode::SUCCESS;
+    }
+    if args.iter().any(|a| a == "--healthcheck") {
+        return healthcheck();
     }
 
     let config = match Config::from_env() {
@@ -52,6 +55,51 @@ fn main() -> ExitCode {
             eprintln!("rrouter: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Container probe: `GET /health` over a plain socket, so the distroless image needs no
+/// shell, curl or Node. Reads the same host/port environment the server does.
+fn healthcheck() -> ExitCode {
+    let host = std::env::var("RROUTER_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    // Binding a wildcard address is not connectable; probe loopback instead.
+    let host = if host == "0.0.0.0" || host == "::" { "127.0.0.1".to_string() } else { host };
+    let port = std::env::var("RROUTER_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(20128);
+    match probe_health(&host, port) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("rrouter: healthcheck: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn probe_health(host: &str, port: u16) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
+
+    let addr = (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| std::io::Error::other(format!("no address for {host}:{port}")))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.write_all(
+        b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )?;
+    let mut head = [0u8; 32];
+    let n = stream.read(&mut head)?;
+    let status = String::from_utf8_lossy(&head[..n]).to_string();
+    if status.starts_with("HTTP/1.1 200") || status.starts_with("HTTP/1.0 200") {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "unexpected response: {}",
+            status.lines().next().unwrap_or("<empty>")
+        )))
     }
 }
 

@@ -76,3 +76,37 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Proves the published image is actually runnable: distroless has no shell, so the
+  # only way to know the entrypoint, the writable /data volume and the built-in
+  # healthcheck work is to start the image and probe it.
+  smoke:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build a local image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: rrouter:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Run, probe, and check the volume is writable
+        run: |
+          docker run -d --name rrouter-smoke \
+            -p 20128:20128 -v rrouter-smoke:/data \
+            -e RROUTER_ALLOW_REMOTE_ADMIN=true \
+            rrouter:smoke
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:20128/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:20128/health
+          docker exec rrouter-smoke /usr/local/bin/rrouter --healthcheck
+          docker exec rrouter-smoke ls /data
+      - name: Cleanup
+        if: always()
+        run: docker rm -f rrouter-smoke || true
