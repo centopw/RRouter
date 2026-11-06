@@ -51,6 +51,54 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
     ok_json(json!({ "object": "list", "data": data }))
 }
 
+/// `GET /v1/models/{id}`: the OpenAI model object for a routable `id` or `provider/id`.
+///
+/// Routable means the registry lists the model for a provider connected right now and
+/// the model is not disabled; aliases and combos are routable names the gateway owns.
+/// Anything else is the OpenAI 404 `model_not_found`, never a guess.
+pub async fn get_model(
+    State(state): State<Arc<AppState>>,
+    Path(reference): Path<String>,
+) -> Response {
+    let reference = reference.trim_start_matches('/');
+    match routable_owner(&state, reference).await {
+        Ok(Some(owned_by)) => ok_json(json!({
+            "id": reference,
+            "object": "model",
+            "created": crate::now_unix(),
+            "owned_by": owned_by,
+        })),
+        Ok(None) => crate::error::error_response(
+            Dialect::OpenAiChat,
+            &Error::NotFound(format!("model {reference} is not available")),
+        ),
+        Err(e) => crate::error::error_response(Dialect::OpenAiChat, &e),
+    }
+}
+
+/// Which provider owns `reference`, when the gateway can route it.
+async fn routable_owner(state: &AppState, reference: &str) -> rrouter_core::Result<Option<String>> {
+    // `provider/id` only splits when the prefix is a registry provider: ids such as
+    // `meta-llama/Llama-3-70B` carry a slash of their own.
+    let (provider, bare) = match reference.split_once('/') {
+        Some((prefix, rest)) if rrouter_auth::get(prefix).is_some() => (Some(prefix), rest),
+        _ => (None, reference),
+    };
+    let items = models_registry::list(state).await?;
+    if let Some(item) = items.iter().find(|item| {
+        item.enabled && item.id == bare && provider.is_none_or(|p| item.provider == p)
+    }) {
+        return Ok(Some(item.provider.clone()));
+    }
+    if state.store.list_aliases().await?.iter().any(|a| a.alias == reference) {
+        return Ok(Some("rrouter".to_string()));
+    }
+    if state.store.list_combos().await?.iter().any(|c| c.name == reference) {
+        return Ok(Some("rrouter".to_string()));
+    }
+    Ok(None)
+}
+
 /// Fetch a connection's models in the background, right after it is added.
 ///
 /// The registry lists a provider's real catalog without an extra click; a provider

@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Router;
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -33,6 +33,8 @@ struct MockInner {
     hits: AtomicUsize,
     /// Bodies the mock received, in order, plus the path they arrived on.
     seen: Mutex<Vec<(String, Value)>>,
+    /// Every request as it arrived on the wire: path, `content-type`, raw bytes.
+    wire: Mutex<Vec<(String, String, Vec<u8>)>>,
     plan: Mutex<Vec<MockReply>>,
     url: String,
 }
@@ -43,6 +45,10 @@ enum MockReply {
     Json(u16, Value),
     /// Bytes relayed exactly as sent, for bodies the gateway must not rewrite.
     Raw(u16, &'static str),
+    /// Audio: raw bytes with an explicit content type.
+    Bytes(u16, &'static str, &'static [u8]),
+    /// Arbitrary bytes in chunks, each optionally gated: proves no whole-body buffering.
+    Chunks(u16, &'static str, Vec<(Vec<u8>, Option<Arc<tokio::sync::Notify>>)>),
     /// SSE chunks written one at a time; each may wait for a gate before it is flushed.
     Sse(Vec<SseStep>),
 }
@@ -62,6 +68,7 @@ impl Mock {
             inner: Arc::new(MockInner {
                 hits: AtomicUsize::new(0),
                 seen: Mutex::new(Vec::new()),
+                wire: Mutex::new(Vec::new()),
                 plan: Mutex::new(plan),
                 url: format!("http://{addr}"),
             }),
@@ -72,6 +79,10 @@ impl Mock {
             .route("/v1/responses", post(handle))
             .route("/v1/embeddings", post(handle))
             .route("/v1/messages/count_tokens", post(handle))
+            .route("/v1/images/generations", post(handle))
+            .route("/v1/audio/speech", post(handle))
+            .route("/v1/audio/transcriptions", post(handle))
+            .route("/v1/audio/voices", get(handle))
             // codex's native path; the gateway must preserve it under an override.
             .route("/backend-api/codex/responses", post(handle))
             .route("/backend-api/codex/responses/compact", post(handle))
@@ -98,18 +109,34 @@ impl Mock {
     fn paths(&self) -> Vec<String> {
         self.inner.seen.lock().expect("seen").iter().map(|(p, _)| p.clone()).collect()
     }
+
+    /// Every request as it reached the mock: path, `content-type`, raw bytes.
+    fn wire(&self) -> Vec<(String, String, Vec<u8>)> {
+        self.inner.wire.lock().expect("wire").clone()
+    }
 }
 
 async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
     mock.inner.hits.fetch_add(1, Ordering::SeqCst);
     let path = req.uri().path().to_string();
+    let content_type = req
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
     let bytes = req.into_body().collect().await.expect("body").to_bytes();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     mock.inner
         .seen
         .lock()
         .expect("seen")
-        .push((path, body));
+        .push((path.clone(), body));
+    mock.inner
+        .wire
+        .lock()
+        .expect("wire")
+        .push((path, content_type, bytes.to_vec()));
     let reply = {
         let mut plan = mock.inner.plan.lock().expect("plan");
         if plan.is_empty() {
@@ -127,6 +154,30 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
             .header("content-type", "application/json")
             .body(Body::from(body))
             .expect("raw response"),
+        MockReply::Bytes(status, content_type, body) => Response::builder()
+            .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
+            .header("content-type", content_type)
+            .body(Body::from(body))
+            .expect("bytes response"),
+        MockReply::Chunks(status, content_type, chunks) => {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+            tokio::spawn(async move {
+                for (chunk, gate) in chunks {
+                    if let Some(gate) = gate {
+                        gate.notified().await;
+                    }
+                    if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+            Response::builder()
+                .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
+                .header("content-type", content_type)
+                .body(Body::from_stream(stream))
+                .expect("chunked response")
+        }
         MockReply::Sse(steps) => {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
             tokio::spawn(async move {
@@ -1946,6 +1997,416 @@ async fn passthrough_endpoints_record_usage_only_when_reported() {
     assert_eq!(rows[0].endpoint.as_deref(), Some("/v1/responses/compact"));
     assert_eq!(rows[0].input_tokens, 11);
     assert_eq!(rows[0].output_tokens, 0);
+}
+
+// ------------------------------------------------------- phase 7: protocol breadth
+
+/// A raw `multipart/form-data` body and the content type that describes it.
+fn multipart(parts: &[(&str, Option<&str>, &[u8])]) -> (String, Vec<u8>) {
+    let boundary = "----rrouter-phase7-boundary";
+    let mut body = Vec::new();
+    for (name, filename, value) in parts {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        let disposition = match filename {
+            Some(file) => format!(
+                "Content-Disposition: form-data; name=\"{name}\"; filename=\"{file}\"\r\n\
+                 Content-Type: application/octet-stream\r\n"
+            ),
+            None => format!("Content-Disposition: form-data; name=\"{name}\"\r\n"),
+        };
+        body.extend_from_slice(disposition.as_bytes());
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(value);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+/// A short stand-in clip: the gateway must never reinterpret audio bytes.
+const TEST_CLIP: &[u8] = b"ID3\x04\x00\x00\x00\x00\x00\x00rrouter-audio-bytes";
+
+/// `GET /v1/models/{id}` answers the OpenAI model object for anything the registry says
+/// is routable right now, and the OpenAI 404 for everything else.
+#[tokio::test]
+async fn model_by_id_answers_the_object_and_404_for_unknown_or_disabled() {
+    let mock = Mock::start(vec![]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (status, body) = h.get("/v1/models/gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "gpt-4.1");
+    assert_eq!(body["object"], "model");
+    assert_eq!(body["owned_by"], "openai");
+    assert!(body["created"].as_i64().unwrap_or_default() > 0);
+
+    let (status, body) = h.get("/v1/models/openai/gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "openai/gpt-4.1");
+    assert_eq!(body["owned_by"], "openai");
+
+    let (status, body) = h.get("/v1/models/nope-9").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"]["code"], "model_not_found");
+
+    // A disabled model is no longer routable, so the by-id lookup stops answering.
+    let (status, _) = h
+        .call(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/disabled/gpt-4.1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = h.get("/v1/models/gpt-4.1").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+/// Image generation is a JSON passthrough: the provider's bare model id, the client's
+/// other fields untouched, the reply relayed, and one usage row from its reported usage.
+#[tokio::test]
+async fn images_passthrough_relays_the_provider_json() {
+    let mock = Mock::start(vec![MockReply::Json(
+        200,
+        json!({
+            "created": 1,
+            "data": [{"b64_json": "aGk="}],
+            "usage": {"input_tokens": 12, "output_tokens": 0, "total_tokens": 12}
+        }),
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
+    let auth = format!("Bearer {key}");
+
+    let (status, body) = h
+        .post_with(
+            "/v1/images/generations",
+            json!({"model": "openai/gpt-image-1", "prompt": "a cat", "n": 1}),
+            &[("authorization", auth.as_str())],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"][0]["b64_json"], "aGk=");
+
+    assert_eq!(mock.paths(), vec!["/v1/images/generations"]);
+    let seen = mock.seen();
+    assert_eq!(seen[0]["model"], "gpt-image-1", "the provider gets the bare id");
+    assert_eq!(seen[0]["prompt"], "a cat");
+
+    let row = wait_for_usage(&h, uuid, "openai/gpt-image-1").await;
+    assert_eq!(row.endpoint.as_deref(), Some("/v1/images/generations"));
+    assert_eq!(row.input_tokens, 12);
+}
+
+/// Fallback walks only the candidates whose provider serves the endpoint.
+#[tokio::test]
+async fn images_fall_back_to_the_next_capable_connection() {
+    let failing = Mock::start(vec![MockReply::Json(
+        500,
+        json!({"error": {"message": "boom"}}),
+    )])
+    .await;
+    let healthy = Mock::start(vec![MockReply::Json(
+        200,
+        json!({"data": [{"b64_json": "ok"}]}),
+    )])
+    .await;
+    let h = harness(false);
+    let first = h.connect("openai", &failing).await;
+    let second = h.connect("openai", &healthy).await;
+    h.patch_connection(&first.to_string(), json!({"priority": 0}))
+        .await;
+    h.patch_connection(&second.to_string(), json!({"priority": 1}))
+        .await;
+
+    let (status, body) = h
+        .post(
+            "/v1/images/generations",
+            json!({"model": "openai/gpt-image-1", "prompt": "a cat"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"][0]["b64_json"], "ok");
+    assert_eq!(failing.hits(), 1, "the preferred account was tried first");
+    assert_eq!(healthy.hits(), 1, "the next capable account served the request");
+}
+
+/// A provider that does not document an endpoint answers `501` naming it, and is never
+/// called with a body it cannot parse.
+#[tokio::test]
+async fn endpoints_a_provider_lacks_answer_501_without_a_call() {
+    let mock = Mock::start(vec![]).await;
+    let h = harness(false);
+    h.connect("claude", &mock).await;
+
+    let (status, body) = h
+        .post(
+            "/v1/images/generations",
+            json!({"model": "claude/sonnet-4-5", "prompt": "a cat"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/v1/images/generations"),
+        "{body}"
+    );
+
+    let (status, body) = h
+        .post(
+            "/v1/audio/speech",
+            json!({"model": "claude/sonnet-4-5", "input": "hello", "voice": "alloy"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/v1/audio/speech"),
+        "{body}"
+    );
+
+    // No registry provider documents a voice-list endpoint, so this is a 501 as well.
+    let (status, body) = h.get("/v1/audio/voices").await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/v1/audio/voices"),
+        "{body}"
+    );
+
+    assert_eq!(mock.hits(), 0, "nothing is sent to a provider without the endpoint");
+}
+
+/// Speech synthesis streams the clip back with the provider's own content type.
+#[tokio::test]
+async fn audio_speech_relays_bytes_with_the_upstream_content_type() {
+    let mock = Mock::start(vec![MockReply::Bytes(200, "audio/mpeg", TEST_CLIP)]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let res = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/audio/speech")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model": "openai/gpt-4o-mini-tts", "input": "hello", "voice": "alloy"})
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-type"], "audio/mpeg");
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    assert_eq!(&bytes[..], TEST_CLIP, "the clip is relayed byte for byte");
+
+    let wire = mock.wire();
+    assert_eq!(wire[0].0, "/v1/audio/speech");
+    let sent: Value = serde_json::from_slice(&wire[0].2).expect("json body");
+    assert_eq!(sent["model"], "gpt-4o-mini-tts");
+    assert_eq!(sent["input"], "hello");
+}
+
+/// The clip is streamed: the client sees the first bytes while the provider is still
+/// holding the rest, so a long clip never sits in gateway memory.
+#[tokio::test]
+async fn audio_speech_streams_before_the_upstream_clip_is_complete() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let mock = Mock::start(vec![MockReply::Chunks(
+        200,
+        "audio/mpeg",
+        vec![
+            (TEST_CLIP[..4].to_vec(), None),
+            (TEST_CLIP[4..].to_vec(), Some(Arc::clone(&gate))),
+        ],
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let res = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/audio/speech")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model": "openai/gpt-4o-mini-tts", "input": "hello", "voice": "alloy"})
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let mut stream = res.into_body().into_data_stream();
+    let first = tokio::time::timeout(
+        Duration::from_secs(5),
+        futures_util::StreamExt::next(&mut stream),
+    )
+    .await
+    .expect("the first chunk arrives while the provider still holds the rest")
+    .expect("chunk")
+    .expect("bytes");
+    assert_eq!(&first[..], &TEST_CLIP[..4]);
+
+    gate.notify_one();
+    let mut rest = Vec::new();
+    while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+        rest.extend_from_slice(&chunk.expect("bytes"));
+    }
+    assert_eq!(&rest[..], &TEST_CLIP[4..]);
+}
+
+/// Transcription forwards the client's multipart bytes and `content-type` — boundary
+/// included — and relays the JSON reply.
+#[tokio::test]
+async fn transcription_relays_the_multipart_body_and_the_json_reply() {
+    let mock = Mock::start(vec![MockReply::Json(200, json!({"text": "hello world"}))]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (content_type, body) = multipart(&[
+        ("model", None, b"openai/whisper-1"),
+        ("language", None, b"en"),
+        ("file", Some("clip.wav"), b"RIFF....WAVEfmt"),
+    ]);
+    let res = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/audio/transcriptions")
+                .header("content-type", &content_type)
+                .body(Body::from(body.clone()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    let reply: Value = serde_json::from_slice(&bytes).expect("json relayed");
+    assert_eq!(reply["text"], "hello world");
+
+    let wire = mock.wire();
+    assert_eq!(wire.len(), 1);
+    assert_eq!(wire[0].0, "/v1/audio/transcriptions");
+    assert_eq!(wire[0].1, content_type, "the boundary reaches the provider intact");
+    assert_eq!(wire[0].2, body, "the form is forwarded byte for byte");
+}
+
+/// A form without `model` borrows the first connected provider that serves
+/// transcriptions; with none connected it is a client error, not a wrong-path call.
+#[tokio::test]
+async fn transcription_without_a_model_picks_a_connected_provider_or_400() {
+    let mock = Mock::start(vec![MockReply::Json(200, json!({"text": "ok"}))]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (content_type, body) = multipart(&[("file", Some("clip.wav"), b"RIFF....WAVEfmt")]);
+    let res = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/audio/transcriptions")
+                .header("content-type", &content_type)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(mock.paths(), vec!["/v1/audio/transcriptions"]);
+
+    let claude_mock = Mock::start(vec![]).await;
+    let bare = harness(false);
+    bare.connect("claude", &claude_mock).await;
+    let (content_type, body) = multipart(&[("file", Some("clip.wav"), b"RIFF....WAVEfmt")]);
+    let res = bare
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/audio/transcriptions")
+                .header("content-type", &content_type)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(claude_mock.hits(), 0);
+}
+
+/// Governance runs before the upstream call for every passthrough endpoint.
+#[tokio::test]
+async fn passthrough_refuses_an_exhausted_key_before_the_upstream_call() {
+    let mock = Mock::start(vec![MockReply::Json(200, json!({"data": []}))]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
+
+    // Prior spend for this key: 25 tokens.
+    h.state
+        .store
+        .record_usage(&UsageRecord {
+            id: None,
+            ts: rrouter_gateway::now_unix(),
+            request_id: Some(uuid::Uuid::new_v4()),
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".to_string()),
+            key_id: Some(uuid),
+            cost_micros: 0,
+            input_tokens: 20,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        })
+        .await
+        .expect("seed spend");
+
+    h.patch_key(&id, json!({"budget_tokens": 20})).await;
+    let auth = format!("Bearer {key}");
+    let (status, body) = h
+        .post_with(
+            "/v1/images/generations",
+            json!({"model": "openai/gpt-image-1", "prompt": "a cat"}),
+            &[("authorization", auth.as_str())],
+        )
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"]["code"], "budget_exhausted");
+    assert_eq!(mock.hits(), 0);
 }
 
 // ------------------------------------------------- phase 4: per-key model mapping

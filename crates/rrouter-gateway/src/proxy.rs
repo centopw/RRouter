@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::error::{error_frame, error_response, not_implemented};
 use crate::overloaded_response;
-use crate::state::{dialect_of, AppState, Slot};
+use crate::state::{dialect_of, AppState, Caller, Slot};
 
 /// Request body limit: a 100k-token request plus base64 images still fits.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -325,6 +325,586 @@ async fn send_special(
     }
     let bytes = resp.bytes().await.map_err(transport_error)?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// Endpoints some providers implement and others do not, forwarded without translation:
+/// the body and the response are both the provider's own wire shapes.
+///
+/// Translation is impossible here (the canonical request has no image, audio or
+/// multipart representation), and an invented one would be worse than the `501` a
+/// provider without the endpoint earns.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// `POST /v1/images/generations` — JSON in, JSON out.
+    Images,
+    /// `POST /v1/audio/speech` — JSON in, audio bytes out.
+    Speech,
+    /// `POST /v1/audio/transcriptions` — multipart in, JSON out.
+    Transcriptions,
+    /// `GET /v1/audio/voices` — JSON out.
+    Voices,
+}
+
+impl Pass {
+    /// These endpoints are OpenAI protocol, so their errors are too.
+    fn dialect(self) -> Dialect {
+        Dialect::OpenAiChat
+    }
+
+    /// The provider's native URL, when it documents the endpoint.
+    fn native(self, spec: &ProviderSpec) -> Option<&'static str> {
+        match self {
+            Self::Images => spec.images_url,
+            Self::Speech => spec.audio_speech_url,
+            Self::Transcriptions => spec.audio_transcriptions_url,
+            Self::Voices => spec.audio_voices_url,
+        }
+    }
+
+    /// Client-facing path, recorded on usage rows and named in a `501`.
+    fn endpoint(self) -> &'static str {
+        match self {
+            Self::Images => "/v1/images/generations",
+            Self::Speech => "/v1/audio/speech",
+            Self::Transcriptions => "/v1/audio/transcriptions",
+            Self::Voices => "/v1/audio/voices",
+        }
+    }
+
+    /// `501` message prefix: names the endpoint the provider does not serve.
+    fn unsupported(self) -> &'static str {
+        match self {
+            Self::Images => "POST /v1/images/generations for this provider",
+            Self::Speech => "POST /v1/audio/speech for this provider",
+            Self::Transcriptions => "POST /v1/audio/transcriptions for this provider",
+            Self::Voices => "GET /v1/audio/voices for this provider",
+        }
+    }
+}
+
+pub async fn images(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    passthrough(&state, req, Pass::Images).await
+}
+
+pub async fn speech(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    passthrough(&state, req, Pass::Speech).await
+}
+
+pub async fn transcriptions(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    passthrough(&state, req, Pass::Transcriptions).await
+}
+
+pub async fn voices(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    passthrough(&state, req, Pass::Voices).await
+}
+
+async fn passthrough(state: &Arc<AppState>, req: Request, kind: Pass) -> Response {
+    let trace = RequestTrace::new(Uuid::new_v4());
+    let started = Instant::now();
+    let permit = match state.try_slot() {
+        Slot::Granted(permit) => permit,
+        Slot::Full => return trace.respond(started, overloaded_response(kind.dialect())),
+    };
+    let (parts, body) = req.into_parts();
+    let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(e) => {
+            return trace.respond(
+                started,
+                error_response(
+                    kind.dialect(),
+                    &Error::BadRequest(format!("request body could not be read: {e}")),
+                ),
+            )
+        }
+    };
+    match passthrough_inner(state, &parts.headers, &raw, kind, &trace).await {
+        // Audio streams: the slot has to outlive this handler and die with the body.
+        Ok(resp) => trace.respond(started, hold_slot(resp, permit)),
+        Err(e) => trace.respond(started, error_response(kind.dialect(), &e)),
+    }
+}
+
+/// Keep a response's concurrency slot until its body is consumed or dropped.
+fn hold_slot(resp: Response, permit: Option<OwnedSemaphorePermit>) -> Response {
+    let Some(permit) = permit else {
+        return resp;
+    };
+    let (parts, body) = resp.into_parts();
+    let held = Held {
+        inner: body.into_data_stream(),
+        _permit: permit,
+    };
+    Response::from_parts(parts, Body::from_stream(held))
+}
+
+/// A body that holds a semaphore permit for its whole life.
+struct Held {
+    inner: axum::body::BodyDataStream,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Stream for Held {
+    type Item = std::result::Result<Bytes, axum::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+async fn passthrough_inner(
+    state: &Arc<AppState>,
+    headers: &axum::http::HeaderMap,
+    raw: &[u8],
+    kind: Pass,
+    trace: &RequestTrace,
+) -> Result<Response> {
+    let caller = state.authenticate(headers).await?;
+    trace.set_key(caller.key_id());
+    match kind {
+        Pass::Voices => voices_inner(state, trace, &caller).await,
+        Pass::Transcriptions => transcriptions_inner(state, headers, raw, trace, &caller).await,
+        Pass::Images | Pass::Speech => {
+            let body: Value = serde_json::from_slice(raw)?;
+            let Some(plan) = json_plan(state, &body, kind, trace, &caller).await? else {
+                return Ok(not_implemented(kind.dialect(), kind.unsupported()));
+            };
+            let started = Instant::now();
+            if kind == Pass::Speech {
+                let outcome = state
+                    .dispatcher
+                    .run(&plan, |c| {
+                        trace.time(state, c, |c| send_speech(state, &body, c))
+                    })
+                    .await?;
+                let audio = outcome.result?;
+                // An audio body reports no token counts: the row says 0, not a guess.
+                record_passthrough(
+                    state,
+                    &outcome.candidate,
+                    &plan.model,
+                    kind,
+                    Usage::default(),
+                    caller.key_id(),
+                    trace,
+                    started,
+                );
+                return Ok(audio_response(audio));
+            }
+            let outcome = state
+                .dispatcher
+                .run(&plan, |c| {
+                    trace.time(state, c, |c| send_json(state, &body, kind, c))
+                })
+                .await?;
+            let (status, value) = outcome.result?;
+            record_passthrough(
+                state,
+                &outcome.candidate,
+                &plan.model,
+                kind,
+                reported_usage(&value).unwrap_or_default(),
+                caller.key_id(),
+                trace,
+                started,
+            );
+            Ok(json_response(status, value))
+        }
+    }
+}
+
+/// Plan for a JSON passthrough: the model is required, this key's mapping and limits
+/// apply, and only providers that serve the endpoint stay in the plan.
+async fn json_plan(
+    state: &Arc<AppState>,
+    body: &Value,
+    kind: Pass,
+    trace: &RequestTrace,
+    caller: &Caller,
+) -> Result<Option<Plan>> {
+    let requested = body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::BadRequest("missing model".into()))?
+        .to_string();
+    let model = state.mapped_model(caller.key_id(), &requested).await?;
+    trace.set_model(&model);
+    state.admit(caller, &model).await?;
+    let plan = state
+        .planner
+        .plan(
+            state.catalog.as_ref(),
+            state.store.as_ref(),
+            &model,
+            false,
+            None,
+            state.config.strategy,
+        )
+        .await?;
+    Ok(supported(plan, kind))
+}
+
+/// Drop the candidates whose provider does not have the endpoint. `None` means nobody
+/// does, so the route answers `501` and nothing is sent.
+fn supported(plan: Plan, kind: Pass) -> Option<Plan> {
+    let candidates: Vec<Candidate> = plan
+        .candidates
+        .iter()
+        .filter(|c| rrouter_auth::get(&c.provider).is_some_and(|spec| kind.native(spec).is_some()))
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    Some(Plan {
+        candidates,
+        ..plan
+    })
+}
+
+/// An upstream audio body and the content type that describes it, relayed untouched.
+struct Audio {
+    content_type: Option<HeaderValue>,
+    bytes: ByteStream,
+}
+
+/// Relay audio bytes, never buffering the clip.
+fn audio_response(audio: Audio) -> Response {
+    let mut resp = Response::new(Body::from_stream(audio.bytes));
+    if let Some(ct) = audio.content_type {
+        resp.headers_mut().insert(header::CONTENT_TYPE, ct);
+    }
+    resp
+}
+
+/// Native URL (account override applied) and outbound headers for one passthrough attempt.
+async fn prepare_pass(
+    state: &Arc<AppState>,
+    kind: Pass,
+    candidate: &Candidate,
+) -> Result<(String, axum::http::HeaderMap)> {
+    let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
+        model: candidate.model.clone(),
+        detail: format!("unknown provider {}", candidate.provider),
+    })?;
+    let native = kind.native(spec).ok_or_else(|| Error::NoRoute {
+        model: candidate.model.clone(),
+        detail: format!("{} has no {}", candidate.provider, kind.unsupported()),
+    })?;
+    let creds = state
+        .refresher
+        .fresh(state.store.as_ref(), spec, candidate.connection)
+        .await?;
+    let url = match creds.base_url_override.as_deref() {
+        Some(base) => rewrite_base(native, base),
+        None => native.to_string(),
+    };
+    Ok((url, request_headers(spec, &creds)?))
+}
+
+/// One JSON passthrough attempt. The model is the provider's own bare id.
+async fn send_json(
+    state: &Arc<AppState>,
+    body: &Value,
+    kind: Pass,
+    candidate: Candidate,
+) -> Result<(StatusCode, Value)> {
+    let (url, headers) = prepare_pass(state, kind, &candidate).await?;
+    let mut wire = body.clone();
+    wire["model"] = Value::String(candidate.model.clone());
+    let resp = state
+        .http
+        .post(&url)
+        .headers(headers)
+        .json(&wire)
+        .timeout(state.request_timeout())
+        .send()
+        .await
+        .map_err(transport_error)?;
+    read_json(&candidate, resp).await
+}
+
+/// One speech attempt: headers are enough to commit, the body streams to the client.
+async fn send_speech(
+    state: &Arc<AppState>,
+    body: &Value,
+    candidate: Candidate,
+) -> Result<Audio> {
+    let (url, headers) = prepare_pass(state, Pass::Speech, &candidate).await?;
+    let mut wire = body.clone();
+    wire["model"] = Value::String(candidate.model.clone());
+    let resp = state
+        .http
+        .post(&url)
+        .headers(headers)
+        .json(&wire)
+        .timeout(state.request_timeout())
+        .send()
+        .await
+        .map_err(transport_error)?;
+    let status = resp.status();
+    if !status.is_success() {
+        let bytes = resp.bytes().await.map_err(transport_error)?;
+        return Err(upstream_error(&candidate, status.as_u16(), &bytes));
+    }
+    let content_type = resp.headers().get(header::CONTENT_TYPE).cloned();
+    Ok(Audio {
+        content_type,
+        bytes: Box::pin(resp.bytes_stream().map(|c| c.map_err(transport_error))),
+    })
+}
+
+/// One transcription attempt. The client's own `content-type` (boundary included) and
+/// raw bytes are forwarded: re-encoding the form would invalidate the boundary.
+async fn send_multipart(
+    state: &Arc<AppState>,
+    raw: &[u8],
+    content_type: &HeaderValue,
+    candidate: Candidate,
+) -> Result<(StatusCode, Value)> {
+    let (url, mut headers) = prepare_pass(state, Pass::Transcriptions, &candidate).await?;
+    headers.insert(header::CONTENT_TYPE, content_type.clone());
+    let resp = state
+        .http
+        .post(&url)
+        .headers(headers)
+        .body(raw.to_vec())
+        .timeout(state.request_timeout())
+        .send()
+        .await
+        .map_err(transport_error)?;
+    read_json(&candidate, resp).await
+}
+
+async fn send_voices(state: &Arc<AppState>, candidate: Candidate) -> Result<(StatusCode, Value)> {
+    let (url, headers) = prepare_pass(state, Pass::Voices, &candidate).await?;
+    let resp = state
+        .http
+        .get(&url)
+        .headers(headers)
+        .timeout(state.request_timeout())
+        .send()
+        .await
+        .map_err(transport_error)?;
+    read_json(&candidate, resp).await
+}
+
+/// A passthrough reply: 4xx/5xx become the proxy's upstream error, a JSON success is
+/// relayed with the upstream status (some providers answer `202` with a handle).
+async fn read_json(candidate: &Candidate, resp: reqwest::Response) -> Result<(StatusCode, Value)> {
+    let status = resp.status();
+    if !status.is_success() {
+        let bytes = resp.bytes().await.map_err(transport_error)?;
+        return Err(upstream_error(candidate, status.as_u16(), &bytes));
+    }
+    let bytes = resp.bytes().await.map_err(transport_error)?;
+    Ok((status, serde_json::from_slice(&bytes)?))
+}
+
+/// `POST /v1/audio/transcriptions` with the client's multipart body untouched.
+async fn transcriptions_inner(
+    state: &Arc<AppState>,
+    headers: &axum::http::HeaderMap,
+    raw: &[u8],
+    trace: &RequestTrace,
+    caller: &Caller,
+) -> Result<Response> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .ok_or_else(|| Error::BadRequest("missing content-type".into()))?;
+    let is_multipart = content_type
+        .to_str()
+        .map(|v| v.to_ascii_lowercase().starts_with("multipart/form-data"))
+        .unwrap_or(false);
+    if !is_multipart {
+        return Err(Error::BadRequest(
+            "expected multipart/form-data with a boundary".into(),
+        ));
+    }
+    let plan = match multipart_field(raw, "model") {
+        Some(requested) => {
+            let model = state.mapped_model(caller.key_id(), &requested).await?;
+            trace.set_model(&model);
+            state.admit(caller, &model).await?;
+            state
+                .planner
+                .plan(
+                    state.catalog.as_ref(),
+                    state.store.as_ref(),
+                    &model,
+                    false,
+                    None,
+                    state.config.strategy,
+                )
+                .await?
+        }
+        None => {
+            // No model in the form: the endpoint needs an account, not a model. The
+            // allowlist is checked against the empty model, so a key restricted to
+            // specific models is told to name one rather than bypassing its list.
+            let Some(candidate) = hint_candidate(state, Pass::Transcriptions).await? else {
+                return Err(Error::BadRequest(
+                    "missing model and no connected provider serves /v1/audio/transcriptions"
+                        .into(),
+                ));
+            };
+            state.admit(caller, "").await?;
+            Plan {
+                model: candidate.model.clone(),
+                candidates: vec![candidate],
+                stream: false,
+            }
+        }
+    };
+    let Some(plan) = supported(plan, Pass::Transcriptions) else {
+        return Ok(not_implemented(
+            Pass::Transcriptions.dialect(),
+            Pass::Transcriptions.unsupported(),
+        ));
+    };
+
+    let started = Instant::now();
+    let outcome = state
+        .dispatcher
+        .run(&plan, |c| {
+            trace.time(state, c, |c| {
+                send_multipart(state, raw, content_type, c)
+            })
+        })
+        .await?;
+    let (status, value) = outcome.result?;
+    record_passthrough(
+        state,
+        &outcome.candidate,
+        &plan.model,
+        Pass::Transcriptions,
+        reported_usage(&value).unwrap_or_default(),
+        caller.key_id(),
+        trace,
+        started,
+    );
+    Ok(json_response(status, value))
+}
+
+async fn voices_inner(
+    state: &Arc<AppState>,
+    trace: &RequestTrace,
+    caller: &Caller,
+) -> Result<Response> {
+    let Some(candidate) = hint_candidate(state, Pass::Voices).await? else {
+        return Ok(not_implemented(
+            Pass::Voices.dialect(),
+            Pass::Voices.unsupported(),
+        ));
+    };
+    state.admit(caller, "").await?;
+    let plan = Plan {
+        model: candidate.model.clone(),
+        candidates: vec![candidate],
+        stream: false,
+    };
+    let started = Instant::now();
+    let outcome = state
+        .dispatcher
+        .run(&plan, |c| trace.time(state, c, |c| send_voices(state, c)))
+        .await?;
+    let (status, value) = outcome.result?;
+    record_passthrough(
+        state,
+        &outcome.candidate,
+        &plan.model,
+        Pass::Voices,
+        reported_usage(&value).unwrap_or_default(),
+        caller.key_id(),
+        trace,
+        started,
+    );
+    Ok(json_response(status, value))
+}
+
+/// First active connection whose provider serves `kind`: the account an endpoint with no
+/// model in its request has to borrow.
+async fn hint_candidate(state: &Arc<AppState>, kind: Pass) -> Result<Option<Candidate>> {
+    let connections = state.store.list_connections(None).await?;
+    Ok(connections
+        .into_iter()
+        .filter(|c| c.is_active)
+        .find_map(|c| {
+            let spec = rrouter_auth::get(&c.provider)?;
+            kind.native(spec)?;
+            Some(Candidate {
+                provider: c.provider.clone(),
+                model: String::new(),
+                connection: c.id,
+                priority: c.priority,
+                dialect: spec.default_dialect,
+            })
+        }))
+}
+
+/// One form field from a raw `multipart/form-data` body.
+///
+/// A real multipart parser exists to re-encode the form, and re-encoding would break the
+/// boundary the client signed its `content-type` with. This reads the one value the route
+/// needs and leaves the bytes alone.
+fn multipart_field(raw: &[u8], name: &str) -> Option<String> {
+    let needle = format!("name=\"{name}\"");
+    let needle = needle.as_bytes();
+    let mut at = 0usize;
+    while let Some(rel) = find_bytes(&raw[at..], needle) {
+        let pos = at + rel;
+        let value_start = pos + needle.len();
+        at = value_start;
+        // `filename="model"` contains the needle; only a real attribute counts.
+        if pos > 0 && (raw[pos - 1].is_ascii_alphanumeric() || raw[pos - 1] == b'-') {
+            continue;
+        }
+        let header_end = value_start + find_bytes(&raw[value_start..], b"\r\n\r\n")? + 4;
+        let value_end = header_end + find_bytes(&raw[header_end..], b"\r\n--")?;
+        let value = String::from_utf8_lossy(&raw[header_end..value_end])
+            .trim()
+            .to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// One usage row per delivered passthrough. Token counts are the upstream's own; a body
+/// that reports nothing records 0 instead of a guess.
+#[allow(clippy::too_many_arguments)]
+fn record_passthrough(
+    state: &AppState,
+    candidate: &Candidate,
+    model: &str,
+    kind: Pass,
+    usage: Usage,
+    key: Option<Uuid>,
+    trace: &RequestTrace,
+    started: Instant,
+) {
+    record_once(
+        state,
+        Recorded {
+            candidate,
+            model,
+            endpoint: kind.endpoint(),
+            usage,
+            key,
+            request_id: trace.request_id,
+            started,
+            ttft: None,
+            streamed: false,
+        },
+    );
 }
 
 /// `permit` is this request's concurrency slot. It is moved into the streamed response

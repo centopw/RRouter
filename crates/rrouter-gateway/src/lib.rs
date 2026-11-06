@@ -133,12 +133,17 @@ pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(routes::health::health))
         .route("/v1/models", get(v1_models))
+        .route("/v1/models/{*id}", get(v1_model))
         .route("/v1/chat/completions", post(proxy::proxy))
         .route("/v1/messages", post(proxy::proxy))
         .route("/v1/responses", post(proxy::proxy))
         .route("/v1/responses/compact", post(proxy::compact))
         .route("/v1/messages/count_tokens", post(proxy::count_tokens))
         .route("/v1/embeddings", post(proxy::embeddings))
+        .route("/v1/images/generations", post(proxy::images))
+        .route("/v1/audio/speech", post(proxy::speech))
+        .route("/v1/audio/transcriptions", post(proxy::transcriptions))
+        .route("/v1/audio/voices", get(proxy::voices))
         .route("/", get(ui::index))
         .route("/app", get(ui::app_index))
         .route("/app/", get(ui::app_index))
@@ -322,6 +327,19 @@ async fn v1_models(axum::extract::State(state): axum::extract::State<Arc<AppStat
         state::Slot::Full => return overloaded_response(rrouter_core::Dialect::OpenAiChat),
     };
     routes::models::list_models(axum::extract::State(state)).await
+}
+
+/// `GET /v1/models/{id}` shares `/v1/models`' slot rule: a catalog answer is still a
+/// `/v1/*` request, and the id may contain slashes (`openai/gpt-image-1`).
+async fn v1_model(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let _permit = match state.try_slot() {
+        state::Slot::Granted(permit) => permit,
+        state::Slot::Full => return overloaded_response(rrouter_core::Dialect::OpenAiChat),
+    };
+    routes::models::get_model(axum::extract::State(state), axum::extract::Path(id)).await
 }
 
 /// `401 admin_unauthorized` in the inbound dialect's error shape.
