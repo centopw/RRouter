@@ -916,3 +916,53 @@ async fn count_tokens_on_a_provider_without_the_endpoint_is_501() {
     assert_eq!(mock.hits(), 0, "nothing is sent upstream");
     assert!(body["error"]["message"].as_str().unwrap_or_default().contains("count_tokens"));
 }
+
+/// Time to first output is measured at the first content event, not at the response
+/// headers, so a slow model shows up as slow even when the stream opens instantly.
+#[tokio::test]
+async fn streaming_records_time_to_first_output() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let notifier = Arc::clone(&gate);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        notifier.notify_one();
+    });
+    let wire = |event: &str, data: &str| format!("event: {event}\ndata: {data}\n\n");
+    let mock = Mock::start(vec![MockReply::Sse(vec![
+        SseStep {
+            wire: wire("response.created", r#"{"type":"response.created","response":{"id":"r1","model":"gpt-5.6-luna"}}"#),
+            await_gate: None,
+        },
+        SseStep {
+            wire: wire("response.output_text.delta", r#"{"type":"response.output_text.delta","delta":"Hi"}"#),
+            await_gate: Some(gate),
+        },
+        SseStep {
+            wire: wire("response.completed", r#"{"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":4,"output_tokens":1}}}"#),
+            await_gate: None,
+        },
+    ])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+
+    let (status, _body) = h
+        .post("/v1/chat/completions", json!({"model": "codex/gpt-5.6-luna", "stream": true, "messages": [{"role": "user", "content": "hi"}]}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut row = None;
+    for _ in 0..100 {
+        if let Ok(rows) = h.state.store.recent_usage(5, None).await {
+            if let Some(first) = rows.first() {
+                row = Some(first.clone());
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let row = row.expect("usage row recorded");
+    assert!(row.streamed);
+    assert!(row.ttft_ms >= 40, "ttft {} should include the upstream pause", row.ttft_ms);
+    assert!(row.ttft_ms <= row.latency_ms, "ttft {} > latency {}", row.ttft_ms, row.latency_ms);
+}

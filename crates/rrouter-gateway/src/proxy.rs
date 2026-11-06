@@ -274,7 +274,18 @@ async fn handle(
         // Stream-only upstream serving a non-streaming client: consume the whole
         // stream, rebuild the canonical response, then answer in the client dialect.
         let assembled = reassemble(&open, bytes).await?;
-        record_once(state, &candidate, &plan.model, endpoint_of(inbound), assembled.usage, started);
+        record_once(
+            state,
+            Recorded {
+                candidate: &candidate,
+                model: &plan.model,
+                endpoint: endpoint_of(inbound),
+                usage: assembled.usage,
+                started,
+                ttft: None,
+                streamed: false,
+            },
+        );
         return Ok(json_response(
             StatusCode::OK,
             rrouter_translate::build_response(inbound, &assembled)?,
@@ -318,7 +329,18 @@ pub async fn complete(
         let outcome = state.dispatcher.run(&plan, |c| attempt.send_once(c)).await?;
         let candidate = outcome.candidate.clone();
         let resp = outcome.result?;
-        record_once(state, &candidate, &plan.model, endpoint_of(inbound), resp.usage, started);
+        record_once(
+            state,
+            Recorded {
+                candidate: &candidate,
+                model: &plan.model,
+                endpoint: endpoint_of(inbound),
+                usage: resp.usage,
+                started,
+                ttft: None,
+                streamed: false,
+            },
+        );
         return Ok(resp);
     }
 
@@ -331,7 +353,18 @@ pub async fn complete(
         client_model: candidate.model.clone(),
     };
     let assembled = reassemble(&open, bytes).await?;
-    record_once(state, &candidate, &plan.model, endpoint_of(inbound), assembled.usage, started);
+    record_once(
+            state,
+            Recorded {
+                candidate: &candidate,
+                model: &plan.model,
+                endpoint: endpoint_of(inbound),
+                usage: assembled.usage,
+                started,
+                ttft: None,
+                streamed: false,
+            },
+        );
     Ok(assembled)
 }
 
@@ -762,6 +795,9 @@ struct Wire {
     usage: Option<Usage>,
     finished: bool,
     failed: bool,
+    /// When the first model output (not the envelope) was decoded: the honest end of
+    /// "time to first token".
+    first_output: Option<Instant>,
 }
 
 impl Wire {
@@ -775,6 +811,7 @@ impl Wire {
             usage: None,
             finished: false,
             failed: false,
+            first_output: None,
         }
     }
 
@@ -782,6 +819,17 @@ impl Wire {
         self.pending.extend(events);
         let mut out: Option<Bytes> = None;
         while let Some(ev) = self.pending.pop_front() {
+            if self.first_output.is_none()
+                && matches!(
+                    ev,
+                    StreamEvent::TextDelta(_)
+                        | StreamEvent::ReasoningDelta(_)
+                        | StreamEvent::ToolCallStart { .. }
+                        | StreamEvent::ToolCallArgsDelta { .. }
+                )
+            {
+                self.first_output = Some(Instant::now());
+            }
             if let StreamEvent::Done { usage, .. } = &ev {
                 self.usage = Some(usage.unwrap_or_default());
                 self.finished = true;
@@ -866,7 +914,19 @@ impl ResponseStream {
             return;
         };
         let tokens = self.inner.usage.unwrap_or_default();
-        record_once(&state, &candidate, &model, endpoint_of(self.inner.inbound), tokens, started);
+        let ttft = self.inner.first_output.map(|at| at.saturating_duration_since(started));
+        record_once(
+            &state,
+            Recorded {
+                candidate: &candidate,
+                model: &model,
+                endpoint: endpoint_of(self.inner.inbound),
+                usage: tokens,
+                started,
+                ttft,
+                streamed: true,
+            },
+        );
         if !ok {
             tracing::debug!(provider = %candidate.provider, "client disconnected mid-stream");
         }
@@ -930,28 +990,38 @@ fn endpoint_of(dialect: Dialect) -> &'static str {
     }
 }
 
-fn record_once(
-    state: &AppState,
-    candidate: &Candidate,
-    model: &str,
+/// One finished request, ready to turn into a usage row.
+struct Recorded<'a> {
+    candidate: &'a Candidate,
+    model: &'a str,
     endpoint: &'static str,
     usage: Usage,
     started: Instant,
-) {
+    /// Time to the first model output; `None` when the client got one JSON body.
+    ttft: Option<std::time::Duration>,
+    streamed: bool,
+}
+
+fn record_once(state: &AppState, r: Recorded<'_>) {
+    let candidate = r.candidate;
     let rec = UsageRecord {
         id: None,
         ts: crate::now_unix(),
         provider: candidate.provider.clone(),
-        model: model.to_string(),
+        model: r.model.to_string(),
         connection_id: Some(candidate.connection),
-        endpoint: Some(endpoint.to_string()),
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        cache_read_tokens: usage.cache_read_tokens,
-        cache_write_tokens: usage.cache_write_tokens,
-        latency_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+        endpoint: Some(r.endpoint.to_string()),
+        input_tokens: r.usage.input_tokens,
+        output_tokens: r.usage.output_tokens,
+        cache_read_tokens: r.usage.cache_read_tokens,
+        cache_write_tokens: r.usage.cache_write_tokens,
+        latency_ms: r.started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+        ttft_ms: r
+            .ttft
+            .map(|d| d.as_millis().min(u32::MAX as u128) as u32)
+            .unwrap_or(0),
         status: 200,
-        streamed: false,
+        streamed: r.streamed,
         error: None,
     };
     spawn_record(state, rec);

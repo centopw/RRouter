@@ -142,6 +142,10 @@ export function RequestDetail({
 }) {
   const failed = row.status >= 400 || row.error !== null;
   const endpoint = row.endpoint ?? "/v1/chat/completions";
+  // Only streamed requests measure a first output, and only when it arrived before
+  // the stream ended; otherwise the split would be an invention.
+  const measured = !failed && row.ttft_ms > 0 && row.ttft_ms < row.latency_ms;
+  const generation = row.latency_ms - row.ttft_ms;
   return (
     <aside aria-label="request detail" className="min-w-0">
       <div className="flex items-start gap-2 border-b border-line px-5 py-3">
@@ -183,10 +187,30 @@ export function RequestDetail({
             {row.error ?? `upstream answered ${row.status} ${statusText(row.status)}`}
           </div>
         ) : (
-          <div className="text-[13px] text-muted">
-            Latency <span className="font-mono text-fg tnum">{ms(row.latency_ms)}</span>
-            {row.streamed ? <span className="text-faint"> · streamed</span> : null}
-          </div>
+          <>
+            <div className="text-[13px] text-muted">
+              Latency <span className="font-mono text-fg tnum">{ms(row.latency_ms)}</span>
+              {row.streamed ? <span className="text-faint"> · streamed</span> : null}
+            </div>
+            {measured ? (
+              <div>
+                <div className="text-[12.5px] text-faint">
+                  First output <span className="font-mono tnum">{ms(row.ttft_ms)}</span> · generation{" "}
+                  <span className="font-mono tnum">{ms(generation)}</span>
+                </div>
+                <div
+                  className="mt-1.5 flex h-1.5 overflow-hidden rounded-full bg-[var(--color-rule)]"
+                  title="time to first output vs generation"
+                >
+                  <span
+                    aria-hidden
+                    className="bg-accent"
+                    style={{ width: `${(row.ttft_ms / row.latency_ms) * 100}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </>
         )}
 
         <dl className="divide-y divide-[var(--color-rule)] text-[13px]">

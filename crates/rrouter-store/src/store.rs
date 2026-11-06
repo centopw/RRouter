@@ -104,6 +104,8 @@ pub struct UsageRecord {
     pub cache_read_tokens: u32,
     pub cache_write_tokens: u32,
     pub latency_ms: u32,
+    /// Milliseconds from request start to the first model output; 0 when unmeasured.
+    pub ttft_ms: u32,
     pub status: u16,
     pub streamed: bool,
     pub error: Option<String>,
@@ -766,8 +768,8 @@ impl Store {
         conn.execute(
             "INSERT INTO usage \
              (ts, provider, model, connection_id, endpoint, input_tokens, output_tokens, \
-              cache_read_tokens, cache_write_tokens, latency_ms, status, streamed, error) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, streamed, error) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 r.ts,
                 r.provider,
@@ -779,6 +781,7 @@ impl Store {
                 r.cache_read_tokens,
                 r.cache_write_tokens,
                 r.latency_ms,
+                r.ttft_ms,
                 r.status,
                 r.streamed as i64,
                 r.error,
@@ -795,7 +798,7 @@ impl Store {
         let mut stmt = conn
             .prepare(
                 "SELECT id, ts, provider, model, connection_id, endpoint, input_tokens, output_tokens, \
-                        cache_read_tokens, cache_write_tokens, latency_ms, status, streamed, error \
+                        cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, streamed, error \
                  FROM usage WHERE ?2 IS NULL OR ts >= ?2 \
                  ORDER BY ts DESC, id DESC LIMIT ?1",
             )
@@ -815,9 +818,10 @@ impl Store {
                     cache_read_tokens: r.get(8)?,
                     cache_write_tokens: r.get(9)?,
                     latency_ms: r.get(10)?,
-                    status: r.get(11)?,
-                    streamed: r.get::<_, i64>(12)? != 0,
-                    error: r.get(13)?,
+                    ttft_ms: r.get(11)?,
+                    status: r.get(12)?,
+                    streamed: r.get::<_, i64>(13)? != 0,
+                    error: r.get(14)?,
                 })
             })
             .map_err(migrations::db_err)?;

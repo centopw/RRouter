@@ -124,6 +124,8 @@ export type UsageEvent = {
   cache_read_tokens: number;
   cache_write_tokens: number;
   latency_ms: number;
+  /** Time to the first model output; 0 when unmeasured (non-streaming, failures). */
+  ttft_ms: number;
   status: number;
   streamed: boolean;
   error: string | null;

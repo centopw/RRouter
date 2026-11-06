@@ -189,7 +189,8 @@ npm run build   # writes ui/dist; the next cargo build embeds it
 **Activity** is the operator's answer to "is anything wrong right now?": four readouts
 (requests, tokens, latency, error rate), a stacked traffic chart with an error lane, a models
 table, and the request log with a detail panel — clicking a model filters the log, clicking a
-request opens its tokens, latency, endpoint and error. Empty, sparse and failing states are
+request opens its tokens, latency (split into time-to-first-output and generation for
+streams), endpoint and error. Empty, sparse and failing states are
 explicit; no number on the page is estimated client-side.
 
 A checkout without `ui/dist` still builds: `/` then serves a smaller dependency-free shell
@@ -261,7 +262,7 @@ non-streaming client is reassembled from the same decoder.
 ## Tests
 
 ```sh
-cargo test --workspace                              # 186 tests
+cargo test --workspace                              # 187 tests
 cargo clippy --workspace --all-targets -- -D warnings
 ./scripts/verify.sh                                 # build + every gate
 python3 scripts/e2e_smoke.py                        # live binary + mock upstream

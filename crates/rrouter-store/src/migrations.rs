@@ -8,15 +8,22 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 5;
+pub(crate) const SCHEMA_VERSION: i64 = 6;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 /// The client endpoint that produced a usage row (`/v1/messages`, …), so the log can
 /// answer "which protocol was this?" without inferring it from the model name.
 const V5: &str = r#"
 ALTER TABLE usage ADD COLUMN endpoint TEXT;
+"#;
+
+/// Time from request start to the first model output, so a slow request can be split
+/// into "upstream thought for 2 s" and "streamed for 500 ms". Zero means unmeasured
+/// (non-streaming requests and failures).
+const V6: &str = r#"
+ALTER TABLE usage ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT 0;
 "#;
 
 const V1: &str = r#"

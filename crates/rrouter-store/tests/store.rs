@@ -386,6 +386,7 @@ fn usage_records_summary_and_recent_order() {
             cache_read_tokens: if ts == 100 { 900 } else { 0 },
             cache_write_tokens: if ts == 100 { 100 } else { 0 },
             latency_ms: ms,
+            ttft_ms: if st == 200 { ms / 2 } else { 0 },
             status: st,
             streamed: true,
             error: (st >= 400).then(|| "upstream 429".to_string()),
@@ -415,6 +416,7 @@ fn usage_records_summary_and_recent_order() {
             .expect("row 100");
         assert_eq!(cached.cache_read_tokens, 900);
         assert_eq!(cached.cache_write_tokens, 100);
+        assert_eq!(cached.ttft_ms, 50, "first-output time round-trips");
 
         let sum = s.usage_summary(None).await.expect("summary");
         assert_eq!(sum.len(), 2);

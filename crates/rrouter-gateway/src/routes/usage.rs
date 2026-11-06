@@ -48,6 +48,7 @@ pub async fn list(
                         "cache_read_tokens": r.cache_read_tokens,
                         "cache_write_tokens": r.cache_write_tokens,
                         "latency_ms": r.latency_ms,
+                        "ttft_ms": r.ttft_ms,
                         "status": r.status,
                         "streamed": r.streamed,
                         "error": r.error,
