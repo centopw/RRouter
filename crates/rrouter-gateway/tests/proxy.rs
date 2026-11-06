@@ -280,6 +280,26 @@ impl Harness {
         (status, headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
+    /// `GET` a non-JSON endpoint (`/metrics`) and keep status, headers and text.
+    async fn get_raw(&self, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+        let res = self
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        let status = res.status();
+        let headers = res.headers().clone();
+        let bytes = res.into_body().collect().await.expect("body").to_bytes();
+        (status, headers, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// One OpenAI chat request, optionally authorized with a key.
     async fn chat(
         &self,
@@ -310,6 +330,17 @@ fn openai_chat_body(model: &str) -> Value {
             {"role": "user", "content": "hello"}
         ]
     })
+}
+
+/// Value of one Prometheus series, or 0 when the scrape does not carry it. Counters are
+/// process-global, so assertions are "at least this many", not exact totals.
+fn metric_value(text: &str, series: &str) -> u64 {
+    text.lines()
+        .find_map(|line| {
+            line.strip_prefix(series)
+                .and_then(|rest| rest.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(0)
 }
 
 fn openai_reply(content: &str) -> MockReply {
@@ -705,6 +736,193 @@ async fn fallback_to_second_candidate() {
     assert_eq!(mock.hits(), 2, "first attempt 503, second attempt served");
 }
 
+// ------------------------------------------------------------- observability
+
+/// A silent fallback cannot be operated. One request id must tie the client's response
+/// header, the usage row, and one row per dispatched candidate together — including the
+/// attempt that failed, with the status and message the client would have seen.
+#[tokio::test]
+async fn fallback_records_every_attempt_under_one_request_id() {
+    let mock = Mock::start(vec![
+        MockReply::Json(503, json!({"error": {"message": "overloaded"}})),
+        openai_reply("from backup"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.connect("openai", &mock).await;
+
+    let (status, headers, body) = h.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let request_id = headers
+        .get("x-request-id")
+        .expect("every response carries x-request-id")
+        .to_str()
+        .expect("ascii header")
+        .to_string();
+    let parsed = uuid::Uuid::parse_str(&request_id).expect("a uuid");
+    assert_eq!(parsed.get_version_num(), 4, "the id must be a UUIDv4");
+
+    // Attempt and usage rows are written off the hot path, exactly like usage always was.
+    let mut detail = Value::Null;
+    for _ in 0..200 {
+        let (code, value) = h.get(&format!("/api/usage/{request_id}")).await;
+        if code == StatusCode::OK
+            && value["data"]["request"]["request_id"] == request_id.as_str()
+            && value["data"]["attempts"].as_array().is_some_and(|a| a.len() == 2)
+        {
+            detail = value;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let data = &detail["data"];
+    assert_eq!(data["request"]["request_id"], request_id.as_str(), "{detail}");
+    assert_eq!(data["request"]["status"], 200, "{detail}");
+    assert_eq!(data["request"]["key_id"], Value::Null, "anonymous request: {detail}");
+
+    let attempts = data["attempts"].as_array().expect("attempts array");
+    assert_eq!(attempts.len(), 2, "one row per candidate: {detail}");
+    assert_eq!(attempts[0]["attempt"], 1, "1-based in dispatch order");
+    assert_eq!(attempts[0]["provider"], "openai");
+    assert_eq!(attempts[0]["status"], 503, "the failing attempt keeps its status");
+    assert!(
+        attempts[0]["error"].as_str().unwrap_or_default().contains("503"),
+        "the client-visible message is stored: {detail}"
+    );
+    assert_eq!(attempts[0]["key_id"], Value::Null);
+    assert!(attempts[0]["latency_ms"].as_u64().is_some());
+    assert_eq!(attempts[1]["attempt"], 2);
+    assert_eq!(attempts[1]["status"], 200);
+    assert_eq!(attempts[1]["error"], Value::Null);
+
+    // The request log row the UI filters by key and opens attempts from.
+    let (_, list) = h.get("/api/usage").await;
+    let row = list["data"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|r| r["request_id"] == request_id.as_str())
+        .unwrap_or_else(|| panic!("no log row for {request_id}: {list}"));
+    assert_eq!(row["key_id"], Value::Null);
+    assert_eq!(row["model"], "gpt-4.1");
+
+    // An id nobody has seen is a 404, not an empty view.
+    let (code, _) = h.get("/api/usage/00000000-0000-4000-8000-000000000000").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+
+    // The static admin routes still win over the new `{request_id}` parameter.
+    let (code, body) = h.get("/api/usage/summary").await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert!(body["data"].is_array(), "{body}");
+    let (code, body) = h.get("/api/usage/series?hours=1&bucket=hour").await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+}
+
+/// `/metrics` is for scrapers: Prometheus text, no API key, and counters that move.
+#[tokio::test]
+async fn metrics_expose_requests_attempts_and_latency() {
+    let mock = Mock::start(vec![
+        MockReply::Json(503, json!({"error": {"message": "overloaded"}})),
+        openai_reply("served"),
+    ])
+    .await;
+    // Keys required: a scrape still must not need one.
+    let h = harness(true);
+    h.connect("openai", &mock).await;
+    h.connect("openai", &mock).await;
+    let (key, _) = h.create_key().await;
+
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let (status, headers, text) = h.get_raw("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("text/plain; version=0.0.4"),
+        "prometheus text format: {content_type}"
+    );
+
+    assert!(text.contains("# TYPE rrouter_requests_total counter"), "{text}");
+    assert!(
+        metric_value(
+            &text,
+            r#"rrouter_requests_total{provider="openai",model="gpt-4.1",status="200"}"#
+        ) >= 1,
+        "the finished request is counted: {text}"
+    );
+    assert!(
+        metric_value(&text, r#"rrouter_attempts_total{provider="openai",status="503"}"#) >= 1,
+        "the fallback attempt is counted: {text}"
+    );
+    assert!(
+        metric_value(&text, r#"rrouter_attempts_total{provider="openai",status="200"}"#) >= 1,
+        "{text}"
+    );
+    assert!(
+        metric_value(&text, r#"rrouter_request_duration_seconds_bucket{le="+Inf"}"#) >= 1,
+        "latency histogram is filled: {text}"
+    );
+    assert!(text.contains("rrouter_request_duration_seconds_count"), "{text}");
+    // Every connection the store knows about is exposed, closed or not.
+    let (_, connections) = h.get("/api/connections").await;
+    let id = connections["data"][0]["id"].as_str().expect("connection id");
+    assert!(
+        text.contains(&format!(r#"rrouter_breaker_open{{connection="{id}"}} 0"#)),
+        "known connections are gauges: {text}"
+    );
+    assert!(text.contains(r#"rrouter_build_info{version="#), "{text}");
+}
+
+/// Errors are responses too: a client that gets a 404 still needs the id to report it.
+#[tokio::test]
+async fn error_and_stream_responses_carry_the_request_id() {
+    let h = harness(false);
+    // No connection for this model: the planner fails before any dispatch.
+    let (status, headers, _body) = h.chat(None, "no-such-model").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let id = headers
+        .get("x-request-id")
+        .expect("error responses carry the id")
+        .to_str()
+        .expect("ascii")
+        .to_string();
+    assert!(uuid::Uuid::parse_str(&id).is_ok(), "not a uuid: {id}");
+
+    // Streaming responses carry it as a header, which is committed before the body.
+    let wire = concat!(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire: wire.to_string(),
+        await_gate: None,
+    }])])
+    .await;
+    h.connect("codex", &mock).await;
+    let (status, headers, _body) = h
+        .call_full(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model": "codex/gpt-5.6-luna", "stream": true, "messages": [{"role": "user", "content": "hi"}]})
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("content-type").and_then(|v| v.to_str().ok()), Some("text/event-stream"));
+    assert!(headers.get("x-request-id").is_some(), "streams carry the id too");
+}
+
 #[tokio::test]
 async fn connections_never_leak_tokens() {
     let mock = Mock::start(vec![]).await;
@@ -1022,6 +1240,9 @@ async fn streaming_records_time_to_first_output() {
     assert!(row.streamed);
     assert!(row.ttft_ms >= 40, "ttft {} should include the upstream pause", row.ttft_ms);
     assert!(row.ttft_ms <= row.latency_ms, "ttft {} > latency {}", row.ttft_ms, row.latency_ms);
+    // A streamed request is joinable to its attempt log by the same id.
+    let request_id = row.request_id.expect("streamed usage rows carry the request id");
+    assert!(h.state.store.usage_by_request(request_id).await.expect("lookup").is_some());
 }
 
 // ------------------------------------------------------ virtual-key governance
@@ -1161,6 +1382,7 @@ async fn budget_exhausted_blocks_the_next_request() {
         .record_usage(&UsageRecord {
             id: None,
             ts: rrouter_gateway::now_unix(),
+            request_id: Some(uuid::Uuid::new_v4()),
             provider: "claude".to_string(),
             model: "haiku".to_string(),
             connection_id: None,
@@ -1222,6 +1444,22 @@ async fn usage_rows_carry_the_key_id() {
     let (status, body) = h.get("/api/usage").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"][0]["key_id"], id.as_str());
+    assert_eq!(body["data"][0]["request_id"], row.request_id.expect("id").to_string().as_str());
+
+    // The attempts of that request are attributed to the same key, so a per-key log can
+    // show what the key's fallbacks cost.
+    let request_id = row.request_id.expect("request id").to_string();
+    let mut attempts = Value::Null;
+    for _ in 0..100 {
+        let (code, value) = h.get(&format!("/api/usage/{request_id}")).await;
+        if code == StatusCode::OK && value["data"]["attempts"].as_array().is_some_and(|a| !a.is_empty()) {
+            attempts = value["data"]["attempts"].clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(attempts[0]["key_id"], id.as_str(), "attempt rows carry the key: {attempts}");
+    assert_eq!(attempts[0]["status"], 200, "{attempts}");
 }
 
 /// Dev clients send placeholder tokens. With keys optional that is anonymous traffic;

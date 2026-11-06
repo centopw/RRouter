@@ -147,6 +147,8 @@ pub struct UsageRecord {
     /// Row id, set when read back; ignored on write.
     pub id: Option<i64>,
     pub ts: i64,
+    /// UUID echoed to the client as `x-request-id`; `None` for rows written before v8.
+    pub request_id: Option<Uuid>,
     pub provider: String,
     pub model: String,
     pub connection_id: Option<Uuid>,
@@ -165,6 +167,33 @@ pub struct UsageRecord {
     pub status: u16,
     pub streamed: bool,
     pub error: Option<String>,
+}
+
+/// One candidate that was dispatched for a request.
+///
+/// A request has one attempt per candidate the dispatcher actually sent to, numbered
+/// from 1 in dispatch order, so a fallback is readable from the log alone. `status` is
+/// the upstream HTTP status when there was one and `0` when nobody answered (transport
+/// failure, timeout, breaker). A row is also the honest record of a request that failed
+/// in the end, which never produces a usage row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptRecord {
+    /// Row id, set when read back; ignored on write.
+    pub id: Option<i64>,
+    pub request_id: Uuid,
+    pub ts: i64,
+    /// 1-based position in dispatch order.
+    pub attempt: u32,
+    pub provider: String,
+    /// Model id actually sent upstream, not the client's alias.
+    pub model: String,
+    pub connection_id: Option<Uuid>,
+    pub status: u16,
+    /// Same message the client received for this attempt.
+    pub error: Option<String>,
+    pub latency_ms: u32,
+    /// Gateway key that paid for the request; `None` for anonymous traffic.
+    pub key_id: Option<Uuid>,
 }
 
 /// One time bucket for one model: the traffic chart stacks these by model, so
@@ -916,11 +945,13 @@ impl Store {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO usage \
-             (ts, provider, model, connection_id, endpoint, key_id, input_tokens, output_tokens, \
-              cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, streamed, error) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             (ts, request_id, provider, model, connection_id, endpoint, key_id, input_tokens, \
+              output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, \
+              streamed, error) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 r.ts,
+                r.request_id.map(|u| u.to_string()).unwrap_or_default(),
                 r.provider,
                 r.model,
                 r.connection_id.map(|u| u.to_string()),
@@ -941,42 +972,92 @@ impl Store {
         Ok(())
     }
 
+    /// Append one attempt row. Failures are recorded here and nowhere else, so this is
+    /// the only per-candidate history the gateway keeps.
+    pub async fn record_attempt(&self, a: &AttemptRecord) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO attempts \
+             (request_id, ts, attempt, provider, model, connection_id, status, error, latency_ms, \
+              key_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                a.request_id.to_string(),
+                a.ts,
+                a.attempt,
+                a.provider,
+                a.model,
+                a.connection_id.map(|u| u.to_string()),
+                a.status,
+                a.error,
+                a.latency_ms,
+                a.key_id.map(|u| u.to_string()),
+            ],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Every attempt for one request, in dispatch order.
+    pub async fn attempts_for(&self, request_id: Uuid) -> Result<Vec<AttemptRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, ts, attempt, provider, model, connection_id, status, error, \
+                        latency_ms, key_id \
+                 FROM attempts WHERE request_id = ?1 ORDER BY attempt ASC, id ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params![request_id.to_string()], |r| {
+                let cid: Option<String> = r.get(5)?;
+                let kid: Option<String> = r.get(9)?;
+                Ok(AttemptRecord {
+                    id: r.get(0)?,
+                    request_id,
+                    ts: r.get(1)?,
+                    attempt: r.get(2)?,
+                    provider: r.get(3)?,
+                    model: r.get(4)?,
+                    connection_id: cid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
+                    status: r.get(6)?,
+                    error: r.get(7)?,
+                    latency_ms: r.get(8)?,
+                    key_id: kid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    /// The usage row a request id belongs to, when the request finished successfully.
+    pub async fn usage_by_request(&self, request_id: Uuid) -> Result<Option<UsageRecord>> {
+        let conn = self.conn();
+        conn.query_row(
+            &format!("SELECT {USAGE_COLUMNS} FROM usage WHERE request_id = ?1 ORDER BY id DESC"),
+            params![request_id.to_string()],
+            row_to_usage,
+        )
+        .optional()
+        .map_err(migrations::db_err)
+    }
+
     /// Most recent records first.
     pub async fn recent_usage(&self, limit: usize, since: Option<i64>) -> Result<Vec<UsageRecord>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let conn = self.conn();
         let mut stmt = conn
-            .prepare(
-                "SELECT id, ts, provider, model, connection_id, endpoint, input_tokens, output_tokens, \
-                        cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, streamed, error, \
-                        key_id \
-                 FROM usage WHERE ?2 IS NULL OR ts >= ?2 \
-                 ORDER BY ts DESC, id DESC LIMIT ?1",
-            )
+            .prepare(&format!(
+                "SELECT {USAGE_COLUMNS} FROM usage WHERE ?2 IS NULL OR ts >= ?2 \
+                 ORDER BY ts DESC, id DESC LIMIT ?1"
+            ))
             .map_err(migrations::db_err)?;
         let rows = stmt
-            .query_map(params![limit, since], |r| {
-                let cid: Option<String> = r.get(4)?;
-                let kid: Option<String> = r.get(15)?;
-                Ok(UsageRecord {
-                    id: r.get(0)?,
-                    ts: r.get(1)?,
-                    provider: r.get(2)?,
-                    model: r.get(3)?,
-                    connection_id: cid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
-                    endpoint: r.get(5)?,
-                    key_id: kid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
-                    input_tokens: r.get(6)?,
-                    output_tokens: r.get(7)?,
-                    cache_read_tokens: r.get(8)?,
-                    cache_write_tokens: r.get(9)?,
-                    latency_ms: r.get(10)?,
-                    ttft_ms: r.get(11)?,
-                    status: r.get(12)?,
-                    streamed: r.get::<_, i64>(13)? != 0,
-                    error: r.get(14)?,
-                })
-            })
+            .query_map(params![limit, since], row_to_usage)
             .map_err(migrations::db_err)?;
         let mut out = Vec::new();
         for r in rows {
@@ -1160,6 +1241,38 @@ struct RawConnection {
 fn uuid_col(s: String) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(&s).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+/// Columns of a [`UsageRecord`], in the order [`row_to_usage`] reads them. Shared by
+/// every reader so a new column cannot desynchronize one query from the rest.
+const USAGE_COLUMNS: &str = "id, ts, request_id, provider, model, connection_id, endpoint, \
+     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, \
+     status, streamed, error, key_id";
+
+/// Empty `request_id` is the v8 "unknown" default written before request ids existed.
+fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
+    let cid: Option<String> = r.get(5)?;
+    let rid: String = r.get(2)?;
+    let kid: Option<String> = r.get(16)?;
+    Ok(UsageRecord {
+        id: r.get(0)?,
+        ts: r.get(1)?,
+        request_id: Uuid::parse_str(&rid).ok(),
+        provider: r.get(3)?,
+        model: r.get(4)?,
+        connection_id: cid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
+        endpoint: r.get(6)?,
+        input_tokens: r.get(7)?,
+        output_tokens: r.get(8)?,
+        cache_read_tokens: r.get(9)?,
+        cache_write_tokens: r.get(10)?,
+        latency_ms: r.get(11)?,
+        ttft_ms: r.get(12)?,
+        status: r.get(13)?,
+        streamed: r.get::<_, i64>(14)? != 0,
+        error: r.get(15)?,
+        key_id: kid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
     })
 }
 

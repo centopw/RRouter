@@ -1,16 +1,61 @@
-//! `/api/usage` and `/api/usage/summary`.
+//! `/api/usage`, `/api/usage/{request_id}`, and `/api/usage/summary`.
+//!
+//! The list is the request log; the detail view is what makes a fallback debuggable —
+//! one request id, its usage row, and every upstream attempt under it.
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::response::Response;
-use serde_json::json;
+use rrouter_core::Error;
+use rrouter_store::{AttemptRecord, UsageRecord};
+use serde_json::{json, Value};
+use uuid::Uuid;
 
 use super::{admin_error, ok_json};
 use crate::state::AppState;
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 1000;
+
+/// One usage row as the admin API exposes it. Shared by the list and the detail view so
+/// a client filtering by `request_id` sees exactly the row the attempt view links to.
+fn row_json(r: &UsageRecord) -> Value {
+    json!({
+        "id": r.id,
+        "ts": r.ts,
+        "request_id": r.request_id.map(|id| id.to_string()),
+        "provider": r.provider,
+        "endpoint": r.endpoint,
+        "model": r.model,
+        "connection_id": r.connection_id.map(|c| c.to_string()),
+        "key_id": r.key_id.map(|k| k.to_string()),
+        "input_tokens": r.input_tokens,
+        "output_tokens": r.output_tokens,
+        "cache_read_tokens": r.cache_read_tokens,
+        "cache_write_tokens": r.cache_write_tokens,
+        "latency_ms": r.latency_ms,
+        "ttft_ms": r.ttft_ms,
+        "status": r.status,
+        "streamed": r.streamed,
+        "error": r.error,
+    })
+}
+
+/// One attempt row: what was tried, in dispatch order, and how it ended.
+fn attempt_json(a: &AttemptRecord) -> Value {
+    json!({
+        "attempt": a.attempt,
+        "ts": a.ts,
+        "provider": a.provider,
+        "model": a.model,
+        "connection_id": a.connection_id.map(|c| c.to_string()),
+        "status": a.status,
+        "error": a.error,
+        "latency_ms": a.latency_ms,
+        "key_id": a.key_id.map(|k| k.to_string()),
+    })
+}
 
 pub async fn list(
     State(state): State<Arc<AppState>>,
@@ -33,33 +78,43 @@ pub async fn list(
         .map(|hours| crate::now_unix() - hours.clamp(1, 24 * 365) * 3600);
     match state.store.recent_usage(limit, since).await {
         Ok(records) => {
-            let data: Vec<serde_json::Value> = records
-                .iter()
-                .map(|r| {
-                    json!({
-                        "id": r.id,
-                        "ts": r.ts,
-                        "provider": r.provider,
-                        "endpoint": r.endpoint,
-                        "model": r.model,
-                        "connection_id": r.connection_id.map(|c| c.to_string()),
-                        "key_id": r.key_id.map(|k| k.to_string()),
-                        "input_tokens": r.input_tokens,
-                        "output_tokens": r.output_tokens,
-                        "cache_read_tokens": r.cache_read_tokens,
-                        "cache_write_tokens": r.cache_write_tokens,
-                        "latency_ms": r.latency_ms,
-                        "ttft_ms": r.ttft_ms,
-                        "status": r.status,
-                        "streamed": r.streamed,
-                        "error": r.error,
-                    })
-                })
-                .collect();
+            let data: Vec<Value> = records.iter().map(row_json).collect();
             ok_json(json!({ "data": data, "limit": limit }))
         }
         Err(e) => admin_error(&e),
     }
+}
+
+/// `GET /api/usage/{request_id}` — the usage row plus every attempt it made.
+///
+/// A request that failed on every candidate has attempts but no usage row (usage is
+/// only written for a served request), so the attempts alone are a known id and are
+/// returned with `"request": null` instead of a misleading 404.
+pub async fn detail(
+    State(state): State<Arc<AppState>>,
+    Path(request_id): Path<String>,
+) -> Response {
+    let Ok(id) = Uuid::parse_str(&request_id) else {
+        return admin_error(&Error::NotFound(format!("unknown request {request_id}")));
+    };
+    let request = match state.store.usage_by_request(id).await {
+        Ok(row) => row,
+        Err(e) => return admin_error(&e),
+    };
+    let attempts = match state.store.attempts_for(id).await {
+        Ok(rows) => rows,
+        Err(e) => return admin_error(&e),
+    };
+    if request.is_none() && attempts.is_empty() {
+        return admin_error(&Error::NotFound(format!("unknown request {id}")));
+    }
+    let attempts: Vec<Value> = attempts.iter().map(attempt_json).collect();
+    ok_json(json!({
+        "data": {
+            "request": request.as_ref().map(row_json),
+            "attempts": attempts,
+        }
+    }))
 }
 
 /// `GET /api/usage/series?hours=168&bucket=hour|day`

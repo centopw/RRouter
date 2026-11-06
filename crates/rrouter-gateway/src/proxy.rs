@@ -5,8 +5,10 @@
 //! events and re-encoded for the client, and whatever bytes the encoder produced are
 //! yielded immediately (at most one `Bytes` per upstream chunk).
 
+use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -19,7 +21,7 @@ use futures_util::{Stream, StreamExt};
 use rrouter_auth::{Credentials, ProviderSpec};
 use rrouter_core::{ChatRequest, ChatResponse, Dialect, Error, Result, StreamEvent, Usage};
 use rrouter_router::{Candidate, Plan};
-use rrouter_store::UsageRecord;
+use rrouter_store::{AttemptRecord, UsageRecord};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -36,37 +38,47 @@ type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 /// Entry point for `/v1/chat/completions`, `/v1/messages`, `/v1/responses`.
 pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let inbound = dialect_of(req.uri());
+    let trace = RequestTrace::new(Uuid::new_v4());
+    let started = Instant::now();
     let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return error_response(
-                inbound,
-                &Error::BadRequest(format!("request body could not be read: {e}")),
+            return trace.respond(
+                started,
+                error_response(
+                    inbound,
+                    &Error::BadRequest(format!("request body could not be read: {e}")),
+                ),
             )
         }
     };
-    match handle(&state, inbound, &parts.headers, &raw).await {
-        Ok(resp) => resp,
-        Err(e) => error_response(inbound, &e),
+    match handle(&state, inbound, &parts.headers, &raw, &trace).await {
+        Ok(resp) => trace.respond(started, resp),
+        Err(e) => trace.respond(started, error_response(inbound, &e)),
     }
 }
 
 /// `/v1/embeddings`: passthrough for [OI]-compatible providers, `501` otherwise.
 pub async fn embeddings(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let trace = RequestTrace::new(Uuid::new_v4());
+    let started = Instant::now();
     let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return error_response(
-                Dialect::OpenAiEmbeddings,
-                &Error::BadRequest(format!("request body could not be read: {e}")),
+            return trace.respond(
+                started,
+                error_response(
+                    Dialect::OpenAiEmbeddings,
+                    &Error::BadRequest(format!("request body could not be read: {e}")),
+                ),
             )
         }
     };
-    match embeddings_inner(&state, &parts.headers, &raw).await {
-        Ok(resp) => resp,
-        Err(e) => error_response(Dialect::OpenAiEmbeddings, &e),
+    match embeddings_inner(&state, &parts.headers, &raw, &trace).await {
+        Ok(resp) => trace.respond(started, resp),
+        Err(e) => trace.respond(started, error_response(Dialect::OpenAiEmbeddings, &e)),
     }
 }
 
@@ -123,19 +135,24 @@ pub async fn compact(State(state): State<Arc<AppState>>, req: Request) -> Respon
 }
 
 async fn special(state: &Arc<AppState>, req: Request, kind: Special) -> Response {
+    let trace = RequestTrace::new(Uuid::new_v4());
+    let started = Instant::now();
     let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return error_response(
-                kind.dialect(),
-                &Error::BadRequest(format!("request body could not be read: {e}")),
+            return trace.respond(
+                started,
+                error_response(
+                    kind.dialect(),
+                    &Error::BadRequest(format!("request body could not be read: {e}")),
+                ),
             )
         }
     };
-    match special_inner(state, &parts.headers, &raw, kind).await {
-        Ok(resp) => resp,
-        Err(e) => error_response(kind.dialect(), &e),
+    match special_inner(state, &parts.headers, &raw, kind, &trace).await {
+        Ok(resp) => trace.respond(started, resp),
+        Err(e) => trace.respond(started, error_response(kind.dialect(), &e)),
     }
 }
 
@@ -144,14 +161,17 @@ async fn special_inner(
     headers: &axum::http::HeaderMap,
     raw: &[u8],
     kind: Special,
+    trace: &RequestTrace,
 ) -> Result<Response> {
     let caller = state.authenticate(headers).await?;
+    trace.set_key(caller.key_id());
     let body: Value = serde_json::from_slice(raw)?;
     let model = body
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::BadRequest("missing model".into()))?
         .to_string();
+    trace.set_model(&model);
     state.admit(&caller, &model).await?;
     let plan = state
         .planner
@@ -174,7 +194,7 @@ async fn special_inner(
 
     let outcome = state
         .dispatcher
-        .run(&plan, |c| send_special(state, &body, kind, c))
+        .run(&plan, |c| trace.time(state, c, |c| send_special(state, &body, kind, c)))
         .await?;
     let value = outcome.result?;
     Ok(json_response(StatusCode::OK, value))
@@ -227,12 +247,15 @@ async fn handle(
     inbound: Dialect,
     headers: &axum::http::HeaderMap,
     raw: &[u8],
+    trace: &RequestTrace,
 ) -> Result<Response> {
     let caller = state.authenticate(headers).await?;
+    trace.set_key(caller.key_id());
     let started = Instant::now();
 
     let body: Value = serde_json::from_slice(raw)?;
     let canonical = rrouter_translate::parse_request(inbound, &body)?;
+    trace.set_model(&canonical.model);
     // Governance runs before planning: an inactive/expired key, a model outside the
     // allowlist, or an exhausted quota must not reach a provider.
     state.admit(&caller, &canonical.model).await?;
@@ -258,10 +281,11 @@ async fn handle(
         canonical,
         raw: &body,
         upstream_stream,
+        trace,
     };
 
     if !client_stream && !upstream_stream {
-        let resp = complete_for(state, inbound, &body, key_id).await?;
+        let resp = complete_traced(state, inbound, &body, key_id, trace).await?;
         return Ok(json_response(StatusCode::OK, rrouter_translate::build_response(inbound, &resp)?));
     }
 
@@ -288,6 +312,7 @@ async fn handle(
                 endpoint: endpoint_of(inbound),
                 usage: assembled.usage,
                 key: key_id,
+                request_id: trace.request_id,
                 started,
                 ttft: None,
                 streamed: false,
@@ -306,6 +331,7 @@ async fn handle(
             model: plan.model.clone(),
             started,
             key: key_id,
+            request_id: trace.request_id,
         },
         open,
         bytes,
@@ -333,8 +359,23 @@ pub async fn complete_for(
     body: &Value,
     key: Option<Uuid>,
 ) -> Result<rrouter_core::ChatResponse> {
+    // A probe is still a request: it gets its own id, its attempt rows and its usage
+    // row, so nothing it does is invisible in the log.
+    let trace = RequestTrace::new(Uuid::new_v4());
+    complete_traced(state, inbound, body, key, &trace).await
+}
+
+async fn complete_traced(
+    state: &Arc<AppState>,
+    inbound: Dialect,
+    body: &Value,
+    key: Option<Uuid>,
+    trace: &RequestTrace,
+) -> Result<rrouter_core::ChatResponse> {
+    trace.set_key(key);
     let started = Instant::now();
     let canonical = rrouter_translate::parse_request(inbound, body)?;
+    trace.set_model(&canonical.model);
     let plan = state
         .planner
         .plan(
@@ -352,6 +393,7 @@ pub async fn complete_for(
         canonical,
         raw: body,
         upstream_stream,
+        trace,
     };
 
     if !upstream_stream {
@@ -366,6 +408,7 @@ pub async fn complete_for(
                 endpoint: endpoint_of(inbound),
                 usage: resp.usage,
                 key,
+                request_id: trace.request_id,
                 started,
                 ttft: None,
                 streamed: false,
@@ -391,6 +434,7 @@ pub async fn complete_for(
             endpoint: endpoint_of(inbound),
             usage: assembled.usage,
             key,
+            request_id: trace.request_id,
             started,
             ttft: None,
             streamed: false,
@@ -697,6 +741,8 @@ struct Attempt<'a> {
     /// Body the provider can accept unmodified because it speaks the inbound dialect.
     /// Upstream must stream even if the client asked for one JSON response.
     upstream_stream: bool,
+    /// Request id and attempt counter shared by every attempt of this request.
+    trace: &'a RequestTrace,
 }
 
 impl Attempt<'_> {
@@ -751,6 +797,12 @@ impl Attempt<'_> {
 
     /// Non-streaming attempt.
     async fn send_once(&self, candidate: Candidate) -> Result<ChatResponse> {
+        self.trace
+            .time(self.state, candidate, |c| self.send_once_inner(c))
+            .await
+    }
+
+    async fn send_once_inner(&self, candidate: Candidate) -> Result<ChatResponse> {
         let (url, dialect, headers) = self.prepare(&candidate).await?;
         let wire = self.outbound(&candidate, dialect)?;
         let resp = self
@@ -776,6 +828,12 @@ impl Attempt<'_> {
     /// Streaming attempt. A non-2xx upstream fails before any byte is committed, so the
     /// dispatcher can still fall back to the next candidate.
     async fn open_stream(&self, candidate: Candidate) -> Result<ByteStream> {
+        self.trace
+            .time(self.state, candidate, |c| self.open_stream_inner(c))
+            .await
+    }
+
+    async fn open_stream_inner(&self, candidate: Candidate) -> Result<ByteStream> {
         let (url, dialect, headers) = self.prepare(&candidate).await?;
         let wire = self.outbound(&candidate, dialect)?;
         let resp = self
@@ -799,7 +857,156 @@ impl Attempt<'_> {
     }
 }
 
-/// Decode + encode in one stage: upstream bytes in, client bytes out.
+/// Per-request bookkeeping: the id the client sees, the attempt counter that numbers
+/// the attempt log, and the labels the request-level metrics need.
+///
+/// One trace is shared by every fallback attempt of one client request, so the rows it
+/// writes can be read back in dispatch order under a single id — and, when every
+/// candidate fails, the attempts are the only record that the request existed.
+struct RequestTrace {
+    request_id: Uuid,
+    /// Next attempt number; also gives the label of the last one.
+    attempts: AtomicU32,
+    inner: Mutex<TraceLabels>,
+}
+
+#[derive(Default)]
+struct TraceLabels {
+    /// Model the client asked for, empty until the body is parsed.
+    model: String,
+    /// Provider of the most recent attempt, empty before any dispatch.
+    provider: String,
+    /// Gateway key that paid for the request.
+    key: Option<Uuid>,
+}
+
+impl RequestTrace {
+    fn new(request_id: Uuid) -> Self {
+        Self {
+            request_id,
+            attempts: AtomicU32::new(0),
+            inner: Mutex::new(TraceLabels::default()),
+        }
+    }
+
+    fn labels(&self) -> MutexGuard<'_, TraceLabels> {
+        // A poisoned lock only means another task panicked; the labels are still whole.
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_key(&self, key: Option<Uuid>) {
+        self.labels().key = key;
+    }
+
+    fn set_model(&self, model: &str) {
+        self.labels().model = model.to_string();
+    }
+
+    /// Number this attempt (1-based, dispatch order) and start its stopwatch.
+    fn next_attempt(&self) -> (u32, Instant) {
+        (self.attempts.fetch_add(1, Ordering::Relaxed) + 1, Instant::now())
+    }
+
+    /// Record one finished attempt: its row, its counter, and the last-tried provider.
+    fn attempted(
+        &self,
+        state: &Arc<AppState>,
+        candidate: &Candidate,
+        number: u32,
+        started: Instant,
+        status: u16,
+        error: Option<String>,
+    ) {
+        let key = {
+            let mut labels = self.labels();
+            labels.provider.clone_from(&candidate.provider);
+            labels.key
+        };
+        crate::metrics::attempt_finished(&candidate.provider, status);
+        spawn_attempt(
+            state,
+            AttemptRecord {
+                id: None,
+                request_id: self.request_id,
+                ts: crate::now_unix(),
+                attempt: number,
+                provider: candidate.provider.clone(),
+                model: candidate.model.clone(),
+                connection_id: Some(candidate.connection),
+                status,
+                error,
+                latency_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+                key_id: key,
+            },
+        );
+    }
+
+    /// Run one attempt under the trace: number it, time it, log it, hand back its result.
+    ///
+    /// The candidate is owned so the send can consume it while the row still knows
+    /// which provider and model it belonged to.
+    async fn time<T, F, Fut>(&self, state: &Arc<AppState>, candidate: Candidate, send: F) -> Result<T>
+    where
+        F: FnOnce(Candidate) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let (number, started) = self.next_attempt();
+        let target = candidate.clone();
+        let result = send(candidate).await;
+        match &result {
+            Ok(_) => self.attempted(state, &target, number, started, 200, None),
+            Err(e) => self.attempted(
+                state,
+                &target,
+                number,
+                started,
+                attempt_status(e),
+                Some(e.to_string()),
+            ),
+        }
+        result
+    }
+
+    /// Attach the request id to a response and count the request once.
+    ///
+    /// Every response carries the id — success, stream, or error — because it is the
+    /// only handle a client has for `GET /api/usage/{id}`.
+    fn respond(&self, started: Instant, mut resp: Response) -> Response {
+        self.finish(started, resp.status().as_u16());
+        if let Ok(value) = HeaderValue::from_str(&self.request_id.to_string()) {
+            resp.headers_mut().insert("x-request-id", value);
+        }
+        resp
+    }
+
+    fn finish(&self, started: Instant, status: u16) {
+        let (provider, model) = {
+            let labels = self.labels();
+            (labels.provider.clone(), labels.model.clone())
+        };
+        crate::metrics::request_finished(&provider, &model, status, started.elapsed());
+    }
+}
+
+/// Upstream HTTP status of a failed attempt; `0` when nobody answered.
+fn attempt_status(e: &Error) -> u16 {
+    match e {
+        Error::Upstream { status, .. } => *status,
+        _ => 0,
+    }
+}
+
+fn spawn_attempt(state: &AppState, rec: AttemptRecord) {
+    let store = Arc::clone(&state.store);
+    // The audit trail must never fail a request or delay the response.
+    tokio::spawn(async move {
+        if let Err(e) = store.record_attempt(&rec).await {
+            tracing::warn!(error = %e, "attempt record failed");
+        }
+    });
+}
+
+
 ///
 /// Polling is strictly one-chunk-at-a-time, so a client frame is produced as soon as
 /// the upstream chunk that carries it arrives. A decode error emits one terminal
@@ -928,6 +1135,8 @@ struct PendingRecord {
     started: Instant,
     /// Gateway key that paid for the request; `None` for anonymous traffic.
     key: Option<Uuid>,
+    /// Id already echoed to the client, so the usage row joins the attempt log.
+    request_id: Uuid,
 }
 
 /// The `Wire` plus the bookkeeping needed to record one usage row when it ends,
@@ -955,6 +1164,7 @@ impl ResponseStream {
                 endpoint: endpoint_of(self.inner.inbound),
                 usage: tokens,
                 key: pending.key,
+                request_id: pending.request_id,
                 started: pending.started,
                 ttft,
                 streamed: true,
@@ -1031,6 +1241,8 @@ struct Recorded<'a> {
     usage: Usage,
     /// Gateway key that paid for the request; `None` for anonymous traffic.
     key: Option<Uuid>,
+    /// Id already echoed to the client, so the row can be found from its header.
+    request_id: Uuid,
     started: Instant,
     /// Time to the first model output; `None` when the client got one JSON body.
     ttft: Option<std::time::Duration>,
@@ -1050,6 +1262,7 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
     let rec = UsageRecord {
         id: None,
         ts: crate::now_unix(),
+        request_id: Some(r.request_id),
         provider: candidate.provider.clone(),
         model: r.model.to_string(),
         connection_id: Some(candidate.connection),
@@ -1085,14 +1298,17 @@ async fn embeddings_inner(
     state: &Arc<AppState>,
     headers: &axum::http::HeaderMap,
     raw: &[u8],
+    trace: &RequestTrace,
 ) -> Result<Response> {
     let caller = state.authenticate(headers).await?;
+    trace.set_key(caller.key_id());
     let body: Value = serde_json::from_slice(raw)?;
     let model = body
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::BadRequest("missing model".into()))?
         .to_string();
+    trace.set_model(&model);
     state.admit(&caller, &model).await?;
     let plan = state
         .planner
@@ -1101,7 +1317,8 @@ async fn embeddings_inner(
     let candidate = plan
         .candidates
         .first()
-        .ok_or_else(|| Error::NoRoute { model: model.clone(), detail: "no candidates".into() })?;
+        .ok_or_else(|| Error::NoRoute { model: model.clone(), detail: "no candidates".into() })?
+        .clone();
     let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
         model: model.clone(),
         detail: format!("unknown provider {}", candidate.provider),
@@ -1118,15 +1335,36 @@ async fn embeddings_inner(
         .clone()
         .map(|base| rewrite_embeddings(&base, spec.base_url))
         .unwrap_or_else(|| embeddings_url(spec.base_url));
-    let resp = state
+    let outbound = request_headers(spec, &creds)?;
+    // The upstream body is relayed verbatim, status included, so the attempt is logged
+    // around the send itself and its status is the upstream's own.
+    let (number, started) = trace.next_attempt();
+    let sent = state
         .http
         .post(&url)
-        .headers(request_headers(spec, &creds)?)
+        .headers(outbound)
         .body(raw.to_vec())
         .timeout(state.request_timeout())
         .send()
-        .await
-        .map_err(transport_error)?;
+        .await;
+    let resp = match sent {
+        Ok(resp) => {
+            trace.attempted(state, &candidate, number, started, resp.status().as_u16(), None);
+            resp
+        }
+        Err(e) => {
+            let err = transport_error(e);
+            trace.attempted(
+                state,
+                &candidate,
+                number,
+                started,
+                attempt_status(&err),
+                Some(err.to_string()),
+            );
+            return Err(err);
+        }
+    };
     passthrough_response(resp).await
 }
 

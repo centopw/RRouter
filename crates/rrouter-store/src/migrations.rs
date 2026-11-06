@@ -8,10 +8,34 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 7;
+pub(crate) const SCHEMA_VERSION: i64 = 8;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+
+/// V8: per-attempt audit trail. A fallback is only operable if every candidate that
+/// was tried is visible, so attempts get their own table keyed by the request id the
+/// client saw in `x-request-id`; the usage row carries the same id. `status` is 0 when
+/// nobody answered (transport failure, breaker), and the empty string is the "unknown"
+/// request id for rows written before this migration.
+const V8: &str = r#"
+ALTER TABLE usage ADD COLUMN request_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_usage_request ON usage(request_id);
+CREATE TABLE IF NOT EXISTS attempts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id    TEXT NOT NULL,
+  ts            INTEGER NOT NULL,
+  attempt       INTEGER NOT NULL,
+  provider      TEXT NOT NULL,
+  model         TEXT NOT NULL,
+  connection_id TEXT,
+  status        INTEGER NOT NULL DEFAULT 0,
+  error         TEXT,
+  latency_ms    INTEGER NOT NULL DEFAULT 0,
+  key_id        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_attempts_request ON attempts(request_id, attempt);
+"#;
 
 /// V7: virtual-key governance. A key carries the limits an operator sells — requests
 /// and tokens per minute, a lifetime token budget, a model allowlist, and an expiry —
@@ -184,12 +208,13 @@ mod tests {
         let tables: i64 = c
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN \
-                 ('connections','api_keys','model_aliases','disabled_models','combos','usage')",
+                 ('connections','api_keys','model_aliases','disabled_models','combos','usage',\
+                  'attempts')",
                 [],
                 |r| r.get(0),
             )
             .expect("count");
-        assert_eq!(tables, 6);
+        assert_eq!(tables, 7);
     }
 
     #[test]

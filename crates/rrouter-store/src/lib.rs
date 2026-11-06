@@ -26,7 +26,7 @@ mod store;
 
 pub use crypto::KEY_FILE_NAME;
 pub use store::{
-    ApiKey, ApiKeyPatch, Combo, Connection, ModelAlias, ModelRow, Store, UsageBucket,
-    UsageModelBucket, UsageRecord, UsageSummary, API_KEY_PREFIX,
+    ApiKey, ApiKeyPatch, AttemptRecord, Combo, Connection, ModelAlias, ModelRow, Store,
+    UsageBucket, UsageModelBucket, UsageRecord, UsageSummary, API_KEY_PREFIX,
 };
 pub use rrouter_auth::{CredentialStore, Credentials};

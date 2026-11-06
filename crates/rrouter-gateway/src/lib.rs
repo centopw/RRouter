@@ -11,6 +11,7 @@
 
 pub mod config;
 pub mod error;
+pub mod metrics;
 pub mod models_registry;
 pub mod proxy;
 pub mod routes;
@@ -96,6 +97,7 @@ pub fn app(state: Arc<AppState>) -> Router {
             get(routes::combos::list).post(routes::combos::create).delete(routes::combos::remove),
         )
         .route("/usage", get(routes::usage::list))
+        .route("/usage/{request_id}", get(routes::usage::detail))
         .route("/usage/summary", get(routes::usage::summary))
         .route("/usage/series", get(routes::usage::series))
         .route("/system", get(routes::system::system))
@@ -114,6 +116,16 @@ pub fn app(state: Arc<AppState>) -> Router {
             admin_gate,
         ));
 
+    // Prometheus scrapes `/metrics`, not `/api/metrics`, so it needs its own gate: the
+    // same loopback-only rule as the admin API, and no API key — a scraper is not a
+    // model client and must not need a virtual key to read counters.
+    let ops = Router::new()
+        .route("/metrics", get(metrics::scrape))
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            admin_gate,
+        ));
+
     Router::new()
         .route("/health", get(routes::health::health))
         .route("/v1/models", get(routes::models::list_models))
@@ -127,6 +139,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/app", get(ui::app_index))
         .route("/app/", get(ui::app_index))
         .route("/app/{*path}", get(ui::app_asset))
+        .merge(ops)
         .route("/{*path}", get(ui::asset))
         .nest("/api", api)
         .with_state(Arc::clone(&state))

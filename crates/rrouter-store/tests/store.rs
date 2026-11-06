@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
 use rrouter_store::{
-    ApiKey, ApiKeyPatch, Credentials, Store, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
+    ApiKey, ApiKeyPatch, AttemptRecord, Credentials, Store, UsageRecord, API_KEY_PREFIX,
+    KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -370,6 +371,7 @@ fn spent_tokens_sums_only_that_key() {
         let rec = |key: Option<Uuid>, ts: i64, inp: u32, out: u32, cr: u32, cw: u32| UsageRecord {
             id: None,
             ts,
+            request_id: Some(Uuid::new_v4()),
             provider: "claude".to_string(),
             model: "haiku".to_string(),
             connection_id: None,
@@ -409,7 +411,7 @@ fn spent_tokens_sums_only_that_key() {
 }
 
 #[test]
-fn v6_database_migrates_to_seven() {
+fn v6_database_migrates_to_eight() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
@@ -450,7 +452,7 @@ fn v6_database_migrates_to_seven() {
         .expect("v6 schema");
     }
 
-    let store = Store::open(&dir.db(), None).expect("open store runs the v7 step");
+    let store = Store::open(&dir.db(), None).expect("open store runs the v7 and v8 steps");
     let keys = rt().block_on(store.list_api_keys()).expect("list");
     assert_eq!(keys.len(), 1);
     let legacy = &keys[0];
@@ -467,21 +469,36 @@ fn v6_database_migrates_to_seven() {
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].input_tokens, 42, "pre-v7 rows are untouched");
     assert_eq!(recent[0].key_id, None, "pre-v7 rows are anonymous");
+    assert_eq!(
+        recent[0].request_id, None,
+        "rows from before request ids existed read back as unknown, not as a bogus id"
+    );
+    // The attempt table exists and is empty: no request had a fallback yet.
+    assert_eq!(
+        rt().block_on(store.attempts_for(Uuid::new_v4())).expect("attempts").len(),
+        0
+    );
     drop(store);
 
     let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 7);
-    let index: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_key_ts'",
-            [],
-            |r| r.get(0),
-        )
-        .expect("index");
-    assert_eq!(index, 1, "per-key spend must be indexed");
+    assert_eq!(version, 8);
+    for (index, why) in [
+        ("idx_usage_key_ts", "per-key spend must be indexed"),
+        ("idx_usage_request", "the usage row is looked up by request id"),
+        ("idx_attempts_request", "attempts are read per request, in order"),
+    ] {
+        let found: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [index],
+                |r| r.get(0),
+            )
+            .expect("index");
+        assert_eq!(found, 1, "{why}: {index}");
+    }
 }
 
 // ----- 5. credentials never plaintext ----------------------------------------------
@@ -594,6 +611,8 @@ fn usage_records_summary_and_recent_order() {
         UsageRecord {
             id: None,
             ts,
+            // Deterministic per row, so the audit trail is assertable after the read.
+            request_id: Some(Uuid::from_u128(ts as u128)),
             provider: provider.to_string(),
             model: model.to_string(),
             connection_id: Some(conn_id),
@@ -662,6 +681,11 @@ fn usage_records_summary_and_recent_order() {
         let newest = &recent[0];
         assert!(newest.id.is_some(), "usage ids are exposed for the request log");
         assert_eq!(newest.endpoint.as_deref(), Some("/v1/chat/completions"));
+        assert_eq!(
+            cached.request_id,
+            Some(Uuid::from_u128(100)),
+            "the request id the client saw round-trips"
+        );
 
         // Stacked chart data: one row per bucket and model, with its own counters.
         let by_model = s.usage_series_by_model(0, 200).await.expect("by model");
@@ -673,6 +697,112 @@ fn usage_records_summary_and_recent_order() {
         assert_eq!((claude_bucket.requests, claude_bucket.errors), (2, 1));
         assert_eq!(claude_bucket.input_tokens, 30);
         assert_eq!(claude_bucket.output_tokens, 40);
+    });
+}
+
+// ----- request ids and the attempt log ----------------------------------------------
+
+/// One request, two candidates: the failing attempt and the one that served are both
+/// kept, ordered, and reachable from the same id as the usage row.
+#[test]
+fn attempts_round_trip_under_the_request_id() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    let request_id = Uuid::new_v4();
+    let first_conn = Uuid::new_v4();
+    let second_conn = Uuid::new_v4();
+    let key = Uuid::new_v4();
+    rt().block_on(async {
+        for (attempt, conn, model, status, error, latency) in [
+            (1u32, first_conn, "gpt-4.1", 503u16, Some("upstream openai returned 503: overloaded"), 12u32),
+            (2, second_conn, "gpt-4.1-mini", 200, None, 40),
+        ] {
+            s.record_attempt(&AttemptRecord {
+                id: None,
+                request_id,
+                ts: 1_700_000_000 + i64::from(attempt),
+                attempt,
+                provider: "openai".to_string(),
+                model: model.to_string(),
+                connection_id: Some(conn),
+                status,
+                error: error.map(str::to_string),
+                latency_ms: latency,
+                key_id: if attempt == 2 { Some(key) } else { None },
+            })
+            .await
+            .expect("attempt");
+        }
+        // A different request must not leak into this one's log.
+        s.record_attempt(&AttemptRecord {
+            id: None,
+            request_id: Uuid::new_v4(),
+            ts: 1,
+            attempt: 1,
+            provider: "groq".to_string(),
+            model: "llama".to_string(),
+            connection_id: None,
+            status: 0,
+            error: Some("transport failure: connection refused".to_string()),
+            latency_ms: 3,
+            key_id: None,
+        })
+        .await
+        .expect("other attempt");
+
+        let rows = s.attempts_for(request_id).await.expect("attempts");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].attempt, 1);
+        assert_eq!(rows[0].status, 503, "the failing attempt keeps its upstream status");
+        assert_eq!(
+            rows[0].error.as_deref(),
+            Some("upstream openai returned 503: overloaded"),
+            "the client-visible message is what the log keeps"
+        );
+        assert_eq!(rows[0].connection_id, Some(first_conn));
+        assert_eq!(rows[0].latency_ms, 12);
+        assert_eq!(rows[0].key_id, None, "anonymous traffic has no key");
+        assert_eq!(rows[1].attempt, 2);
+        assert_eq!(rows[1].status, 200);
+        assert_eq!(rows[1].error, None);
+        assert_eq!(rows[1].key_id, Some(key));
+        assert_eq!(rows[1].connection_id, Some(second_conn));
+        assert!(rows.iter().all(|r| r.request_id == request_id));
+
+        // The usage row is found by the same id the client was given.
+        s.record_usage(&UsageRecord {
+            id: None,
+            ts: 1_700_000_010,
+            request_id: Some(request_id),
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            connection_id: Some(second_conn),
+            endpoint: Some("/v1/chat/completions".to_string()),
+            key_id: Some(key),
+            input_tokens: 7,
+            output_tokens: 3,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 52,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        })
+        .await
+        .expect("usage");
+
+        let found = s
+            .usage_by_request(request_id)
+            .await
+            .expect("usage by request")
+            .expect("row for this request");
+        assert_eq!(found.request_id, Some(request_id));
+        assert_eq!(found.provider, "openai");
+        assert!(
+            s.usage_by_request(Uuid::new_v4()).await.expect("missing").is_none(),
+            "an unknown request id has no usage row"
+        );
     });
 }
 
