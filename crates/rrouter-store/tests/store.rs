@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 
 use rrouter_store::{
     cache_key, ApiKey, ApiKeyPatch, AttemptRecord, Credentials, KeyModel, ModelRow, Store,
-    UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
+    StatusFilter, UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -404,7 +404,7 @@ fn spent_tokens_sums_only_that_key() {
         assert_eq!(all.len(), 2, "anonymous rows belong to no key");
 
         // Attribution is readable back, which is what `/api/usage` exposes.
-        let recent = s.recent_usage(10, None, None, None).await.expect("recent");
+        let recent = s.recent_usage(&query(10)).await.expect("recent");
         assert_eq!(recent[0].key_id, None, "newest row is the anonymous one");
         assert!(recent.iter().any(|r| r.key_id == Some(a.id)));
         assert!(recent.iter().any(|r| r.key_id == Some(b.id)));
@@ -459,7 +459,7 @@ fn cost_micros_round_trips_and_sums_per_key() {
         assert_eq!(all.len(), 2, "anonymous rows belong to no key");
 
         // The cost is stored with the row, not recomputed on read.
-        let recent = s.recent_usage(10, None, None, None).await.expect("recent");
+        let recent = s.recent_usage(&query(10)).await.expect("recent");
         assert_eq!(recent[0].cost_micros, 9_999);
         assert!(recent.iter().any(|r| r.cost_micros == 3_000));
     });
@@ -597,7 +597,7 @@ fn v6_database_migrates_to_twelve() {
         "a pre-v10 key has no money budget: unlimited, exactly as before"
     );
 
-    let recent = rt().block_on(store.recent_usage(10, None, None, None)).expect("recent");
+    let recent = rt().block_on(store.recent_usage(&query(10))).expect("recent");
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].input_tokens, 42, "pre-v7 rows are untouched");
     assert_eq!(
@@ -794,7 +794,7 @@ fn v9_database_migrates_to_twelve() {
         0
     );
 
-    let rows = rt().block_on(store.recent_usage(10, None, None, None)).expect("usage");
+    let rows = rt().block_on(store.recent_usage(&query(10))).expect("usage");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].input_tokens, 42);
     assert_eq!(rows[0].cost_micros, 0);
@@ -1101,7 +1101,7 @@ fn usage_records_summary_and_recent_order() {
         s.record_usage(&rec(200, "claude", "sonnet", 0, 0, 200, 429)).await.expect("r3");
         s.record_usage(&rec(400, "groq", "llama", 5, 5, 400, 200)).await.expect("r4");
 
-        let recent = s.recent_usage(3, None, None, None).await.expect("recent");
+        let recent = s.recent_usage(&query(3)).await.expect("recent");
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].ts, 400, "newest first");
         assert_eq!(recent[1].ts, 300);
@@ -1111,7 +1111,7 @@ fn usage_records_summary_and_recent_order() {
         assert_eq!(recent[2].error.as_deref(), Some("upstream 429"));
         assert_eq!(recent[0].connection_id, Some(conn_id));
         let cached = s
-            .recent_usage(4, None, None, None)
+            .recent_usage(&query(4))
             .await
             .expect("recent all")
             .into_iter()
@@ -1563,7 +1563,8 @@ fn walk_pages(s: &Store, limit: usize, since: Option<i64>) -> Vec<UsageRecord> {
                 Some((t, i)) => (Some(t), Some(i)),
                 None => (None, None),
             };
-            let page = s.recent_usage(limit, since, bt, bi).await.expect("page");
+            let q = UsageQuery { limit, since, before_ts: bt, before_id: bi, ..Default::default() };
+            let page = s.recent_usage(&q).await.expect("page");
             let short = page.len() < limit;
             cursor = page.last().map(|r| (r.ts, r.id.expect("id read back")));
             all.extend(page);
@@ -1582,12 +1583,17 @@ fn usage_cursor_pages_disjoint_and_ordered() {
         for (ts, m) in [(10, "a"), (20, "b"), (30, "c"), (40, "d"), (50, "e")] {
             store.record_usage(&page_row(ts, m)).await.expect("insert");
         }
-        let first = store.recent_usage(2, None, None, None).await.expect("first");
+        let first = store.recent_usage(&query(2)).await.expect("first");
         assert_eq!(first.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![50, 40]);
         let cursor_ts = first.last().expect("row").ts;
         let cursor_id = first.last().expect("row").id.expect("id");
         let second = store
-            .recent_usage(2, None, Some(cursor_ts), Some(cursor_id))
+            .recent_usage(&UsageQuery {
+                limit: 2,
+                before_ts: Some(cursor_ts),
+                before_id: Some(cursor_id),
+                ..Default::default()
+            })
             .await
             .expect("second");
         assert_eq!(second.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![30, 20]);
@@ -1631,16 +1637,207 @@ fn usage_cursor_composes_with_hours_window() {
             store.record_usage(&page_row(ts, "x")).await.expect("insert");
         }
         // `since` keeps ts >= 200; the pair cursor then pages strictly past the ts-400 row.
-        let at_400 = store.recent_usage(10, Some(400), None, None).await.expect("400");
+        let at_400 = store
+            .recent_usage(&UsageQuery { limit: 10, since: Some(400), ..Default::default() })
+            .await
+            .expect("400");
         let row_400 = at_400.iter().find(|r| r.ts == 400).expect("row 400").id.expect("id");
         let page = store
-            .recent_usage(2, Some(200), Some(400), Some(row_400))
+            .recent_usage(&UsageQuery {
+                limit: 2,
+                since: Some(200),
+                before_ts: Some(400),
+                before_id: Some(row_400),
+                ..Default::default()
+            })
             .await
             .expect("page");
         assert_eq!(page.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![300, 200]);
-        let none = store.recent_usage(10, Some(600), Some(600), None).await.expect("none");
+        let none = store
+            .recent_usage(&UsageQuery {
+                limit: 10,
+                since: Some(600),
+                before_ts: Some(600),
+                ..Default::default()
+            })
+            .await
+            .expect("none");
         assert!(none.is_empty(), "cursor and window agree on empty");
-        let below = store.recent_usage(10, Some(200), Some(200), Some(0)).await.expect("below");
+        let below = store
+            .recent_usage(&UsageQuery {
+                limit: 10,
+                since: Some(200),
+                before_ts: Some(200),
+                before_id: Some(0),
+                ..Default::default()
+            })
+            .await
+            .expect("below");
         assert!(below.is_empty(), "nothing in the window is older than ts 200: {below:?}");
     });
+}
+
+// ----- usage filters ----------------------------------------------------------------
+
+/// An unfiltered query for the first `limit` rows.
+fn query(limit: usize) -> UsageQuery {
+    UsageQuery { limit, ..Default::default() }
+}
+
+/// A usage row whose provider, model, key, and outcome are what the filters inspect.
+fn filter_row(
+    ts: i64,
+    provider: &str,
+    model: &str,
+    key: Option<Uuid>,
+    status: u16,
+    error: Option<&str>,
+) -> UsageRecord {
+    UsageRecord {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        key_id: key,
+        status,
+        error: error.map(str::to_string),
+        ..page_row(ts, model)
+    }
+}
+
+/// Timestamps of the rows a query returns, in page order.
+fn ts_of(s: &Store, q: &UsageQuery) -> Vec<i64> {
+    rt().block_on(s.recent_usage(q)).expect("recent").iter().map(|r| r.ts).collect()
+}
+
+/// Walks the filtered set with the `(ts, id)` cursor, `limit` rows at a time.
+fn walk_filtered(s: &Store, limit: usize, base: UsageQuery) -> Vec<UsageRecord> {
+    rt().block_on(async {
+        let mut all = Vec::new();
+        let mut q = UsageQuery { limit, ..base };
+        loop {
+            let page = s.recent_usage(&q).await.expect("page");
+            let short = page.len() < limit;
+            if let Some(last) = page.last() {
+                q.before_ts = Some(last.ts);
+                q.before_id = last.id;
+            }
+            all.extend(page);
+            if short {
+                break;
+            }
+        }
+        all
+    })
+}
+
+#[test]
+fn usage_filters_select_provider_model_key_and_status() {
+    let store = Store::open_in_memory().expect("mem");
+    let key = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    rt().block_on(async {
+        let rows = [
+            filter_row(10, "openai", "gpt-4.1", Some(key), 200, None),
+            filter_row(20, "openai", "gpt-4.1", Some(other), 500, None),
+            filter_row(30, "anthropic", "claude", Some(key), 200, Some("stream dropped")),
+            filter_row(40, "openai", "gpt-4.1-mini", None, 200, None),
+            filter_row(50, "openai", "openai/gpt-4.1", Some(key), 200, None),
+        ];
+        for r in &rows {
+            store.record_usage(r).await.expect("insert");
+        }
+    });
+
+    // Provider is an exact match.
+    let openai = UsageQuery { provider: Some("openai".into()), ..query(10) };
+    assert_eq!(ts_of(&store, &openai), vec![50, 40, 20, 10]);
+    // Model alone matches the stored string exactly; the ref row (ts 50) is not `gpt-4.1`.
+    let exact = UsageQuery { model: Some("gpt-4.1".into()), ..query(10) };
+    assert_eq!(ts_of(&store, &exact), vec![20, 10]);
+    // A ref matches itself exactly and its bare id.
+    let both = UsageQuery {
+        model: Some("openai/gpt-4.1".into()),
+        bare_model: Some("gpt-4.1".into()),
+        ..query(10)
+    };
+    assert_eq!(ts_of(&store, &both), vec![50, 20, 10]);
+    // Key filter.
+    let by_key = UsageQuery { key_id: Some(key), ..query(10) };
+    assert_eq!(ts_of(&store, &by_key), vec![50, 30, 10]);
+    // Error: status >= 400 or error text, even when the status is 2xx.
+    let errors = UsageQuery { status: Some(StatusFilter::Error), ..query(10) };
+    assert_eq!(ts_of(&store, &errors), vec![30, 20]);
+    // Success: 2xx with no error text.
+    let success = UsageQuery { status: Some(StatusFilter::Success), ..query(10) };
+    assert_eq!(ts_of(&store, &success), vec![50, 40, 10]);
+    // Combinations.
+    let openai_key = UsageQuery { provider: Some("openai".into()), key_id: Some(key), ..query(10) };
+    assert_eq!(ts_of(&store, &openai_key), vec![50, 10]);
+    let key_error = UsageQuery { key_id: Some(key), status: Some(StatusFilter::Error), ..query(10) };
+    assert_eq!(ts_of(&store, &key_error), vec![30]);
+    let openai_error =
+        UsageQuery { provider: Some("openai".into()), status: Some(StatusFilter::Error), ..query(10) };
+    assert_eq!(ts_of(&store, &openai_error), vec![20]);
+    let since_key = UsageQuery { since: Some(25), key_id: Some(key), ..query(10) };
+    assert_eq!(ts_of(&store, &since_key), vec![50, 30]);
+    let model_success_key = UsageQuery {
+        model: Some("gpt-4.1".into()),
+        key_id: Some(key),
+        status: Some(StatusFilter::Success),
+        ..query(10)
+    };
+    assert_eq!(ts_of(&store, &model_success_key), vec![10]);
+    let mismatch = UsageQuery {
+        provider: Some("anthropic".into()),
+        model: Some("gpt-4.1".into()),
+        ..query(10)
+    };
+    assert!(ts_of(&store, &mismatch).is_empty(), "provider and model must agree");
+}
+
+#[test]
+fn usage_filters_compose_with_the_cursor() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        // Odd positions fail; timestamps tie so the cursor's id half is exercised.
+        for (i, ts) in [100, 100, 100, 200, 200, 300, 300, 300].into_iter().enumerate() {
+            let status = if i % 2 == 1 { 500 } else { 200 };
+            store
+                .record_usage(&filter_row(ts, "openai", "gpt-4.1", None, status, None))
+                .await
+                .expect("insert");
+        }
+    });
+    let errors = UsageQuery { status: Some(StatusFilter::Error), ..query(2) };
+    let first = rt().block_on(store.recent_usage(&errors)).expect("first");
+    assert_eq!(first.len(), 2, "a full filtered page");
+    let last = first.last().expect("row");
+    let second = rt()
+        .block_on(store.recent_usage(&UsageQuery {
+            before_ts: Some(last.ts),
+            before_id: last.id,
+            ..errors.clone()
+        }))
+        .expect("second");
+    assert_eq!(second.len(), 2, "the filtered walk continues past the first page");
+    let first_ids: Vec<i64> = first.iter().map(|r| r.id.expect("id")).collect();
+    let second_ids: Vec<i64> = second.iter().map(|r| r.id.expect("id")).collect();
+    assert!(first_ids.iter().all(|i| !second_ids.contains(i)), "pages are disjoint");
+    assert!(first.iter().chain(&second).all(|r| r.status == 500), "every page stays filtered");
+
+    // The filtered walk equals the unfiltered walk restricted to failures.
+    let filtered: Vec<i64> = walk_filtered(
+        &store,
+        2,
+        UsageQuery { status: Some(StatusFilter::Error), ..Default::default() },
+    )
+    .iter()
+    .map(|r| r.id.expect("id"))
+    .collect();
+    let oracle: Vec<i64> = walk_filtered(&store, 3, Default::default())
+        .iter()
+        .filter(|r| r.status == 500)
+        .map(|r| r.id.expect("id"))
+        .collect();
+    assert_eq!(filtered, oracle, "same rows, same order");
+    assert_eq!(filtered.len(), 4);
 }

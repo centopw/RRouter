@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::response::Response;
 use rrouter_core::Error;
-use rrouter_store::{AttemptRecord, UsageRecord};
+use rrouter_store::{AttemptRecord, StatusFilter, UsageQuery, UsageRecord};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -82,11 +82,54 @@ pub async fn list(
     // share a timestamp; `before` alone keeps only strictly older rows.
     let before_ts = param("before").and_then(|v| v.parse::<i64>().ok());
     let before_id = param("before_id").and_then(|v| v.parse::<i64>().ok());
-    match state
-        .store
-        .recent_usage(limit, since, before_ts, before_id)
-        .await
-    {
+    // Filters are applied in SQL so a filtered walk pages through matching rows only.
+    // An empty value is the same as an absent one, so a select left on "all" is harmless.
+    let text = |key: &str| param(key).filter(|v| !v.is_empty());
+    let provider = text("provider");
+    let key_id = match text("key_id") {
+        None => None,
+        Some(raw) => match Uuid::parse_str(&raw) {
+            Ok(id) => Some(id),
+            Err(_) => return admin_error(&Error::BadRequest("key_id must be a uuid".into())),
+        },
+    };
+    let status = match text("status").as_deref() {
+        None => None,
+        Some("2xx") => Some(StatusFilter::Success),
+        Some("error") => Some(StatusFilter::Error),
+        Some(_) => {
+            return admin_error(&Error::BadRequest("status must be 2xx or error".into()));
+        }
+    };
+    // `model` matches the stored string exactly. A `provider/model` ref also matches its
+    // bare id, the same normalization the cost lookup applies: a provider prefix is only
+    // stripped when it names the filtered provider, or a registered one when none is set.
+    let (model, bare_model) = match text("model") {
+        None => (None, None),
+        Some(m) => {
+            let bare = match provider.as_deref() {
+                Some(p) => m.strip_prefix(p).and_then(|rest| rest.strip_prefix('/')),
+                None => m
+                    .split_once('/')
+                    .filter(|(head, _)| rrouter_auth::get(head).is_some())
+                    .map(|(_, rest)| rest),
+            }
+            .map(str::to_string);
+            (Some(m), bare)
+        }
+    };
+    let query = UsageQuery {
+        since,
+        before_ts,
+        before_id,
+        provider,
+        model,
+        bare_model,
+        key_id,
+        status,
+        limit,
+    };
+    match state.store.recent_usage(&query).await {
         Ok(records) => {
             // A short page is the last one: there is nothing older to ask for.
             let next = (records.len() == limit).then(|| records.last()).flatten();

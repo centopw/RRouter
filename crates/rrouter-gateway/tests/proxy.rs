@@ -18,7 +18,7 @@ use http_body_util::BodyExt;
 use rrouter_auth::Credentials;
 use rrouter_gateway::{app, config::Config, AppState};
 use rrouter_router::{Breaker, Catalog, Dispatcher, Planner};
-use rrouter_store::{ModelRow, Store, UsageRecord};
+use rrouter_store::{ModelRow, Store, UsageQuery, UsageRecord};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -1367,7 +1367,7 @@ async fn streaming_records_time_to_first_output() {
 
     let mut row = None;
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(5, None, None, None).await {
+        if let Ok(rows) = h.state.store.recent_usage(&UsageQuery { limit: 5, ..Default::default() }).await {
             if let Some(first) = rows.first() {
                 row = Some(first.clone());
                 break;
@@ -1568,7 +1568,7 @@ async fn usage_rows_carry_the_key_id() {
 
     let mut row = None;
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(5, None, None, None).await {
+        if let Ok(rows) = h.state.store.recent_usage(&UsageQuery { limit: 5, ..Default::default() }).await {
             if let Some(found) = rows.iter().find(|r| r.key_id == Some(uuid)) {
                 row = Some(found.clone());
                 break;
@@ -1967,7 +1967,7 @@ async fn embeddings_record_usage_and_relay_malformed_bodies_unchanged() {
 
     let mut row = None;
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(5, None, None, None).await {
+        if let Ok(rows) = h.state.store.recent_usage(&UsageQuery { limit: 5, ..Default::default() }).await {
             if let Some(found) = rows.iter().find(|r| r.key_id == Some(uuid)) {
                 row = Some(found.clone());
                 break;
@@ -1991,7 +1991,7 @@ async fn embeddings_record_usage_and_relay_malformed_bodies_unchanged() {
     let bytes = res.into_body().collect().await.expect("body").to_bytes();
     assert_eq!(String::from_utf8_lossy(&bytes), "{\"data\": [not json");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let rows = h.state.store.recent_usage(10, None, None, None).await.expect("usage");
+    let rows = h.state.store.recent_usage(&UsageQuery { limit: 10, ..Default::default() }).await.expect("usage");
     assert_eq!(rows.len(), 1, "the unparseable body adds no row: {rows:?}");
 }
 
@@ -2030,13 +2030,13 @@ async fn passthrough_endpoints_record_usage_only_when_reported() {
 
     let deadline = Instant::now() + Duration::from_secs(1);
     while Instant::now() < deadline
-        && h.state.store.recent_usage(10, None, None, None).await.expect("usage").is_empty()
+        && h.state.store.recent_usage(&UsageQuery { limit: 10, ..Default::default() }).await.expect("usage").is_empty()
     {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     // Give the (unwritten) count_tokens row a chance to appear before asserting absence.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let rows = h.state.store.recent_usage(10, None, None, None).await.expect("usage");
+    let rows = h.state.store.recent_usage(&UsageQuery { limit: 10, ..Default::default() }).await.expect("usage");
     assert_eq!(rows.len(), 1, "count_tokens reported no usage: {rows:?}");
     assert_eq!(rows[0].endpoint.as_deref(), Some("/v1/responses/compact"));
     assert_eq!(rows[0].input_tokens, 11);
@@ -2788,7 +2788,7 @@ async fn seed_usage(
 /// `model` — accounting is asynchronous, so an assertion must not race it.
 async fn wait_for_usage(h: &Harness, key: uuid::Uuid, model: &str) -> UsageRecord {
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(50, None, None, None).await {
+        if let Ok(rows) = h.state.store.recent_usage(&UsageQuery { limit: 50, ..Default::default() }).await {
             if let Some(row) = rows
                 .into_iter()
                 .find(|r| r.key_id == Some(key) && r.model == model)
@@ -2915,6 +2915,105 @@ async fn usage_api_pages_backwards_without_overlap() {
     assert_eq!(status, StatusCode::OK);
     assert!(last["data"].as_array().expect("rows").is_empty(), "nothing older: {last}");
     assert!(last["next_before"].is_null(), "an empty page ends the walk");
+}
+
+/// `/api/usage` filters happen in SQL, so a filtered walk pages through matching rows only:
+/// `status=error` pages past the 2xx rows, the cursor survives the filter, and malformed
+/// `key_id` or `status` values are a `400`, never an empty page.
+#[tokio::test]
+async fn usage_api_filters_compose_with_the_cursor() {
+    let h = harness(false);
+    let key = uuid::Uuid::new_v4();
+    // (ts, model, status, error): 2xx, 5xx, 2xx-with-error-text, 429, 2xx.
+    let rows = [
+        (100, "m1", 200, None),
+        (200, "m2", 500, None),
+        (300, "m3", 200, Some("stream dropped")),
+        (400, "m4", 429, None),
+        (500, "m5", 200, None),
+    ];
+    for (ts, model, status, error) in rows {
+        h.state
+            .store
+            .record_usage(&UsageRecord {
+                id: None,
+                ts,
+                request_id: Some(uuid::Uuid::new_v4()),
+                provider: "openai".to_string(),
+                model: model.to_string(),
+                connection_id: None,
+                endpoint: Some("/v1/chat/completions".to_string()),
+                key_id: Some(key),
+                cost_micros: 0,
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                latency_ms: 1,
+                ttft_ms: 0,
+                status,
+                streamed: false,
+                error: error.map(str::to_string),
+            })
+            .await
+            .expect("record usage");
+    }
+
+    let models = |page: &Value| -> Vec<String> {
+        page["data"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|r| r["model"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Errors are status >= 400 or error text: m4, m3, m2, newest first, one per page.
+    let (status, mut page) = h.get("/api/usage?status=error&limit=1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models(&page), vec!["m4"]);
+    let mut seen = models(&page);
+    for expected in ["m3", "m2"] {
+        let before = page["next_before"].as_i64().expect("cursor ts");
+        let before_id = page["next_before_id"].as_i64().expect("cursor id");
+        let (status, next) = h
+            .get(&format!(
+                "/api/usage?status=error&limit=1&before={before}&before_id={before_id}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(models(&next), vec![expected], "next page stays filtered: {next}");
+        seen.extend(models(&next));
+        page = next;
+    }
+    assert_eq!(seen, vec!["m4", "m3", "m2"]);
+    // The walk ends with an empty page and no further cursor.
+    let before = page["next_before"].as_i64().expect("cursor ts");
+    let before_id = page["next_before_id"].as_i64().expect("cursor id");
+    let (_, last) = h
+        .get(&format!("/api/usage?status=error&limit=1&before={before}&before_id={before_id}"))
+        .await;
+    assert!(models(&last).is_empty(), "nothing older: {last}");
+    assert!(last["next_before"].is_null());
+
+    // `2xx` is success with no error text; `hours` still composes with it.
+    let (_, ok) = h.get("/api/usage?status=2xx&limit=10").await;
+    assert_eq!(models(&ok), vec!["m5", "m1"], "m3 is 2xx but carries error text");
+
+    // Key and model-ref filters; a ref matches its bare stored id.
+    let (_, by_key) = h.get(&format!("/api/usage?key_id={key}&status=error&limit=10")).await;
+    assert_eq!(models(&by_key), vec!["m4", "m3", "m2"]);
+    let (_, by_ref) = h.get("/api/usage?provider=openai&model=openai/m2&limit=10").await;
+    assert_eq!(models(&by_ref), vec!["m2"], "a ref matches its bare id");
+    let (_, anon) = h.get(&format!("/api/usage?key_id={}&limit=10", uuid::Uuid::new_v4())).await;
+    assert!(models(&anon).is_empty(), "an unknown key has no rows: {anon}");
+
+    // Malformed filters are client errors, not empty pages.
+    let (status, body) = h.get("/api/usage?key_id=not-a-uuid").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(body["error"]["message"].as_str().is_some_and(|m| m.ends_with("key_id must be a uuid")), "body: {body}");
+    let (status, body) = h.get("/api/usage?status=ok").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
 }
 
 /// A USD budget is enforced from durable spend, and the refusal names dollars.

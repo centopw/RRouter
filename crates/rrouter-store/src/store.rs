@@ -294,6 +294,48 @@ pub struct UsageRecord {
     pub error: Option<String>,
 }
 
+/// Outcome class for [`UsageQuery::status`]. `Success` is a 2xx answer with no error text;
+/// `Error` is the dashboard's rule everywhere else: `status >= 400 OR error IS NOT NULL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusFilter {
+    Success,
+    Error,
+}
+
+impl StatusFilter {
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Filters and keyset cursor for [`Store::recent_usage`]. Every field except `limit` is
+/// optional and an unset field does not constrain the walk. All filters are applied in SQL,
+/// so each page is the next `limit` rows of the filtered set rather than a filtered slice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageQuery {
+    /// Keep rows with `ts >= since`.
+    pub since: Option<i64>,
+    /// Cursor `ts` of the last row on the previous page.
+    pub before_ts: Option<i64>,
+    /// Cursor `id` of the last row on the previous page; with `before_ts`, pages exactly.
+    pub before_id: Option<i64>,
+    /// Exact provider match.
+    pub provider: Option<String>,
+    /// Stored model string, matched exactly.
+    pub model: Option<String>,
+    /// Bare model id that also matches. The gateway sets it when the caller passed
+    /// `provider/model`, so both spellings of a stored model are found.
+    pub bare_model: Option<String>,
+    /// Gateway key that paid for the request.
+    pub key_id: Option<Uuid>,
+    pub status: Option<StatusFilter>,
+    /// Rows per page.
+    pub limit: usize,
+}
+
 /// One candidate that was dispatched for a request.
 ///
 /// A request has one attempt per candidate the dispatcher actually sent to, numbered
@@ -1576,31 +1618,47 @@ impl Store {
         .map_err(migrations::db_err)
     }
 
-    /// Most recent records first, ordered `(ts, id)` descending.
+    /// Most recent records first, ordered `(ts, id)` descending. Every filter in `query`
+    /// is applied in one SQL statement, so a filtered walk over history pages correctly.
     ///
     /// `before_ts` is an exclusive cursor. With `before_id` as well, the cursor is the
     /// pair: rows strictly after `(before_ts, before_id)` in that order are excluded, so
     /// rows sharing a timestamp across a page boundary are neither dropped nor repeated.
     /// Without `before_id`, only `ts < before_ts` is kept. `since` filters `ts >= since`.
-    pub async fn recent_usage(
-        &self,
-        limit: usize,
-        since: Option<i64>,
-        before_ts: Option<i64>,
-        before_id: Option<i64>,
-    ) -> Result<Vec<UsageRecord>> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    pub async fn recent_usage(&self, query: &UsageQuery) -> Result<Vec<UsageRecord>> {
+        let limit = i64::try_from(query.limit).unwrap_or(i64::MAX);
+        let key_id = query.key_id.map(|k| k.to_string());
+        let status = query.status.map(StatusFilter::as_sql);
         let conn = self.conn();
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {USAGE_COLUMNS} FROM usage \
                  WHERE (?2 IS NULL OR ts >= ?2) \
                  AND (?3 IS NULL OR ts < ?3 OR (?4 IS NOT NULL AND ts = ?3 AND id < ?4)) \
+                 AND (?5 IS NULL OR provider = ?5) \
+                 AND (?6 IS NULL OR model = ?6 OR (?7 IS NOT NULL AND model = ?7)) \
+                 AND (?8 IS NULL OR key_id = ?8) \
+                 AND (?9 IS NULL \
+                      OR (?9 = 'success' AND status BETWEEN 200 AND 299 AND error IS NULL) \
+                      OR (?9 = 'error' AND (status >= 400 OR error IS NOT NULL))) \
                  ORDER BY ts DESC, id DESC LIMIT ?1"
             ))
             .map_err(migrations::db_err)?;
         let rows = stmt
-            .query_map(params![limit, since, before_ts, before_id], row_to_usage)
+            .query_map(
+                params![
+                    limit,
+                    query.since,
+                    query.before_ts,
+                    query.before_id,
+                    query.provider.as_deref(),
+                    query.model.as_deref(),
+                    query.bare_model.as_deref(),
+                    key_id.as_deref(),
+                    status,
+                ],
+                row_to_usage,
+            )
             .map_err(migrations::db_err)?;
         let mut out = Vec::new();
         for r in rows {
