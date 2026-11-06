@@ -27,6 +27,11 @@ for t in "${TASKS[@]}"; do
   [ -d "$src" ] || { echo "skip $t: no $src" >&2; continue; }
   # Sync ONLY this crate: an unquoted/array-expanded target could otherwise
   # rewrite sibling crates with stale stubs from the worker's branch.
+  # Every top-level entry of the crate except Cargo.toml and Rust sources, so
+  # embedded assets (include_str!) and any future fixture dirs come along too.
+  rsync -a --delete --exclude 'Cargo.toml' \
+        --exclude 'src/***' --exclude 'tests/***' \
+        "$src/" "$REPO/crates/$crate/"
   rsync -a --delete "$src/src/" "$REPO/crates/$crate/src/"
   if [ -d "$src/tests" ]; then
     mkdir -p "$REPO/crates/$crate/tests"

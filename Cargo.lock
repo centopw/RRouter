@@ -1302,6 +1302,7 @@ dependencies = [
  "rrouter-router",
  "rrouter-store",
  "rrouter-translate",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

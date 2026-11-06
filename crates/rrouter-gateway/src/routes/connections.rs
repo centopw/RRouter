@@ -1,0 +1,369 @@
+//! `/api/connections` — provider credential CRUD and the 1-token probe.
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use rrouter_auth::Credentials;
+use rrouter_core::{ChatRequest, Dialect, Error, Message, Role};
+use rrouter_store::Connection;
+use serde_json::{json, Map, Value};
+use uuid::Uuid;
+
+use super::{admin_error, body_json, ok_json};
+use crate::state::AppState;
+
+/// A connection as the admin API shows it: booleans, never token material.
+#[derive(serde::Serialize)]
+pub struct ConnectionView {
+    pub id: String,
+    pub provider: String,
+    pub auth_type: String,
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub priority: i32,
+    pub is_active: bool,
+    pub base_url_override: Option<String>,
+    pub has_access_token: bool,
+    pub has_refresh_token: bool,
+    pub has_api_key: bool,
+    pub expires_at: Option<i64>,
+    pub backoff_level: u32,
+    pub last_error: Option<String>,
+    pub last_error_code: Option<u16>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl From<&Connection> for ConnectionView {
+    fn from(c: &Connection) -> Self {
+        let creds = &c.credentials;
+        Self {
+            id: c.id.to_string(),
+            provider: c.provider.clone(),
+            auth_type: c.auth_type.clone(),
+            name: c.name.clone(),
+            email: c.email.clone(),
+            priority: c.priority,
+            is_active: c.is_active,
+            base_url_override: creds.base_url_override.clone(),
+            has_access_token: creds.access_token.as_deref().is_some_and(|t| !t.is_empty()),
+            has_refresh_token: creds.refresh_token.as_deref().is_some_and(|t| !t.is_empty()),
+            has_api_key: creds.api_key.as_deref().is_some_and(|t| !t.is_empty()),
+            expires_at: creds.expires_at,
+            backoff_level: c.backoff_level,
+            last_error: c.last_error.clone(),
+            last_error_code: c.last_error_code,
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+        }
+    }
+}
+
+pub async fn list(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<Vec<(String, String)>>,
+) -> Response {
+    let provider = query.iter().find(|(k, _)| k == "provider").map(|(_, v)| v.as_str());
+    match state.store.list_connections(provider).await {
+        Ok(conns) => {
+            let data: Vec<ConnectionView> = conns.iter().map(ConnectionView::from).collect();
+            ok_json(json!({ "data": data }))
+        }
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// Body: `{provider, auth_type, name?, email?, priority?, credentials:{…}}`.
+pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response {
+    let value = match body_json(body).await {
+        Ok(v) => v,
+        Err(resp) => return *resp,
+    };
+    let Some(provider) = super::models::str_field(&value, "provider") else {
+        return admin_error(&Error::BadRequest("provider is required".into()));
+    };
+    let Some(spec) = rrouter_auth::get(&provider) else {
+        return admin_error(&Error::BadRequest(format!("unknown provider {provider}")));
+    };
+    let auth_type = super::models::str_field(&value, "auth_type")
+        .unwrap_or_else(|| default_auth_type(spec).to_string());
+    let name = super::models::str_field(&value, "name");
+    let creds = match credentials_from(&value) {
+        Ok(c) => c,
+        Err(e) => return admin_error(&e),
+    };
+    match state
+        .store
+        .create_connection(&provider, &auth_type, creds, name.as_deref())
+        .await
+    {
+        Ok(created) => {
+            if let Some(priority) = value.get("priority").and_then(Value::as_i64) {
+                if let Err(e) = apply_patch(&state, created.id, json!({ "priority": priority })).await {
+                    return admin_error(&e);
+                }
+            }
+            match state.store.get_connection(created.id).await {
+                Ok(Some(c)) => (StatusCode::CREATED, axum::Json(ConnectionView::from(&c))).into_response(),
+                Ok(None) => (StatusCode::CREATED, axum::Json(ConnectionView::from(&created))).into_response(),
+                Err(e) => admin_error(&e),
+            }
+        }
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// `PATCH /api/connections/:id` with any subset of the create body.
+pub async fn update(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Body,
+) -> Response {
+    let Ok(uuid) = Uuid::parse_str(&id) else {
+        return admin_error(&Error::BadRequest("connection id must be a uuid".into()));
+    };
+    let value = match body_json(body).await {
+        Ok(v) => v,
+        Err(resp) => return *resp,
+    };
+    if let Some(creds) = value.get("credentials") {
+        let patch = match credentials_patch(creds) {
+            Ok(p) => p,
+            Err(e) => return admin_error(&e),
+        };
+        if let Err(e) = state.store.merge_credentials(uuid, patch).await {
+            return admin_error(&e);
+        }
+    }
+    if let Err(e) = apply_patch(&state, uuid, value.clone()).await {
+        return admin_error(&e);
+    }
+    match state.store.get_connection(uuid).await {
+        Ok(Some(c)) => ok_json(ConnectionView::from(&c)),
+        Ok(None) => admin_error(&Error::NotFound(format!("connection {uuid}"))),
+        Err(e) => admin_error(&e),
+    }
+}
+
+pub async fn remove(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Ok(uuid) = Uuid::parse_str(&id) else {
+        return admin_error(&Error::BadRequest("connection id must be a uuid".into()));
+    };
+    match state.store.delete_connection(uuid).await {
+        Ok(true) => ok_json(json!({ "deleted": true, "id": uuid.to_string() })),
+        Ok(false) => admin_error(&Error::NotFound(format!("connection {uuid}"))),
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// `POST /api/connections/:id/test`: refresh credentials, then ask for one token.
+pub async fn test(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Ok(uuid) = Uuid::parse_str(&id) else {
+        return admin_error(&Error::BadRequest("connection id must be a uuid".into()));
+    };
+    let Some(conn) = (match state.store.get_connection(uuid).await {
+        Ok(c) => c,
+        Err(e) => return admin_error(&e),
+    }) else {
+        return admin_error(&Error::NotFound(format!("connection {uuid}")));
+    };
+    let Some(spec) = rrouter_auth::get(&conn.provider) else {
+        return admin_error(&Error::BadRequest(format!("unknown provider {}", conn.provider)));
+    };
+    let started = std::time::Instant::now();
+    let result = probe(&state, spec, conn).await;
+    let latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+    match result {
+        Ok(status) => ok_json(json!({ "ok": true, "status": status, "latency_ms": latency_ms })),
+        Err(e) => ok_json(json!({
+            "ok": false,
+            "status": e.status(),
+            "latency_ms": latency_ms,
+            "error": e.to_string(),
+        })),
+    }
+}
+
+async fn probe(
+    state: &Arc<AppState>,
+    spec: &'static rrouter_auth::ProviderSpec,
+    conn: Connection,
+) -> Result<u16, Error> {
+    let creds = state.refresher.fresh(state.store.as_ref(), spec, conn.id).await?;
+    let mut req = ChatRequest::new("ping");
+    req.messages.push(Message::text(Role::User, "ping"));
+    req.max_tokens = Some(1);
+    // The probe never streams: a single token, one JSON response.
+    let body = rrouter_translate::build_request(spec.default_dialect, &req, false)?;
+
+    let mut headers = axum::http::HeaderMap::new();
+    for (name, value) in rrouter_auth::build_headers(spec, &creds)? {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::header::HeaderName::from_bytes(name.as_bytes()),
+            axum::http::HeaderValue::from_str(&value),
+        ) {
+            headers.append(name, value);
+        }
+    }
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let url = crate::proxy::endpoint_for(spec, creds.base_url_override.as_deref(), Dialect::OpenAiChat).0;
+    let resp = state
+        .http
+        .post(url)
+        .headers(headers)
+        .json(&body)
+        .timeout(state.request_timeout())
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                Error::Timeout(e.to_string())
+            } else {
+                Error::Transport(e.to_string())
+            }
+        })?;
+    let status = resp.status().as_u16();
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(Error::Upstream {
+            provider: conn.provider.clone(),
+            status,
+            body: text.chars().take(512).collect(),
+            payload: None,
+        });
+    }
+    Ok(status)
+}
+
+fn default_auth_type(spec: &rrouter_auth::ProviderSpec) -> &'static str {
+    match spec.kind {
+        rrouter_auth::ProviderKind::OAuth => "oauth",
+        rrouter_auth::ProviderKind::ApiKey => "api_key",
+        rrouter_auth::ProviderKind::Local => "none",
+    }
+}
+
+/// Fields an admin may write, minus the ones that live in their own columns.
+async fn apply_patch(state: &AppState, id: Uuid, value: Value) -> Result<(), Error> {
+    let Some(conn) = state.store.get_connection(id).await? else {
+        return Err(Error::NotFound(format!("connection {id}")));
+    };
+    let mut patch = Credentials::default();
+    let mut has_patch = false;
+    if let Some(email) = super::models::str_field(&value, "email") {
+        patch.account_label = Some(email);
+        has_patch = true;
+    }
+    if let Some(url) = value.get("base_url_override").and_then(Value::as_str) {
+        patch.base_url_override = Some(url.to_string());
+        has_patch = true;
+    }
+    if has_patch {
+        // `email` is mirrored into the credentials blob's display label.
+        state.store.merge_credentials(id, patch).await?;
+    }
+    if let Some(active) = value.get("is_active").and_then(Value::as_bool) {
+        state
+            .store
+            .update_connection_status(id, if active { 0 } else { conn.backoff_level }, None, None)
+            .await?;
+    }
+    if let Some(error) = value.get("last_error").and_then(Value::as_str) {
+        state
+            .store
+            .update_connection_status(id, conn.backoff_level, Some(error), None)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Extract the writable credential fields from a create body.
+pub fn credentials_from(value: &Value) -> Result<Credentials, Error> {
+    let Some(creds) = value.get("credentials").filter(|v| v.is_object()) else {
+        return Ok(Credentials::default());
+    };
+    let mut out = credentials_patch(creds)?;
+    if let Some(email) = super::models::str_field(value, "email") {
+        out.account_label = Some(email);
+    }
+    Ok(out)
+}
+
+/// Credential fields present in `credentials`: only these are merged, so a PATCH never
+/// wipes tokens it did not mention.
+fn credentials_patch(value: &Value) -> Result<Credentials, Error> {
+    let Value::Object(map) = value else {
+        return Err(Error::BadRequest("credentials must be an object".into()));
+    };
+    let mut c = Credentials::default();
+    let mut extra = Map::new();
+    for (key, v) in map {
+        match key.as_str() {
+            "access_token" => c.access_token = string_or_none(v),
+            "refresh_token" => c.refresh_token = string_or_none(v),
+            "api_key" => c.api_key = string_or_none(v),
+            "id_token" => c.id_token = string_or_none(v),
+            "copilot_token" => c.copilot_token = string_or_none(v),
+            "expires_at" => c.expires_at = v.as_i64(),
+            "copilot_expires_at" => c.copilot_expires_at = v.as_i64(),
+            "account_label" => c.account_label = string_or_none(v),
+            "base_url_override" => c.base_url_override = string_or_none(v),
+            _ => {
+                extra.insert(key.clone(), v.clone());
+            }
+        }
+    }
+    c.extra = extra;
+    Ok(c)
+}
+
+fn string_or_none(v: &Value) -> Option<String> {
+    v.as_str().map(|s| s.to_string()).filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn views_never_carry_token_values() {
+        let creds = Credentials {
+            access_token: Some("SECRET-A".into()),
+            refresh_token: Some("SECRET-R".into()),
+            api_key: Some("SECRET-K".into()),
+            ..Credentials::default()
+        };
+        let conn = Connection {
+            id: Uuid::nil(),
+            provider: "openai".into(),
+            auth_type: "api_key".into(),
+            name: None,
+            email: None,
+            priority: 0,
+            is_active: true,
+            credentials: creds,
+            backoff_level: 0,
+            last_error: None,
+            last_error_code: None,
+            last_error_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let encoded = serde_json::to_string(&ConnectionView::from(&conn)).expect("serialize");
+        assert!(!encoded.contains("SECRET"));
+        assert!(encoded.contains("\"has_access_token\":true"));
+    }
+
+    #[test]
+    fn credential_patch_only_touches_named_fields() {
+        let patch = credentials_patch(&json!({"api_key": "k"})).expect("patch");
+        assert_eq!(patch.api_key.as_deref(), Some("k"));
+        assert!(patch.access_token.is_none());
+    }
+}
