@@ -1,0 +1,838 @@
+//! `Store`: the single embedded SQLite database behind the gateway.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rusqlite::{params, Connection as Sql, OptionalExtension, Row};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use rrouter_core::{Error, Result};
+
+use crate::crypto::Cipher;
+use crate::migrations;
+use crate::testkit::{CredentialStore, Credentials};
+
+/// Prefix of every gateway API key. The remainder is 32 hex chars of CSPRNG output.
+pub const API_KEY_PREFIX: &str = "sk-rr-";
+const API_KEY_SECRET_HEX_LEN: usize = 32;
+
+/// A stored provider credential set. `credentials` comes from the encrypted `data` blob.
+#[derive(Debug, Clone)]
+pub struct Connection {
+    pub id: Uuid,
+    pub provider: String,
+    pub auth_type: String,
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub priority: i32,
+    pub is_active: bool,
+    pub credentials: Credentials,
+    pub backoff_level: u32,
+    pub last_error: Option<String>,
+    pub last_error_code: Option<u16>,
+    pub last_error_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// A gateway API key. Only the SHA-256 hex of the plaintext is persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKey {
+    pub id: Uuid,
+    pub key_hash: String,
+    pub name: Option<String>,
+    pub is_active: bool,
+    pub created_at: i64,
+}
+
+/// Model alias -> `"provider/model"` target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelAlias {
+    pub alias: String,
+    pub target: String,
+}
+
+/// Ordered fallback chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Combo {
+    pub id: Uuid,
+    pub name: String,
+    pub models: Vec<String>,
+    pub created_at: i64,
+}
+
+/// One completed request. Never contains prompt or response bodies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageRecord {
+    pub ts: i64,
+    pub provider: String,
+    pub model: String,
+    pub connection_id: Option<Uuid>,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub latency_ms: u32,
+    pub status: u16,
+    pub streamed: bool,
+    pub error: Option<String>,
+}
+
+/// Per provider+model aggregate over `usage`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageSummary {
+    pub provider: String,
+    pub model: String,
+    pub requests: u64,
+    pub errors: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub avg_latency_ms: u32,
+}
+
+/// Embedded database handle. Cheap to clone; all clones share one connection.
+#[derive(Clone)]
+pub struct Store {
+    conn: Arc<Mutex<Sql>>,
+    cipher: Arc<Cipher>,
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store").finish_non_exhaustive()
+    }
+}
+
+impl Store {
+    /// Opens (creating if needed) the database at `path` and runs migrations.
+    ///
+    /// The data dir is `path`'s parent; when `master_key` is `None` the AES key is read from
+    /// (or created in) `<data_dir>/master.key`.
+    pub fn open(path: &Path, master_key: Option<String>) -> Result<Self> {
+        let data_dir = data_dir_for(path)?;
+        std::fs::create_dir_all(&data_dir).map_err(|e| {
+            Error::Store(format!("create data dir {}: {e}", data_dir.display()))
+        })?;
+        let cipher = match master_key {
+            Some(k) => Cipher::from_hex(&k)?,
+            None => Cipher::load_or_create_file(&data_dir)?,
+        };
+        Self::open_with(path, cipher)
+    }
+
+    /// In-memory database with an ephemeral random key. For tests and dry runs.
+    pub fn open_in_memory() -> Result<Self> {
+        let mut key = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+        let cipher = Cipher::from_bytes(&key)?;
+        let mut conn = Sql::open_in_memory().map_err(migrations::db_err)?;
+        Self::configure(&conn)?;
+        migrations::migrate(&mut conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            cipher: Arc::new(cipher),
+        })
+    }
+
+    fn open_with(path: &Path, cipher: Cipher) -> Result<Self> {
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let mut conn = Sql::open_with_flags(path, flags).map_err(|e| {
+            Error::Store(format!("open database {}: {e}", path.display()))
+        })?;
+        Self::configure(&conn)?;
+        migrations::migrate(&mut conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            cipher: Arc::new(cipher),
+        })
+    }
+
+    /// WAL + foreign keys + 5 s busy timeout. WAL is a file property, so it persists.
+    fn configure(conn: &Sql) -> Result<()> {
+        conn.busy_timeout(Duration::from_millis(5000))
+            .map_err(migrations::db_err)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;\
+             PRAGMA synchronous = NORMAL;\
+             PRAGMA foreign_keys = ON;",
+        )
+        .map_err(migrations::db_err)
+    }
+
+    /// Lock the connection. A panicking writer would poison the mutex; the underlying SQLite
+    /// connection is still valid (rusqlite does not unwind mid-statement here), so recover.
+    fn conn(&self) -> MutexGuard<'_, Sql> {
+        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    // ----- connections -------------------------------------------------------------
+
+    pub async fn create_connection(
+        &self,
+        provider: &str,
+        auth_type: &str,
+        credentials: Credentials,
+        name: Option<&str>,
+    ) -> Result<Connection> {
+        let id = Uuid::new_v4();
+        let blob = self.seal(&id, &credentials)?;
+        let now = now();
+        let email = credentials.account_label.clone();
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO connections \
+             (id, provider, auth_type, name, email, priority, is_active, data, backoff_level, \
+              created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, ?6, 0, ?7, ?7)",
+            params![
+                id.to_string(),
+                provider,
+                auth_type,
+                name,
+                email,
+                blob,
+                now
+            ],
+        )
+        .map_err(migrations::db_err)?;
+        drop(conn);
+        self.get_connection(id)
+            .await?
+            .ok_or_else(|| Error::Store("connection vanished after insert".to_string()))
+    }
+
+    pub async fn get_connection(&self, id: Uuid) -> Result<Option<Connection>> {
+        let blob = {
+            let conn = self.conn();
+            conn.query_row(
+                &format!("SELECT {CONN_COLUMNS} FROM connections WHERE id = ?1"),
+                params![id.to_string()],
+                row_to_connection,
+            )
+            .optional()
+            .map_err(migrations::db_err)?
+        };
+        blob.map(|raw| self.decode(raw)).transpose()
+    }
+
+    pub async fn list_connections(&self, provider: Option<&str>) -> Result<Vec<Connection>> {
+        let raws = {
+            let conn = self.conn();
+            let mut out = Vec::new();
+            match provider {
+                Some(p) => {
+                    let mut stmt = conn
+                        .prepare(&format!(
+                            "SELECT {CONN_COLUMNS} FROM connections WHERE provider = ?1 \
+                             ORDER BY priority ASC, created_at ASC"
+                        ))
+                        .map_err(migrations::db_err)?;
+                    let rows = stmt
+                        .query_map(params![p], row_to_connection)
+                        .map_err(migrations::db_err)?;
+                    for r in rows {
+                        out.push(r.map_err(migrations::db_err)?);
+                    }
+                }
+                None => {
+                    let mut stmt = conn
+                        .prepare(&format!(
+                            "SELECT {CONN_COLUMNS} FROM connections \
+                             ORDER BY provider ASC, priority ASC, created_at ASC"
+                        ))
+                        .map_err(migrations::db_err)?;
+                    let rows = stmt.query_map([], row_to_connection).map_err(migrations::db_err)?;
+                    for r in rows {
+                        out.push(r.map_err(migrations::db_err)?);
+                    }
+                }
+            }
+            out
+        };
+        raws.into_iter().map(|raw| self.decode(raw)).collect()
+    }
+
+    /// Read-merge-write of the credentials blob inside one SQL transaction.
+    ///
+    /// The transaction is `IMMEDIATE`, so the read lock is taken up front: two concurrent
+    /// merges serialize instead of both reading the pre-merge row and losing one update.
+    pub async fn merge_credentials(&self, id: Uuid, patch: Credentials) -> Result<Connection> {
+        {
+            let mut conn = self.conn();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(migrations::db_err)?;
+            let raw = tx
+                .query_row(
+                    &format!("SELECT {CONN_COLUMNS} FROM connections WHERE id = ?1"),
+                    params![id.to_string()],
+                    row_to_connection,
+                )
+                .optional()
+                .map_err(migrations::db_err)?
+                .ok_or_else(|| Error::NotFound(format!("connection {id}")))?;
+
+            let mut merged = self.decode(raw)?.credentials;
+            merge_into(&mut merged, patch);
+            let blob = self.seal(&id, &merged)?;
+            if let Some(label) = merged.account_label.clone() {
+                tx.execute(
+                    "UPDATE connections SET email = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id.to_string(), label, now()],
+                )
+                .map_err(migrations::db_err)?;
+            }
+            tx.execute(
+                "UPDATE connections SET data = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id.to_string(), blob, now()],
+            )
+            .map_err(migrations::db_err)?;
+            tx.commit().map_err(migrations::db_err)?;
+        }
+        self.get_connection(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("connection {id}")))
+    }
+
+    /// Record a routing/upstream failure on a connection.
+    pub async fn update_connection_status(
+        &self,
+        id: Uuid,
+        backoff_level: u32,
+        last_error: Option<&str>,
+        code: Option<u16>,
+    ) -> Result<()> {
+        let conn = self.conn();
+        let now = now();
+        let mut stmt = conn
+            .prepare(
+                "UPDATE connections SET backoff_level = ?2, last_error = ?3, last_error_code = ?4, \
+                 last_error_at = ?5, updated_at = ?5 WHERE id = ?1",
+            )
+            .map_err(migrations::db_err)?;
+        let n = stmt
+            .execute(params![id.to_string(), backoff_level, last_error, code, now])
+            .map_err(migrations::db_err)?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("connection {id}")));
+        }
+        Ok(())
+    }
+
+    pub async fn delete_connection(&self, id: Uuid) -> Result<bool> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "DELETE FROM connections WHERE id = ?1",
+                params![id.to_string()],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
+    }
+
+    fn seal(&self, id: &Uuid, creds: &Credentials) -> Result<Vec<u8>> {
+        let plain = serde_json::to_vec(creds)?;
+        self.cipher.seal(id.as_bytes(), &plain)
+    }
+
+    fn decode(&self, raw: RawConnection) -> Result<Connection> {
+        let plain = self.cipher.open(raw.id.as_bytes(), &raw.data)?;
+        let credentials: Credentials = serde_json::from_slice(&plain).map_err(|e| {
+            Error::Store(format!("credential blob for {} is not valid JSON: {e}", raw.id))
+        })?;
+        Ok(Connection {
+            id: raw.id,
+            provider: raw.provider,
+            auth_type: raw.auth_type,
+            name: raw.name,
+            email: raw.email,
+            priority: raw.priority,
+            is_active: raw.is_active,
+            credentials,
+            backoff_level: raw.backoff_level,
+            last_error: raw.last_error,
+            last_error_code: raw.last_error_code,
+            last_error_at: raw.last_error_at,
+            created_at: raw.created_at,
+            updated_at: raw.updated_at,
+        })
+    }
+
+    // ----- gateway API keys --------------------------------------------------------
+
+    /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
+    pub async fn create_api_key(&self, name: Option<&str>) -> Result<(String, ApiKey)> {
+        let plaintext = generate_api_key();
+        let key_hash = hash_api_key(&plaintext);
+        let id = Uuid::new_v4();
+        let created_at = now();
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at) \
+             VALUES (?1, ?2, ?3, 1, ?4)",
+            params![id.to_string(), key_hash, name, created_at],
+        )
+        .map_err(migrations::db_err)?;
+        Ok((
+            plaintext,
+            ApiKey {
+                id,
+                key_hash,
+                name: name.map(str::to_owned),
+                is_active: true,
+                created_at,
+            },
+        ))
+    }
+
+    /// `Some(key)` when `presented` matches an active key; `None` otherwise.
+    pub async fn verify_api_key(&self, presented: &str) -> Result<Option<ApiKey>> {
+        let presented = presented.trim();
+        if presented.is_empty() {
+            return Ok(None);
+        }
+        let hash = hash_api_key(presented);
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT id, key_hash, name, is_active, created_at FROM api_keys \
+             WHERE key_hash = ?1 AND is_active = 1",
+            params![hash],
+            row_to_api_key,
+        )
+        .optional()
+        .map_err(migrations::db_err)
+    }
+
+    pub async fn list_api_keys(&self) -> Result<Vec<ApiKey>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, key_hash, name, is_active, created_at FROM api_keys \
+                 ORDER BY created_at ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt.query_map([], row_to_api_key).map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    pub async fn delete_api_key(&self, id: Uuid) -> Result<bool> {
+        let conn = self.conn();
+        let n = conn
+            .execute("DELETE FROM api_keys WHERE id = ?1", params![id.to_string()])
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
+    }
+
+    pub async fn count_api_keys(&self) -> Result<usize> {
+        let conn = self.conn();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM api_keys", [], |r| r.get(0))
+            .map_err(migrations::db_err)?;
+        Ok(usize::try_from(n).unwrap_or(usize::MAX))
+    }
+
+    // ----- model routing config ----------------------------------------------------
+
+    pub async fn upsert_alias(&self, alias: &str, target: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO model_aliases (alias, target) VALUES (?1, ?2) \
+             ON CONFLICT(alias) DO UPDATE SET target = excluded.target",
+            params![alias, target],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    pub async fn list_aliases(&self) -> Result<Vec<ModelAlias>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT alias, target FROM model_aliases ORDER BY alias ASC")
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ModelAlias {
+                    alias: r.get(0)?,
+                    target: r.get(1)?,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    pub async fn delete_alias(&self, alias: &str) -> Result<bool> {
+        let conn = self.conn();
+        let n = conn
+            .execute("DELETE FROM model_aliases WHERE alias = ?1", params![alias])
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
+    }
+
+    pub async fn set_disabled(&self, model: &str, disabled: bool) -> Result<()> {
+        let conn = self.conn();
+        if disabled {
+            conn.execute(
+                "INSERT INTO disabled_models (model) VALUES (?1) ON CONFLICT(model) DO NOTHING",
+                params![model],
+            )
+            .map_err(migrations::db_err)?;
+        } else {
+            conn.execute("DELETE FROM disabled_models WHERE model = ?1", params![model])
+                .map_err(migrations::db_err)?;
+        }
+        Ok(())
+    }
+
+    pub async fn disabled_models(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT model FROM disabled_models ORDER BY model ASC")
+            .map_err(migrations::db_err)?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    // ----- combos ------------------------------------------------------------------
+
+    /// Insert or replace the chain named `name`. Order is preserved; duplicates are dropped.
+    pub async fn upsert_combo(&self, name: &str, models: &[String]) -> Result<Combo> {
+        let mut unique = Vec::with_capacity(models.len());
+        for m in models {
+            if !unique.contains(m) {
+                unique.push(m.clone());
+            }
+        }
+        let json = serde_json::to_string(&unique)?;
+        // Read-then-write under one mutex guard: keep the original id/created_at on update.
+        let conn = self.conn();
+        let existing: Option<(Uuid, i64)> = conn
+            .query_row(
+                "SELECT id, created_at FROM combos WHERE name = ?1",
+                params![name],
+                |r| Ok((uuid_col(r.get(0)?)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(migrations::db_err)?;
+        let (id, created_at) = existing.unwrap_or_else(|| (Uuid::new_v4(), now()));
+        conn.execute(
+            "INSERT INTO combos (id, name, models, created_at) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(name) DO UPDATE SET models = excluded.models",
+            params![id.to_string(), name, json, created_at],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(Combo {
+            id,
+            name: name.to_string(),
+            models: unique,
+            created_at,
+        })
+    }
+
+    pub async fn get_combo(&self, name: &str) -> Result<Option<Combo>> {
+        let conn = self.conn();
+        let row = conn
+            .query_row(
+                "SELECT id, name, models, created_at FROM combos WHERE name = ?1",
+                params![name],
+                row_to_combo,
+            )
+            .optional()
+            .map_err(migrations::db_err)?;
+        row.map(decode_combo).transpose()
+    }
+
+    pub async fn list_combos(&self) -> Result<Vec<Combo>> {
+        let rows = {
+            let conn = self.conn();
+            let mut stmt = conn
+                .prepare("SELECT id, name, models, created_at FROM combos ORDER BY name ASC")
+                .map_err(migrations::db_err)?;
+            let rows = stmt.query_map([], row_to_combo).map_err(migrations::db_err)?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(migrations::db_err)?);
+            }
+            out
+        };
+        rows.into_iter().map(decode_combo).collect()
+    }
+
+    pub async fn delete_combo(&self, name: &str) -> Result<bool> {
+        let conn = self.conn();
+        let n = conn
+            .execute("DELETE FROM combos WHERE name = ?1", params![name])
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
+    }
+
+    // ----- usage -------------------------------------------------------------------
+
+    /// Append one usage row. Only counters and error text are stored, never payloads.
+    pub async fn record_usage(&self, r: &UsageRecord) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO usage \
+             (ts, provider, model, connection_id, input_tokens, output_tokens, latency_ms, \
+              status, streamed, error) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                r.ts,
+                r.provider,
+                r.model,
+                r.connection_id.map(|u| u.to_string()),
+                r.input_tokens,
+                r.output_tokens,
+                r.latency_ms,
+                r.status,
+                r.streamed as i64,
+                r.error,
+            ],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Most recent records first.
+    pub async fn recent_usage(&self, limit: usize) -> Result<Vec<UsageRecord>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT ts, provider, model, connection_id, input_tokens, output_tokens, \
+                        latency_ms, status, streamed, error \
+                 FROM usage ORDER BY ts DESC, id DESC LIMIT ?1",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                let cid: Option<String> = r.get(3)?;
+                Ok(UsageRecord {
+                    ts: r.get(0)?,
+                    provider: r.get(1)?,
+                    model: r.get(2)?,
+                    connection_id: cid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
+                    input_tokens: r.get(4)?,
+                    output_tokens: r.get(5)?,
+                    latency_ms: r.get(6)?,
+                    status: r.get(7)?,
+                    streamed: r.get::<_, i64>(8)? != 0,
+                    error: r.get(9)?,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    /// Totals per provider+model. A request is an error when `status >= 400`.
+    pub async fn usage_summary(&self) -> Result<Vec<UsageSummary>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT provider, model, count(*), \
+                        sum(CASE WHEN status >= 400 THEN 1 ELSE 0 END), \
+                        sum(input_tokens), sum(output_tokens), avg(latency_ms) \
+                 FROM usage GROUP BY provider, model ORDER BY provider ASC, model ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                let avg: f64 = r.get(6)?;
+                Ok(UsageSummary {
+                    provider: r.get(0)?,
+                    model: r.get(1)?,
+                    requests: r.get(2)?,
+                    errors: r.get(3)?,
+                    input_tokens: r.get(4)?,
+                    output_tokens: r.get(5)?,
+                    avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+}
+
+impl CredentialStore for Store {
+    async fn load(&self, id: Uuid) -> Result<Credentials> {
+        self.get_connection(id)
+            .await?
+            .map(|c| c.credentials)
+            .ok_or_else(|| Error::NotFound(format!("connection {id}")))
+    }
+
+    async fn merge(&self, id: Uuid, patch: Credentials) -> Result<Credentials> {
+        Ok(self.merge_credentials(id, patch).await?.credentials)
+    }
+}
+
+// ----- helpers ---------------------------------------------------------------------
+
+const CONN_COLUMNS: &str = "id, provider, auth_type, name, email, priority, is_active, data, \
+                            backoff_level, last_error, last_error_code, last_error_at, \
+                            created_at, updated_at";
+
+/// Row with the credential blob still sealed.
+struct RawConnection {
+    id: Uuid,
+    provider: String,
+    auth_type: String,
+    name: Option<String>,
+    email: Option<String>,
+    priority: i32,
+    is_active: bool,
+    data: Vec<u8>,
+    backoff_level: u32,
+    last_error: Option<String>,
+    last_error_code: Option<u16>,
+    last_error_at: Option<i64>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+fn uuid_col(s: String) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(&s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+fn row_to_connection(r: &Row<'_>) -> rusqlite::Result<RawConnection> {
+    Ok(RawConnection {
+        id: uuid_col(r.get(0)?)?,
+        provider: r.get(1)?,
+        auth_type: r.get(2)?,
+        name: r.get(3)?,
+        email: r.get(4)?,
+        priority: r.get(5)?,
+        is_active: r.get::<_, i64>(6)? != 0,
+        data: r.get(7)?,
+        backoff_level: r.get(8)?,
+        last_error: r.get(9)?,
+        last_error_code: r.get(10)?,
+        last_error_at: r.get(11)?,
+        created_at: r.get(12)?,
+        updated_at: r.get(13)?,
+    })
+}
+
+fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
+    Ok(ApiKey {
+        id: uuid_col(r.get(0)?)?,
+        key_hash: r.get(1)?,
+        name: r.get(2)?,
+        is_active: r.get::<_, i64>(3)? != 0,
+        created_at: r.get(4)?,
+    })
+}
+
+struct RawCombo {
+    id: Uuid,
+    name: String,
+    models: String,
+    created_at: i64,
+}
+
+fn row_to_combo(r: &Row<'_>) -> rusqlite::Result<RawCombo> {
+    Ok(RawCombo {
+        id: uuid_col(r.get(0)?)?,
+        name: r.get(1)?,
+        models: r.get(2)?,
+        created_at: r.get(3)?,
+    })
+}
+
+fn decode_combo(raw: RawCombo) -> Result<Combo> {
+    let models: Vec<String> = serde_json::from_str(&raw.models).map_err(|e| {
+        Error::Store(format!("combo {} has invalid models JSON: {e}", raw.name))
+    })?;
+    Ok(Combo {
+        id: raw.id,
+        name: raw.name,
+        models,
+        created_at: raw.created_at,
+    })
+}
+
+/// Field-wise merge: every `Some` in `patch` overwrites; `None` never erases.
+/// `extra` is merged key by key and a `null` value deletes a key.
+fn merge_into(dst: &mut Credentials, patch: Credentials) {
+    macro_rules! merge {
+        ($($f:ident),* $(,)?) => {$(
+            if patch.$f.is_some() {
+                dst.$f = patch.$f;
+            }
+        )*};
+    }
+    merge!(
+        access_token,
+        refresh_token,
+        api_key,
+        id_token,
+        expires_at,
+        copilot_token,
+        copilot_expires_at,
+        account_label,
+        base_url_override,
+    );
+    for (k, v) in patch.extra {
+        if v.is_null() {
+            dst.extra.remove(&k);
+        } else {
+            dst.extra.insert(k, v);
+        }
+    }
+}
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn data_dir_for(path: &Path) -> Result<PathBuf> {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            Error::Store(format!(
+                "database path {} has no parent directory to hold the key file",
+                path.display()
+            ))
+        })
+}
+
+/// `sk-rr-` + 32 hex chars from the OS CSPRNG.
+fn generate_api_key() -> String {
+    let mut raw = [0u8; API_KEY_SECRET_HEX_LEN / 2];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
+    let mut key = String::with_capacity(API_KEY_PREFIX.len() + API_KEY_SECRET_HEX_LEN);
+    key.push_str(API_KEY_PREFIX);
+    key.push_str(&hex::encode(raw));
+    key
+}
+
+fn hash_api_key(plaintext: &str) -> String {
+    hex::encode(Sha256::digest(plaintext.as_bytes()))
+}
