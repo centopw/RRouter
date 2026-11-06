@@ -28,6 +28,8 @@ use crate::registry::{
 
 /// How long a pending login may sit unused before it is dropped.
 pub const PENDING_TTL: Duration = Duration::from_secs(15 * 60);
+/// How long `complete` waits for a PKCE callback that has not arrived yet.
+const COMPLETE_WAIT: Duration = Duration::from_secs(20);
 /// Ceiling on a single device-code poll cycle.
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -68,18 +70,15 @@ pub enum PendingState {
 }
 
 struct Pending {
-    flow: LoginFlow,
     provider: &'static str,
     profile_url: Option<&'static str>,
-    verifier: Option<String>,
-    state: String,
-    redirect_uri: String,
-    /// Kept alive until the callback arrives so the port stays bound.
-    server: Option<LoopbackServer>,
     device: Option<DeviceFlowState>,
     created: Instant,
     status: PendingState,
     outcome: Option<std::result::Result<SignedIn, String>>,
+    /// The task that owns the loopback listener and exchanges the code as soon as the
+    /// browser redirects. Aborted on cancel so a forgotten dialog cannot hold a port.
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct DeviceFlowState {
@@ -121,17 +120,23 @@ impl OAuthFlows {
         .ok_or_else(|| Error::BadRequest(format!("provider {} has no OAuth sign-in", spec.id)))?;
         self.sweep();
         match flow {
-            LoginFlow::Pkce(p) => self.start_pkce(spec, p).await,
+            LoginFlow::Pkce(p) => self.start_pkce(http, spec, p).await,
             LoginFlow::DeviceCode(d) => self.start_device(http, spec, d).await,
         }
     }
 
     async fn start_pkce(
         &self,
+        http: &reqwest::Client,
         spec: &'static ProviderSpec,
         p: PkceFlow,
     ) -> Result<(String, Challenge)> {
-        let server = LoopbackServer::bind(p.fixed_port.unwrap_or(0), p.callback_path).await?;
+        let server = LoopbackServer::bind(
+            p.fixed_port.unwrap_or(0),
+            p.callback_path,
+            p.redirect_host,
+        )
+        .await?;
         let redirect_uri = server.redirect_uri();
         let verifier = pkce::generate_verifier();
         let challenge = pkce::challenge_for(&verifier);
@@ -146,20 +151,49 @@ impl OAuthFlows {
             p.extra_params,
         );
         let id = uuid::Uuid::new_v4().to_string();
+        // The browser redirect *is* the completion signal: accept it now and exchange
+        // the code in the background, so the callback page answers immediately and the
+        // login finishes without waiting for someone to press a button.
+        let task = {
+            let flows = self.clone();
+            let http = http.clone();
+            let waiter_id = id.clone();
+            let state = state.clone();
+            let redirect_uri = redirect_uri.clone();
+            let verifier = verifier.clone();
+            let server = server;
+            tokio::spawn(async move {
+                let outcome = match server.wait(&state, PENDING_TTL).await {
+                    Ok(cb) => {
+                        Self::exchange_code(
+                            &http,
+                            ExchangeCode {
+                                provider: spec.id,
+                                flow: p,
+                                profile_url: spec.profile_url,
+                                code: &cb.code,
+                                redirect_uri: &redirect_uri,
+                                verifier: &verifier,
+                                state: &state,
+                            },
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                };
+                flows.finish(&waiter_id, outcome.map_err(|e| e.to_string()));
+            })
+        };
         self.insert(
             id.clone(),
             Pending {
-                flow: LoginFlow::Pkce(p),
                 provider: spec.id,
                 profile_url: spec.profile_url,
-                verifier: Some(verifier),
-                state,
-                redirect_uri: redirect_uri.clone(),
-                server: Some(server),
                 device: None,
                 created: Instant::now(),
                 status: PendingState::Waiting,
                 outcome: None,
+                task: Some(task),
             },
         );
         Ok((id, Challenge::Pkce { authorize_url, redirect_uri }))
@@ -201,13 +235,8 @@ impl OAuthFlows {
         self.insert(
             id.clone(),
             Pending {
-                flow: LoginFlow::DeviceCode(d),
                 provider: spec.id,
                 profile_url: spec.profile_url,
-                verifier: None,
-                state: String::new(),
-                redirect_uri: String::new(),
-                server: None,
                 device: Some(DeviceFlowState {
                     flow: d,
                     device_code: grant.device_code,
@@ -216,6 +245,7 @@ impl OAuthFlows {
                 created: Instant::now(),
                 status: PendingState::Waiting,
                 outcome: None,
+                task: None,
             },
         );
         Ok((
@@ -237,98 +267,88 @@ impl OAuthFlows {
 
     /// Finish a sign-in. Idempotent: a second call returns the stored outcome
     /// instead of exchanging twice (a code is single-use at the provider).
+    ///
+    /// PKCE logins are exchanged by the task started in [`start`], so this waits for
+    /// its outcome; device logins still poll here because the provider, not a redirect,
+    /// decides when the user has approved.
     pub async fn complete(&self, http: &reqwest::Client, id: &str) -> Result<SignedIn> {
-        let pending = {
-            let mut map = self.lock();
-            let Some(p) = map.get_mut(id) else {
+        let device = {
+            let map = self.lock();
+            let Some(p) = map.get(id) else {
                 return Err(Error::NotFound(format!("no pending OAuth login {id}")));
             };
             if p.expired() {
-                map.remove(id);
+                drop(map);
+                self.lock().remove(id);
                 return Err(Error::Timeout("this sign-in expired; start a new one".into()));
             }
             if p.status == PendingState::Finished {
-                return match p.outcome.clone() {
-                    Some(Ok(done)) => Ok(done),
-                    Some(Err(msg)) => Err(Error::BadRequest(msg)),
-                    None => Err(Error::BadRequest("login already finished".into())),
-                };
+                return replay(&p.outcome);
             }
-            p.status = PendingState::Finished;
-            // Take ownership of the server so the port is released as soon as the
-            // exchange resolves, whichever way it goes.
-            let server = p.server.take();
-            PendingSnapshot {
-                flow: p.flow,
-                provider: p.provider,
-                profile_url: p.profile_url,
-                verifier: p.verifier.clone(),
-                state: p.state.clone(),
-                redirect_uri: p.redirect_uri.clone(),
-                server,
-                device: p
-                    .device
-                    .as_ref()
-                    .map(|d| (d.flow, d.device_code.clone(), d.interval)),
-            }
+            p.device
+                .as_ref()
+                .map(|d| (d.flow, d.device_code.clone(), d.interval))
         };
 
-        let outcome = match pending.flow {
-            LoginFlow::Pkce(p) => {
-                let Some(server) = pending.server else {
-                    return Err(Error::BadRequest("this login has no callback listener".into()));
+        if let Some((flow, device_code, interval)) = device {
+            let (provider, profile_url) = {
+                let map = self.lock();
+                let p = map.get(id).ok_or_else(|| Error::NotFound(id.to_string()))?;
+                (p.provider, p.profile_url)
+            };
+            let outcome = Self::poll_device(http, provider, flow, profile_url, &device_code, interval)
+                .await;
+            if let Ok(done) = &outcome {
+                self.finish(id, Ok(done.clone()));
+            } else if let Err(e) = &outcome {
+                self.finish(id, Err(e.to_string()));
+            }
+            return outcome;
+        }
+
+        // PKCE: the callback task owns the exchange. Wait a short while for it — the
+        // caller may press "complete" before the browser has redirected — but never
+        // hold an HTTP request for the full login lifetime.
+        let deadline = Instant::now() + COMPLETE_WAIT;
+        loop {
+            {
+                let map = self.lock();
+                let Some(p) = map.get(id) else {
+                    return Err(Error::NotFound(format!("no pending OAuth login {id}")));
                 };
-                let wait = server.wait(&pending.state, PENDING_TTL).await;
-                match wait {
-                    Err(e) => Err(e),
-                    Ok(cb) => {
-                        Self::exchange_code(
-                            http,
-                            pending.provider,
-                            p,
-                            pending.profile_url,
-                            &cb.code,
-                            &pending.redirect_uri,
-                            pending.verifier.as_deref().unwrap_or_default(),
-                        )
-                        .await
-                    }
+                if p.status == PendingState::Finished {
+                    return replay(&p.outcome);
                 }
             }
-            LoginFlow::DeviceCode(d) => {
-                let Some((flow, device_code, interval)) = pending.device else {
-                    return Err(Error::BadRequest("this login has no device code".into()));
-                };
-                let _ = d;
-                Self::poll_device(
-                    http,
-                    pending.provider,
-                    flow,
-                    pending.profile_url,
-                    &device_code,
-                    interval,
-                )
-                .await
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout(
+                    "waiting for the provider redirect: finish the sign-in in the browser".into(),
+                ));
             }
-        };
-
-        {
-            let mut map = self.lock();
-            if let Some(p) = map.get_mut(id) {
-                // Store a flattened copy so an idempotent retry can replay the outcome
-                // without re-exchanging a single-use code.
-                p.outcome = Some(match &outcome {
-                    Ok(done) => Ok(done.clone()),
-                    Err(e) => Err(e.to_string()),
-                });
-            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
         }
-        outcome
     }
 
-    /// Drop a pending login (dashboard "cancel"), releasing any bound port.
+    /// Store the outcome of a background exchange so `complete` can replay it.
+    fn finish(&self, id: &str, outcome: std::result::Result<SignedIn, String>) {
+        let mut map = self.lock();
+        if let Some(p) = map.get_mut(id) {
+            p.status = PendingState::Finished;
+            p.outcome = Some(outcome);
+        }
+    }
+
     pub fn cancel(&self, id: &str) -> bool {
-        self.lock().remove(id).is_some()
+        let removed = self.lock().remove(id);
+        match removed {
+            Some(p) => {
+                if let Some(task) = p.task {
+                    task.abort();
+                }
+                true
+            }
+            None => false,
+        }
     }
 
     /// Pending logins, for diagnostics. Never exposes verifiers or codes.
@@ -360,30 +380,26 @@ impl OAuthFlows {
         map.retain(|_, p| !p.expired());
     }
 
-    async fn exchange_code(
-        http: &reqwest::Client,
-        provider: &str,
-        p: PkceFlow,
-        profile_url: Option<&'static str>,
-        code: &str,
-        redirect_uri: &str,
-        verifier: &str,
-    ) -> Result<SignedIn> {
+    async fn exchange_code(http: &reqwest::Client, e: ExchangeCode<'_>) -> Result<SignedIn> {
+        let ExchangeCode {
+            provider,
+            flow: p,
+            profile_url,
+            code,
+            redirect_uri,
+            verifier,
+            state,
+        } = e;
+        let params = authorization_params(&p, code, redirect_uri, verifier, state);
         let req = match p.body {
-            RefreshBody::Json => http.post(p.token_url).json(&serde_json::json!({
-                "grant_type": "authorization_code",
-                "code": code,
-                "client_id": p.client_id,
-                "redirect_uri": redirect_uri,
-                "code_verifier": verifier,
-            })),
-            RefreshBody::Form => http.post(p.token_url).form(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("client_id", p.client_id),
-                ("redirect_uri", redirect_uri),
-                ("code_verifier", verifier),
-            ]),
+            RefreshBody::Json => {
+                let object: serde_json::Map<String, serde_json::Value> = params
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), serde_json::Value::String(v.clone())))
+                    .collect();
+                http.post(p.token_url).json(&serde_json::Value::Object(object))
+            }
+            RefreshBody::Form => http.post(p.token_url).form(&params),
         };
         let resp = req
             .header("accept", "application/json")
@@ -519,15 +535,51 @@ impl OAuthFlows {
     }
 }
 
-struct PendingSnapshot {
-    flow: LoginFlow,
-    provider: &'static str,
+
+
+/// Everything one authorization-code exchange needs, grouped so the call site stays
+/// readable and the function does not grow an argument per provider quirk.
+struct ExchangeCode<'a> {
+    provider: &'a str,
+    flow: PkceFlow,
     profile_url: Option<&'static str>,
-    verifier: Option<String>,
-    state: String,
-    redirect_uri: String,
-    server: Option<LoopbackServer>,
-    device: Option<(DeviceFlow, String, Duration)>,
+    code: &'a str,
+    redirect_uri: &'a str,
+    verifier: &'a str,
+    state: &'a str,
+}
+
+/// Token-exchange fields for an authorization-code grant.
+///
+/// Anthropic rejects the body without `state` (it answers "Invalid request format"),
+/// while OpenAI's endpoint does not expect it, so the echo is per provider.
+fn authorization_params(
+    p: &PkceFlow,
+    code: &str,
+    redirect_uri: &str,
+    verifier: &str,
+    state: &str,
+) -> Vec<(&'static str, String)> {
+    let mut params = vec![
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code.to_string()),
+        ("client_id", p.client_id.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("code_verifier", verifier.to_string()),
+    ];
+    if p.send_state {
+        params.push(("state", state.to_string()));
+    }
+    params
+}
+
+/// Replay a stored outcome, keeping failure messages verbatim.
+fn replay(outcome: &Option<std::result::Result<SignedIn, String>>) -> Result<SignedIn> {
+    match outcome {
+        Some(Ok(done)) => Ok(done.clone()),
+        Some(Err(msg)) => Err(Error::BadRequest(msg.clone())),
+        None => Err(Error::BadRequest("login already finished".into())),
+    }
 }
 
 impl Pending {
@@ -675,6 +727,66 @@ mod tests {
             login: Some(login),
             stream_only: false,
         }))
+    }
+
+    /// Anthropic rejects the token exchange without `state` ("Invalid request format");
+    /// OpenAI's endpoint does not expect it. Verified against the live endpoints.
+    #[test]
+    fn authorization_code_exchange_echoes_state_only_where_required() {
+        let LoginFlow::Pkce(claude) = crate::registry::CLAUDE_LOGIN else {
+            panic!("claude is a PKCE flow");
+        };
+        let params = authorization_params(&claude, "code", "http://localhost:1/callback", "v", "st");
+        assert!(
+            params.iter().any(|(k, v)| *k == "state" && v == "st"),
+            "claude must echo state: {params:?}"
+        );
+
+        let LoginFlow::Pkce(codex) = crate::registry::CODEX_LOGIN else {
+            panic!("codex is a PKCE flow");
+        };
+        let params = authorization_params(&codex, "code", "http://127.0.0.1:1455/auth/callback", "v", "st");
+        assert!(
+            !params.iter().any(|(k, _)| *k == "state"),
+            "codex must not send state: {params:?}"
+        );
+    }
+
+    /// Anthropic's client registration accepts `http://localhost:<port>/callback` only;
+    /// 127.0.0.1 fails the sign-in with "Redirect URI ... is not supported by client".
+    #[tokio::test]
+    async fn claude_redirect_uri_uses_localhost() {
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let spec = crate::registry::get("claude").expect("claude provider");
+        let (_, challenge) = flows.start(&http, spec).await.expect("start");
+        let Challenge::Pkce { authorize_url, .. } = challenge else {
+            panic!("claude must be a PKCE flow");
+        };
+        assert!(
+            authorize_url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A"),
+            "claude must redirect to localhost: {authorize_url}"
+        );
+        assert!(
+            !authorize_url.contains("127.0.0.1"),
+            "127.0.0.1 is rejected by Anthropic's client registration: {authorize_url}"
+        );
+    }
+
+    /// Codex keeps its registered host and port.
+    #[tokio::test]
+    async fn codex_redirect_uri_keeps_its_registered_port() {
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let spec = crate::registry::get("codex").expect("codex provider");
+        let (_, challenge) = flows.start(&http, spec).await.expect("start");
+        let Challenge::Pkce { authorize_url, .. } = challenge else {
+            panic!("codex must be a PKCE flow");
+        };
+        assert!(
+            authorize_url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback"),
+            "codex must keep its registered redirect: {authorize_url}"
+        );
     }
 
     async fn oauth_server() -> (String, Arc<AtomicUsize>) {
@@ -845,8 +957,10 @@ mod tests {
                 token_url: Box::leak(format!("{base}/token").into_boxed_str()),
                 scope: "openid profile",
                 fixed_port: None,
+                redirect_host: "127.0.0.1",
                 callback_path: "/callback",
                 extra_params: &[],
+                send_state: false,
                 body: RefreshBody::Form,
             }),
             Some(profile_url),
@@ -924,8 +1038,10 @@ mod tests {
             token_url: "https://mock.test/token",
             scope: "s",
             fixed_port: None,
+            redirect_host: "127.0.0.1",
             callback_path: "/callback",
             extra_params: &[],
+            send_state: false,
             body: RefreshBody::Form,
         }));
         let (id, _) = flows.start(&http, leaked).await.unwrap();
@@ -941,3 +1057,4 @@ mod tests {
         assert_eq!(label_from_jwt(&fake_jwt("x@y.z")).as_deref(), Some("x@y.z"));
     }
 }
+

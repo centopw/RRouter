@@ -33,6 +33,11 @@ pub struct Callback {
 /// A listening loopback server; drop or [`LoopbackServer::close`] to release the port.
 pub struct LoopbackServer {
     listener: TcpListener,
+    /// `localhost` can resolve to ::1 first, so a named host listens on both loopback
+    /// families; a browser that picks either one still reaches the callback.
+    listener_v6: Option<TcpListener>,
+    /// Host the provider registered for this client (usually `localhost` or 127.0.0.1).
+    host: String,
     pub port: u16,
     pub callback_path: String,
     local_addr: SocketAddr,
@@ -40,15 +45,22 @@ pub struct LoopbackServer {
 
 impl LoopbackServer {
     /// Bind `127.0.0.1` on `port` (`0` picks an ephemeral port).
-    pub async fn bind(port: u16, callback_path: &str) -> Result<Self> {
+    pub async fn bind(port: u16, callback_path: &str, host: &str) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
             Error::Transport(format!("cannot bind 127.0.0.1:{port} for the OAuth callback: {e}"))
         })?;
         let local_addr = listener
             .local_addr()
             .map_err(|e| Error::Transport(format!("loopback local_addr: {e}")))?;
+        let listener_v6 = if host == "localhost" {
+            TcpListener::bind(("::1", local_addr.port())).await.ok()
+        } else {
+            None
+        };
         Ok(Self {
             listener,
+            listener_v6,
+            host: host.to_string(),
             port: local_addr.port(),
             callback_path: normalize_path(callback_path),
             local_addr,
@@ -56,7 +68,7 @@ impl LoopbackServer {
     }
 
     pub fn redirect_uri(&self) -> String {
-        format!("http://127.0.0.1:{}{}", self.port, self.callback_path)
+        format!("http://{}:{}{}", self.host, self.port, self.callback_path)
     }
 
     /// Wait for the provider's redirect and return its query parameters.
@@ -72,7 +84,16 @@ impl LoopbackServer {
             if remaining.is_zero() {
                 return Err(Error::Timeout("timed out waiting for the OAuth redirect".into()));
             }
-            let accepted = timeout(remaining, self.listener.accept()).await;
+            let accepted = timeout(remaining, async {
+                match &self.listener_v6 {
+                    Some(v6) => tokio::select! {
+                        accepted = self.listener.accept() => accepted,
+                        accepted = v6.accept() => accepted,
+                    },
+                    None => self.listener.accept().await,
+                }
+            })
+            .await;
             let (stream, peer) = match accepted {
                 Err(_) => {
                     return Err(Error::Timeout("timed out waiting for the OAuth redirect".into()))
@@ -286,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_redirect_params_after_state_check() {
-        let srv = LoopbackServer::bind(0, "/callback").await.unwrap();
+        let srv = LoopbackServer::bind(0, "/callback", "127.0.0.1").await.unwrap();
         let port = srv.port;
         let uri = srv.redirect_uri();
         assert_eq!(uri, format!("http://127.0.0.1:{port}/callback"));
@@ -300,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_mismatch_fails_instead_of_ignoring() {
-        let srv = LoopbackServer::bind(0, "/callback").await.unwrap();
+        let srv = LoopbackServer::bind(0, "/callback", "127.0.0.1").await.unwrap();
         let port = srv.port;
         let waiter = tokio::spawn(srv.wait("EXPECTED", Duration::from_secs(5)));
         let body = get(port, "/callback?code=x&state=ATTACKER").await;
@@ -311,7 +332,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_error_is_reported() {
-        let srv = LoopbackServer::bind(0, "/callback").await.unwrap();
+        let srv = LoopbackServer::bind(0, "/callback", "127.0.0.1").await.unwrap();
         let port = srv.port;
         let waiter = tokio::spawn(srv.wait("S", Duration::from_secs(5)));
         let _ = get(port, "/callback?error=access_denied&error_description=nope").await;
@@ -321,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn other_paths_are_ignored_and_wait_continues() {
-        let srv = LoopbackServer::bind(0, "/callback").await.unwrap();
+        let srv = LoopbackServer::bind(0, "/callback", "127.0.0.1").await.unwrap();
         let port = srv.port;
         let waiter = tokio::spawn(srv.wait("S", Duration::from_secs(5)));
         // Browser favicon/health probes must not end the wait.
@@ -333,17 +354,17 @@ mod tests {
 
     #[tokio::test]
     async fn times_out_when_nothing_arrives() {
-        let srv = LoopbackServer::bind(0, "/callback").await.unwrap();
+        let srv = LoopbackServer::bind(0, "/callback", "127.0.0.1").await.unwrap();
         let err = srv.wait("S", Duration::from_millis(80)).await.unwrap_err();
         assert!(matches!(err, Error::Timeout(_)), "{err}");
     }
 
     #[tokio::test]
     async fn fixed_port_is_honoured_or_reported() {
-        let first = LoopbackServer::bind(0, "/auth/callback").await.unwrap();
+        let first = LoopbackServer::bind(0, "/auth/callback", "127.0.0.1").await.unwrap();
         let port = first.port;
         // The same port must be unavailable while the first listener lives.
-        let second = LoopbackServer::bind(port, "/auth/callback").await;
+        let second = LoopbackServer::bind(port, "/auth/callback", "127.0.0.1").await;
         assert!(second.is_err(), "port {port} should be taken");
         drop(first);
     }

@@ -78,10 +78,16 @@ pub struct PkceFlow {
     /// Fixed loopback port the provider's registered redirect URI requires, if any.
     /// `None` means bind an ephemeral port.
     pub fixed_port: Option<u16>,
+    /// Host spelled in the redirect URI. Anthropic's client registration only accepts
+    /// `localhost`, not `127.0.0.1`; OpenAI's Codex registration is the other way round.
+    pub redirect_host: &'static str,
     /// Path of the loopback callback (`/callback` or `/auth/callback`).
     pub callback_path: &'static str,
     /// Extra query params the provider's own CLI sends.
     pub extra_params: &'static [(&'static str, &'static str)],
+    /// Echo `state` in the token exchange. Anthropic binds the exchange to the
+    /// authorization request and answers "Invalid request format" without it.
+    pub send_state: bool,
     /// Token-endpoint request encoding.
     pub body: RefreshBody,
 }
@@ -207,8 +213,12 @@ pub const CLAUDE_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
     token_url: "https://api.anthropic.com/v1/oauth/token",
     scope: "org:create_api_key user:profile user:inference",
     fixed_port: None,
+    // Claude Code's own CLI registers `http://localhost:<port>/callback`; sending
+    // 127.0.0.1 fails with "Redirect URI ... is not supported by client".
+    redirect_host: "localhost",
     callback_path: "/callback",
     extra_params: &[("code", "true")],
+    send_state: true,
     body: RefreshBody::Json,
 });
 
@@ -221,12 +231,14 @@ pub const CODEX_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
     // The registered redirect URI is bound to this exact port; a dynamic port
     // fails the exchange with a redirect_uri mismatch.
     fixed_port: Some(1455),
+    redirect_host: "127.0.0.1",
     callback_path: "/auth/callback",
     extra_params: &[
         ("id_token_add_organizations", "true"),
         ("codex_cli_simplified_flow", "true"),
         ("originator", "codex_cli_rs"),
     ],
+    send_state: false,
     body: RefreshBody::Form,
 });
 
