@@ -415,6 +415,7 @@ mod tests {
             "stream": false
         });
         let req = parse_request(Dialect::OpenAiChat, &body).unwrap();
+        assert_eq!(req.model, "gpt-4o");
         let (src, extra) = req.extra.clone().unwrap();
         assert_eq!(src, Dialect::OpenAiChat);
         assert_eq!(extra.get("service_tier"), Some(&Value::from("flex")));
@@ -427,5 +428,61 @@ mod tests {
         let cross = build_request(Dialect::AnthropicMessages, &req, false).unwrap();
         assert!(cross.get("service_tier").is_none());
         assert!(cross.get("metadata").is_none());
+    }
+
+    #[test]
+    fn embeddings_passthrough_keeps_input_in_extra() {
+        let body = serde_json::json!({
+            "model": "text-embedding-3-small",
+            "input": ["one", "two"],
+            "encoding_format": "float"
+        });
+        let req = parse_request(Dialect::OpenAiEmbeddings, &body).unwrap();
+        assert_eq!(req.model, "text-embedding-3-small");
+        let (src, extra) = req.extra.clone().unwrap();
+        assert_eq!(src, Dialect::OpenAiEmbeddings);
+        assert_eq!(extra["input"], serde_json::json!(["one", "two"]));
+        let out = build_request(Dialect::OpenAiEmbeddings, &req, false).unwrap();
+        assert_eq!(out["input"], serde_json::json!(["one", "two"]));
+        assert_eq!(out["encoding_format"], "float");
+        assert_eq!(out["model"], "text-embedding-3-small");
+    }
+
+    #[test]
+    fn embeddings_have_no_canonical_response() {
+        let err = parse_response(Dialect::OpenAiEmbeddings, &serde_json::json!({})).unwrap_err();
+        assert!(matches!(err, Error::Translation(_)));
+    }
+
+    #[test]
+    fn fragmented_300_byte_frame_parses_in_7_byte_chunks() {
+        let text = "x".repeat(240);
+        let payload = serde_json::json!({
+            "id": "chatcmpl-chunk",
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"content": text}}]
+        });
+        let frame = rrouter_core::sse::render_openai(&payload.to_string(), None);
+        assert!(frame.len() > 300, "frame should exceed 300 bytes: {}", frame.len());
+
+        let decode = |chunk_size: usize| {
+            let mut dec = StreamDecoder::new(Dialect::OpenAiChat, "m");
+            let mut events = Vec::new();
+            for chunk in frame.as_bytes().chunks(chunk_size) {
+                events.extend(dec.push(chunk).unwrap());
+            }
+            events.extend(dec.finish().unwrap());
+            events
+        };
+        let whole = decode(frame.len());
+        assert_eq!(decode(7), whole, "frame split at arbitrary offsets must decode identically");
+        assert_eq!(
+            whole,
+            vec![
+                StreamEvent::Start { id: "chatcmpl-chunk".into(), model: "gpt-4o".into() },
+                StreamEvent::TextDelta(text),
+                StreamEvent::Done { reason: FinishReason::Stop, usage: None },
+            ]
+        );
     }
 }

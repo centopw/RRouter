@@ -159,13 +159,10 @@ fn req_system_extend(out: &mut Vec<Message>, text: String) {
         return;
     }
     if let Some(Message { role: Role::System, parts }) = out.last_mut() {
-        match parts.first_mut() {
-            Some(Part::Text(t)) => {
-                t.push_str("\n\n");
-                t.push_str(&text);
-                return;
-            }
-            _ => {}
+        if let Some(Part::Text(t)) = parts.first_mut() {
+            t.push_str("\n\n");
+            t.push_str(&text);
+            return;
         }
     }
     out.push(Message::text(Role::System, text));

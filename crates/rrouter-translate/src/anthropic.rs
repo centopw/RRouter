@@ -476,13 +476,11 @@ impl AnthropicDecoder {
                             out.push(StreamEvent::ReasoningDelta(t.to_owned()));
                         }
                     }
-                    Some("input_json_delta") => {
-                        if block.kind == BlockKind::ToolUse {
-                            out.push(StreamEvent::ToolCallArgsDelta {
-                                index: block.index,
-                                partial_json: req_str(delta, "partial_json").unwrap_or_default().to_owned(),
-                            });
-                        }
+                    Some("input_json_delta") if block.kind == BlockKind::ToolUse => {
+                        out.push(StreamEvent::ToolCallArgsDelta {
+                            index: block.index,
+                            partial_json: req_str(delta, "partial_json").unwrap_or_default().to_owned(),
+                        });
                     }
                     _ => {}
                 }
@@ -946,10 +944,6 @@ mod tests {
 
     // Full cross-dialect round trip: [OI] request → Anthropic body → Anthropic
     // response → [OI] response, preserving tool names/args/ids and finish reason.
-    fn resp_canonical_messages(resp: &ChatResponse) -> Vec<Message> {
-        vec![Message { role: Role::Assistant, parts: resp.parts.clone() }]
-    }
-
     #[test]
     fn full_round_trip_openai_to_anthropic_and_back() {
         let client = json!({
@@ -991,8 +985,33 @@ mod tests {
         assert_eq!(oi_out["usage"]["prompt_tokens"], 40);
         assert_eq!(oi_out["usage"]["completion_tokens"], 12);
 
-        // The converted client body must itself re-parse cleanly.
-        let client_round = parse_oi(&oi_out).unwrap();
-        assert_eq!(client_round.messages, resp_canonical_messages(&resp));
+        // Re-entering through the client dialect must preserve identity.
+        let reparsed = crate::openai_chat::parse_response(&oi_out).unwrap();
+        assert_eq!(reparsed.id, "msg_rt");
+        assert_eq!(reparsed.parts, resp.parts);
+        assert_eq!(reparsed.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(reparsed.usage, resp.usage);
+    }
+
+    #[test]
+    fn image_base64_maps_to_data_url_and_back() {
+        let body = json!({
+            "model": "",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is this"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
+            ]}]
+        });
+        let req = parse_request(D, &body).unwrap();
+        assert_eq!(
+            req.messages[0].parts[1],
+            Part::Image { url: "data:image/png;base64,QUJD".into(), media_type: Some("image/png".into()) }
+        );
+        let out = build_request(D, &req, false).unwrap();
+        let source = &out["messages"][0]["content"][1]["source"];
+        assert_eq!(source["type"], "base64");
+        assert_eq!(source["media_type"], "image/png");
+        assert_eq!(source["data"], "QUJD");
     }
 }
