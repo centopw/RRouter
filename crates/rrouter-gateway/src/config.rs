@@ -3,6 +3,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
+use rrouter_router::Strategy;
 use serde::Serialize;
 
 /// Default listen port: 9router's, so existing client configs keep working.
@@ -46,6 +47,8 @@ pub struct Config {
     pub max_attempts: usize,
     /// Seconds graceful shutdown may spend draining live streams; `0` waits forever.
     pub shutdown_grace_secs: u64,
+    /// Ordering of equal-priority connections. Priority itself always dominates.
+    pub strategy: Strategy,
 }
 
 impl Config {
@@ -151,6 +154,22 @@ impl Config {
             DEFAULT_SHUTDOWN_GRACE_SECS,
             &mut problems,
         );
+        // An unknown strategy is refused at startup rather than silently treated as
+        // `priority`: the operator asked for different routing and must know it did not
+        // take effect.
+        let strategy = match var("RROUTER_STRATEGY") {
+            None => Strategy::Priority,
+            Some(raw) => match Strategy::parse(&raw) {
+                Some(strategy) => strategy,
+                None => {
+                    problems.push(format!(
+                        "RROUTER_STRATEGY={raw:?} is not one of priority, weighted, \
+                         least_latency"
+                    ));
+                    Strategy::Priority
+                }
+            },
+        };
 
         if problems.is_empty() {
             Ok(Self {
@@ -169,6 +188,7 @@ impl Config {
                 max_concurrency,
                 max_attempts,
                 shutdown_grace_secs,
+                strategy,
             })
         } else {
             Err(problems.join("; "))
@@ -252,7 +272,7 @@ impl Serialize for Redacted<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let c = self.0;
-        let mut st = s.serialize_struct("Config", 16)?;
+        let mut st = s.serialize_struct("Config", 17)?;
         st.serialize_field("host", &c.host.to_string())?;
         st.serialize_field("port", &c.port)?;
         st.serialize_field("data_dir", &c.data_dir.to_string_lossy())?;
@@ -272,6 +292,7 @@ impl Serialize for Redacted<'_> {
         st.serialize_field("max_concurrency", &c.max_concurrency)?;
         st.serialize_field("max_attempts", &c.max_attempts)?;
         st.serialize_field("shutdown_grace_secs", &c.shutdown_grace_secs)?;
+        st.serialize_field("strategy", c.strategy.as_str())?;
         st.end()
     }
 }
@@ -304,7 +325,17 @@ mod tests {
             max_concurrency: 0,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             shutdown_grace_secs: DEFAULT_SHUTDOWN_GRACE_SECS,
+            strategy: Strategy::Priority,
         }
+    }
+
+    #[test]
+    fn strategy_names_parse_and_unknown_values_are_refused() {
+        assert_eq!(Strategy::parse("priority"), Some(Strategy::Priority));
+        assert_eq!(Strategy::parse(" Weighted "), Some(Strategy::Weighted));
+        assert_eq!(Strategy::parse("least_latency"), Some(Strategy::LeastLatency));
+        assert_eq!(Strategy::parse("least-latency"), None);
+        assert_eq!(Strategy::parse(""), None);
     }
 
     #[test]
@@ -342,6 +373,7 @@ mod tests {
         assert!(json.contains("\"max_concurrency\":7"));
         assert!(json.contains("\"max_attempts\":2"));
         assert!(json.contains("\"shutdown_grace_secs\":0"));
+        assert!(json.contains("\"strategy\":\"priority\""));
     }
 
     #[test]

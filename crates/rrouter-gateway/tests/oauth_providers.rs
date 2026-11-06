@@ -42,6 +42,7 @@ fn test_state() -> Arc<AppState> {
             max_concurrency: 0,
             max_attempts: 4,
             shutdown_grace_secs: 20,
+        strategy: Default::default(),
         },
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),

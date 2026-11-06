@@ -175,6 +175,7 @@ fn config(require_api_key: bool) -> Config {
         max_concurrency: 0,
         max_attempts: 4,
         shutdown_grace_secs: 20,
+        strategy: rrouter_router::Strategy::Priority,
     }
 }
 
@@ -217,8 +218,9 @@ fn build_state(config: Config) -> AppState {
 }
 
 impl Harness {
-    /// Register a provider connection pointing at the mock upstream.
-    async fn connect(&self, provider: &str, mock: &Mock) {
+    /// Register a provider connection pointing at the mock upstream; the id is what
+    /// weight and latency tests address it by.
+    async fn connect(&self, provider: &str, mock: &Mock) -> uuid::Uuid {
         let creds = Credentials {
             api_key: Some("test-key".into()),
             access_token: Some("SECRET-ACCESS-TOKEN".into()),
@@ -230,7 +232,8 @@ impl Harness {
             .store
             .create_connection(provider, "api_key", creds, Some("mock"))
             .await
-            .expect("connection");
+            .expect("connection")
+            .id
     }
 
     async fn call(&self, req: Request<Body>) -> (StatusCode, Value) {
@@ -1547,6 +1550,7 @@ async fn key_rows_match_the_governance_contract() {
         "spent_tokens": 0,
         "allowed_models": ["claude/claude-haiku-4-5-20251001"],
         "expires_at": null,
+        "models": [],
     });
     assert_eq!(patched, expected);
 
@@ -1917,4 +1921,299 @@ async fn passthrough_endpoints_record_usage_only_when_reported() {
     assert_eq!(rows[0].endpoint.as_deref(), Some("/v1/responses/compact"));
     assert_eq!(rows[0].input_tokens, 11);
     assert_eq!(rows[0].output_tokens, 0);
+}
+
+// ------------------------------------------------- phase 4: per-key model mapping
+
+impl Harness {
+    /// `PUT /api/keys/{id}/models`.
+    async fn put_models(&self, id: &str, body: Value) -> (StatusCode, Value) {
+        self.call(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/keys/{id}/models"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+    }
+}
+
+fn anthropic_body(model: &str) -> Value {
+    json!({
+        "model": model,
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}]
+    })
+}
+
+/// One key maps `default` to a real ref: the client keeps the stable name, the upstream
+/// sees the target, and the mapping applies to count_tokens as well as chat.
+#[tokio::test]
+async fn key_model_mapping_rewrites_the_routed_model() {
+    let reply = || {
+        MockReply::Json(
+            200,
+            json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-haiku-4-5-20251001",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 2, "output_tokens": 1}
+            }),
+        )
+    };
+    let mock = Mock::start(vec![
+        reply(),
+        reply(),
+        MockReply::Json(200, json!({"input_tokens": 5})),
+        reply(),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("claude", &mock).await;
+    let (key, id) = h.create_key().await;
+
+    let (status, body) = h
+        .put_models(
+            &id,
+            json!({"models": [{"from": "default", "to": "claude/claude-haiku-4-5-20251001"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = h
+        .post_with("/v1/messages", anthropic_body("default"), &[("x-api-key", &key)])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        mock.seen()[0]["model"], "claude-haiku-4-5-20251001",
+        "the mapped target is what the provider receives"
+    );
+
+    // An unmapped model passes through unchanged.
+    let (status, body) = h
+        .post_with("/v1/messages", anthropic_body("claude/sonnet-4-5"), &[("x-api-key", &key)])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(mock.seen()[1]["model"], "sonnet-4-5");
+
+    // count_tokens goes through the same rewrite.
+    let (status, body) = h
+        .post_with(
+            "/v1/messages/count_tokens",
+            anthropic_body("default"),
+            &[("x-api-key", &key)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(mock.seen()[2]["model"], "claude-haiku-4-5-20251001");
+
+    // The same model name from a key without the mapping is not rewritten.
+    let (status, body) = h.post("/v1/messages", anthropic_body("claude/sonnet-4-5")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(mock.seen()[3]["model"], "sonnet-4-5");
+}
+
+/// The mapping endpoint validates every target, replaces the whole map or nothing, and
+/// the keys list carries the map.
+#[tokio::test]
+async fn key_model_endpoint_validates_and_replaces_atomically() {
+    let h = harness(false);
+    let (_, id) = h.create_key().await;
+
+    for (body, why) in [
+        (json!({"models": [{"from": "", "to": "claude/x"}]}), "empty from"),
+        (json!({"models": [{"from": "a", "to": "gpt-5"}]}), "to without a provider"),
+        (json!({"models": [{"from": "a", "to": "not-a-provider/m"}]}), "unregistered provider"),
+        (json!({"models": [{"from": "a", "to": "claude/"}]}), "empty model id"),
+        (
+            json!({"models": [
+                {"from": "a", "to": "claude/x"},
+                {"from": "a", "to": "openai/gpt-5"}
+            ]}),
+            "duplicate from",
+        ),
+        (json!({"nope": []}), "missing models key"),
+    ] {
+        let (status, value) = h.put_models(&id, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {value}");
+    }
+    // Nothing was written by any of the rejected requests.
+    let (status, value) = h.get(&format!("/api/keys/{id}/models")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["data"], json!([]), "a rejected PUT must not partially apply");
+
+    let (status, value) = h
+        .put_models(
+            &id,
+            json!({"models": [
+                {"from": "smart", "to": "claude/claude-sonnet-4-5"},
+                {"from": "default", "to": "claude/claude-haiku-4-5-20251001"}
+            ]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["data"].as_array().map(Vec::len), Some(2));
+
+    // Read back in `from` order, and in the keys list too.
+    let (status, value) = h.get(&format!("/api/keys/{id}/models")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        value["data"],
+        json!([
+            {"from": "default", "to": "claude/claude-haiku-4-5-20251001"},
+            {"from": "smart", "to": "claude/claude-sonnet-4-5"}
+        ])
+    );
+    let (status, value) = h.get("/api/keys").await;
+    assert_eq!(status, StatusCode::OK);
+    let row = value["data"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["id"] == id.as_str()))
+        .expect("key row");
+    assert_eq!(row["models"].as_array().map(Vec::len), Some(2));
+
+    // A second PUT replaces rather than merges; an empty list clears.
+    let (status, _) = h
+        .put_models(&id, json!({"models": [{"from": "only", "to": "openai/gpt-5"}]}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, value) = h.get(&format!("/api/keys/{id}/models")).await;
+    assert_eq!(value["data"], json!([{"from": "only", "to": "openai/gpt-5"}]));
+    let (status, _) = h.put_models(&id, json!({"models": []})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, value) = h.get(&format!("/api/keys/{id}/models")).await;
+    assert_eq!(value["data"], json!([]));
+
+    // Unknown key: `404`, not an empty list.
+    let missing = uuid::Uuid::new_v4();
+    let (status, _) = h.get(&format!("/api/keys/{missing}/models")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = h
+        .put_models(&missing.to_string(), json!({"models": []}))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Every successful attempt feeds the EWMA the least-latency strategy reads, off the
+/// response path.
+#[tokio::test]
+async fn successful_attempts_record_latency_samples() {
+    let mock = Mock::start(vec![openai_reply("timed")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (status, _, body) = h.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let mut samples = std::collections::HashMap::new();
+    for _ in 0..100 {
+        samples = h.state.store.connection_latencies().await.expect("latencies");
+        if !samples.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(samples.len(), 1, "the one connection that served has a sample");
+}
+
+/// The configured strategy reaches the proxy: with weights 3:1 two separate upstreams
+/// receive the deterministic smooth-WRR sequence (heavy, heavy, light, heavy) over four
+/// plans. Embeddings take the first candidate and pass `affinity: None`, so this is the
+/// planner cursor, not a conversation hash.
+#[tokio::test]
+async fn weighted_strategy_is_applied_by_the_proxy() {
+    let embedding = || {
+        MockReply::Json(
+            200,
+            json!({
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+                "model": "text-embedding-3-small",
+                "usage": {"prompt_tokens": 1, "total_tokens": 1}
+            }),
+        )
+    };
+    let heavy = Mock::start(vec![embedding(), embedding(), embedding(), embedding()]).await;
+    let light = Mock::start(vec![embedding(), embedding(), embedding(), embedding()]).await;
+    let mut cfg = config(false);
+    cfg.strategy = rrouter_router::Strategy::Weighted;
+    let h = harness_with(cfg);
+    let heavy_id = h.connect("openai", &heavy).await;
+    let light_id = h.connect("openai", &light).await;
+    h.state.store.set_connection_weight(heavy_id, 3).await.expect("heavy weight");
+    h.state.store.set_connection_weight(light_id, 1).await.expect("light weight");
+
+    for _ in 0..4 {
+        let (status, body) = h
+            .post(
+                "/v1/embeddings",
+                json!({"model": "openai/text-embedding-3-small", "input": "hi"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    assert_eq!(heavy.hits(), 3, "weight 3 should lead three of four plans");
+    assert_eq!(light.hits(), 1);
+}
+
+/// Least-latency wiring: the fastest measured connection serves even though another
+/// connection exists, and the choice is not a conversation-hash accident.
+#[tokio::test]
+async fn least_latency_strategy_is_applied_by_the_proxy() {
+    let embedding = || {
+        MockReply::Json(
+            200,
+            json!({
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1]}],
+                "model": "text-embedding-3-small",
+                "usage": {"prompt_tokens": 1, "total_tokens": 1}
+            }),
+        )
+    };
+    let fast = Mock::start(vec![embedding(), embedding()]).await;
+    let slow = Mock::start(vec![embedding(), embedding()]).await;
+    let mut cfg = config(false);
+    cfg.strategy = rrouter_router::Strategy::LeastLatency;
+    let h = harness_with(cfg);
+    let fast_id = h.connect("openai", &fast).await;
+    let slow_id = h.connect("openai", &slow).await;
+    h.state.store.record_connection_latency(fast_id, 20).await.expect("fast");
+    h.state.store.record_connection_latency(slow_id, 4_000).await.expect("slow");
+
+    for _ in 0..2 {
+        let (status, body) = h
+            .post(
+                "/v1/embeddings",
+                json!({"model": "openai/text-embedding-3-small", "input": "hi"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    assert_eq!(fast.hits(), 2, "the measured-fast connection must serve");
+    assert_eq!(slow.hits(), 0);
+}
+
+/// A failed attempt must not teach the latency strategy anything: a 500 says nothing
+/// about how fast the account is when it works.
+#[tokio::test]
+async fn failed_attempts_do_not_record_latency_samples() {
+    let mock = Mock::start(vec![MockReply::Json(500, json!({"error": "boom"}))]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (status, _, body) = h.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {body}");
+
+    // Give any (incorrectly) spawned sample time to land before asserting absence.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        h.state.store.connection_latencies().await.expect("latencies").is_empty(),
+        "a failed attempt must not update the EWMA"
+    );
 }

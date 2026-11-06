@@ -29,6 +29,9 @@ pub struct Connection {
     pub name: Option<String>,
     pub email: Option<String>,
     pub priority: i32,
+    /// Traffic share for the weighted strategy, `1..=1000` (higher = more traffic).
+    /// The weighted planner reads it; the priority strategy ignores it.
+    pub weight: u32,
     pub is_active: bool,
     pub credentials: Credentials,
     pub backoff_level: u32,
@@ -108,6 +111,16 @@ impl ApiKeyPatch {
 pub struct ModelAlias {
     pub alias: String,
     pub target: String,
+}
+
+/// One per-key model mapping: the client's `from` ref is routed as `to`.
+///
+/// A mapping is one hop and runs before alias/combo resolution, so a client can keep a
+/// stable model name while the operator repoints it for that key alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyModel {
+    pub from: String,
+    pub to: String,
 }
 
 /// Ordered fallback chain.
@@ -487,6 +500,63 @@ impl Store {
         Ok(())
     }
 
+    /// Traffic share used by the weighted strategy. Clamped to the schema's
+    /// `1..=1000`: zero would silently starve an account that is still meant to serve,
+    /// and an unbounded value would make the weighted cycle unbounded too.
+    pub async fn set_connection_weight(&self, id: Uuid, weight: u32) -> Result<()> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "UPDATE connections SET weight = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id.to_string(), weight.clamp(MIN_WEIGHT, MAX_WEIGHT), now()],
+            )
+            .map_err(migrations::db_err)?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("connection {id}")));
+        }
+        Ok(())
+    }
+
+    /// Fold one successful attempt's latency into the connection's EWMA:
+    /// `new = old * 0.8 + latency * 0.2`, evaluated in SQL so concurrent attempts
+    /// cannot lose each other's update. Callers fire this and forget it.
+    pub async fn record_connection_latency(&self, id: Uuid, latency_ms: u32) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO connection_stats (connection_id, ewma_latency_ms, updated_at) \
+             VALUES (?1, ?2, ?3) \
+             ON CONFLICT(connection_id) DO UPDATE SET \
+               ewma_latency_ms = connection_stats.ewma_latency_ms * 0.8 + \
+                                 excluded.ewma_latency_ms * 0.2, \
+               updated_at = excluded.updated_at",
+            params![id.to_string(), f64::from(latency_ms), now()],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Every measured connection latency, for `least_latency` ordering. A connection
+    /// with no successful attempt yet is simply absent.
+    pub async fn connection_latencies(&self) -> Result<std::collections::HashMap<Uuid, f64>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT connection_id, ewma_latency_ms FROM connection_stats")
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (raw, ewma) = row.map_err(migrations::db_err)?;
+            if let Ok(id) = Uuid::parse_str(&raw) {
+                out.insert(id, ewma);
+            }
+        }
+        Ok(out)
+    }
+
     /// Take a connection out of (or back into) routing without deleting its credentials.
     pub async fn set_connection_active(&self, id: Uuid, active: bool) -> Result<()> {
         let conn = self.conn();
@@ -510,6 +580,13 @@ impl Store {
                 params![id.to_string()],
             )
             .map_err(migrations::db_err)?;
+        // A deleted connection's latency sample must not outlive it: the id is never
+        // reused, so the row would only ever be dead weight.
+        conn.execute(
+            "DELETE FROM connection_stats WHERE connection_id = ?1",
+            params![id.to_string()],
+        )
+        .map_err(migrations::db_err)?;
         Ok(n > 0)
     }
 
@@ -530,6 +607,7 @@ impl Store {
             name: raw.name,
             email: raw.email,
             priority: raw.priority,
+            weight: raw.weight,
             is_active: raw.is_active,
             credentials,
             backoff_level: raw.backoff_level,
@@ -619,6 +697,18 @@ impl Store {
         Ok(out)
     }
 
+    /// One key by id, or `None` when it does not exist.
+    pub async fn get_api_key(&self, id: Uuid) -> Result<Option<ApiKey>> {
+        let conn = self.conn();
+        conn.query_row(
+            &format!("SELECT {} FROM api_keys WHERE id = ?1", Self::KEY_COLUMNS),
+            params![id.to_string()],
+            row_to_api_key,
+        )
+        .optional()
+        .map_err(migrations::db_err)
+    }
+
     /// Merge `patch` into the stored key and return the merged row, or `None` when the
     /// id does not exist. Read and write happen under the same connection lock, so two
     /// concurrent patches cannot interleave into a lost update.
@@ -663,7 +753,117 @@ impl Store {
         let n = conn
             .execute("DELETE FROM api_keys WHERE id = ?1", params![id.to_string()])
             .map_err(migrations::db_err)?;
+        if n > 0 {
+            // The key id is never reused, so its mappings can only ever be dead weight.
+            conn.execute(
+                "DELETE FROM key_models WHERE key_id = ?1",
+                params![id.to_string()],
+            )
+            .map_err(migrations::db_err)?;
+        }
         Ok(n > 0)
+    }
+
+    // ----- per-key model mapping ---------------------------------------------------
+
+    /// All mappings for one key, ordered by the client ref.
+    pub async fn key_models(&self, key_id: Uuid) -> Result<Vec<KeyModel>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT from_ref, to_ref FROM key_models WHERE key_id = ?1 ORDER BY from_ref ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params![key_id.to_string()], |r| {
+                Ok(KeyModel { from: r.get(0)?, to: r.get(1)? })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    /// The target this key maps `from` to, if any. One indexed row, because it runs on
+    /// the request path.
+    pub async fn key_model_target(&self, key_id: Uuid, from: &str) -> Result<Option<String>> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT to_ref FROM key_models WHERE key_id = ?1 AND from_ref = ?2",
+            params![key_id.to_string(), from],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(migrations::db_err)
+    }
+
+    /// Every key's mappings, grouped by key, for `GET /api/keys`.
+    pub async fn key_models_all(
+        &self,
+    ) -> Result<std::collections::HashMap<Uuid, Vec<KeyModel>>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT key_id, from_ref, to_ref FROM key_models ORDER BY key_id ASC, from_ref ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    KeyModel { from: r.get(1)?, to: r.get(2)? },
+                ))
+            })
+            .map_err(migrations::db_err)?;
+        let mut out: std::collections::HashMap<Uuid, Vec<KeyModel>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (raw, model) = row.map_err(migrations::db_err)?;
+            if let Ok(id) = Uuid::parse_str(&raw) {
+                out.entry(id).or_default().push(model);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Replace one key's whole mapping in a single transaction, so a reader never sees
+    /// half of an update and a duplicate `from` cannot survive. `Ok(false)` when the key
+    /// does not exist — the caller answers `404` without a second query.
+    pub async fn replace_key_models(&self, key_id: Uuid, models: &[KeyModel]) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT 1 FROM api_keys WHERE id = ?1",
+                params![key_id.to_string()],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(migrations::db_err)?
+            .unwrap_or(false);
+        if !exists {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM key_models WHERE key_id = ?1",
+            params![key_id.to_string()],
+        )
+        .map_err(migrations::db_err)?;
+        {
+            let mut stmt = tx
+                .prepare("INSERT INTO key_models (key_id, from_ref, to_ref) VALUES (?1, ?2, ?3)")
+                .map_err(migrations::db_err)?;
+            for m in models {
+                stmt.execute(params![key_id.to_string(), m.from, m.to])
+                    .map_err(migrations::db_err)?;
+            }
+        }
+        tx.commit().map_err(migrations::db_err)?;
+        Ok(true)
     }
 
     /// Lifetime tokens this key has spent: input + output + cache reads + cache writes,
@@ -1218,7 +1418,12 @@ impl CredentialStore for Store {
 
 const CONN_COLUMNS: &str = "id, provider, auth_type, name, email, priority, is_active, data, \
                             backoff_level, last_error, last_error_code, last_error_at, \
-                            created_at, updated_at";
+                            created_at, updated_at, weight";
+
+/// Weighted-strategy bounds. The column is clamped on read and write so a hand-edited
+/// database cannot produce a zero-traffic account or an unbounded weighted cycle.
+const MIN_WEIGHT: u32 = 1;
+const MAX_WEIGHT: u32 = 1000;
 
 /// Row with the credential blob still sealed.
 struct RawConnection {
@@ -1236,6 +1441,7 @@ struct RawConnection {
     last_error_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
+    weight: u32,
 }
 
 fn uuid_col(s: String) -> rusqlite::Result<Uuid> {
@@ -1292,6 +1498,7 @@ fn row_to_connection(r: &Row<'_>) -> rusqlite::Result<RawConnection> {
         last_error_at: r.get(11)?,
         created_at: r.get(12)?,
         updated_at: r.get(13)?,
+        weight: (r.get::<_, i64>(14)?).clamp(i64::from(MIN_WEIGHT), i64::from(MAX_WEIGHT)) as u32,
     })
 }
 

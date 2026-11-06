@@ -8,10 +8,30 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 8;
+pub(crate) const SCHEMA_VERSION: i64 = 9;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+
+/// V9: routing inputs. `connections.weight` is the traffic share used by the weighted
+/// strategy (clamped to 1..=1000 on read); `connection_stats` keeps one EWMA latency per
+/// connection, which survives a restart and needs no in-process state; `key_models`
+/// pins a client model name to a provider ref for one virtual key, so a client keeps a
+/// stable name while the operator repoints it.
+const V9: &str = r#"
+ALTER TABLE connections ADD COLUMN weight INTEGER NOT NULL DEFAULT 100;
+CREATE TABLE IF NOT EXISTS connection_stats (
+  connection_id   TEXT PRIMARY KEY,
+  ewma_latency_ms REAL NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS key_models (
+  key_id   TEXT NOT NULL,
+  from_ref TEXT NOT NULL,
+  to_ref   TEXT NOT NULL,
+  PRIMARY KEY (key_id, from_ref)
+);
+"#;
 
 /// V8: per-attempt audit trail. A fallback is only operable if every candidate that
 /// was tried is visible, so attempts get their own table keyed by the request id the
@@ -209,12 +229,12 @@ mod tests {
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN \
                  ('connections','api_keys','model_aliases','disabled_models','combos','usage',\
-                  'attempts')",
+                  'attempts','connection_stats','key_models')",
                 [],
                 |r| r.get(0),
             )
             .expect("count");
-        assert_eq!(tables, 7);
+        assert_eq!(tables, 9);
     }
 
     #[test]

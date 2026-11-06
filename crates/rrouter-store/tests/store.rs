@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
 use rrouter_store::{
-    ApiKey, ApiKeyPatch, AttemptRecord, Credentials, Store, UsageRecord, API_KEY_PREFIX,
+    ApiKey, ApiKeyPatch, AttemptRecord, Credentials, KeyModel, Store, UsageRecord, API_KEY_PREFIX,
     KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
@@ -411,13 +411,31 @@ fn spent_tokens_sums_only_that_key() {
 }
 
 #[test]
-fn v6_database_migrates_to_eight() {
+fn v6_database_migrates_to_nine() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         conn.execute_batch(
-            "CREATE TABLE api_keys (
+            // V9 alters `connections`, so the fixture must carry the table V1 created.
+            "CREATE TABLE connections (
+               id              TEXT PRIMARY KEY,
+               provider        TEXT NOT NULL,
+               auth_type       TEXT NOT NULL,
+               name            TEXT,
+               email           TEXT,
+               priority        INTEGER NOT NULL DEFAULT 0,
+               is_active       INTEGER NOT NULL DEFAULT 1,
+               data            BLOB NOT NULL,
+               backoff_level   INTEGER NOT NULL DEFAULT 0,
+               last_error      TEXT,
+               last_error_code INTEGER,
+               last_error_at   INTEGER,
+               created_at      INTEGER NOT NULL,
+               updated_at      INTEGER NOT NULL
+             );
+
+             CREATE TABLE api_keys (
                id         TEXT PRIMARY KEY,
                key_hash   TEXT NOT NULL UNIQUE,
                name       TEXT,
@@ -452,7 +470,7 @@ fn v6_database_migrates_to_eight() {
         .expect("v6 schema");
     }
 
-    let store = Store::open(&dir.db(), None).expect("open store runs the v7 and v8 steps");
+    let store = Store::open(&dir.db(), None).expect("open store runs the v7-v9 steps");
     let keys = rt().block_on(store.list_api_keys()).expect("list");
     assert_eq!(keys.len(), 1);
     let legacy = &keys[0];
@@ -484,7 +502,7 @@ fn v6_database_migrates_to_eight() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
         ("idx_usage_request", "the usage row is looked up by request id"),
@@ -499,6 +517,184 @@ fn v6_database_migrates_to_eight() {
             .expect("index");
         assert_eq!(found, 1, "{why}: {index}");
     }
+}
+
+/// A v8 database gains the routing inputs without touching existing rows: every
+/// connection defaults to weight 100 (the plain round-robin share), and the two new
+/// tables start empty.
+#[test]
+fn v8_database_migrates_to_nine() {
+    let dir = TempDir::new("v8");
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        conn.execute_batch(
+            "CREATE TABLE connections (
+               id              TEXT PRIMARY KEY,
+               provider        TEXT NOT NULL,
+               auth_type       TEXT NOT NULL,
+               name            TEXT,
+               email           TEXT,
+               priority        INTEGER NOT NULL DEFAULT 0,
+               is_active       INTEGER NOT NULL DEFAULT 1,
+               data            BLOB NOT NULL,
+               backoff_level   INTEGER NOT NULL DEFAULT 0,
+               last_error      TEXT,
+               last_error_code INTEGER,
+               last_error_at   INTEGER,
+               created_at      INTEGER NOT NULL,
+               updated_at      INTEGER NOT NULL
+             );
+             INSERT INTO connections (id, provider, auth_type, data, created_at, updated_at)
+             VALUES ('11111111-1111-4111-8111-111111111111', 'openai', 'api_key', x'00',
+                     1700000000, 1700000000);
+             PRAGMA user_version = 8;",
+        )
+        .expect("v8 schema");
+    }
+
+    drop(Store::open(&dir.db(), None).expect("open store runs the v9 step"));
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 9);
+
+    let weight: i64 = conn
+        .query_row("SELECT weight FROM connections", [], |r| r.get(0))
+        .expect("weight");
+    assert_eq!(weight, 100, "existing connections join the weighted cycle evenly");
+
+    for (table, why) in [
+        ("connection_stats", "least_latency needs a place to keep its EWMA"),
+        ("key_models", "per-key model mapping needs its table"),
+    ] {
+        let found: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .expect("table");
+        assert_eq!(found, 1, "{why}: {table}");
+    }
+}
+
+// ----- 4c. routing inputs (phase 4) -------------------------------------------------
+
+#[test]
+fn connection_weight_is_clamped_into_the_supported_range() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        let c = store
+            .create_connection("openai", "api_key", creds("k"), Some("w"))
+            .await
+            .expect("connection");
+        assert_eq!(c.weight, 100, "new connections join the weighted cycle evenly");
+
+        store.set_connection_weight(c.id, 0).await.expect("clamp low");
+        let read = store.get_connection(c.id).await.expect("read").expect("exists");
+        assert_eq!(read.weight, 1, "zero would starve an account that must still serve");
+
+        store.set_connection_weight(c.id, 10_000).await.expect("clamp high");
+        let read = store.get_connection(c.id).await.expect("read").expect("exists");
+        assert_eq!(read.weight, 1000);
+
+        assert!(
+            store.set_connection_weight(Uuid::new_v4(), 5).await.is_err(),
+            "an unknown connection is reported, not silently ignored"
+        );
+    });
+}
+
+#[test]
+fn latency_ewma_is_old_times_zero_point_eight_plus_sample_times_zero_point_two() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        let c = store
+            .create_connection("openai", "api_key", creds("k"), Some("fast"))
+            .await
+            .expect("connection");
+
+        // First sample seeds the EWMA; later samples move it by 20%.
+        store.record_connection_latency(c.id, 100).await.expect("first");
+        let ewma = store.connection_latencies().await.expect("latencies");
+        assert_eq!(ewma.get(&c.id).copied(), Some(100.0));
+
+        store.record_connection_latency(c.id, 200).await.expect("second");
+        let ewma = store.connection_latencies().await.expect("latencies");
+        assert_eq!(ewma.get(&c.id).copied(), Some(120.0), "100*0.8 + 200*0.2");
+
+        store.record_connection_latency(c.id, 300).await.expect("third");
+        let ewma = store.connection_latencies().await.expect("latencies");
+        assert_eq!(ewma.get(&c.id).copied(), Some(156.0), "120*0.8 + 300*0.2");
+
+        // A deleted connection takes its sample with it.
+        assert!(store.delete_connection(c.id).await.expect("delete"));
+        assert!(store.connection_latencies().await.expect("latencies").is_empty());
+    });
+}
+
+#[test]
+fn key_models_replace_whole_map_and_reject_duplicates() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        let (_, key) = store.create_api_key(Some("laptop")).await.expect("key");
+        let haiku = KeyModel {
+            from: "default".into(),
+            to: "claude/claude-haiku-4-5-20251001".into(),
+        };
+        let sonnet = KeyModel {
+            from: "smart".into(),
+            to: "claude/claude-sonnet-4-5".into(),
+        };
+        assert!(
+            store.replace_key_models(key.id, &[haiku.clone(), sonnet.clone()]).await.expect("put")
+        );
+
+        // Read back in `from` order, and findable by exact client model.
+        assert_eq!(store.key_models(key.id).await.expect("models"), vec![haiku.clone(), sonnet]);
+        assert_eq!(
+            store.key_model_target(key.id, "default").await.expect("target").as_deref(),
+            Some("claude/claude-haiku-4-5-20251001")
+        );
+        assert_eq!(store.key_model_target(key.id, "unmapped").await.expect("target"), None);
+
+        // A second PUT replaces the whole map rather than merging into it.
+        let only = KeyModel { from: "default".into(), to: "openai/gpt-5".into() };
+        store.replace_key_models(key.id, std::slice::from_ref(&only)).await.expect("replace");
+        assert_eq!(store.key_models(key.id).await.expect("models"), vec![only]);
+        let all = store.key_models_all().await.expect("all");
+        assert_eq!(all.get(&key.id).map(Vec::len), Some(1));
+
+        // An empty list clears it.
+        store.replace_key_models(key.id, &[]).await.expect("clear");
+        assert!(store.key_models(key.id).await.expect("models").is_empty());
+
+        // A duplicate `from` is refused by the primary key, and the previous state is
+        // left alone because the whole write is one transaction.
+        store.replace_key_models(key.id, std::slice::from_ref(&haiku)).await.expect("put");
+        assert!(
+            store.replace_key_models(key.id, &[haiku.clone(), haiku]).await.is_err(),
+            "one key cannot map the same client model twice"
+        );
+        assert_eq!(store.key_models(key.id).await.expect("models").len(), 1);
+
+        assert!(
+            !store
+                .replace_key_models(Uuid::new_v4(), &[KeyModel {
+                    from: "a".into(),
+                    to: "openai/gpt-5".into()
+                }])
+                .await
+                .expect("unknown key"),
+            "an unknown key is reported, not created"
+        );
+
+        // Deleting the key drops its mappings.
+        assert!(store.delete_api_key(key.id).await.expect("delete key"));
+        assert!(store.key_models_all().await.expect("all").is_empty());
+    });
 }
 
 // ----- 5. credentials never plaintext ----------------------------------------------

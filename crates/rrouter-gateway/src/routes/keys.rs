@@ -3,6 +3,10 @@
 //! A key carries the limits an operator sells: requests and tokens per minute, a
 //! lifetime token budget, a model allowlist, and an expiry. `0` / `null` means
 //! unlimited, so a freshly created key behaves exactly as before the phase-1 schema.
+//!
+//! A key also owns a model mapping (`/api/keys/{id}/models`): the client keeps a stable
+//! model name and the operator repoints it for that key alone. Validation is here, not
+//! in the store, because "resolves to a known provider" is a routing fact.
 
 use std::sync::Arc;
 
@@ -10,7 +14,7 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use rrouter_core::Error;
-use rrouter_store::{ApiKey, ApiKeyPatch};
+use rrouter_store::{ApiKey, ApiKeyPatch, KeyModel};
 use serde_json::{json, Value};
 
 use super::{admin_error, body_json, ok_json};
@@ -18,7 +22,7 @@ use crate::state::AppState;
 
 /// The row shape shared by `GET /api/keys`, `POST` and `PATCH`. `spent_tokens` is the
 /// durable SQL sum over `usage` for this key, not a stored counter.
-fn row(key: &ApiKey, spent: u64) -> Value {
+fn row(key: &ApiKey, spent: u64, models: &[KeyModel]) -> Value {
     json!({
         "id": key.id.to_string(),
         "name": key.name,
@@ -30,12 +34,24 @@ fn row(key: &ApiKey, spent: u64) -> Value {
         "spent_tokens": spent,
         "allowed_models": key.allowed_models,
         "expires_at": key.expires_at,
+        "models": models_value(models),
     })
+}
+
+/// `[{"from": …, "to": …}]`, the shape both the keys list and the mapping endpoint use.
+fn models_value(models: &[KeyModel]) -> Value {
+    Value::Array(
+        models
+            .iter()
+            .map(|m| json!({ "from": m.from, "to": m.to }))
+            .collect(),
+    )
 }
 
 async fn view(state: &AppState, key: &ApiKey) -> Value {
     let spent = state.store.api_key_spend(key.id).await.unwrap_or(0);
-    row(key, spent)
+    let models = state.store.key_models(key.id).await.unwrap_or_default();
+    row(key, spent, &models)
 }
 
 pub async fn list(State(state): State<Arc<AppState>>) -> Response {
@@ -47,9 +63,20 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
         Ok(spend) => spend,
         Err(e) => return admin_error(&e),
     };
+    // One query for every key's mapping, so the list stays O(1) in statement count.
+    let models = match state.store.key_models_all().await {
+        Ok(models) => models,
+        Err(e) => return admin_error(&e),
+    };
     let data: Vec<Value> = keys
         .iter()
-        .map(|k| row(k, spend.get(&k.id).copied().unwrap_or(0)))
+        .map(|k| {
+            row(
+                k,
+                spend.get(&k.id).copied().unwrap_or(0),
+                models.get(&k.id).map(Vec::as_slice).unwrap_or_default(),
+            )
+        })
         .collect();
     ok_json(json!({ "data": data }))
 }
@@ -116,6 +143,86 @@ pub async fn remove(
         Ok(false) => admin_error(&Error::NotFound(format!("key {uuid}"))),
         Err(e) => admin_error(&e),
     }
+}
+
+/// `GET /api/keys/{id}/models` — the key's model mapping, in `from` order.
+pub async fn list_models(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Ok(uuid) = uuid::Uuid::parse_str(&id) else {
+        return admin_error(&Error::BadRequest("key id must be a uuid".into()));
+    };
+    match state.store.get_api_key(uuid).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return admin_error(&Error::NotFound(format!("key {uuid}"))),
+        Err(e) => return admin_error(&e),
+    }
+    match state.store.key_models(uuid).await {
+        Ok(models) => ok_json(json!({ "data": models_value(&models) })),
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// `PUT /api/keys/{id}/models` — replace the whole mapping atomically; an empty list
+/// clears it. Every `to` must be a `provider/model` ref for a registered provider,
+/// because a mapping that cannot route is worse than no mapping at all.
+pub async fn put_models(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Body,
+) -> Response {
+    let Ok(uuid) = uuid::Uuid::parse_str(&id) else {
+        return admin_error(&Error::BadRequest("key id must be a uuid".into()));
+    };
+    let value = match body_json(body).await {
+        Ok(v) => v,
+        Err(resp) => return *resp,
+    };
+    let models = match models_from(&value) {
+        Ok(models) => models,
+        Err(e) => return admin_error(&e),
+    };
+    match state.store.replace_key_models(uuid, &models).await {
+        Ok(true) => ok_json(json!({ "data": models_value(&models) })),
+        Ok(false) => admin_error(&Error::NotFound(format!("key {uuid}"))),
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// Decode `{"models":[{"from","to"}]}` and reject anything that could not route.
+fn models_from(value: &Value) -> Result<Vec<KeyModel>, Error> {
+    let items = value
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::BadRequest("body must be {\"models\": [...]}".into()))?;
+    let mut out: Vec<KeyModel> = Vec::with_capacity(items.len());
+    for item in items {
+        let from = item
+            .get("from")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::BadRequest("each mapping needs a non-empty \"from\"".into()))?;
+        let to = item
+            .get("to")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .ok_or_else(|| Error::BadRequest("each mapping needs a \"to\" ref".into()))?;
+        let (provider, model) = to.split_once('/').ok_or_else(|| {
+            Error::BadRequest(format!("\"to\" must be provider/model, got {to:?}"))
+        })?;
+        if model.is_empty() || rrouter_auth::get(provider).is_none() {
+            return Err(Error::BadRequest(format!(
+                "\"to\" must name a registered provider and a model, got {to:?}"
+            )));
+        }
+        if out.iter().any(|m| m.from == from) {
+            return Err(Error::BadRequest(format!("duplicate mapping for {from:?}")));
+        }
+        out.push(KeyModel { from: from.to_string(), to: to.to_string() });
+    }
+    Ok(out)
 }
 
 /// Decode a PATCH body: absent fields are left alone, an explicit `null` clears a

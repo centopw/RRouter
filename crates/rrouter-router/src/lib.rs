@@ -7,7 +7,7 @@
 //!
 //! Layering:
 //! - [`Catalog`] — static "who serves what".
-//! - [`Planner`] — [`Store`](rrouter_store::Store) reads + catalog → [`Plan`].
+//! - [`Planner`] — [`Store`](rrouter_store::Store) reads + catalog + [`Strategy`] → [`Plan`].
 //! - [`Breaker`] — per-connection closed/open/half-open state.
 //! - [`Dispatcher`] — drives a plan; `run` for JSON, `run_streaming` for bodies.
 
@@ -22,5 +22,5 @@ pub use breaker::{Breaker, BreakerState};
 pub use candidate::{Candidate, Plan};
 pub use catalog::{Catalog, ModelInfo};
 pub use dispatch::{AttemptOutcome, Dispatcher, DEFAULT_MAX_ATTEMPTS};
-pub use planner::Planner;
+pub use planner::{Planner, Strategy};
 pub use stream_dispatch::ByteStream;

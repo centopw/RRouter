@@ -195,16 +195,26 @@ async fn special_inner(
     let caller = state.authenticate(headers).await?;
     trace.set_key(caller.key_id());
     let body: Value = serde_json::from_slice(raw)?;
-    let model = body
+    let requested = body
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::BadRequest("missing model".into()))?
         .to_string();
+    // Per-key mapping first, then governance and planning, so the allowlist and the
+    // routed ref both see the model this key actually asked for.
+    let model = state.mapped_model(caller.key_id(), &requested).await?;
     trace.set_model(&model);
     state.admit(&caller, &model).await?;
     let plan = state
         .planner
-        .plan(state.catalog.as_ref(), state.store.as_ref(), &model, false, None)
+        .plan(
+            state.catalog.as_ref(),
+            state.store.as_ref(),
+            &model,
+            false,
+            None,
+            state.config.strategy,
+        )
         .await?;
     // Fallback only makes sense between providers that have the endpoint; asking the
     // next candidate would answer with a NoRoute that stops the chain anyway.
@@ -334,19 +344,22 @@ async fn handle(
 
     let body: Value = serde_json::from_slice(raw)?;
     let canonical = rrouter_translate::parse_request(inbound, &body)?;
-    trace.set_model(&canonical.model);
+    // This key's model mapping is one hop that runs before alias/combo resolution.
+    let model = state.mapped_model(caller.key_id(), &canonical.model).await?;
+    trace.set_model(&model);
     // Governance runs before planning: an inactive/expired key, a model outside the
     // allowlist, or an exhausted quota must not reach a provider.
-    state.admit(&caller, &canonical.model).await?;
+    state.admit(&caller, &model).await?;
     let key_id = caller.key_id();
     let plan = state
         .planner
         .plan(
             state.catalog.as_ref(),
             state.store.as_ref(),
-            &canonical.model,
+            &model,
             canonical.stream,
             Some(affinity_of(&canonical)),
+            state.config.strategy,
         )
         .await?;
     let client_stream = plan.stream || canonical.stream;
@@ -457,15 +470,17 @@ async fn complete_traced(
     trace.set_key(key);
     let started = Instant::now();
     let canonical = rrouter_translate::parse_request(inbound, body)?;
-    trace.set_model(&canonical.model);
+    let model = state.mapped_model(key, &canonical.model).await?;
+    trace.set_model(&model);
     let plan = state
         .planner
         .plan(
             state.catalog.as_ref(),
             state.store.as_ref(),
-            &canonical.model,
+            &model,
             canonical.stream,
             Some(affinity_of(&canonical)),
+            state.config.strategy,
         )
         .await?;
     let upstream_stream = plan.stream || canonical.stream || plan.candidates.iter().any(stream_only);
@@ -1005,6 +1020,15 @@ impl RequestTrace {
             labels.key
         };
         crate::metrics::attempt_finished(&candidate.provider, status);
+        // Every successful attempt feeds `least_latency`. Fire and forget: a routing
+        // hint must never delay or fail the response.
+        if status == 200 {
+            spawn_latency(
+                state,
+                candidate.connection,
+                started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+            );
+        }
         spawn_attempt(
             state,
             AttemptRecord {
@@ -1076,6 +1100,16 @@ fn attempt_status(e: &Error) -> u16 {
         Error::Upstream { status, .. } => *status,
         _ => 0,
     }
+}
+
+/// Fold one successful attempt into the connection's EWMA, off the request path.
+fn spawn_latency(state: &AppState, connection: Uuid, latency_ms: u32) {
+    let store = Arc::clone(&state.store);
+    tokio::spawn(async move {
+        if let Err(e) = store.record_connection_latency(connection, latency_ms).await {
+            tracing::warn!(error = %e, "latency sample failed");
+        }
+    });
 }
 
 fn spawn_attempt(state: &AppState, rec: AttemptRecord) {
@@ -1388,16 +1422,24 @@ async fn embeddings_inner(
     let caller = state.authenticate(headers).await?;
     trace.set_key(caller.key_id());
     let body: Value = serde_json::from_slice(raw)?;
-    let model = body
+    let requested = body
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::BadRequest("missing model".into()))?
         .to_string();
+    let model = state.mapped_model(caller.key_id(), &requested).await?;
     trace.set_model(&model);
     state.admit(&caller, &model).await?;
     let plan = state
         .planner
-        .plan(state.catalog.as_ref(), state.store.as_ref(), &model, false, None)
+        .plan(
+            state.catalog.as_ref(),
+            state.store.as_ref(),
+            &model,
+            false,
+            None,
+            state.config.strategy,
+        )
         .await?;
     let candidate = plan
         .candidates

@@ -11,7 +11,7 @@ use rrouter_core::{ChatResponse, Error, FinishReason, Usage};
 use rrouter_router::breaker::{BreakerState, ProbeTicket};
 use rrouter_router::dispatch::AttemptOutcome;
 use rrouter_router::stream_dispatch::{byte_stream, collect_stream};
-use rrouter_router::{Breaker, Candidate, Catalog, Dispatcher, Plan, Planner};
+use rrouter_router::{Breaker, Candidate, Catalog, Dispatcher, Plan, Planner, Strategy};
 use rrouter_store::Store;
 use uuid::Uuid;
 
@@ -38,6 +38,19 @@ async fn conn(store: &Store, provider: &str, model_hint: &str, priority: i32) ->
     c.id
 }
 
+/// Equal-priority order of the builtin `openai/gpt-5` connections under the
+/// least-latency strategy.
+async fn least_latency_order(planner: &Planner, store: &Store) -> Vec<Uuid> {
+    planner
+        .plan(&Catalog::builtin(), store, "openai/gpt-5", false, None, Strategy::LeastLatency)
+        .await
+        .expect("plan")
+        .candidates
+        .iter()
+        .map(|c| c.connection)
+        .collect()
+}
+
 fn plan_of(n: usize) -> Plan {
     Plan {
         model: "m".into(),
@@ -62,7 +75,7 @@ async fn alias_resolves_one_hop_without_looping() {
     store.upsert_alias("claude/primary-x", "claude/never-reached").await.unwrap();
     let planner = Planner::new();
     let plan = planner
-        .plan(&Catalog::builtin(), &store, "fast", false, None)
+        .plan(&Catalog::builtin(), &store, "fast", false, None, Strategy::Priority)
         .await
         .unwrap();
     assert_eq!(plan.candidates.len(), 1);
@@ -79,7 +92,7 @@ async fn self_referential_alias_does_not_loop() {
     store.upsert_alias("loop", "loop").await.unwrap();
     let planner = Planner::new();
     // Resolves via catalog fallback/lookup and terminates.
-    let plan = planner.plan(&Catalog::builtin(), &store, "loop", false, None).await.unwrap();
+    let plan = planner.plan(&Catalog::builtin(), &store, "loop", false, None, Strategy::Priority).await.unwrap();
     assert_eq!(plan.candidates.len(), 1);
     assert_eq!(plan.candidates[0].model, "loop");
 }
@@ -98,7 +111,7 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
     let _codex = conn(&store, "codex", "gpt-5", 0).await;
     let planner = Planner::new();
     let plan = planner
-        .plan(&Catalog::builtin(), &store, "claude/claude-opus-5-5", false, None)
+        .plan(&Catalog::builtin(), &store, "claude/claude-opus-5-5", false, None, Strategy::Priority)
         .await
         .unwrap();
     assert_eq!(plan.candidates.len(), 1);
@@ -108,7 +121,7 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
 
     // Unprefixed ids keep the old behaviour: any active provider may serve them.
     let bare = planner
-        .plan(&Catalog::builtin(), &store, "mystery-model", false, None)
+        .plan(&Catalog::builtin(), &store, "mystery-model", false, None, Strategy::Priority)
         .await
         .unwrap();
     let providers: Vec<&str> = bare.candidates.iter().map(|c| c.provider.as_str()).collect();
@@ -123,7 +136,7 @@ async fn explicit_provider_wins_over_catalog_guess() {
     let id = conn(&store, "github", "gpt-4.1", 0).await;
     let planner = Planner::new();
     let plan = planner
-        .plan(&Catalog::builtin(), &store, "github/gpt-4.1", false, None)
+        .plan(&Catalog::builtin(), &store, "github/gpt-4.1", false, None, Strategy::Priority)
         .await
         .unwrap();
     assert_eq!(plan.candidates.len(), 1);
@@ -138,13 +151,13 @@ async fn combo_preserves_declared_order() {
     let b = conn(&store, "openai", "gpt-5", 9).await;
     store.upsert_combo("chain", &["xai/grok-4".into(), "openai/gpt-5".into()]).await.unwrap();
     let planner = Planner::new();
-    let plan = planner.plan(&Catalog::builtin(), &store, "combo:chain", false, None).await.unwrap();
+    let plan = planner.plan(&Catalog::builtin(), &store, "combo:chain", false, None, Strategy::Priority).await.unwrap();
     assert_eq!(plan.candidates.len(), 2);
     assert_eq!(plan.candidates[0].connection, a);
     assert_eq!(plan.candidates[1].connection, b);
 
     // Bare combo name resolves the same way.
-    let bare = planner.plan(&Catalog::builtin(), &store, "chain", false, None).await.unwrap();
+    let bare = planner.plan(&Catalog::builtin(), &store, "chain", false, None, Strategy::Priority).await.unwrap();
     assert_eq!(bare.candidates, plan.candidates);
 }
 
@@ -156,8 +169,8 @@ async fn round_robin_alternates_equal_priority_connections() {
     let c = conn(&store, "openai", "gpt-5", 5).await;
     let planner = Planner::new();
     let catalog = Catalog::builtin();
-    let first = planner.plan(&catalog, &store, "openai/gpt-5", false, None).await.unwrap();
-    let second = planner.plan(&catalog, &store, "openai/gpt-5", false, None).await.unwrap();
+    let first = planner.plan(&catalog, &store, "openai/gpt-5", false, None, Strategy::Priority).await.unwrap();
+    let second = planner.plan(&catalog, &store, "openai/gpt-5", false, None, Strategy::Priority).await.unwrap();
     assert_ne!(first.candidates[0].connection, second.candidates[0].connection);
     assert_eq!(
         std::collections::HashSet::from([first.candidates[0].connection, second.candidates[0].connection]),
@@ -166,6 +179,103 @@ async fn round_robin_alternates_equal_priority_connections() {
     // Priority still dominates: the priority-5 connection is always last.
     assert_eq!(first.candidates[2].connection, c);
     assert_eq!(second.candidates[2].connection, c);
+}
+
+/// Weighted selection: 3:1 means the heavy account leads eight plans out of ten,
+/// deterministically, because the sequence is driven by the planner cursor.
+#[tokio::test]
+async fn weighted_puts_the_heavy_account_first_eight_times_in_ten() {
+    let store = Store::open_in_memory().unwrap();
+    let heavy = conn(&store, "openai", "gpt-5", 0).await;
+    let light = conn(&store, "openai", "gpt-5", 0).await;
+    store.set_connection_weight(heavy, 3).await.unwrap();
+    store.set_connection_weight(light, 1).await.unwrap();
+    let planner = Planner::new();
+    let catalog = Catalog::builtin();
+
+    let mut heavy_first = 0;
+    for _ in 0..10 {
+        let plan = planner
+            .plan(&catalog, &store, "openai/gpt-5", false, None, Strategy::Weighted)
+            .await
+            .unwrap();
+        assert_eq!(plan.candidates.len(), 2, "both accounts stay in the plan");
+        assert!(
+            plan.candidates
+                .iter()
+                .any(|c| c.connection == light),
+            "the light account must never be dropped"
+        );
+        if plan.candidates[0].connection == heavy {
+            heavy_first += 1;
+        }
+    }
+    assert!(
+        (7..=8).contains(&heavy_first),
+        "3:1 should lead 7-8 plans out of 10, got {heavy_first}"
+    );
+}
+
+/// A strategy only orders inside an equal-priority group. An operator who sets
+/// priority 1 on a heavy account still gets the priority-0 account first.
+#[tokio::test]
+async fn weighted_and_latency_never_override_priority() {
+    let store = Store::open_in_memory().unwrap();
+    let first = conn(&store, "openai", "gpt-5", 0).await;
+    let second = conn(&store, "openai", "gpt-5", 1).await;
+    // The priority-1 account is heavier and already measured as fast: neither fact
+    // may promote it above the priority-0 account.
+    store.set_connection_weight(second, 1000).await.unwrap();
+    store.set_connection_weight(first, 1).await.unwrap();
+    store.record_connection_latency(first, 5_000).await.unwrap();
+    store.record_connection_latency(second, 10).await.unwrap();
+
+    let planner = Planner::new();
+    let catalog = Catalog::builtin();
+    for strategy in [Strategy::Weighted, Strategy::LeastLatency] {
+        let plan = planner
+            .plan(&catalog, &store, "openai/gpt-5", false, None, strategy)
+            .await
+            .unwrap();
+        let order: Vec<Uuid> = plan.candidates.iter().map(|c| c.connection).collect();
+        assert_eq!(order, vec![first, second], "{strategy:?} reordered priority groups");
+    }
+}
+
+/// Least latency: measured connections first, fastest first; never-measured ones
+/// after them, heavier first. A new sample moves the connection immediately, and the
+/// EWMA is what decides, not the last raw sample.
+#[tokio::test]
+async fn least_latency_orders_by_ewma_and_puts_unknown_connections_last() {
+    let store = Store::open_in_memory().unwrap();
+    let fast = conn(&store, "openai", "gpt-5", 0).await;
+    let slow = conn(&store, "openai", "gpt-5", 0).await;
+    let unknown_light = conn(&store, "openai", "gpt-5", 0).await;
+    let unknown_heavy = conn(&store, "openai", "gpt-5", 0).await;
+    store.set_connection_weight(unknown_light, 1).await.unwrap();
+    store.set_connection_weight(unknown_heavy, 9).await.unwrap();
+    store.set_connection_weight(fast, 1).await.unwrap();
+    store.set_connection_weight(slow, 1).await.unwrap();
+
+    for _ in 0..3 {
+        store.record_connection_latency(fast, 100).await.unwrap();
+    }
+    store.record_connection_latency(slow, 1_000).await.unwrap();
+
+    let planner = Planner::new();
+    assert_eq!(
+        least_latency_order(&planner, &store).await,
+        vec![fast, slow, unknown_heavy, unknown_light],
+        "measured latencies first, then unknown connections by weight"
+    );
+
+    // 100*0.8 + 10_000*0.2 = 2_080 ms, now slower than the 1_000 ms connection.
+    store.record_connection_latency(fast, 10_000).await.unwrap();
+    assert_eq!(
+        least_latency_order(&planner, &store).await,
+        vec![slow, fast, unknown_heavy, unknown_light],
+        "one slow sample must reorder, and only that connection's EWMA moved"
+    );
 }
 
 /// Conversations must stay on one account: KV caches are per upstream account, so
@@ -177,7 +287,7 @@ async fn affinity_pins_one_conversation_but_spreads_conversations() {
     let b = conn(&store, "openai", "gpt-5", 0).await;
     let planner = Planner::new();
     let catalog = Catalog::builtin();
-    let first_for = |key: u64| planner.plan(&catalog, &store, "openai/gpt-5", false, Some(key));
+    let first_for = |key: u64| planner.plan(&catalog, &store, "openai/gpt-5", false, Some(key), Strategy::Priority);
 
     let pinned = first_for(7).await.unwrap().candidates[0].connection;
     for _ in 0..5 {
@@ -201,7 +311,7 @@ async fn disabled_model_is_excluded() {
     let _ = conn(&store, "openai", "gpt-5", 0).await;
     store.set_disabled("gpt-5", true).await.unwrap();
     let planner = Planner::new();
-    let err = planner.plan(&Catalog::builtin(), &store, "openai/gpt-5", false, None).await.unwrap_err();
+    let err = planner.plan(&Catalog::builtin(), &store, "openai/gpt-5", false, None, Strategy::Priority).await.unwrap_err();
     assert!(matches!(err, Error::NoRoute { .. }), "{err:?}");
 }
 

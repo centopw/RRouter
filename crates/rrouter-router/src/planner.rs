@@ -3,13 +3,16 @@
 //! Resolution order is fixed and documented in `.orca-specs/T5-router.md`:
 //! alias (one hop), then explicit `provider/model`, then `combo:<name>` (or a
 //! combo that happens to share the client's model name), then a catalog lookup
-//! over every active connection. Connections of equal priority rotate on
-//! successive calls so a healthy account is not pinned to one token bucket.
+//! over every active connection. Connections of equal priority are ordered by the
+//! configured [`Strategy`]: round-robin (default), a smooth weighted round-robin over
+//! their `weight`, or ascending EWMA latency. Priority always dominates the strategy,
+//! so a group is fully drained before the next one is reached.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rrouter_core::{Dialect, Error, Result};
+use uuid::Uuid;
 use rrouter_store::{Connection, Store};
 
 use crate::candidate::{Candidate, Plan};
@@ -49,6 +52,42 @@ const KNOWN_PROVIDERS: &[&str] = &[
 /// a model id.
 const COMBO_PREFIX: &str = "combo:";
 
+/// How equal-priority connections are ordered inside one plan.
+///
+/// Priority is authoritative in every strategy: a connection at priority 0 is always
+/// tried before one at priority 1. The strategy only decides the order *within* a group.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Strategy {
+    /// Round-robin on the planner cursor: successive plans start on a different account.
+    #[default]
+    Priority,
+    /// Smooth weighted round-robin on `connections.weight` (higher = more traffic).
+    Weighted,
+    /// Ascending measured latency; never-tried connections sort after measured ones.
+    LeastLatency,
+}
+
+impl Strategy {
+    /// Parse the `RROUTER_STRATEGY` value. `None` is an invalid value, which the
+    /// gateway turns into a startup error rather than a silent fallback.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "priority" => Some(Self::Priority),
+            "weighted" => Some(Self::Weighted),
+            "least_latency" => Some(Self::LeastLatency),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Priority => "priority",
+            Self::Weighted => "weighted",
+            Self::LeastLatency => "least_latency",
+        }
+    }
+}
+
 /// Pure planner: no I/O beyond the `Store` reads handed to it.
 pub struct Planner {
     /// Round-robin cursor, advanced per `plan()` call.
@@ -68,10 +107,15 @@ impl Planner {
 
     /// Build the ordered candidate list for `model`.
     /// `affinity` pins account selection for a conversation: equal-priority accounts are
-    /// ordered by `affinity % group`, not round-robin. KV caches live per upstream
-    /// account, so alternating accounts between turns turns every prompt into a cold
-    /// write. Callers pass a stable hash of the request; `None` keeps round-robin for
-    /// probes and embeddings where there is no conversation to preserve.
+    /// ordered by `affinity` as the strategy's offset instead of the planner cursor. KV
+    /// caches live per upstream account, so alternating accounts between turns turns
+    /// every prompt into a cold write. Callers pass a stable hash of the request; `None`
+    /// advances the cursor, which is what probes, embeddings and the budgeted rotation
+    /// want.
+    ///
+    /// `strategy` only orders connections of equal priority; priority itself always
+    /// dominates, so an operator's preference is never overridden by a weight or a
+    /// latency sample.
     pub async fn plan(
         &self,
         catalog: &Catalog,
@@ -79,6 +123,7 @@ impl Planner {
         model: &str,
         stream: bool,
         affinity: Option<u64>,
+        strategy: Strategy,
     ) -> Result<Plan> {
         let connections = store.list_connections(None).await?;
         let aliases = store.list_aliases().await?;
@@ -130,6 +175,12 @@ impl Planner {
             }
         }
 
+        // Only `least_latency` needs the extra read; the other strategies must not pay
+        // a query per plan for a table they never consult.
+        let latencies = match strategy {
+            Strategy::LeastLatency => store.connection_latencies().await?,
+            _ => HashMap::new(),
+        };
         let mut candidates = Vec::with_capacity(active.len());
         let offset = affinity.unwrap_or_else(|| self.next_offset());
         let target_count = seen_pairs.len();
@@ -142,8 +193,8 @@ impl Planner {
             if matching.is_empty() {
                 continue;
             }
-            // Priority ascending; round-robin only inside each equal-priority group
-            // so the configured preference stays authoritative.
+            // Priority ascending; the strategy only orders inside each equal-priority
+            // group so the configured preference stays authoritative.
             matching.sort_by_key(|c| c.priority);
             let mut group_start = 0;
             while group_start < matching.len() {
@@ -152,7 +203,12 @@ impl Planner {
                 while group_end < matching.len() && matching[group_end].priority == priority {
                     group_end += 1;
                 }
-                rotate(&mut matching[group_start..group_end], offset);
+                let group = &mut matching[group_start..group_end];
+                match strategy {
+                    Strategy::Priority => rotate(group, offset),
+                    Strategy::Weighted => weighted_order(group, offset),
+                    Strategy::LeastLatency => latency_order(group, &latencies),
+                }
                 group_start = group_end;
             }
             for conn in matching {
@@ -261,4 +317,95 @@ fn rotate<T>(items: &mut [T], offset: u64) {
     }
     let shift = (offset % len as u64) as usize;
     items.rotate_left(shift);
+}
+
+/// Order one equal-priority group by smooth weighted round-robin.
+///
+/// The plan starts at pick `offset` of the SWRR cycle and each connection is ranked by
+/// where it next comes up, so successive plans advance one pick at a time and a 3:1 pair
+/// puts the heavy account first eight times out of ten. Nothing is stored between calls:
+/// `offset` is the planner cursor, which makes the sequence deterministic and
+/// restart-safe.
+///
+/// Weights are divided by their gcd before the simulation, which bounds the cycle
+/// (`Σ weight/gcd`) without changing the ratio, so the per-plan cost stays small even
+/// for the schema's 1..=1000 range with several default-100 connections.
+fn weighted_order(group: &mut [&Connection], offset: u64) {
+    let len = group.len();
+    if len < 2 {
+        return;
+    }
+    let gcd = group
+        .iter()
+        .map(|c| c.weight)
+        .fold(0u32, gcd_u32)
+        .max(1);
+    let weights: Vec<i64> = group
+        .iter()
+        .map(|c| i64::from(c.weight.max(1) / gcd))
+        .collect();
+    let total: i64 = weights.iter().sum();
+    if total <= 0 {
+        return;
+    }
+    let mut current = vec![0i64; len];
+    let advance = |current: &mut [i64]| -> usize {
+        // Smooth WRR: every candidate gains its weight, the largest gains the slot and
+        // pays the whole cycle. Ties go to the earlier entry, which keeps it stable.
+        let mut best = 0;
+        for (i, weight) in weights.iter().enumerate() {
+            current[i] += weight;
+            if current[i] > current[best] {
+                best = i;
+            }
+        }
+        current[best] -= total;
+        best
+    };
+    let start = (offset % total as u64) as usize;
+    for _ in 0..start {
+        advance(&mut current);
+    }
+    // Picks may repeat a connection (weights are not a permutation), so the group is
+    // ordered by each connection's next scheduled pick: the first time it comes up.
+    // Every weight is at least 1, so all `len` distinct indices appear within the cycle.
+    let mut order: Vec<usize> = Vec::with_capacity(len);
+    let mut seen = vec![false; len];
+    while order.len() < len {
+        let idx = advance(&mut current);
+        if !seen[idx] {
+            seen[idx] = true;
+            order.push(idx);
+        }
+    }
+    reorder(group, &order);
+}
+
+fn gcd_u32(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { gcd_u32(b, a % b) }
+}
+
+/// Order one equal-priority group by measured latency: known connections first,
+/// fastest first; never-measured connections after them, heavier first. Ties fall back
+/// to weight and then to creation order, so the plan is deterministic.
+fn latency_order(group: &mut [&Connection], latencies: &HashMap<Uuid, f64>) {
+    group.sort_by(|a, b| {
+        match (latencies.get(&a.id), latencies.get(&b.id)) {
+            (Some(la), Some(lb)) => la.total_cmp(lb),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| b.weight.cmp(&a.weight))
+        .then_with(|| a.created_at.cmp(&b.created_at))
+        .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+/// Apply an index permutation to a slice in place.
+fn reorder<T: Copy>(items: &mut [T], order: &[usize]) {
+    let mut slots: Vec<Option<T>> = items.iter().copied().map(Some).collect();
+    for (dst, &src) in order.iter().enumerate() {
+        items[dst] = slots[src].take().expect("every index appears once");
+    }
 }

@@ -127,6 +127,23 @@ impl AppState {
         Ok(Caller::Key(key))
     }
 
+    /// Apply this key's model mapping to the client's model: one hop, before alias and
+    /// combo resolution. Only a key can carry a mapping, so anonymous traffic and
+    /// unmapped models pass through unchanged, and a key with no mapping keeps exactly
+    /// the pre-phase-4 behaviour.
+    ///
+    /// Runs on the request path, so it is one indexed row rather than the whole map.
+    pub async fn mapped_model(&self, key: Option<Uuid>, model: &str) -> Result<String> {
+        let Some(id) = key else {
+            return Ok(model.to_string());
+        };
+        Ok(self
+            .store
+            .key_model_target(id, model)
+            .await?
+            .unwrap_or_else(|| model.to_string()))
+    }
+
     /// Allowlist and per-key caps for an authenticated caller. Must run after the
     /// client's model is known and before any dispatch.
     ///

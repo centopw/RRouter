@@ -75,6 +75,10 @@ pub fn app(state: Arc<AppState>) -> Router {
             patch(routes::keys::update).delete(routes::keys::remove),
         )
         .route(
+            "/keys/{id}/models",
+            get(routes::keys::list_models).put(routes::keys::put_models),
+        )
+        .route(
             "/aliases",
             get(routes::models::list_aliases)
                 .post(routes::models::create_alias)

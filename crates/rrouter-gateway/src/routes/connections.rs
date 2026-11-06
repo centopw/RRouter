@@ -396,6 +396,7 @@ mod tests {
             name: None,
             email: None,
             priority: 0,
+            weight: 100,
             is_active: true,
             credentials: creds,
             backoff_level: 0,

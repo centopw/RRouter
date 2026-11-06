@@ -87,6 +87,7 @@ fn config() -> Config {
         max_concurrency: 0,
         max_attempts: 4,
         shutdown_grace_secs: 20,
+        strategy: Default::default(),
     }
 }
 
