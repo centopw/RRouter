@@ -316,6 +316,35 @@ async fn fallback_uses_second_candidate_and_opens_first_breaker() {
 }
 
 #[tokio::test]
+async fn dead_credential_falls_through_to_the_next_account() {
+    // Regression: the refresher reports a dead refresh token / missing credential as
+    // `Error::Unauthorized`. That is an account problem, not a request problem, so the
+    // dispatcher must try the next candidate instead of failing the whole request.
+    let dispatcher = Dispatcher::new(Breaker::new());
+    let plan = plan_of(2);
+    let dead = plan.candidates[0].connection;
+    let seen = AtomicUsize::new(0);
+    let outcome = dispatcher
+        .run(&plan, |_c| {
+            let n = seen.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Err(Error::Unauthorized("provider claude refresh failed".into()))
+                } else {
+                    Ok(resp("m"))
+                }
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 2, "the dead account must not end the request");
+    assert_eq!(outcome.candidate.connection, plan.candidates[1].connection);
+    assert_eq!(outcome.result.unwrap().model, "m");
+    // A 401-class failure parks the dead account hard (5 min).
+    assert!(matches!(dispatcher.breaker().state(dead), BreakerState::Open { .. }));
+}
+
+#[tokio::test]
 async fn non_retryable_error_stops_immediately() {
     let dispatcher = Dispatcher::new(Breaker::new());
     let plan = plan_of(3);
