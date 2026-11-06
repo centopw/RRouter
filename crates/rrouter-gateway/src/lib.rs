@@ -25,7 +25,7 @@ use axum::http::header::{ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METH
 use axum::http::{HeaderMap, HeaderValue};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{get, patch, post, put};
 use axum::Router;
 
 pub use config::Config;
@@ -69,7 +69,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/connections/{id}/test", post(routes::connections::test))
         .route("/keys", get(routes::keys::list).post(routes::keys::create))
-        .route("/keys/{id}", delete(routes::keys::remove))
+        .route(
+            "/keys/{id}",
+            patch(routes::keys::update).delete(routes::keys::remove),
+        )
         .route(
             "/aliases",
             get(routes::models::list_aliases)

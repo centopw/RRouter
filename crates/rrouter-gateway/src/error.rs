@@ -21,8 +21,14 @@ pub fn error_kind(status: u16) -> (&'static str, &'static str) {
 
 /// The `error` object common to both shapes.
 pub fn error_object(status: u16, message: &str) -> Value {
-    let (kind, code) = error_kind(status);
-    json!({ "message": message, "type": kind, "code": code })
+    error_object_with(status, message, None)
+}
+
+/// [`error_object`] with an explicit `code`, used by governance errors whose machine
+/// reason (`api_key_inactive`, `model_not_allowed`, …) is not the status default.
+pub fn error_object_with(status: u16, message: &str, code: Option<&str>) -> Value {
+    let (kind, default_code) = error_kind(status);
+    json!({ "message": message, "type": kind, "code": code.unwrap_or(default_code) })
 }
 
 /// Body for a non-streaming failure. Anthropic clients expect the top-level
@@ -30,7 +36,7 @@ pub fn error_object(status: u16, message: &str) -> Value {
 pub fn error_body(inbound: Dialect, err: &Error) -> Value {
     let status = err.status();
     let message = err.to_string();
-    let obj = error_object(status, &message);
+    let obj = error_object_with(status, &message, err.code());
     match inbound {
         Dialect::AnthropicMessages => json!({ "type": "error", "error": obj }),
         _ => json!({ "error": obj }),
@@ -40,7 +46,13 @@ pub fn error_body(inbound: Dialect, err: &Error) -> Value {
 /// Complete HTTP response for a failed request.
 pub fn error_response(inbound: Dialect, err: &Error) -> Response {
     let status = StatusCode::from_u16(err.status()).unwrap_or(StatusCode::BAD_GATEWAY);
-    (status, axum::Json(error_body(inbound, err))).into_response()
+    let mut resp = (status, axum::Json(error_body(inbound, err))).into_response();
+    if let Some(secs) = err.retry_after_secs() {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+            resp.headers_mut().insert(axum::http::header::RETRY_AFTER, value);
+        }
+    }
+    resp
 }
 
 /// One SSE frame carrying a mid-stream error, in the inbound wire shape.

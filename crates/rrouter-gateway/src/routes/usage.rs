@@ -43,6 +43,7 @@ pub async fn list(
                         "endpoint": r.endpoint,
                         "model": r.model,
                         "connection_id": r.connection_id.map(|c| c.to_string()),
+                        "key_id": r.key_id.map(|k| k.to_string()),
                         "input_tokens": r.input_tokens,
                         "output_tokens": r.output_tokens,
                         "cache_read_tokens": r.cache_read_tokens,

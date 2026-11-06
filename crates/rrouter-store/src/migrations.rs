@@ -8,10 +8,24 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 6;
+pub(crate) const SCHEMA_VERSION: i64 = 7;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+
+/// V7: virtual-key governance. A key carries the limits an operator sells — requests
+/// and tokens per minute, a lifetime token budget, a model allowlist, and an expiry —
+/// and every usage row is attributed to the key that spent it. Zero/NULL means
+/// "unlimited" throughout, so existing rows keep today's behaviour after the migration.
+const V7: &str = r#"
+ALTER TABLE api_keys ADD COLUMN rpm INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE api_keys ADD COLUMN tpm INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE api_keys ADD COLUMN budget_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE api_keys ADD COLUMN allowed_models TEXT;
+ALTER TABLE api_keys ADD COLUMN expires_at INTEGER;
+ALTER TABLE usage ADD COLUMN key_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_usage_key_ts ON usage(key_id, ts);
+"#;
 
 /// The client endpoint that produced a usage row (`/v1/messages`, …), so the log can
 /// answer "which protocol was this?" without inferring it from the model name.

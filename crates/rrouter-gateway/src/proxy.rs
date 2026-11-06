@@ -21,6 +21,7 @@ use rrouter_core::{ChatRequest, ChatResponse, Dialect, Error, Result, StreamEven
 use rrouter_router::{Candidate, Plan};
 use rrouter_store::UsageRecord;
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::error::{error_frame, error_response, not_implemented};
 use crate::state::{dialect_of, AppState};
@@ -144,13 +145,14 @@ async fn special_inner(
     raw: &[u8],
     kind: Special,
 ) -> Result<Response> {
-    guard_api_key(state, headers).await?;
+    let caller = state.authenticate(headers).await?;
     let body: Value = serde_json::from_slice(raw)?;
     let model = body
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::BadRequest("missing model".into()))?
         .to_string();
+    state.admit(&caller, &model).await?;
     let plan = state
         .planner
         .plan(state.catalog.as_ref(), state.store.as_ref(), &model, false, None)
@@ -226,11 +228,15 @@ async fn handle(
     headers: &axum::http::HeaderMap,
     raw: &[u8],
 ) -> Result<Response> {
-    guard_api_key(state, headers).await?;
+    let caller = state.authenticate(headers).await?;
     let started = Instant::now();
 
     let body: Value = serde_json::from_slice(raw)?;
     let canonical = rrouter_translate::parse_request(inbound, &body)?;
+    // Governance runs before planning: an inactive/expired key, a model outside the
+    // allowlist, or an exhausted quota must not reach a provider.
+    state.admit(&caller, &canonical.model).await?;
+    let key_id = caller.key_id();
     let plan = state
         .planner
         .plan(
@@ -255,7 +261,7 @@ async fn handle(
     };
 
     if !client_stream && !upstream_stream {
-        let resp = complete(state, inbound, &body).await?;
+        let resp = complete_for(state, inbound, &body, key_id).await?;
         return Ok(json_response(StatusCode::OK, rrouter_translate::build_response(inbound, &resp)?));
     }
 
@@ -281,6 +287,7 @@ async fn handle(
                 model: &plan.model,
                 endpoint: endpoint_of(inbound),
                 usage: assembled.usage,
+                key: key_id,
                 started,
                 ttft: None,
                 streamed: false,
@@ -291,18 +298,40 @@ async fn handle(
             rrouter_translate::build_response(inbound, &assembled)?,
         ));
     }
-    Ok(stream_response(state, inbound, &candidate, &plan.model, open, bytes, started))
+    Ok(stream_response(
+        inbound,
+        PendingRecord {
+            state: Arc::clone(state),
+            candidate,
+            model: plan.model.clone(),
+            started,
+            key: key_id,
+        },
+        open,
+        bytes,
+    ))
 }
 
-/// One non-streaming completion through the full routing path.
-///
-/// Shared by the proxy and the admin probe so a green "test" button means exactly what
-/// a client request would do: same planner, same fallback, same forced streaming for
-/// providers that reject non-streaming calls, same reassembly.
+/// One non-streaming completion through the full routing path, attributed to no key.
+/// Used by the admin probe, whose traffic belongs to the operator, not to a virtual key.
 pub async fn complete(
     state: &Arc<AppState>,
     inbound: Dialect,
     body: &Value,
+) -> Result<rrouter_core::ChatResponse> {
+    complete_for(state, inbound, body, None).await
+}
+
+/// [`complete`] with usage attributed to `key` (the gateway key that paid for it).
+///
+/// Shared by the proxy and the admin probe so a green "test" button means exactly what
+/// a client request would do: same planner, same fallback, same forced streaming for
+/// providers that reject non-streaming calls, same reassembly.
+pub async fn complete_for(
+    state: &Arc<AppState>,
+    inbound: Dialect,
+    body: &Value,
+    key: Option<Uuid>,
 ) -> Result<rrouter_core::ChatResponse> {
     let started = Instant::now();
     let canonical = rrouter_translate::parse_request(inbound, body)?;
@@ -336,6 +365,7 @@ pub async fn complete(
                 model: &plan.model,
                 endpoint: endpoint_of(inbound),
                 usage: resp.usage,
+                key,
                 started,
                 ttft: None,
                 streamed: false,
@@ -354,17 +384,18 @@ pub async fn complete(
     };
     let assembled = reassemble(&open, bytes).await?;
     record_once(
-            state,
-            Recorded {
-                candidate: &candidate,
-                model: &plan.model,
-                endpoint: endpoint_of(inbound),
-                usage: assembled.usage,
-                started,
-                ttft: None,
-                streamed: false,
-            },
-        );
+        state,
+        Recorded {
+            candidate: &candidate,
+            model: &plan.model,
+            endpoint: endpoint_of(inbound),
+            usage: assembled.usage,
+            key,
+            started,
+            ttft: None,
+            streamed: false,
+        },
+    );
     Ok(assembled)
 }
 
@@ -451,19 +482,6 @@ async fn reassemble(open: &StreamRoute, bytes: ByteStream) -> Result<rrouter_cor
         });
     }
     Ok(rrouter_core::ChatResponse { id, model, parts, finish_reason: finish, usage })
-}
-
-async fn guard_api_key(state: &AppState, headers: &axum::http::HeaderMap) -> Result<()> {
-    if !state.config.require_api_key {
-        return Ok(());
-    }
-    let Some(key) = crate::auth_header(headers) else {
-        return Err(Error::Unauthorized("missing API key".into()));
-    };
-    match state.store.verify_api_key(&key).await? {
-        Some(_) => Ok(()),
-        None => Err(Error::Unauthorized("invalid API key".into())),
-    }
 }
 
 /// Stable per-conversation key for account selection.
@@ -901,34 +919,52 @@ impl Stream for Wire {
     }
 }
 
+/// Everything the usage row for one in-flight response needs, captured before the
+/// body starts streaming.
+struct PendingRecord {
+    state: Arc<AppState>,
+    candidate: Candidate,
+    model: String,
+    started: Instant,
+    /// Gateway key that paid for the request; `None` for anonymous traffic.
+    key: Option<Uuid>,
+}
+
 /// The `Wire` plus the bookkeeping needed to record one usage row when it ends,
 /// whether normally or because the client disconnected.
 struct ResponseStream {
     inner: Wire,
-    usage: Option<(Arc<AppState>, Candidate, String, Instant)>,
+    pending: Option<PendingRecord>,
 }
 
 impl ResponseStream {
     fn commit(&mut self, ok: bool) {
-        let Some((state, candidate, model, started)) = self.usage.take() else {
+        let Some(pending) = self.pending.take() else {
             return;
         };
         let tokens = self.inner.usage.unwrap_or_default();
-        let ttft = self.inner.first_output.map(|at| at.saturating_duration_since(started));
+        let ttft = self
+            .inner
+            .first_output
+            .map(|at| at.saturating_duration_since(pending.started));
         record_once(
-            &state,
+            &pending.state,
             Recorded {
-                candidate: &candidate,
-                model: &model,
+                candidate: &pending.candidate,
+                model: &pending.model,
                 endpoint: endpoint_of(self.inner.inbound),
                 usage: tokens,
-                started,
+                key: pending.key,
+                started: pending.started,
                 ttft,
                 streamed: true,
             },
         );
         if !ok {
-            tracing::debug!(provider = %candidate.provider, "client disconnected mid-stream");
+            tracing::debug!(
+                provider = %pending.candidate.provider,
+                "client disconnected mid-stream"
+            );
         }
     }
 }
@@ -957,18 +993,15 @@ impl Drop for ResponseStream {
 }
 
 fn stream_response(
-    state: &Arc<AppState>,
     inbound: Dialect,
-    candidate: &Candidate,
-    plan_model: &str,
+    pending: PendingRecord,
     open: StreamRoute,
     bytes: ByteStream,
-    started: Instant,
 ) -> Response {
     let wire = Wire::new(inbound, open.upstream, &open.client_model, bytes);
     let stream = ResponseStream {
         inner: wire,
-        usage: Some((Arc::clone(state), candidate.clone(), plan_model.to_string(), started)),
+        pending: Some(pending),
     };
     let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
@@ -996,6 +1029,8 @@ struct Recorded<'a> {
     model: &'a str,
     endpoint: &'static str,
     usage: Usage,
+    /// Gateway key that paid for the request; `None` for anonymous traffic.
+    key: Option<Uuid>,
     started: Instant,
     /// Time to the first model output; `None` when the client got one JSON body.
     ttft: Option<std::time::Duration>,
@@ -1004,6 +1039,14 @@ struct Recorded<'a> {
 
 fn record_once(state: &AppState, r: Recorded<'_>) {
     let candidate = r.candidate;
+    let usage = r.usage;
+    // The per-minute token window is fed the same numbers the usage row stores, so
+    // `tpm` and `spent_tokens` can never disagree about what a request consumed.
+    let spent = u64::from(usage.input_tokens)
+        + u64::from(usage.output_tokens)
+        + u64::from(usage.cache_read_tokens)
+        + u64::from(usage.cache_write_tokens);
+    state.record_tokens(r.key, spent);
     let rec = UsageRecord {
         id: None,
         ts: crate::now_unix(),
@@ -1011,10 +1054,11 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
         model: r.model.to_string(),
         connection_id: Some(candidate.connection),
         endpoint: Some(r.endpoint.to_string()),
-        input_tokens: r.usage.input_tokens,
-        output_tokens: r.usage.output_tokens,
-        cache_read_tokens: r.usage.cache_read_tokens,
-        cache_write_tokens: r.usage.cache_write_tokens,
+        key_id: r.key,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_write_tokens: usage.cache_write_tokens,
         latency_ms: r.started.elapsed().as_millis().min(u32::MAX as u128) as u32,
         ttft_ms: r
             .ttft
@@ -1042,13 +1086,14 @@ async fn embeddings_inner(
     headers: &axum::http::HeaderMap,
     raw: &[u8],
 ) -> Result<Response> {
-    guard_api_key(state, headers).await?;
+    let caller = state.authenticate(headers).await?;
     let body: Value = serde_json::from_slice(raw)?;
     let model = body
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::BadRequest("missing model".into()))?
         .to_string();
+    state.admit(&caller, &model).await?;
     let plan = state
         .planner
         .plan(state.catalog.as_ref(), state.store.as_ref(), &model, false, None)

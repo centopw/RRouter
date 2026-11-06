@@ -162,6 +162,7 @@ fn harness() -> Harness {
         },
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
+        counters: Default::default(),
     });
     Harness { router: app(state) }
 }

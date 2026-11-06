@@ -40,6 +40,10 @@ pub struct Connection {
 }
 
 /// A gateway API key. Only the SHA-256 hex of the plaintext is persisted.
+///
+/// The governance columns are the virtual-key contract: `0` means unlimited for the
+/// numeric caps, `None` means unset for the nullable ones. Spend is not stored here —
+/// it is the SQL sum over `usage` for this key (see [`Store::api_key_spend`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiKey {
     pub id: Uuid,
@@ -47,6 +51,56 @@ pub struct ApiKey {
     pub name: Option<String>,
     pub is_active: bool,
     pub created_at: i64,
+    /// Requests per minute allowed; 0 = unlimited.
+    pub rpm: u32,
+    /// Tokens per minute allowed; 0 = unlimited. Measured post-hoc from the tokens
+    /// recorded for this key in the last 60 s — a single request can overshoot it.
+    pub tpm: u32,
+    /// Lifetime token budget; 0 = unlimited. Spend is the durable `usage` sum.
+    pub budget_tokens: u64,
+    /// Exact model refs or `provider/*` globs; `None` = every model.
+    pub allowed_models: Option<Vec<String>>,
+    /// Unix seconds after which the key is refused; `None` = never.
+    pub expires_at: Option<i64>,
+}
+
+/// A partial update of an [`ApiKey`]. Absent = leave alone; `Some(None)` = clear a
+/// nullable column. Mirrors the `PATCH /api/keys/{id}` body.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApiKeyPatch {
+    pub is_active: Option<bool>,
+    pub rpm: Option<u32>,
+    pub tpm: Option<u32>,
+    pub budget_tokens: Option<u64>,
+    /// `Some(None)` clears the allowlist (back to every model).
+    pub allowed_models: Option<Option<Vec<String>>>,
+    /// `Some(None)` clears the expiry (back to never).
+    pub expires_at: Option<Option<i64>>,
+}
+
+impl ApiKeyPatch {
+    /// Apply this patch to `key` in place. Pure, so the merge rule is testable on its
+    /// own and the SQL only ever writes the merged row.
+    pub fn apply(&self, key: &mut ApiKey) {
+        if let Some(v) = self.is_active {
+            key.is_active = v;
+        }
+        if let Some(v) = self.rpm {
+            key.rpm = v;
+        }
+        if let Some(v) = self.tpm {
+            key.tpm = v;
+        }
+        if let Some(v) = self.budget_tokens {
+            key.budget_tokens = v;
+        }
+        if let Some(v) = &self.allowed_models {
+            key.allowed_models = v.clone();
+        }
+        if let Some(v) = self.expires_at {
+            key.expires_at = v;
+        }
+    }
 }
 
 /// Model alias -> `"provider/model"` target.
@@ -98,6 +152,8 @@ pub struct UsageRecord {
     pub connection_id: Option<Uuid>,
     /// Client endpoint that carried the request, e.g. `/v1/messages`.
     pub endpoint: Option<String>,
+    /// Gateway key that paid for the request; `None` for anonymous traffic.
+    pub key_id: Option<Uuid>,
     pub input_tokens: u32,
     pub output_tokens: u32,
     /// Prompt-cache reads (billed at a discount) and writes (billed at a premium).
@@ -458,7 +514,14 @@ impl Store {
 
     // ----- gateway API keys --------------------------------------------------------
 
+    /// The key columns every read selects, in [`row_to_api_key`]'s order.
+    const KEY_COLUMNS: &'static str =
+        "id, key_hash, name, is_active, created_at, rpm, tpm, budget_tokens, allowed_models, \
+         expires_at";
+
     /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
+    ///
+    /// A new key is unlimited: no caps, no allowlist, no expiry.
     pub async fn create_api_key(&self, name: Option<&str>) -> Result<(String, ApiKey)> {
         let plaintext = generate_api_key();
         let key_hash = hash_api_key(&plaintext);
@@ -479,11 +542,19 @@ impl Store {
                 name: name.map(str::to_owned),
                 is_active: true,
                 created_at,
+                rpm: 0,
+                tpm: 0,
+                budget_tokens: 0,
+                allowed_models: None,
+                expires_at: None,
             },
         ))
     }
 
-    /// `Some(key)` when `presented` matches an active key; `None` otherwise.
+    /// `Some(key)` when `presented` matches a stored key, active or not.
+    ///
+    /// Activity and expiry are governance decisions, not lookup rules: the caller must
+    /// see an inactive or expired key so it can answer `403` rather than `401`.
     pub async fn verify_api_key(&self, presented: &str) -> Result<Option<ApiKey>> {
         let presented = presented.trim();
         if presented.is_empty() {
@@ -492,8 +563,10 @@ impl Store {
         let hash = hash_api_key(presented);
         let conn = self.conn();
         conn.query_row(
-            "SELECT id, key_hash, name, is_active, created_at FROM api_keys \
-             WHERE key_hash = ?1 AND is_active = 1",
+            &format!(
+                "SELECT {} FROM api_keys WHERE key_hash = ?1",
+                Self::KEY_COLUMNS
+            ),
             params![hash],
             row_to_api_key,
         )
@@ -504,10 +577,10 @@ impl Store {
     pub async fn list_api_keys(&self) -> Result<Vec<ApiKey>> {
         let conn = self.conn();
         let mut stmt = conn
-            .prepare(
-                "SELECT id, key_hash, name, is_active, created_at FROM api_keys \
-                 ORDER BY created_at ASC",
-            )
+            .prepare(&format!(
+                "SELECT {} FROM api_keys ORDER BY created_at ASC",
+                Self::KEY_COLUMNS
+            ))
             .map_err(migrations::db_err)?;
         let rows = stmt.query_map([], row_to_api_key).map_err(migrations::db_err)?;
         let mut out = Vec::new();
@@ -517,12 +590,88 @@ impl Store {
         Ok(out)
     }
 
+    /// Merge `patch` into the stored key and return the merged row, or `None` when the
+    /// id does not exist. Read and write happen under the same connection lock, so two
+    /// concurrent patches cannot interleave into a lost update.
+    pub async fn update_api_key(&self, id: Uuid, patch: &ApiKeyPatch) -> Result<Option<ApiKey>> {
+        let conn = self.conn();
+        let mut key: ApiKey = match conn
+            .query_row(
+                &format!("SELECT {} FROM api_keys WHERE id = ?1", Self::KEY_COLUMNS),
+                params![id.to_string()],
+                row_to_api_key,
+            )
+            .optional()
+            .map_err(migrations::db_err)?
+        {
+            Some(k) => k,
+            None => return Ok(None),
+        };
+        patch.apply(&mut key);
+        let allowed = match &key.allowed_models {
+            Some(models) => Some(serde_json::to_string(models)?),
+            None => None,
+        };
+        conn.execute(
+            "UPDATE api_keys SET is_active = ?2, rpm = ?3, tpm = ?4, budget_tokens = ?5, \
+             allowed_models = ?6, expires_at = ?7 WHERE id = ?1",
+            params![
+                id.to_string(),
+                key.is_active as i64,
+                key.rpm,
+                key.tpm,
+                key.budget_tokens,
+                allowed,
+                key.expires_at,
+            ],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(Some(key))
+    }
+
     pub async fn delete_api_key(&self, id: Uuid) -> Result<bool> {
         let conn = self.conn();
         let n = conn
             .execute("DELETE FROM api_keys WHERE id = ?1", params![id.to_string()])
             .map_err(migrations::db_err)?;
         Ok(n > 0)
+    }
+
+    /// Lifetime tokens this key has spent: input + output + cache reads + cache writes,
+    /// summed in SQL so a budget check never has to read events into Rust.
+    pub async fn api_key_spend(&self, id: Uuid) -> Result<u64> {
+        let conn = self.conn();
+        let total: i64 = conn
+            .query_row(
+                "SELECT COALESCE(sum(input_tokens + output_tokens + cache_read_tokens + \
+                 cache_write_tokens), 0) FROM usage WHERE key_id = ?1",
+                params![id.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(migrations::db_err)?;
+        Ok(total.max(0) as u64)
+    }
+
+    /// Spend for every key in one statement, for `GET /api/keys`.
+    pub async fn api_key_spend_all(&self) -> Result<std::collections::HashMap<Uuid, u64>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT key_id, sum(input_tokens + output_tokens + cache_read_tokens + \
+                 cache_write_tokens) FROM usage WHERE key_id IS NOT NULL GROUP BY key_id",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(migrations::db_err)?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (raw, total) = row.map_err(migrations::db_err)?;
+            if let Ok(id) = Uuid::parse_str(&raw) {
+                out.insert(id, total.max(0) as u64);
+            }
+        }
+        Ok(out)
     }
 
     pub async fn count_api_keys(&self) -> Result<usize> {
@@ -767,15 +916,16 @@ impl Store {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO usage \
-             (ts, provider, model, connection_id, endpoint, input_tokens, output_tokens, \
+             (ts, provider, model, connection_id, endpoint, key_id, input_tokens, output_tokens, \
               cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, streamed, error) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 r.ts,
                 r.provider,
                 r.model,
                 r.connection_id.map(|u| u.to_string()),
                 r.endpoint,
+                r.key_id.map(|u| u.to_string()),
                 r.input_tokens,
                 r.output_tokens,
                 r.cache_read_tokens,
@@ -798,7 +948,8 @@ impl Store {
         let mut stmt = conn
             .prepare(
                 "SELECT id, ts, provider, model, connection_id, endpoint, input_tokens, output_tokens, \
-                        cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, streamed, error \
+                        cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, streamed, error, \
+                        key_id \
                  FROM usage WHERE ?2 IS NULL OR ts >= ?2 \
                  ORDER BY ts DESC, id DESC LIMIT ?1",
             )
@@ -806,6 +957,7 @@ impl Store {
         let rows = stmt
             .query_map(params![limit, since], |r| {
                 let cid: Option<String> = r.get(4)?;
+                let kid: Option<String> = r.get(15)?;
                 Ok(UsageRecord {
                     id: r.get(0)?,
                     ts: r.get(1)?,
@@ -813,6 +965,7 @@ impl Store {
                     model: r.get(3)?,
                     connection_id: cid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
                     endpoint: r.get(5)?,
+                    key_id: kid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
                     input_tokens: r.get(6)?,
                     output_tokens: r.get(7)?,
                     cache_read_tokens: r.get(8)?,
@@ -1030,12 +1183,30 @@ fn row_to_connection(r: &Row<'_>) -> rusqlite::Result<RawConnection> {
 }
 
 fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
+    // `allowed_models` is a JSON array of refs; a malformed blob is a storage failure
+    // rather than a silent "allow everything".
+    let raw_models: Option<String> = r.get(8)?;
+    let allowed_models = match raw_models {
+        Some(text) => Some(serde_json::from_str(&text).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                8,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?),
+        None => None,
+    };
     Ok(ApiKey {
         id: uuid_col(r.get(0)?)?,
         key_hash: r.get(1)?,
         name: r.get(2)?,
         is_active: r.get::<_, i64>(3)? != 0,
         created_at: r.get(4)?,
+        rpm: r.get(5)?,
+        tpm: r.get(6)?,
+        budget_tokens: r.get(7)?,
+        allowed_models,
+        expires_at: r.get(9)?,
     })
 }
 

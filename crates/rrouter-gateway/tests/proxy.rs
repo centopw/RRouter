@@ -18,7 +18,7 @@ use http_body_util::BodyExt;
 use rrouter_auth::Credentials;
 use rrouter_gateway::{app, config::Config, AppState};
 use rrouter_router::{Breaker, Catalog, Dispatcher, Planner};
-use rrouter_store::Store;
+use rrouter_store::{Store, UsageRecord};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -190,6 +190,7 @@ fn build_state(require_api_key: bool) -> AppState {
         config: config(require_api_key),
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
+        counters: Default::default(),
     }
 }
 
@@ -242,6 +243,62 @@ impl Harness {
             builder = builder.header(*k, *v);
         }
         self.call(builder.body(Body::from(body.to_string())).expect("request")).await
+    }
+
+    /// Create a key and hand back `(plaintext, id)`.
+    async fn create_key(&self) -> (String, String) {
+        let (status, body) = self.post("/api/keys", json!({"name": "test"})).await;
+        assert_eq!(status, StatusCode::OK, "create key: {body}");
+        (
+            body["key"].as_str().expect("plaintext key").to_string(),
+            body["id"].as_str().expect("key id").to_string(),
+        )
+    }
+
+    /// `PATCH /api/keys/{id}`, asserting the row came back.
+    async fn patch_key(&self, id: &str, body: Value) -> Value {
+        let (status, headers, value) = self
+            .call_full(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/keys/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "patch {body}: {value} (headers {headers:?})");
+        value
+    }
+
+    /// Like [`Harness::call`] but keeps the response headers (for `Retry-After`).
+    async fn call_full(&self, req: Request<Body>) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let res = self.router.clone().oneshot(req).await.expect("oneshot");
+        let status = res.status();
+        let headers = res.headers().clone();
+        let bytes = res.into_body().collect().await.expect("body").to_bytes();
+        (status, headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// One OpenAI chat request, optionally authorized with a key.
+    async fn chat(
+        &self,
+        key: Option<&str>,
+        model: &str,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json");
+        if let Some(key) = key {
+            builder = builder.header("authorization", format!("Bearer {key}"));
+        }
+        self.call_full(
+            builder
+                .body(Body::from(openai_chat_body(model).to_string()))
+                .expect("request"),
+        )
+        .await
     }
 }
 
@@ -965,4 +1022,294 @@ async fn streaming_records_time_to_first_output() {
     assert!(row.streamed);
     assert!(row.ttft_ms >= 40, "ttft {} should include the upstream pause", row.ttft_ms);
     assert!(row.ttft_ms <= row.latency_ms, "ttft {} > latency {}", row.ttft_ms, row.latency_ms);
+}
+
+// ------------------------------------------------------ virtual-key governance
+
+/// A disabled key is a governance decision, not a missing credential: `403` with a
+/// stable code, and it holds even when keys are optional for everyone else.
+#[tokio::test]
+async fn inactive_key_is_rejected_with_403_even_when_keys_are_optional() {
+    let mock = Mock::start(vec![openai_reply("never")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"is_active": false})).await;
+
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "api_key_inactive");
+    assert_eq!(body["error"]["type"], "permission_error");
+    assert_eq!(mock.hits(), 0, "a disabled key must never reach a provider");
+}
+
+/// Expiry is wall-clock, and a key that is not expired keeps working.
+#[tokio::test]
+async fn expired_key_is_rejected_and_a_live_one_is_not() {
+    let mock = Mock::start(vec![openai_reply("live")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+
+    let past = rrouter_gateway::now_unix() - 60;
+    h.patch_key(&id, json!({"expires_at": past})).await;
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "api_key_expired");
+    assert_eq!(mock.hits(), 0);
+
+    let future = rrouter_gateway::now_unix() + 3600;
+    h.patch_key(&id, json!({"expires_at": future})).await;
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "live");
+    assert_eq!(mock.hits(), 1);
+}
+
+/// An allowlist accepts an exact ref and a `provider/*` glob, and refuses anything else
+/// before the planner looks at it.
+#[tokio::test]
+async fn allowed_models_allows_exact_ref_and_glob_and_rejects_others() {
+    let mock = Mock::start(vec![
+        openai_reply("one"),
+        openai_reply("two"),
+        openai_reply("three"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+
+    h.patch_key(&id, json!({"allowed_models": ["openai/gpt-4.1"]})).await;
+    let (status, _, body) = h.chat(Some(&key), "openai/gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "one");
+
+    let (status, _, body) = h.chat(Some(&key), "openai/gpt-4o").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "model_not_allowed");
+    assert_eq!(mock.hits(), 1, "a refused model must not be dispatched");
+
+    // The glob form covers the whole provider.
+    h.patch_key(&id, json!({"allowed_models": ["openai/*"]})).await;
+    let (status, _, body) = h.chat(Some(&key), "openai/gpt-4o").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "two");
+    assert_eq!(mock.hits(), 2);
+
+    // `null` clears the list: every model is allowed again.
+    h.patch_key(&id, json!({"allowed_models": null})).await;
+    let (status, _, body) = h.chat(Some(&key), "openai/gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "three");
+}
+
+/// `rpm` is a 60 s sliding window with a one-second retry hint.
+#[tokio::test]
+async fn rpm_limit_answers_429_with_retry_after() {
+    let mock = Mock::start(vec![openai_reply("first"), openai_reply("second")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"rpm": 1})).await;
+
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let (status, headers, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(body["error"]["code"], "rate_limited");
+    assert_eq!(
+        headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert_eq!(mock.hits(), 1, "the limited request is not dispatched");
+}
+
+/// `tpm` reads the tokens recorded for the key in the last 60 s. Tokens are only known
+/// after a response, so the first request always passes and later ones see its cost.
+#[tokio::test]
+async fn tpm_limit_measures_tokens_recorded_for_the_key() {
+    let mock = Mock::start(vec![openai_reply("first"), openai_reply("second")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"tpm": 1})).await;
+
+    // The mock reports 7 prompt + 3 completion tokens, far above a 1-token cap.
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "the window is still empty: {body}");
+
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(body["error"]["code"], "rate_limited");
+    assert_eq!(mock.hits(), 1);
+}
+
+/// The budget is durable spend, so it is answered from `usage`, not from memory.
+#[tokio::test]
+async fn budget_exhausted_blocks_the_next_request() {
+    let mock = Mock::start(vec![openai_reply("paid")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
+
+    // Prior spend for this key: 25 tokens.
+    h.state
+        .store
+        .record_usage(&UsageRecord {
+            id: None,
+            ts: rrouter_gateway::now_unix(),
+            provider: "claude".to_string(),
+            model: "haiku".to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/messages".to_string()),
+            key_id: Some(uuid),
+            input_tokens: 20,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        })
+        .await
+        .expect("seed spend");
+
+    h.patch_key(&id, json!({"budget_tokens": 20})).await;
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(body["error"]["code"], "budget_exhausted");
+    assert_eq!(mock.hits(), 0);
+
+    h.patch_key(&id, json!({"budget_tokens": 1000})).await;
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(mock.hits(), 1);
+}
+
+/// Every usage row the proxy writes names the key that paid for it, and `/api/usage`
+/// exposes that attribution.
+#[tokio::test]
+async fn usage_rows_carry_the_key_id() {
+    let mock = Mock::start(vec![openai_reply("attributed")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
+
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let mut row = None;
+    for _ in 0..100 {
+        if let Ok(rows) = h.state.store.recent_usage(5, None).await {
+            if let Some(found) = rows.iter().find(|r| r.key_id == Some(uuid)) {
+                row = Some(found.clone());
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let row = row.expect("usage row attributed to the key");
+    assert_eq!(row.input_tokens, 7);
+    assert_eq!(row.output_tokens, 3);
+    assert_eq!(row.endpoint.as_deref(), Some("/v1/chat/completions"));
+
+    let (status, body) = h.get("/api/usage").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"][0]["key_id"], id.as_str());
+}
+
+/// Dev clients send placeholder tokens. With keys optional that is anonymous traffic;
+/// with keys required it is a `401`, exactly as before.
+#[tokio::test]
+async fn unknown_key_is_anonymous_when_optional_and_rejected_when_required() {
+    let lax_mock = Mock::start(vec![openai_reply("anonymous")]).await;
+    let lax = harness(false);
+    lax.connect("openai", &lax_mock).await;
+    let (status, _, body) = lax.chat(Some("sk-rr-placeholder"), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "anonymous");
+    assert_eq!(lax_mock.hits(), 1);
+
+    let strict_mock = Mock::start(vec![openai_reply("never")]).await;
+    let strict = harness(true);
+    strict.connect("openai", &strict_mock).await;
+    let (status, _, body) = strict.chat(Some("sk-rr-placeholder"), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+    assert_eq!(body["error"]["code"], "invalid_api_key");
+    assert_eq!(strict_mock.hits(), 0);
+}
+
+/// The row shape is the contract the dashboard is built against: exact keys, exact
+/// types, `spent_tokens` measured from usage.
+#[tokio::test]
+async fn key_rows_match_the_governance_contract() {
+    let h = harness(false);
+    let (_, id) = h.create_key().await;
+
+    // A fresh key is unlimited.
+    let (status, body) = h.get("/api/keys").await;
+    assert_eq!(status, StatusCode::OK);
+    let created = body["data"][0].clone();
+    assert_eq!(created["is_active"], true);
+    assert_eq!(created["rpm"], 0);
+    assert_eq!(created["tpm"], 0);
+    assert_eq!(created["budget_tokens"], 0);
+    assert_eq!(created["spent_tokens"], 0);
+    assert_eq!(created["allowed_models"], Value::Null);
+    assert_eq!(created["expires_at"], Value::Null);
+
+    let patched = h
+        .patch_key(
+            &id,
+            json!({
+                "rpm": 60,
+                "tpm": 90_000,
+                "budget_tokens": 5_000_000,
+                "allowed_models": ["claude/claude-haiku-4-5-20251001"],
+                "expires_at": null,
+            }),
+        )
+        .await;
+    let expected = json!({
+        "id": id.as_str(),
+        "name": "test",
+        "created_at": patched["created_at"].clone(),
+        "is_active": true,
+        "rpm": 60,
+        "tpm": 90_000,
+        "budget_tokens": 5_000_000,
+        "spent_tokens": 0,
+        "allowed_models": ["claude/claude-haiku-4-5-20251001"],
+        "expires_at": null,
+    });
+    assert_eq!(patched, expected);
+
+    // The list endpoint answers the same row.
+    let (_, body) = h.get("/api/keys").await;
+    assert_eq!(body["data"][0], expected);
+
+    // A wrong type is a client error, not a silently ignored field.
+    let (status, _, body) = h
+        .call_full(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/keys/{id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"rpm": "fast"}).to_string()))
+                .expect("request"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("rpm must be a non-negative integer")),
+        "body: {body}"
+    );
 }

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
 use rrouter_store::{
-    ApiKey, Credentials, Store, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
+    ApiKey, ApiKeyPatch, Credentials, Store, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -266,6 +266,224 @@ fn api_key_lifecycle_and_no_plaintext_in_db_file() {
     assert!(contains(&bytes, key.key_hash.as_bytes()), "hash should be stored");
 }
 
+// ----- 4b. virtual-key governance ---------------------------------------------------
+
+#[test]
+fn api_key_limits_default_then_patch_merges_and_clears() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let (plain, key) = s.create_api_key(Some("laptop")).await.expect("create");
+        // A brand new key carries no limits at all.
+        assert_eq!((key.rpm, key.tpm, key.budget_tokens), (0, 0, 0));
+        assert_eq!(key.allowed_models, None);
+        assert_eq!(key.expires_at, None);
+        assert!(key.is_active);
+        assert_eq!(s.api_key_spend(key.id).await.expect("spend"), 0);
+
+        // A partial patch changes only the named field.
+        let patched = s
+            .update_api_key(key.id, &ApiKeyPatch { rpm: Some(60), ..Default::default() })
+            .await
+            .expect("patch")
+            .expect("exists");
+        assert_eq!(patched.rpm, 60);
+        assert_eq!(patched.tpm, 0);
+        assert_eq!(patched.name.as_deref(), Some("laptop"));
+
+        let patched = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    tpm: Some(90_000),
+                    budget_tokens: Some(5_000_000),
+                    allowed_models: Some(Some(vec![
+                        "claude/claude-haiku-4-5-20251001".to_string(),
+                    ])),
+                    expires_at: Some(Some(1_800_000_000)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("patch")
+            .expect("exists");
+        assert_eq!(patched.tpm, 90_000);
+        assert_eq!(patched.budget_tokens, 5_000_000);
+        assert_eq!(
+            patched.allowed_models,
+            Some(vec!["claude/claude-haiku-4-5-20251001".to_string()])
+        );
+        assert_eq!(patched.expires_at, Some(1_800_000_000));
+        assert_eq!(patched.rpm, 60, "the earlier patch survived");
+
+        // The merged row is what SQLite holds, not just what the call returned.
+        assert_eq!(s.list_api_keys().await.expect("list"), vec![patched.clone()]);
+
+        // `Some(None)` clears a nullable column and leaves the rest alone.
+        let cleared = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    allowed_models: Some(None),
+                    expires_at: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("clear")
+            .expect("exists");
+        assert_eq!(cleared.allowed_models, None);
+        assert_eq!(cleared.expires_at, None);
+        assert_eq!(cleared.tpm, 90_000, "clearing did not touch other fields");
+
+        // A disabled key is still found, so the gateway can answer 403 instead of 401.
+        let off = s
+            .update_api_key(key.id, &ApiKeyPatch { is_active: Some(false), ..Default::default() })
+            .await
+            .expect("disable")
+            .expect("exists");
+        assert!(!off.is_active);
+        let found = s
+            .verify_api_key(&plain)
+            .await
+            .expect("verify")
+            .expect("a disabled key is still a known key");
+        assert!(!found.is_active);
+
+        assert!(
+            s.update_api_key(Uuid::new_v4(), &ApiKeyPatch::default())
+                .await
+                .expect("unknown")
+                .is_none(),
+            "patching a missing key reports it, it does not create it"
+        );
+    });
+}
+
+#[test]
+fn spent_tokens_sums_only_that_key() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let (_, a) = s.create_api_key(Some("a")).await.expect("a");
+        let (_, b) = s.create_api_key(Some("b")).await.expect("b");
+        let rec = |key: Option<Uuid>, ts: i64, inp: u32, out: u32, cr: u32, cw: u32| UsageRecord {
+            id: None,
+            ts,
+            provider: "claude".to_string(),
+            model: "haiku".to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/messages".to_string()),
+            key_id: key,
+            input_tokens: inp,
+            output_tokens: out,
+            cache_read_tokens: cr,
+            cache_write_tokens: cw,
+            latency_ms: 1,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        };
+        // a: 100 + 20 + 5 + 5 = 130 across two rows; b: 7; anonymous: excluded.
+        s.record_usage(&rec(Some(a.id), 100, 60, 10, 5, 5)).await.expect("a1");
+        s.record_usage(&rec(Some(a.id), 200, 40, 10, 0, 0)).await.expect("a2");
+        s.record_usage(&rec(Some(b.id), 300, 7, 0, 0, 0)).await.expect("b1");
+        s.record_usage(&rec(None, 400, 99, 0, 0, 0)).await.expect("anon");
+
+        assert_eq!(s.api_key_spend(a.id).await.expect("a spend"), 130);
+        assert_eq!(s.api_key_spend(b.id).await.expect("b spend"), 7);
+        assert_eq!(s.api_key_spend(Uuid::new_v4()).await.expect("none"), 0);
+
+        let all = s.api_key_spend_all().await.expect("all");
+        assert_eq!(all.get(&a.id).copied(), Some(130));
+        assert_eq!(all.get(&b.id).copied(), Some(7));
+        assert_eq!(all.len(), 2, "anonymous rows belong to no key");
+
+        // Attribution is readable back, which is what `/api/usage` exposes.
+        let recent = s.recent_usage(10, None).await.expect("recent");
+        assert_eq!(recent[0].key_id, None, "newest row is the anonymous one");
+        assert!(recent.iter().any(|r| r.key_id == Some(a.id)));
+        assert!(recent.iter().any(|r| r.key_id == Some(b.id)));
+    });
+}
+
+#[test]
+fn v6_database_migrates_to_seven() {
+    let dir = TempDir::new("v6");
+    // A real v6 database: api_keys before the governance columns, usage before key_id.
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        conn.execute_batch(
+            "CREATE TABLE api_keys (
+               id         TEXT PRIMARY KEY,
+               key_hash   TEXT NOT NULL UNIQUE,
+               name       TEXT,
+               is_active  INTEGER NOT NULL DEFAULT 1,
+               created_at INTEGER NOT NULL
+             );
+             INSERT INTO api_keys (id, key_hash, name, is_active, created_at)
+             VALUES ('11111111-1111-4111-8111-111111111111', 'deadbeef', 'legacy', 1, 1700000000);
+
+             CREATE TABLE usage (
+               id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+               ts                 INTEGER NOT NULL,
+               provider           TEXT NOT NULL,
+               model              TEXT NOT NULL,
+               connection_id      TEXT,
+               input_tokens       INTEGER NOT NULL DEFAULT 0,
+               output_tokens      INTEGER NOT NULL DEFAULT 0,
+               latency_ms         INTEGER NOT NULL DEFAULT 0,
+               status             INTEGER NOT NULL,
+               streamed           INTEGER NOT NULL DEFAULT 0,
+               error              TEXT,
+               cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+               cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+               ttft_ms            INTEGER NOT NULL DEFAULT 0,
+               endpoint           TEXT
+             );
+             INSERT INTO usage (ts, provider, model, status, input_tokens)
+             VALUES (1700000000, 'claude', 'haiku', 200, 42);
+
+             PRAGMA user_version = 6;",
+        )
+        .expect("v6 schema");
+    }
+
+    let store = Store::open(&dir.db(), None).expect("open store runs the v7 step");
+    let keys = rt().block_on(store.list_api_keys()).expect("list");
+    assert_eq!(keys.len(), 1);
+    let legacy = &keys[0];
+    assert_eq!(legacy.name.as_deref(), Some("legacy"));
+    assert_eq!(
+        (legacy.rpm, legacy.tpm, legacy.budget_tokens),
+        (0, 0, 0),
+        "existing keys stay unlimited after the migration"
+    );
+    assert_eq!(legacy.allowed_models, None);
+    assert_eq!(legacy.expires_at, None);
+
+    let recent = rt().block_on(store.recent_usage(10, None)).expect("recent");
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].input_tokens, 42, "pre-v7 rows are untouched");
+    assert_eq!(recent[0].key_id, None, "pre-v7 rows are anonymous");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 7);
+    let index: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_key_ts'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("index");
+    assert_eq!(index, 1, "per-key spend must be indexed");
+}
+
 // ----- 5. credentials never plaintext ----------------------------------------------
 
 #[test]
@@ -380,6 +598,7 @@ fn usage_records_summary_and_recent_order() {
             model: model.to_string(),
             connection_id: Some(conn_id),
             endpoint: Some("/v1/chat/completions".to_string()),
+            key_id: None,
             input_tokens: inp,
             output_tokens: out,
             // Prompt-cache counters are priced separately; keep them per row.

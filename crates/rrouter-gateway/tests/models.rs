@@ -105,6 +105,7 @@ fn harness() -> Harness {
         config: config(),
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
+        counters: Default::default(),
     });
     let router = app(Arc::clone(&state));
     Harness { state, router }
