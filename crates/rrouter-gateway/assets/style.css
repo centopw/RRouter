@@ -52,3 +52,11 @@ iframe.ext { width: 100%; min-height: 70vh; border: 1px solid var(--line); borde
 .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel); }
 .error { color: var(--bad); }
 .card.ok { border-color: color-mix(in srgb, var(--ok) 55%, var(--line)); }
+.oauth-status { display: grid; gap: 8px; }
+.user-code {
+  font-size: 1.8rem;
+  letter-spacing: .12em;
+  padding: 8px 0;
+  user-select: all;
+}
+.oauth-status:focus { outline: 2px solid var(--accent); outline-offset: 3px; }

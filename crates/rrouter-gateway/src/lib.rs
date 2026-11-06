@@ -85,6 +85,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/usage/summary", get(routes::usage::summary))
         .route("/system", get(routes::system::system))
         .route("/settings", get(routes::settings::get_settings).put(routes::settings::put_settings))
+        .route("/oauth/providers", get(routes::oauth::providers))
         .route("/oauth/{provider}/start", post(routes::oauth::start))
         .route(
             "/oauth/{provider}/status/{id}",

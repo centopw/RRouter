@@ -24,6 +24,23 @@ use super::{admin_error, body_json, ok_json};
 use crate::state::AppState;
 use rrouter_core::Error;
 
+/// `GET /api/oauth/providers`
+pub async fn providers() -> Response {
+    let data: Vec<_> = rrouter_auth::PROVIDERS
+        .iter()
+        .filter_map(|spec| {
+            spec.login_flow().map(|flow| {
+                json!({
+                    "id": spec.id,
+                    "display": spec.display,
+                    "flow": flow.kind(),
+                })
+            })
+        })
+        .collect();
+    ok_json(json!({ "data": data }))
+}
+
 /// `POST /api/oauth/{provider}/start`
 pub async fn start(
     State(state): State<Arc<AppState>>,

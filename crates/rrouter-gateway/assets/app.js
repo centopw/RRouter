@@ -44,85 +44,156 @@ const input = (placeholder, value = '') => el('input', { placeholder, value });
 const button = (label, onclick, cls = '') => el('button', { class: cls, onclick }, label);
 
 // ---------- OAuth sign-in ----------
-// Providers whose sign-in RRouter implements. Kept here so the button list is
-// explicit rather than a guess from the connection list.
-const OAUTH_PROVIDERS = [
-  { id: 'claude', label: 'Claude' },
-  { id: 'codex', label: 'Codex' },
-  { id: 'github', label: 'GitHub Copilot' },
-];
-
-/// Run one sign-in end to end, showing whatever the human must do.
+const oauthStatus = () => el('div', { class: 'oauth-status', role: 'status', 'aria-live': 'polite', tabindex: '-1' });
+const errorBlock = (error, retry) => el('div', { class: 'error' }, error.message, retry ? el('div', { class: 'toolbar' }, button('Retry', retry)) : null);
 async function startLogin(provider, slot, onDone) {
-  slot.replaceChildren(el('div', { class: 'muted' }, `starting ${provider} sign-in…`));
+  const status = oauthStatus();
+  slot.replaceChildren(status);
+  status.focus({ preventScroll: true });
+  status.append(el('div', { class: 'muted' }, `starting ${provider} sign-in…`));
   let started;
   try {
     started = await api(`/oauth/${provider}/start`, { method: 'POST' });
   } catch (err) {
-    slot.replaceChildren(el('div', { class: 'error' }, `${provider}: ${err.message}`));
+    status.replaceChildren(errorBlock(err, () => startLogin(provider, slot, onDone)));
     return;
   }
+
   const { id, challenge } = started;
+  let timer;
+  let countdown;
+  let completed = false;
+  let stopped = false;
+  const stopTimer = () => { clearInterval(timer); clearInterval(countdown); timer = countdown = undefined; };
+  const cancel = async () => {
+    stopTimer();
+    try {
+      await api(`/oauth/${provider}/${id}`, { method: 'DELETE' });
+      slot.replaceChildren();
+    } catch (err) {
+      status.replaceChildren(errorBlock(err, cancel));
+    }
+  };
 
   if (challenge.kind === 'pkce') {
-    slot.replaceChildren(
+    const startedAt = Date.now();
+    const progress = el('div', { class: 'muted' });
+    const paint = () => { progress.textContent = `waiting for you to finish in the browser… elapsed ${Math.floor((Date.now() - startedAt) / 1000)}s`; };
+    const finishButton = button('I authorized — continue', () => finish(), 'primary');
+    status.replaceChildren(
       el('div', { class: 'card' },
-        el('div', {}, `Authorize ${provider} in your browser, then this finishes automatically.`),
+        el('div', {}, `Authorize ${provider} in your browser.`),
+        progress,
         el('div', { class: 'toolbar' },
-          el('a', { href: challenge.authorize_url, target: '_blank', rel: 'noopener' }, 'open authorization page'),
-          button('I authorized — continue', (e) => finish(e.target, id), 'primary'),
-          button('cancel', async () => { await api(`/oauth/${provider}/${id}`, { method: 'DELETE' }); slot.replaceChildren(); }, 'danger'))),
+          el('a', { href: challenge.authorize_url, target: '_blank', rel: 'noopener' }, 'Open authorization page'),
+          finishButton,
+          button('Cancel', cancel, 'danger'))),
     );
+    paint();
+    timer = setInterval(async () => {
+      if (stopped) return;
+      paint();
+      try {
+        const current = await api(`/oauth/${provider}/status/${id}`);
+        if (!current.pending) {
+          stopped = true;
+          stopTimer();
+          status.replaceChildren(errorBlock(new Error('this sign-in expired; start a new one'), () => startLogin(provider, slot, onDone)));
+        }
+      } catch (err) {
+        stopped = true;
+        stopTimer();
+        status.replaceChildren(errorBlock(err, () => startLogin(provider, slot, onDone)));
+      }
+    }, 1000);
   } else {
-    // Device flow: show the code, open the verification page, poll until done.
-    slot.replaceChildren(
+    let remaining = Number(challenge.expires_in) || 0;
+    const progress = el('div', { class: 'muted' });
+    const code = el('div', { class: 'secret user-code', 'aria-label': 'Device authorization code' }, challenge.user_code);
+    const paint = () => { progress.textContent = `waiting for authorization… ${Math.max(0, remaining)}s remaining`; };
+    const copy = async () => {
+      try { await navigator.clipboard.writeText(challenge.user_code); progress.textContent = 'code copied; waiting for authorization…'; }
+      catch { progress.textContent = 'copy unavailable; select the code to copy it'; }
+    };
+    status.replaceChildren(
       el('div', { class: 'card' },
-        el('div', {}, 'Enter this code on GitHub:'),
-        el('div', { class: 'secret' }, challenge.user_code),
+        el('div', {}, 'Enter this code on the provider:'),
+        code,
         el('div', { class: 'toolbar' },
-          el('a', { href: challenge.verification_uri, target: '_blank', rel: 'noopener' }, 'open verification page'),
-          button('cancel', async () => { await api(`/oauth/${provider}/${id}`, { method: 'DELETE' }); slot.replaceChildren(); }, 'danger'))),
+          button('Copy code', copy),
+          el('a', { href: challenge.verification_uri, target: '_blank', rel: 'noopener' }, 'Open verification page'),
+          button('Cancel', cancel, 'danger')),
+        progress),
     );
+    paint();
+    countdown = setInterval(() => {
+      remaining -= 1;
+      paint();
+      if (remaining <= 0) { clearInterval(countdown); countdown = undefined; }
+    }, 1000);
+    finish();
   }
 
-  async function finish(btn, loginId) {
-    btn.disabled = true;
-    btn.textContent = 'waiting for provider…';
+  async function finish() {
+    if (completed) return;
+    completed = true;
+    stopped = true;
+    if (challenge.kind === 'pkce') stopTimer();
+    const progress = el('div', { class: 'muted' }, 'waiting for provider…');
+    status.append(progress);
     try {
-      const out = await api(`/oauth/${provider}/complete`, { method: 'POST', body: { id: loginId } });
-      slot.replaceChildren(
-        el('div', { class: 'card ok' }, `connected ${out.provider}${out.name ? ` as ${out.name}` : ''}`),
-        out.warning ? el('div', { class: 'error' }, out.warning) : null,
-      );
+      const out = await api(`/oauth/${provider}/complete`, { method: 'POST', body: { id } });
+      stopTimer();
+      status.replaceChildren(el('div', { class: 'card ok' },
+        `Connected ${out.provider}${out.name ? ` as ${out.name}` : ''}`),
+        out.warning ? el('div', { class: 'error' }, out.warning) : null);
       await onDone();
     } catch (err) {
-      slot.replaceChildren(el('div', { class: 'error' }, `${provider}: ${err.message}`));
+      stopTimer();
+      status.replaceChildren(errorBlock(err, () => startLogin(provider, slot, onDone)));
     }
   }
-
-  // Device flows complete on their own: the server polls the provider.
-  if (challenge.kind === 'device_code') finish(el('button'), id);
 }
 
+async function oauthProviders(panel, connect, loginSlot, refresh) {
+  try {
+    const providers = (await api('/oauth/providers')).data ?? [];
+    // Spread the buttons: replaceChildren only flattens one level, so an array
+    // argument would stringify each element into "[object HTMLButtonElement]".
+    connect.replaceChildren(
+      el('span', { class: 'muted' }, 'sign in:'),
+      ...providers.map((provider) =>
+        button(provider.display, () => startLogin(provider.id, loginSlot, refresh))),
+    );
+  } catch (err) {
+    connect.replaceChildren(errorBlock(err, () => oauthProviders(panel, connect, loginSlot, refresh)));
+  }
+}
+
+// ---------- built-in panels ----------
 const builtins = {
   async connections(panel) {
     const loginSlot = el('div');
+    const connectionError = el('div');
     const refresh = () => render(panel.parentElement, current);
+    const addConnection = async (e) => {
+      const [provider, authType, name, token] = e.target.parentElement.querySelectorAll('input');
+      const credentials = authType.value === 'api_key' ? { api_key: token.value } : { access_token: token.value };
+      try {
+        await api('/connections', { method: 'POST', body: {
+          provider: provider.value, auth_type: authType.value, name: name.value, credentials,
+        } });
+        connectionError.replaceChildren();
+        refresh();
+      } catch (err) {
+        connectionError.replaceChildren(errorBlock(err, () => addConnection(e)));
+      }
+    };
     const form = el('div', { class: 'toolbar' },
       input('provider e.g. openai', 'openai'), input('auth_type', 'api_key'),
       input('name'), input('api_key / access_token'),
-      button('add', async (e) => {
-        const [provider, authType, name, token] = e.target.parentElement.querySelectorAll('input');
-        const credentials = authType.value === 'api_key' ? { api_key: token.value } : { access_token: token.value };
-        try { await api('/connections', { method: 'POST', body: { provider: provider.value, auth_type: authType.value, name: name.value, credentials } }); }
-        catch (err) { alert(err.message); }
-        refresh();
-      }, 'primary'));
-    const connect = el('div', { class: 'toolbar' },
-      el('span', { class: 'muted' }, 'sign in:'),
-      OAUTH_PROVIDERS.map((p) => button(p.label, () => startLogin(p.id, loginSlot, refresh))));
-    // The table helper replaces the panel's children, so the toolbar is rendered into
-    // its own toolbar slot and prepended afterwards (see the prepend below).
+      button('add', addConnection, 'primary'));
+    const connect = el('div', { class: 'toolbar' }, el('span', { class: 'muted' }, 'loading sign-in providers…'));
     await table(panel, [
       { title: 'provider', key: 'provider' },
       { title: 'name', key: 'name' },
@@ -131,10 +202,17 @@ const builtins = {
       { title: 'tokens', render: (r) => [r.has_access_token && 'access', r.has_refresh_token && 'refresh', r.has_api_key && 'key'].filter(Boolean).join(' ') || '—', },
       { title: 'state', render: (r) => (r.is_active ? 'active' : `off (${r.backoff_level})`) },
       { title: '', render: (r) => el('span', {},
-          button('test', async () => { const out = await api(`/connections/${r.id}/test`, { method: 'POST' }); alert(JSON.stringify(out)); }),
-          button('delete', async () => { await api(`/connections/${r.id}`, { method: 'DELETE' }); refresh(); }, 'danger')) },
+        button('test', async () => {
+          try { connectionError.replaceChildren(el('div', { class: 'card' }, JSON.stringify(await api(`/connections/${r.id}/test`, { method: 'POST' })))); }
+          catch (err) { connectionError.replaceChildren(errorBlock(err, () => render(panel.parentElement, current))); }
+        }),
+        button('delete', async () => {
+          try { await api(`/connections/${r.id}`, { method: 'DELETE' }); refresh(); }
+          catch (err) { connectionError.replaceChildren(errorBlock(err, () => render(panel.parentElement, current))); }
+        }, 'danger')) },
     ], async () => (await api('/connections')).data ?? []);
-    panel.prepend(el('div', { class: 'toolbar' }, form), connect, loginSlot);
+    panel.prepend(el('div', { class: 'toolbar' }, form), connect, loginSlot, connectionError);
+    oauthProviders(panel, connect, loginSlot, refresh);
   },
 
   async keys(panel) {
