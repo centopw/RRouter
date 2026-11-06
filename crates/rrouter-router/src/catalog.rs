@@ -231,6 +231,18 @@ pub fn registry_providers(models_dev_id: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// Registry providers a models.dev document's models may be *stored* under.
+///
+/// Same as [`registry_providers`] except `codex`: the ChatGPT OAuth line serves a small
+/// verified subset, so mirroring OpenAI's full catalog there advertises models the
+/// account cannot call. Codex rows come from the curated catalog instead.
+pub fn ingest_providers(models_dev_id: &str) -> Vec<&'static str> {
+    registry_providers(models_dev_id)
+        .into_iter()
+        .filter(|ours| *ours != "codex")
+        .collect()
+}
+
 /// What each registry provider serves.
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {

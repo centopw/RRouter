@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rrouter_core::{Error, Result};
-use rrouter_router::catalog::registry_providers;
+use rrouter_router::catalog::ingest_providers;
 use rrouter_router::ModelInfo;
 use rrouter_store::{ModelRow, Store};
 use serde::Serialize;
@@ -144,10 +144,24 @@ pub fn merge(
 ) -> Vec<ModelItem> {
     let mut items: BTreeMap<(String, String), ModelItem> = BTreeMap::new();
 
+    // models.dev describes a model under its vendor (`openai`), while a registry
+    // provider may be a different product line serving the same model id (`codex`).
+    // Those rows carry the limits and capabilities; the catalog carries the fact that
+    // the product line serves it.
+    let donors: BTreeMap<(&str, &str), &ModelRow> = rows
+        .iter()
+        .filter(|row| row.source == SOURCE_SYNCED)
+        .map(|row| ((row.provider.as_str(), row.model.as_str()), row))
+        .collect();
+
     for info in catalog_rows {
         let mut item = ModelItem::new(&info.provider, &info.id, SOURCE_CATALOG);
         // The catalog records an output cap, not a context window.
         item.max_output = info.max_tokens;
+        let vendor = rrouter_router::catalog::models_dev_provider(&info.provider);
+        if let Some(donor) = donors.get(&(vendor, info.id.as_str())) {
+            overlay(&mut item, donor);
+        }
         items.insert((info.provider, info.id), item);
     }
 
@@ -164,16 +178,7 @@ pub fn merge(
                 .entry(key)
                 .or_insert_with(|| ModelItem::new(&row.provider, &row.model, &row.source)),
         };
-        if row.display.is_some() {
-            item.display = row.display.clone();
-        }
-        if row.context.is_some() {
-            item.context = row.context;
-        }
-        if row.max_output.is_some() {
-            item.max_output = row.max_output;
-        }
-        item.capabilities.overlay(&row.caps);
+        overlay(item, row);
         // Source answers "why does this model exist here", not "who wrote last".
         // models.dev enriching a shipped catalog entry must not relabel it as a
         // discovery; only the operator's own row overrides a catalog entry.
@@ -191,6 +196,21 @@ pub fn merge(
             item
         })
         .collect()
+}
+
+/// Apply one row's stated facts to an item. Absent fields never erase present ones,
+/// so a vendor row enriching a catalog entry cannot blank its output cap.
+fn overlay(item: &mut ModelItem, row: &ModelRow) {
+    if row.display.is_some() {
+        item.display = row.display.clone();
+    }
+    if row.context.is_some() {
+        item.context = row.context;
+    }
+    if row.max_output.is_some() {
+        item.max_output = row.max_output;
+    }
+    item.capabilities.overlay(&row.caps);
 }
 
 /// Live `GET /api/models` payload.
@@ -266,7 +286,7 @@ pub fn parse_models_dev(document: &Value) -> Vec<ModelRow> {
         };
         // Only providers this gateway can route are worth storing: models.dev lists
         // 240+, and a row nobody can call is noise in every list and select.
-        let mut targets: Vec<&str> = registry_providers(models_dev_id)
+        let mut targets: Vec<&str> = ingest_providers(models_dev_id)
             .into_iter()
             .filter(|id| rrouter_auth::get(id).is_some())
             .collect();
@@ -301,12 +321,14 @@ pub fn parse_models_dev(document: &Value) -> Vec<ModelRow> {
     rows
 }
 
-/// `limit.<key>` as a token count.
+/// `limit.<key>` as a token count. models.dev writes `0` for "unpublished", which
+/// must read as unknown rather than as a zero-token window.
 fn limit(entry: &Value, key: &str) -> Option<u32> {
     entry
         .get("limit")
         .and_then(|limit| limit.get(key))
         .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
         .and_then(|value| u32::try_from(value).ok())
 }
 
