@@ -24,7 +24,28 @@ material, and the dashboard all live inside the binary and the data directory.
 
 ---
 
+## Install
+
+One line, any Linux or macOS host — the script resolves the latest release for your
+OS/architecture, verifies its SHA-256, and installs to `/usr/local/bin` (or
+`~/.local/bin` when that is not writable):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | sh
+```
+
+```sh
+# pin a version / choose a directory
+RROUTER_VERSION=v0.1.0 RROUTER_INSTALL_DIR="$HOME/bin" \
+  sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
+
+# see what it would do
+RROUTER_DRY_RUN=1 curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | sh
+```
+
 ## Quick start
+
+From source:
 
 ```sh
 git clone https://github.com/centopw/RRouter && cd RRouter
@@ -155,13 +176,20 @@ sidebar keeps working.
 
 ### Docker
 
-The image is two stages: Rust builds the binary, distroless runs it. `ui/dist` is copied in,
-so the image ships the full dashboard with no Node in the final layer.
+The image is three stages — Node builds the dashboard, Rust embeds it and builds the binary,
+distroless runs it — so the runtime layer has no shell, package manager, or Node.
 
 ```sh
-docker build -t rrouter .
-docker run -p 20128:20128 -v rrouter-data:/data rrouter
+docker run -p 20128:20128 -v rrouter-data:/data \
+  ghcr.io/centopw/rrouter:latest
+
+docker build -t rrouter .        # or build it yourself
 ```
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR by
+`.github/workflows/docker.yml` on every push to `main` and on `v*` tags. Tagged builds also
+publish standalone binaries through `.github/workflows/release.yml`; `install.sh` consumes
+those, which is why it needs no Rust toolchain.
 
 ## Architecture
 
@@ -203,6 +231,17 @@ arriving before the upstream finishes, Anthropic clients receiving Anthropic sha
 OpenAI-speaking provider, tool calls and tool results crossing dialects, `strict` schemas and
 provider-native tools surviving translation, credential material absent from the database
 file, and the admin API never returning tokens.
+
+## Releasing
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+That tag drives both workflows: the release job publishes
+`rrouter-{linux,darwin}-{amd64,arm64}.tar.gz` with `.sha256` files, and the docker job pushes
+`ghcr.io/centopw/rrouter:0.2.0`, `:0.2`, `:latest`, and a `:sha-…` tag. The installer verifies
+the checksum before installing, so a corrupted download never lands in `$PATH`.
 
 ## License
 

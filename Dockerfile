@@ -1,15 +1,24 @@
-# RRouter — minimal self-hosted image.
+# syntax=docker/dockerfile:1
+
+# RRouter — self-hosted image.
 #
-# Two stages: build with the Rust toolchain, ship only the static-ish binary on a
-# distroless runtime. No Node, no npm, no JS runtime, no build step at deploy time.
+# Three stages: Node builds the dashboard, Rust builds the binary with that dist
+# embedded, distroless runs it. The runtime image has no package manager, no shell,
+# and no Node — just the static binary.
+
+FROM node:22-alpine AS ui
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY ui/ ./
+RUN npm run build
 
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
-# The dashboard is prebuilt: crates/rrouter-ui embeds these files at compile time.
-# Without ui/dist the image still builds and serves the built-in fallback shell.
-COPY ui/dist ./ui/dist
+# crates/rrouter-ui/build.rs embeds ../../ui/dist at compile time.
+COPY --from=ui /ui/dist ./ui/dist
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config \
  && cargo build --release --locked \
  && strip target/release/rrouter

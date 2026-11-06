@@ -13,8 +13,16 @@ const BANNER: &str = "rrouter";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        // Installers and health checks read this without touching the data directory.
+        println!("rrouter {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("usage: rrouter [--print-config]\n\nEvery option is an environment variable; see README.");
+        println!(
+            "usage: rrouter [--version] [--print-config]\n\n\
+             Every option is an environment variable; see README."
+        );
         return ExitCode::SUCCESS;
     }
 

@@ -1,4 +1,8 @@
 target/
 data/
 .git/
-.orca-specs/
+.github/
+ui/node_modules/
+ui/dist/
+.orca-specs*/
+docs/
