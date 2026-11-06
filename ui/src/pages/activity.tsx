@@ -211,7 +211,7 @@ function RankedList({
   return (
     <ol className="px-5 pb-4">
       {rows.map((row, i) => (
-        <li key={`${row.label}-${i}`} className="flex items-center gap-3 border-b border-[#1a1a1a] py-2.5 last:border-0">
+        <li key={`${row.label}-${i}`} className="flex items-center gap-3 border-b border-[var(--color-rule)] py-2.5 last:border-0">
           <span className="w-4 text-right text-[11px] text-faint tnum">{i + 1}</span>
           <span className="min-w-0 flex-1">
             <span className="block truncate text-[13px]">{row.label}</span>

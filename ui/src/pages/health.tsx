@@ -101,7 +101,7 @@ export default function Health() {
           {(connections.data ?? []).length === 0 ? (
             <p className="text-[13px] text-faint">No connections. Add one under Providers.</p>
           ) : (
-            <ul className="divide-y divide-[#1a1a1a]">
+            <ul className="divide-y divide-[var(--color-rule)]">
               {(connections.data ?? []).map((c) => (
                 <li key={c.id} className="flex items-center gap-3 py-2.5 text-[13px]">
                   <Dot tone={!c.is_active ? "muted" : c.backoff_level > 0 ? "warn" : "pos"} />

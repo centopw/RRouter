@@ -42,8 +42,8 @@ export function PageHeader({
     <div className="mb-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-[28px] font-semibold tracking-[-0.02em] text-fg">{title}</h1>
-          {subtitle ? <p className="mt-1 text-sm text-muted">{subtitle}</p> : null}
+          <h1 className="text-[28px] font-bold tracking-[-0.02em] text-fg">{title}</h1>
+          {subtitle ? <p className="mt-1 text-sm font-medium text-muted">{subtitle}</p> : null}
         </div>
         {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
       </div>
@@ -96,6 +96,7 @@ export function Button({
   title,
   type = "button",
   className,
+  arrow,
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -104,15 +105,17 @@ export function Button({
   title?: string;
   type?: "button" | "submit";
   className?: string;
+  /** Primary actions carry a directional arrow; that is part of the brand. */
+  arrow?: boolean;
 }) {
   const styles: Record<ButtonVariant, string> = {
     primary:
-      "bg-accent text-[var(--color-accent-ink)] hover:brightness-105 border border-transparent font-medium",
+      "brand-gradient text-white font-semibold border border-transparent hover:brightness-110 shadow-[0_1px_0_rgba(255,255,255,0.12)_inset]",
     ghost:
-      "border border-line-strong bg-surface-2 text-fg hover:border-[#3d3d3d] hover:bg-[#1d1d1d]",
+      "border border-line bg-surface-2 text-fg hover:border-line-strong hover:bg-[#232b3a]",
     quiet: "border border-transparent text-muted hover:bg-surface-2 hover:text-fg",
     danger:
-      "border border-[#5a2130] bg-[#2a1016] text-neg hover:border-[#7a2c3f] hover:bg-[#351318]",
+      "border border-[#ef4444]/35 bg-[#ef4444]/10 text-[#f87171] hover:border-[#ef4444]/55 hover:bg-[#ef4444]/15",
   };
   return (
     <button
@@ -127,6 +130,7 @@ export function Button({
       )}
     >
       {children}
+      {arrow ?? variant === "primary" ? <span aria-hidden>→</span> : null}
     </button>
   );
 }
@@ -142,10 +146,10 @@ export function Badge({
 }) {
   const tones = {
     neutral: "border-line-strong bg-surface-2 text-muted",
-    pos: "border-[#204a31] bg-[#12251a] text-pos",
-    neg: "border-[#5a2130] bg-[#2a1016] text-neg",
-    warn: "border-[#4d3a1c] bg-[#241c0f] text-warn",
-    accent: "border-[#3a4d1e] bg-[var(--color-accent-soft)] text-accent",
+    pos: "border-[#22c55e]/35 bg-[#22c55e]/10 text-[#4ade80]",
+    neg: "border-[#ef4444]/35 bg-[#ef4444]/10 text-[#f87171]",
+    warn: "border-[#f59e0b]/35 bg-[#f59e0b]/10 text-[#fbbf24]",
+    accent: "border-[#8a2bff]/40 bg-[#8a2bff]/12 text-[#c4b5fd]",
   } as const;
   return (
     <span
@@ -176,7 +180,7 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
 }
 
 const control =
-  "h-8 w-full min-w-0 rounded-lg border border-line-strong bg-[#0e0e0e] px-2.5 text-[13px] text-fg placeholder:text-faint focus:border-[#3f3f3f] focus:outline-none";
+  "h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 text-[13px] text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none";
 
 export function Input({
   value,
@@ -247,9 +251,9 @@ export function EmptyState({ children }: { children: ReactNode }) {
 export function ErrorNote({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   const message = error instanceof Error ? error.message : String(error);
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-[#5a2130] bg-[#2a1016] px-3 py-2 text-[13px] text-neg">
+    <div className="flex items-start gap-3 rounded-lg border border-[#ef4444]/35 bg-[#ef4444]/10 px-3 py-2 text-[13px] text-neg">
       <span className="font-medium">Request failed</span>
-      <span className="min-w-0 flex-1 break-words text-[#ffb3c2]">{message}</span>
+      <span className="min-w-0 flex-1 break-words text-[#fca5a5]">{message}</span>
       {onRetry ? (
         <button onClick={onRetry} className="text-[12px] underline underline-offset-2">
           retry

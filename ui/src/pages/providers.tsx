@@ -174,8 +174,8 @@ export default function Providers() {
           className={cx(
             "mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[13px]",
             notice.tone === "pos"
-              ? "border-[#204a31] bg-[#12251a] text-pos"
-              : "border-[#5a2130] bg-[#2a1016] text-neg",
+              ? "border-[#22c55e]/35 bg-[#22c55e]/10 text-[#4ade80]"
+              : "border-[#ef4444]/35 bg-[#ef4444]/10 text-[#f87171]",
           )}
         >
           <span className="min-w-0 flex-1 break-words">{notice.text}</span>
@@ -378,7 +378,7 @@ function Choice({ title, body, onClick }: { title: string; body: string; onClick
   return (
     <button
       onClick={onClick}
-      className="rounded-[var(--radius-card)] border border-line-strong bg-surface-2 p-4 text-left transition-colors hover:border-[#3d3d3d] hover:bg-[#1d1d1d]"
+      className="rounded-[var(--radius-card)] border border-line-strong bg-surface-2 p-4 text-left transition-colors hover:border-[var(--color-line-strong)] hover:bg-[#232b3a]"
     >
       <span className="block text-[14px] font-medium">{title}</span>
       <span className="mt-1 block text-[12px] leading-relaxed text-muted">{body}</span>
@@ -400,7 +400,7 @@ function ProviderList({
         <li key={item.id}>
           <button
             onClick={item.onClick}
-            className="flex w-full items-center gap-3 rounded-lg border border-line bg-[#0e0e0e] px-3 py-2.5 text-left hover:border-line-strong hover:bg-surface-2"
+            className="flex w-full items-center gap-3 rounded-lg border border-line bg-[var(--color-surface-2)] px-3 py-2.5 text-left hover:border-line-strong hover:bg-surface-2"
           >
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[13px]">{item.title}</span>
@@ -463,7 +463,7 @@ function ApiKeyForm({
           value={provider}
           onChange={(e) => setProvider(e.target.value)}
           aria-label="api key provider"
-          className="h-8 w-full rounded-lg border border-line-strong bg-[#0e0e0e] px-2.5 text-[13px] text-fg"
+          className="h-8 w-full rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 text-[13px] text-fg"
         >
           {providers.map((p) => (
             <option key={p.id} value={p.id}>

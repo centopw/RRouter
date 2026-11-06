@@ -1,25 +1,38 @@
 @import "tailwindcss";
 
-/* Design tokens: near-black canvas, hairline borders, one lime accent.
-   Everything in the app references these names, never a raw hex. */
+/* Brand tokens (RRouter brand guidelines). Every component references these
+   names, never a raw hex, so a palette change stays a one-file edit. */
 @theme {
-  --color-bg: #0a0a0a;
-  --color-surface: #111111;
-  --color-surface-2: #171717;
-  --color-line: #232323;
-  --color-line-strong: #303030;
-  --color-fg: #ededed;
-  --color-muted: #9b9b9b;
-  --color-faint: #6e6e6e;
-  --color-accent: #b9f36b;
-  --color-accent-ink: #0d1a03;
-  --color-accent-soft: #1b2413;
-  --color-pos: #5ce08a;
-  --color-neg: #ff6b8a;
-  --color-warn: #ffb86b;
+  /* Neutral surfaces: canvas below cards, cards below inputs. */
+  --color-bg: #0b0f17; /* Gray 950 */
+  --color-sidebar: #080b12;
+  --color-surface: #10151f;
+  --color-surface-2: #1a1f2b; /* Gray 900 — inputs, secondary buttons */
+  --color-line: #2d3748; /* Gray 800 — borders, dividers */
+  --color-line-strong: #4b5563; /* Gray 600 — subdued borders, inactive icons */
+  --color-row-hover: #151b26;
+  --color-rule: #20293a;
+
+  /* Type */
+  --color-fg: #ffffff;
+  --color-muted: #94a3b8; /* Gray 400 */
+  --color-faint: #7c8aa0; /* 5.5:1 on canvas — AA even at 11px */
+
+  /* Brand */
+  --color-accent: #00d4ff; /* Electric Cyan */
+  --color-accent-2: #8a2bff; /* Cyber Purple */
+  --color-info: #3b82f6; /* Core Blue */
+
+  /* Semantic — status only, never decoration */
+  --color-pos: #22c55e;
+  --color-warn: #f59e0b;
+  --color-neg: #ef4444;
+
   --radius-card: 12px;
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --font-sans:
+    Inter, "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 html,
@@ -36,6 +49,22 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* The signature gradient: primary actions, active toggles, brand accents. */
+.brand-gradient {
+  background-image: linear-gradient(90deg, var(--color-accent) 0%, var(--color-accent-2) 100%);
+}
+
+.brand-gradient-diag {
+  background-image: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-2) 100%);
+}
+
+.brand-text {
+  background-image: linear-gradient(90deg, var(--color-accent) 0%, var(--color-accent-2) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
 /* Numeric readouts line up in tables and metric cards. */
 .tnum {
   font-variant-numeric: tabular-nums;
@@ -44,7 +73,7 @@ body {
 
 ::selection {
   background: var(--color-accent);
-  color: var(--color-accent-ink);
+  color: #04121a;
 }
 
 ::-webkit-scrollbar {
@@ -52,7 +81,7 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2a2a;
+  background: var(--color-line);
   border-radius: 999px;
   border: 3px solid var(--color-bg);
 }

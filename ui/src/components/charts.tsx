@@ -20,7 +20,8 @@ export function Sparkline({
   fill?: boolean;
 }) {
   const id = useId().replace(/[:]/g, "");
-  const color = { pos: "var(--color-pos)", neg: "var(--color-neg)", accent: "var(--color-accent)" }[tone];
+  // Brand cyan marks a trend; red is reserved for an error series.
+  const color = { pos: "var(--color-accent)", neg: "var(--color-neg)", accent: "var(--color-accent-2)" }[tone];
   const pts = normalize(values, width, height);
   if (pts.length < 2) return <div style={{ width, height }} aria-hidden />;
 
@@ -78,7 +79,7 @@ export function Bars({ bars, height = 220, fill = false }: { bars: Bar[]; height
               style={{ top: `${(i / ticks) * 100}%` }}
             >
               <span className="w-10 shrink-0 text-right tnum">{compact(Math.round(value))}</span>
-              <span className="h-px flex-1 bg-[#1c1c1c]" />
+              <span className="h-px flex-1 bg-[var(--color-rule)]" />
             </div>
           );
         })}
@@ -102,10 +103,16 @@ export function Bars({ bars, height = 220, fill = false }: { bars: Bar[]; height
               title={`${b.label}: ${b.value.toLocaleString()} tokens`}
             >
               <div
-                className="w-full rounded-t-[3px] transition-opacity group-hover:opacity-80"
+                className={
+                  fill
+                    ? "w-full max-w-[40px] rounded-t-[3px] transition-opacity group-hover:opacity-80"
+                    : "w-full rounded-t-[3px] transition-opacity group-hover:opacity-80"
+                }
                 style={{
                   height: `${Math.max(2, (b.value / max) * 100)}%`,
-                  background: b.highlight ? "var(--color-neg)" : "#3a3a3a",
+                  background: b.highlight
+                    ? "linear-gradient(180deg, var(--color-accent) 0%, var(--color-accent-2) 100%)"
+                    : "var(--color-line)",
                 }}
               />
             </div>

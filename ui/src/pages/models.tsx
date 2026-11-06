@@ -246,16 +246,14 @@ export default function Models() {
             onClick={() => toggle.mutate(m)}
             className={cx(
               "relative inline-flex h-4 w-7 items-center rounded-full border transition-colors disabled:opacity-40",
-              m.enabled
-                ? "border-[#3a4d1e] bg-[var(--color-accent-soft)]"
-                : "border-line-strong bg-surface-2",
+              m.enabled ? "border-transparent brand-gradient" : "border-line bg-surface-2",
             )}
           >
             <span
               aria-hidden
               className={cx(
                 "absolute h-2.5 w-2.5 rounded-full transition-all",
-                m.enabled ? "left-[13px] bg-accent" : "left-[3px] bg-faint",
+                m.enabled ? "left-[13px] bg-white" : "left-[3px] bg-[var(--color-muted)]",
               )}
             />
           </button>
@@ -566,7 +564,7 @@ function CustomModelModal({
                   type="checkbox"
                   checked={caps[key] === true}
                   onChange={(e) => setCaps((c) => ({ ...c, [key]: e.target.checked }))}
-                  className="h-3.5 w-3.5 rounded border border-line-strong bg-[#0e0e0e] accent-[var(--color-accent)]"
+                  className="h-3.5 w-3.5 rounded border border-line-strong bg-[var(--color-surface-2)] accent-[var(--color-accent)]"
                 />
                 {CAPABILITY_LABELS[key].chip}
               </label>
@@ -599,7 +597,7 @@ function EmptyRegistry({ onSync, syncing }: { onSync: () => void; syncing: boole
         </Button>
         <a
           href="/app/providers"
-          className="inline-flex h-8 items-center rounded-lg border border-line-strong bg-surface-2 px-3 text-[13px] text-fg hover:border-[#3d3d3d]"
+          className="inline-flex h-8 items-center rounded-lg border border-line-strong bg-surface-2 px-3 text-[13px] text-fg hover:border-[var(--color-line-strong)]"
         >
           go to providers
         </a>

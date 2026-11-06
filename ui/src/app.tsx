@@ -59,7 +59,7 @@ export function Shell() {
 
   return (
     <div className="flex h-full">
-      <aside className="flex w-[236px] shrink-0 flex-col border-r border-line bg-[#0d0d0d]">
+      <aside className="flex w-[236px] shrink-0 flex-col border-r border-line bg-[var(--color-sidebar)]">
         <div className="px-3 pt-3">
           <div className="flex items-center gap-2 rounded-lg px-2 py-2">
             <img
@@ -86,15 +86,25 @@ export function Shell() {
                       to={item.to}
                       className={({ isActive }) =>
                         cx(
-                          "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] transition-colors",
+                          "relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] transition-colors",
                           isActive
-                            ? "bg-[var(--color-accent-soft)] text-accent"
+                            ? "bg-[linear-gradient(90deg,rgba(0,212,255,0.14),rgba(138,43,255,0.06))] font-medium text-fg"
                             : "text-muted hover:bg-surface-2 hover:text-fg",
                         )
                       }
                     >
-                      <span className="shrink-0 opacity-90">{item.icon}</span>
-                      {item.label}
+                      {({ isActive }) => (
+                        <>
+                          {isActive ? (
+                            <span
+                              aria-hidden
+                              className="brand-gradient absolute left-0 top-1.5 h-[calc(100%-12px)] w-[2px] rounded-full"
+                            />
+                          ) : null}
+                          <span className="shrink-0 opacity-90">{item.icon}</span>
+                          {item.label}
+                        </>
+                      )}
                     </NavLink>
                   </li>
                 ))}
@@ -144,7 +154,7 @@ function TopBar({ onSearch }: { onSearch: () => void }) {
     <header className="flex h-[52px] shrink-0 items-center gap-4 border-b border-line px-8">
       <button
         onClick={onSearch}
-        className="flex h-8 w-[320px] items-center gap-2 rounded-lg border border-line-strong bg-[#0e0e0e] px-2.5 text-left text-[13px] text-faint hover:border-[#3a3a3a]"
+        className="flex h-8 w-[320px] items-center gap-2 rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 text-left text-[13px] text-faint hover:border-[var(--color-line-strong)]"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
           <circle cx="11" cy="11" r="7" />
@@ -155,7 +165,7 @@ function TopBar({ onSearch }: { onSearch: () => void }) {
       </button>
       <div className="ml-auto flex items-center gap-3 text-[12px] text-muted">
         <span className="hidden sm:inline">OpenAI-compatible gateway</span>
-        <code className="rounded border border-line-strong bg-[#0e0e0e] px-1.5 py-0.5 text-[11px] text-muted">
+        <code className="rounded border border-line-strong bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[11px] text-muted">
           :20128/v1
         </code>
       </div>

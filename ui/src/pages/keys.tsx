@@ -67,10 +67,10 @@ export default function Keys() {
       ) : null}
 
       {issued ? (
-        <Card className="mb-3 border-[#3a4d1e] bg-[var(--color-accent-soft)] px-5 py-4">
+        <Card className="mb-3 border-[#00d4ff]/35 bg-[#00d4ff]/10 px-5 py-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[12px] text-accent">Copy this key now — it is not shown again.</div>
+              <div className="text-[12px] text-[#67e8f9]">Copy this key now — it is not shown again.</div>
               <code className="mt-1 block truncate font-mono text-[13px] text-fg">{issued.key}</code>
             </div>
             <Button

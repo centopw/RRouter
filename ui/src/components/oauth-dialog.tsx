@@ -143,7 +143,7 @@ export function OAuthDialog({
             </p>
             <Field label="redirect uri" hint="the loopback the browser must reach">
               <div className="flex items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[#0e0e0e] px-2.5 py-1.5 font-mono text-[12px] text-muted">
+                <code className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-[12px] text-muted">
                   {challenge.redirect_uri}
                 </code>
                 <Button onClick={() => copy(challenge.redirect_uri)}>copy</Button>
@@ -155,7 +155,7 @@ export function OAuthDialog({
                   href={challenge.authorize_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[#0e0e0e] px-2.5 py-1.5 font-mono text-[12px] text-accent underline underline-offset-2"
+                  className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-[12px] text-accent underline underline-offset-2"
                 >
                   {challenge.authorize_url}
                 </a>
@@ -171,7 +171,7 @@ export function OAuthDialog({
           <>
             <Field label="user code" hint={`expires in ${Math.round(challenge.expires_in / 60)} min`}>
               <div className="flex items-center gap-2">
-                <code className="min-w-0 flex-1 rounded-lg border border-line-strong bg-[#0e0e0e] px-3 py-2 font-mono text-[24px] tracking-[0.18em] text-fg">
+                <code className="min-w-0 flex-1 rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-3 py-2 font-mono text-[24px] tracking-[0.18em] text-fg">
                   {challenge.user_code}
                 </code>
                 <Button onClick={() => copy(challenge.user_code)}>copy</Button>
@@ -183,7 +183,7 @@ export function OAuthDialog({
                   href={challenge.verification_uri}
                   target="_blank"
                   rel="noreferrer"
-                  className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[#0e0e0e] px-2.5 py-1.5 font-mono text-[12px] text-accent underline underline-offset-2"
+                  className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-[12px] text-accent underline underline-offset-2"
                 >
                   {challenge.verification_uri}
                 </a>
