@@ -542,8 +542,12 @@ fn sync_parser_maps_models_dev_into_rows() {
     assert_eq!(openai.caps["audio_output"], false);
     assert!(openai.caps.get("search").is_none(), "search is never derived");
 
-    // The alias map mirrors the vendor's models under the OAuth product line.
-    assert_eq!(find("codex", "gpt-4.1").caps["vision"], true);
+    // The alias map mirrors the vendor's models under product lines that serve the same
+    // catalog, but never under codex: that account cannot call OpenAI's full list.
+    assert!(
+        !rows.iter().any(|row| row.provider == "codex"),
+        "codex must not inherit the vendor catalog"
+    );
     assert_eq!(find("gemini", "gemini-2.5-pro").context, Some(1_048_576));
     assert_eq!(find("gemini", "gemini-2.5-pro").caps["pdf"], true);
     assert_eq!(find("gemini", "gemini-2.5-pro").caps["reasoning"], true);
