@@ -228,10 +228,10 @@ async fn catalog_rows_have_nine_capabilities_and_are_sorted() {
     sorted.sort();
     assert_eq!(order, sorted, "items must be sorted by provider, then id");
 
-    let codex = h.item("codex/gpt-5").await;
+    let codex = h.item("codex/gpt-5.6-luna").await;
     assert_eq!(codex["source"], "catalog");
     assert_eq!(codex["provider"], "codex");
-    assert_eq!(codex["id"], "gpt-5");
+    assert_eq!(codex["id"], "gpt-5.6-luna");
     assert_eq!(codex["capabilities"]["tools"], true);
     assert_eq!(codex["capabilities"]["vision"], false);
     assert_eq!(codex["enabled"], true);
@@ -348,17 +348,28 @@ async fn deleting_a_non_custom_row_is_a_404() {
 #[tokio::test]
 async fn disabled_models_flips_enabled_to_false() {
     let h = harness();
-    assert_eq!(h.item("codex/gpt-5").await["enabled"], true);
+    // Two providers serving the same id: disabling is keyed by model id alone, so
+    // both must flip. Custom rows make the test independent of catalog contents.
+    for provider in ["codex", "openai"] {
+        let (status, body) = h
+            .post(
+                "/api/models/custom",
+                json!({"provider": provider, "id": "shared-id", "display": "Shared"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    assert_eq!(h.item("codex/shared-id").await["enabled"], true);
+    assert_eq!(h.item("openai/shared-id").await["enabled"], true);
 
-    let (status, body) = h.send("PUT", "/api/disabled/gpt-5", Value::Null).await;
+    let (status, body) = h.send("PUT", "/api/disabled/shared-id", Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(h.item("codex/gpt-5").await["enabled"], false);
-    // Disabled state is per model id, so the openai row reads false too.
-    assert_eq!(h.item("openai/gpt-5").await["enabled"], false);
+    assert_eq!(h.item("codex/shared-id").await["enabled"], false);
+    assert_eq!(h.item("openai/shared-id").await["enabled"], false);
 
-    let (status, _) = h.send("PUT", "/api/disabled/gpt-5/enable", Value::Null).await;
+    let (status, _) = h.send("PUT", "/api/disabled/shared-id/enable", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(h.item("codex/gpt-5").await["enabled"], true);
+    assert_eq!(h.item("codex/shared-id").await["enabled"], true);
 }
 
 #[tokio::test]

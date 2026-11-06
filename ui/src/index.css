@@ -1,0 +1,79 @@
+@import "tailwindcss";
+
+/* Design tokens: near-black canvas, hairline borders, one lime accent.
+   Everything in the app references these names, never a raw hex. */
+@theme {
+  --color-bg: #0a0a0a;
+  --color-surface: #111111;
+  --color-surface-2: #171717;
+  --color-line: #232323;
+  --color-line-strong: #303030;
+  --color-fg: #ededed;
+  --color-muted: #9b9b9b;
+  --color-faint: #6e6e6e;
+  --color-accent: #b9f36b;
+  --color-accent-ink: #0d1a03;
+  --color-accent-soft: #1b2413;
+  --color-pos: #5ce08a;
+  --color-neg: #ff6b8a;
+  --color-warn: #ffb86b;
+  --radius-card: 12px;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Numeric readouts line up in tables and metric cards. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+::selection {
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2a2a;
+  border-radius: 999px;
+  border: 3px solid var(--color-bg);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+@keyframes rrouter-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.pulse {
+  animation: rrouter-pulse 2s ease-in-out infinite;
+}
