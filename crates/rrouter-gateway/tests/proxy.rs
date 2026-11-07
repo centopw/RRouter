@@ -3963,3 +3963,142 @@ async fn cache_eviction_keeps_at_most_max_entries() {
     assert_eq!(again["choices"][0]["message"]["content"], "third");
     assert_eq!(mock.hits(), 3);
 }
+
+// ------------------------------------------------------------- security headers
+
+/// The four headers every response carries, HTML or not.
+fn assert_base_security_headers(headers: &axum::http::HeaderMap) {
+    let expected = [
+        ("x-content-type-options", "nosniff"),
+        ("x-frame-options", "DENY"),
+        ("referrer-policy", "no-referrer"),
+        ("permissions-policy", "camera=(), microphone=(), geolocation=()"),
+    ];
+    for (name, value) in expected {
+        assert_eq!(
+            headers.get(name).and_then(|v| v.to_str().ok()),
+            Some(value),
+            "{name} missing or rewritten: {headers:?}"
+        );
+    }
+}
+
+fn header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> &'a str {
+    headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default()
+}
+
+/// The dashboard is a document: it gets the base set plus a CSP that keeps the SPA
+/// same-origin. `/app/` is the embedded entry point whether or not `ui/dist` exists
+/// (without a build it is the built-in shell's `404`, so the test asks for the shell).
+#[tokio::test]
+async fn html_responses_carry_base_headers_and_the_dashboard_csp() {
+    let h = harness(false);
+    let (status, headers, body) = h.get_raw("/app/").await;
+    assert!(header(&headers, "content-type").starts_with("text/html"), "{headers:?}");
+    assert_eq!(status, StatusCode::OK, "dashboard shell: {body}");
+
+    assert_base_security_headers(&headers);
+    assert_eq!(
+        Some(header(&headers, "content-security-policy")),
+        Some(rrouter_gateway::headers::CSP),
+        "the HTML policy is the documented one: {headers:?}"
+    );
+    assert!(header(&headers, "content-security-policy").contains("frame-ancestors 'none'"));
+}
+
+/// JSON is not a document: no CSP, but the base set still applies. Covers both an
+/// admin endpoint and the proxied `/v1` path, which relays an upstream body.
+#[tokio::test]
+async fn json_and_proxied_responses_carry_base_headers_without_csp() {
+    let mock = Mock::start(vec![openai_reply("hi")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (status, headers, _) = h
+        .call_full(
+            Request::builder()
+                .method("GET")
+                .uri("/api/system")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_base_security_headers(&headers);
+    assert!(headers.get("content-security-policy").is_none(), "no CSP on JSON: {headers:?}");
+
+    let (status, headers, body) = h.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_base_security_headers(&headers);
+    assert!(headers.get("content-security-policy").is_none(), "no CSP on JSON: {headers:?}");
+}
+
+/// A scraper still gets the Prometheus exposition, with the base set added.
+#[tokio::test]
+async fn metrics_keeps_prometheus_text_and_gains_base_headers() {
+    let h = harness(false);
+    let (status, headers, text) = h.get_raw("/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        header(&headers, "content-type").starts_with("text/plain; version=0.0.4"),
+        "{headers:?}"
+    );
+    assert!(text.contains("# TYPE rrouter_requests_total counter"), "{text}");
+    assert_base_security_headers(&headers);
+    assert!(headers.get("content-security-policy").is_none(), "{headers:?}");
+}
+
+/// Insert-only: a value set by a handler (or an upstream hop) wins, and content-type
+/// and a download's `content-disposition` are untouched. The middleware is applied to
+/// a purpose-built router so the handler can set exactly the headers the middleware
+/// would otherwise add.
+#[tokio::test]
+async fn hardening_never_overwrites_a_header_already_set() {
+    async fn handler() -> Response {
+        (
+            [
+                ("content-type", "text/html; charset=utf-8"),
+                ("x-frame-options", "SAMEORIGIN"),
+                ("referrer-policy", "strict-origin-when-cross-origin"),
+                ("content-security-policy", "default-src 'none'"),
+                ("content-disposition", "attachment; filename=export.csv"),
+            ],
+            "<p>handler</p>",
+        )
+            .into_response()
+    }
+
+    let router = Router::new()
+        .route("/preset", get(handler))
+        .layer(axum::middleware::from_fn(rrouter_gateway::headers::harden));
+
+    let res = router
+        .oneshot(
+            Request::builder()
+                .uri("/preset")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let headers = res.headers().clone();
+    assert_eq!(header(&headers, "x-frame-options"), "SAMEORIGIN", "{headers:?}");
+    assert_eq!(
+        header(&headers, "referrer-policy"),
+        "strict-origin-when-cross-origin",
+        "{headers:?}"
+    );
+    assert_eq!(header(&headers, "content-security-policy"), "default-src 'none'", "{headers:?}");
+    assert_eq!(
+        header(&headers, "content-disposition"),
+        "attachment; filename=export.csv",
+        "{headers:?}"
+    );
+    assert_eq!(header(&headers, "content-type"), "text/html; charset=utf-8");
+    // The headers nobody set are still added.
+    assert_eq!(header(&headers, "x-content-type-options"), "nosniff");
+    assert_eq!(
+        header(&headers, "permissions-policy"),
+        "camera=(), microphone=(), geolocation=()"
+    );
+}

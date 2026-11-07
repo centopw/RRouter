@@ -11,6 +11,7 @@
 
 pub mod config;
 pub mod error;
+pub mod headers;
 pub mod metrics;
 pub mod models_registry;
 pub mod proxy;
@@ -154,6 +155,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         .nest("/api", api)
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(state, cors))
+        // Outermost, so the gate's rejections, CORS preflights and the dashboard all
+        // get hardened, and so it sees the final response: a header already set by a
+        // handler or an upstream hop is left alone.
+        .layer(axum::middleware::from_fn(headers::harden))
 }
 
 /// Starts the models.dev refresh loop exactly once per process.
