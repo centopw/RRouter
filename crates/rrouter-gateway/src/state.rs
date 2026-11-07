@@ -57,6 +57,22 @@ pub enum Slot {
     Full,
 }
 
+/// The fallback engine, configured from the environment: the total send cap, the
+/// per-provider retry curve, and the headers-phase budget those retries may spend.
+///
+/// A 503 or reset is usually transient, so one retry on the same account is cheaper
+/// than spending a fallback; the shared request timeout is what bounds the whole thing.
+pub fn dispatcher(config: &Config) -> rrouter_router::Dispatcher {
+    rrouter_router::Dispatcher::new(rrouter_router::Breaker::new())
+        .with_max_attempts(config.max_attempts)
+        .with_retry_policy(rrouter_router::dispatch::RetryPolicy {
+            attempts: config.retry_attempts,
+            base: Duration::from_millis(config.retry_base_ms),
+            max: Duration::from_millis(config.retry_max_ms),
+            budget: Some(Duration::from_secs(config.request_timeout_secs)),
+        })
+}
+
 /// The semaphore for `RROUTER_MAX_CONCURRENCY` (`0` = none).
 ///
 /// Any cap above tokio's permit ceiling is effectively unlimited, but constructing a

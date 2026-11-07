@@ -225,6 +225,9 @@ fn config(require_api_key: bool) -> Config {
         admin_token: None,
         max_concurrency: 0,
         max_attempts: 4,
+        retry_attempts: 1,
+        retry_base_ms: 200,
+        retry_max_ms: 5000,
         shutdown_grace_secs: 20,
         strategy: rrouter_router::Strategy::Priority,
         cache: rrouter_gateway::config::CacheMode::Off,
@@ -922,7 +925,7 @@ async fn fallback_records_every_attempt_under_one_request_id() {
     assert_eq!(data["request"]["key_id"], Value::Null, "anonymous request: {detail}");
 
     let attempts = data["attempts"].as_array().expect("attempts array");
-    assert_eq!(attempts.len(), 2, "one row per candidate: {detail}");
+    assert_eq!(attempts.len(), 2, "one row per send, retries included: {detail}");
     assert_eq!(attempts[0]["attempt"], 1, "1-based in dispatch order");
     assert_eq!(attempts[0]["provider"], "openai");
     assert_eq!(attempts[0]["status"], 503, "the failing attempt keeps its status");
@@ -2525,7 +2528,9 @@ async fn images_fall_back_to_the_next_capable_connection() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["data"][0]["b64_json"], "ok");
-    assert_eq!(failing.hits(), 1, "the preferred account was tried first");
+    // The preferred account is tried, its 500 is retried once on the same account,
+    // and only then does the next capable one serve the request.
+    assert_eq!(failing.hits(), 2, "the preferred account was tried first");
     assert_eq!(healthy.hits(), 1, "the next capable account served the request");
 }
 
@@ -4448,4 +4453,195 @@ async fn hardening_never_overwrites_a_header_already_set() {
         header(&headers, "permissions-policy"),
         "camera=(), microphone=(), geolocation=()"
     );
+}
+
+// --------------------------------------------------- phase 18: prompt templates
+
+/// Any JSON method against the admin API; `None` sends an empty body.
+async fn template_call(
+    h: &Harness,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json");
+    let req = match body {
+        Some(value) => builder.body(Body::from(value.to_string())).expect("request"),
+        None => builder.body(Body::empty()).expect("request"),
+    };
+    h.call(req).await
+}
+
+#[tokio::test]
+async fn templates_crud_round_trip() {
+    let h = harness(false);
+
+    let (status, body) = h
+        .post("/api/templates", json!({"name": "support", "body": "You are support."}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().expect("id").to_string();
+    assert_eq!(body["name"], "support");
+    assert_eq!(body["body"], "You are support.");
+    assert_eq!(body["version"], 1);
+    assert!(body["created_at"].as_i64().expect("created_at") > 0);
+    assert_eq!(body["created_at"], body["updated_at"]);
+
+    let (status, body) = h.get("/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let data = body["data"].as_array().expect("data");
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["id"], id.as_str());
+    assert_eq!(data[0]["body"], "You are support.");
+
+    let (status, body) = h.get(&format!("/api/templates/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "support");
+
+    // A second template with the same name is a conflict with its own code.
+    let (status, body) = h
+        .post("/api/templates", json!({"name": "support", "body": "different"}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "template_exists");
+
+    // Renaming without touching the body keeps version 1.
+    let (status, body) = template_call(
+        &h,
+        "PUT",
+        &format!("/api/templates/{id}"),
+        Some(json!({"name": "helpdesk", "body": "You are support."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "helpdesk");
+    assert_eq!(body["version"], 1);
+
+    // A body change is a new revision.
+    let (status, body) = template_call(
+        &h,
+        "PUT",
+        &format!("/api/templates/{id}"),
+        Some(json!({"body": "You are helpdesk."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "helpdesk");
+    assert_eq!(body["body"], "You are helpdesk.");
+    assert_eq!(body["version"], 2);
+
+    let (status, body) = h.get(&format!("/api/templates/{id}/versions")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let versions = body["data"].as_array().expect("data");
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0]["version"], 2, "newest first");
+    assert_eq!(versions[0]["body"], "You are helpdesk.");
+    assert_eq!(versions[1]["version"], 1);
+    assert_eq!(versions[1]["body"], "You are support.");
+
+    // Renaming onto a name that is taken is a conflict, not a bad request.
+    let (status, other) = h.post("/api/templates", json!({"name": "taken", "body": "x"})).await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+    let (status, body) = template_call(
+        &h,
+        "PUT",
+        &format!("/api/templates/{id}"),
+        Some(json!({"name": "taken", "body": "You are helpdesk."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "template_exists");
+
+    let (status, body) = template_call(&h, "DELETE", &format!("/api/templates/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], true);
+    let (status, _) = h.get(&format!("/api/templates/{id}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = h.get(&format!("/api/templates/{id}/versions")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = template_call(&h, "DELETE", &format!("/api/templates/{id}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) =
+        template_call(&h, "PUT", "/api/templates/nope", Some(json!({"body": "x"}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn templates_reject_invalid_payloads() {
+    let h = harness(false);
+
+    let (status, body) = h.post("/api/templates", json!({"body": "no name"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _) = h
+        .post("/api/templates", json!({"name": "n".repeat(101), "body": "x"}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "101-character name");
+    let (status, _) = h
+        .post("/api/templates", json!({"name": "big", "body": "x".repeat(100_001)}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body over 100k characters");
+
+    let (status, body) = h.get("/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["data"].as_array().expect("data").is_empty(),
+        "nothing was stored by the rejected creates: {body}"
+    );
+
+    // The 100k boundary itself is accepted.
+    let (status, _) = h
+        .post("/api/templates", json!({"name": "max", "body": "x".repeat(100_000)}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+/// Templates are admin surface: the same gate as every other `/api` route.
+#[tokio::test]
+async fn templates_require_the_admin_gate() {
+    let h = harness(false);
+    for uri in ["/api/templates", "/api/templates/abc", "/api/templates/abc/versions"] {
+        let res = h
+            .router
+            .clone()
+            .oneshot(as_peer(get_with(uri, &[]), remote_peer()))
+            .await
+            .expect("oneshot");
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri} from a remote peer");
+    }
+    let req = as_peer(
+        Request::builder()
+            .method("POST")
+            .uri("/api/templates")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"name": "x", "body": "y"}).to_string()))
+            .expect("request"),
+        remote_peer(),
+    );
+    let res = h.router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "POST from a remote peer");
+
+    // A configured token replaces the loopback rule: remote peers need it.
+    let mut cfg = config(false);
+    cfg.admin_token = Some(TEST_ADMIN_TOKEN.into());
+    let gated = harness_with(cfg);
+    let res = gated
+        .router
+        .clone()
+        .oneshot(as_peer(get_with("/api/templates", &[]), remote_peer()))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let res = gated
+        .router
+        .clone()
+        .oneshot(as_peer(
+            get_with("/api/templates", &[("x-admin-token", TEST_ADMIN_TOKEN)]),
+            remote_peer(),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK, "remote peer with the admin token");
 }

@@ -4,8 +4,13 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rrouter_gateway::{app, config::{Config, LogFormat}, state::concurrency_for, AppState};
-use rrouter_router::{Breaker, Catalog, Dispatcher};
+use rrouter_gateway::{
+    app,
+    config::{Config, LogFormat},
+    state::{concurrency_for, dispatcher},
+    AppState,
+};
+use rrouter_router::Catalog;
 use rrouter_store::Store;
 use tracing_subscriber::EnvFilter;
 
@@ -143,9 +148,7 @@ async fn serve(config: Config) -> Result<(), String> {
         catalog: Arc::new(Catalog::builtin()),
         refresher: Arc::new(rrouter_auth::Refresher::new(http.clone())),
         planner: rrouter_router::Planner::new(),
-        dispatcher: Arc::new(
-            Dispatcher::new(Breaker::new()).with_max_attempts(config.max_attempts),
-        ),
+        dispatcher: Arc::new(dispatcher(&config)),
         http,
         config: config.clone(),
         started: Instant::now(),

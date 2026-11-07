@@ -2,14 +2,15 @@
 //! streaming commit semantics, and the attempt cap.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use futures_util::StreamExt;
 
 use rrouter_core::{ChatResponse, Error, FinishReason, Usage};
 use rrouter_router::breaker::{BreakerState, ProbeTicket};
-use rrouter_router::dispatch::AttemptOutcome;
+use rrouter_router::dispatch::{AttemptOutcome, RetryPolicy};
 use rrouter_router::stream_dispatch::{byte_stream, collect_stream};
 use rrouter_router::{Breaker, Candidate, Catalog, Dispatcher, Plan, Planner, Strategy};
 use rrouter_store::{ModelRow, Store};
@@ -27,6 +28,26 @@ fn resp(model: &str) -> ChatResponse {
 
 fn upstream(status: u16) -> Error {
     Error::Upstream { provider: "p".into(), status, body: String::new(), payload: None }
+}
+
+/// An upstream failure carrying the `Retry-After` header the proxy would parse.
+fn upstream_retry_after(status: u16, secs: u64) -> Error {
+    Error::Upstream {
+        provider: "p".into(),
+        status,
+        body: String::new(),
+        payload: Some(serde_json::json!({ "retry_after": secs })),
+    }
+}
+
+/// Dispatcher with a fixed retry curve, in milliseconds so the suite stays fast.
+fn retrying(attempts: usize, base_ms: u64, max_ms: u64) -> Dispatcher {
+    Dispatcher::new(Breaker::new()).with_retry_policy(RetryPolicy {
+        attempts,
+        base: Duration::from_millis(base_ms),
+        max: Duration::from_millis(max_ms),
+        budget: None,
+    })
 }
 
 async fn conn(store: &Store, provider: &str, model_hint: &str, priority: i32) -> Uuid {
@@ -594,15 +615,22 @@ async fn fallback_uses_second_candidate_and_opens_first_breaker() {
     let first = plan.candidates[0].connection;
     let seen = AtomicUsize::new(0);
     let outcome: AttemptOutcome<ChatResponse> = dispatcher
-        .run(&plan, |_c| {
-            let n = seen.fetch_add(1, Ordering::SeqCst);
-            async move { if n == 0 { Err(upstream(503)) } else { Ok(resp("m")) } }
+        .run(&plan, |c| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if c.connection == first {
+                    Err(upstream(503))
+                } else {
+                    Ok(resp("m"))
+                }
+            }
         })
         .await
         .unwrap();
     assert_eq!(outcome.result.unwrap().model, "m");
     assert_eq!(outcome.candidate.connection, plan.candidates[1].connection);
-    assert_eq!(seen.load(Ordering::SeqCst), 2);
+    // The default policy gives the first candidate one retry before falling back.
+    assert_eq!(seen.load(Ordering::SeqCst), 3);
     // One 503 is a failure but not a trip: the breaker stays closed and the
     // account remains a fallback for the next request.
     assert_eq!(dispatcher.breaker().state(first), BreakerState::Closed);
@@ -618,10 +646,10 @@ async fn dead_credential_falls_through_to_the_next_account() {
     let dead = plan.candidates[0].connection;
     let seen = AtomicUsize::new(0);
     let outcome = dispatcher
-        .run(&plan, |_c| {
-            let n = seen.fetch_add(1, Ordering::SeqCst);
+        .run(&plan, |c| {
+            seen.fetch_add(1, Ordering::SeqCst);
             async move {
-                if n == 0 {
+                if c.connection == dead {
                     Err(Error::Unauthorized("provider claude refresh failed".into()))
                 } else {
                     Ok(resp("m"))
@@ -630,7 +658,7 @@ async fn dead_credential_falls_through_to_the_next_account() {
         })
         .await
         .unwrap();
-    assert_eq!(seen.load(Ordering::SeqCst), 2, "the dead account must not end the request");
+    assert_eq!(seen.load(Ordering::SeqCst), 3, "one retry, then the next account");
     assert_eq!(outcome.candidate.connection, plan.candidates[1].connection);
     assert_eq!(outcome.result.unwrap().model, "m");
     // A 401-class failure parks the dead account hard (5 min).
@@ -654,40 +682,110 @@ async fn non_retryable_error_stops_immediately() {
     assert!(dispatcher.breaker().is_available(plan.candidates[0].connection));
 }
 
+/// A 503 from `open` has not committed a byte, so the same candidate is retried
+/// instead of spending the fallback (same rule as the JSON path).
 #[tokio::test]
-async fn streaming_retries_before_first_byte() {
-    let dispatcher = Dispatcher::new(Breaker::new());
+async fn streaming_retries_the_same_candidate_before_first_byte() {
+    let dispatcher = retrying(2, 1, 50);
     let plan = plan_of(2);
-    let seen = AtomicUsize::new(0);
-    let (winner, mut stream) = dispatcher
-        .run_streaming(&plan, |_c| {
-            let n = seen.fetch_add(1, Ordering::SeqCst);
+    let first = plan.candidates[0].connection;
+    let sent = Mutex::new(Vec::new());
+    let (winner, stream) = dispatcher
+        .run_streaming(&plan, |c| {
+            let n = {
+                let mut sent = sent.lock().unwrap();
+                sent.push(c.connection);
+                sent.len()
+            };
             async move {
-                if n == 0 {
+                if n < 3 {
                     Err(upstream(503))
                 } else {
-                    Ok(byte_stream(futures_util::stream::iter(vec![Ok(Bytes::from_static(b"hello"))])))
+                    Ok(byte_stream(futures_util::stream::iter(vec![Ok(Bytes::from_static(
+                        b"data: x\n\n",
+                    ))])))
                 }
             }
         })
         .await
         .unwrap();
-    assert_eq!(seen.load(Ordering::SeqCst), 2);
-    assert_eq!(winner.connection, plan.candidates[1].connection);
-    let body = collect_stream(std::mem::replace(&mut stream, byte_stream(futures_util::stream::empty())))
-        .await
-        .unwrap();
-    assert_eq!(body, b"hello");
+    assert_eq!(winner.connection, first);
+    assert_eq!(
+        sent.into_inner().unwrap(),
+        vec![first, first, first],
+        "two retries stay on the same candidate, then it succeeds"
+    );
+    let body = collect_stream(stream).await.unwrap();
+    assert_eq!(body, b"data: x\n\n", "the frame reaches the client exactly once");
 }
 
+/// Zero retries keeps the pre-phase behaviour for streams too: one open per
+/// candidate, then the next one.
+#[tokio::test]
+async fn streaming_zero_retries_fails_over_immediately() {
+    let dispatcher = retrying(0, 1, 50);
+    let plan = plan_of(2);
+    let first = plan.candidates[0].connection;
+    let sent = Mutex::new(Vec::new());
+    let (winner, stream) = dispatcher
+        .run_streaming(&plan, |c| {
+            sent.lock().unwrap().push(c.connection);
+            async move {
+                if c.connection == first {
+                    Err(upstream(503))
+                } else {
+                    Ok(byte_stream(futures_util::stream::iter(vec![Ok(Bytes::from_static(
+                        b"data: y\n\n",
+                    ))])))
+                }
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(winner.connection, plan.candidates[1].connection);
+    assert_eq!(
+        sent.into_inner().unwrap(),
+        vec![plan.candidates[0].connection, plan.candidates[1].connection],
+        "one open per candidate, no retry"
+    );
+    assert_eq!(collect_stream(stream).await.unwrap(), b"data: y\n\n");
+}
+
+/// A 400 is the client's fault: retrying another account cannot fix it.
+#[tokio::test]
+async fn streaming_client_error_is_never_retried() {
+    let dispatcher = retrying(2, 1, 50);
+    let plan = plan_of(2);
+    let sent = Mutex::new(Vec::new());
+    let err = match dispatcher
+        .run_streaming(&plan, |c| {
+            sent.lock().unwrap().push(c.connection);
+            async move { Err(upstream(400)) }
+        })
+        .await
+    {
+        Ok(_) => panic!("a 400 must fail the request"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, Error::Upstream { status: 400, .. }));
+    assert_eq!(
+        sent.into_inner().unwrap(),
+        vec![plan.candidates[0].connection],
+        "a 400 must stop at the first send"
+    );
+    assert!(dispatcher.breaker().is_available(plan.candidates[0].connection));
+}
+
+/// Bytes already reached the client, so the error is terminal — one error, no
+/// re-send, even with retries configured.
 #[tokio::test]
 async fn streaming_midstream_error_is_terminal_and_not_retried() {
-    let dispatcher = Dispatcher::new(Breaker::new());
+    let dispatcher = retrying(2, 1, 50);
     let plan = plan_of(2);
-    let seen = AtomicUsize::new(0);
-    let (winner, stream) = dispatcher
-        .run_streaming(&plan, |_c| {
-            seen.fetch_add(1, Ordering::SeqCst);
+    let sent = Mutex::new(Vec::new());
+    let (winner, mut stream) = dispatcher
+        .run_streaming(&plan, |c| {
+            sent.lock().unwrap().push(c.connection);
             async move {
                 Ok(byte_stream(futures_util::stream::iter(vec![
                     Ok(Bytes::from_static(b"partial")),
@@ -699,11 +797,73 @@ async fn streaming_midstream_error_is_terminal_and_not_retried() {
         .await
         .unwrap();
     assert_eq!(winner.connection, plan.candidates[0].connection);
-    let err = collect_stream(stream).await.unwrap_err();
+    assert_eq!(stream.next().await.expect("chunk").unwrap(), Bytes::from_static(b"partial"));
+    let err = stream.next().await.expect("terminal error").unwrap_err();
     assert!(matches!(err, Error::Upstream { status: 502, .. }));
-    assert_eq!(seen.load(Ordering::SeqCst), 1, "no retry once bytes were emitted");
+    assert!(stream.next().await.is_none(), "the error is terminal and surfaces once");
+    assert_eq!(
+        sent.into_inner().unwrap(),
+        vec![winner.connection],
+        "no retry once bytes were emitted"
+    );
     // One 502 is recorded against the connection (three would open the breaker).
     assert_eq!(dispatcher.breaker().state(winner.connection), BreakerState::Closed);
+}
+
+/// A retry is not another account failure: three opens of one candidate are one strike.
+#[tokio::test]
+async fn streaming_retries_count_as_one_breaker_failure() {
+    let dispatcher = Dispatcher::with_shared_breaker(Arc::new(Breaker::with_policy(
+        2,
+        Duration::from_secs(30),
+        1,
+    )))
+    .with_retry_policy(RetryPolicy {
+        attempts: 2,
+        base: Duration::from_millis(0),
+        max: Duration::from_millis(0),
+        budget: None,
+    });
+    let plan = plan_of(1);
+    let conn = plan.candidates[0].connection;
+    let seen = AtomicUsize::new(0);
+    let err = match dispatcher
+        .run_streaming(&plan, |_c| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { Err(upstream(503)) }
+        })
+        .await
+    {
+        Ok(_) => panic!("every open failed"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, Error::Upstream { status: 503, .. }));
+    assert_eq!(seen.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        dispatcher.breaker().state(conn),
+        BreakerState::Closed,
+        "three sends of one candidate must not trip a threshold-2 breaker"
+    );
+}
+
+/// Retries spend the same `RROUTER_MAX_ATTEMPTS` budget as fallbacks.
+#[tokio::test]
+async fn streaming_retries_stay_inside_the_total_send_budget() {
+    let dispatcher = retrying(5, 0, 0).with_max_attempts(3);
+    let plan = plan_of(4);
+    let seen = AtomicUsize::new(0);
+    let err = match dispatcher
+        .run_streaming(&plan, |_c| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { Err(upstream(503)) }
+        })
+        .await
+    {
+        Ok(_) => panic!("every open failed"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, Error::Upstream { status: 503, .. }));
+    assert_eq!(seen.load(Ordering::SeqCst), 3, "the cap counts stream opens too");
 }
 
 #[tokio::test]
@@ -850,4 +1010,181 @@ async fn client_error_does_not_trip_a_healthy_account() {
         "client errors must not count toward the account's failure streak"
     );
     assert!(dispatcher.breaker().claim(conn).is_ok(), "account must stay eligible");
+}
+
+/// A 503 is transient: the same candidate is retried before the fallback is spent.
+#[tokio::test]
+async fn transient_503_is_retried_on_the_same_candidate() {
+    let dispatcher = retrying(2, 1, 50);
+    let plan = plan_of(1);
+    let seen = AtomicUsize::new(0);
+    let outcome = dispatcher
+        .run(&plan, |_c| {
+            let n = seen.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err(upstream(503))
+                } else {
+                    Ok(resp("m"))
+                }
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 3, "two retries then success");
+    assert_eq!(outcome.candidate.connection, plan.candidates[0].connection);
+    assert_eq!(outcome.result.unwrap().model, "m");
+}
+
+/// Zero retries keeps the pre-phase behaviour: one send per candidate, then fail over.
+#[tokio::test]
+async fn zero_retries_send_each_candidate_once() {
+    let dispatcher = retrying(0, 1, 50);
+    let plan = plan_of(2);
+    let sent = Mutex::new(Vec::new());
+    let err = dispatcher
+        .run(&plan, |c| {
+            sent.lock().unwrap().push(c.connection);
+            async move { Err::<ChatResponse, _>(upstream(503)) }
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Upstream { status: 503, .. }));
+    assert_eq!(
+        sent.into_inner().unwrap(),
+        vec![plan.candidates[0].connection, plan.candidates[1].connection]
+    );
+}
+
+/// A 400 is the client's fault; another account or another try cannot fix it.
+#[tokio::test]
+async fn client_error_is_never_retried() {
+    let dispatcher = retrying(5, 1, 50);
+    let plan = plan_of(1);
+    let seen = AtomicUsize::new(0);
+    let outcome = dispatcher
+        .run(&plan, |_c| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { Err::<ChatResponse, _>(upstream(400)) }
+        })
+        .await
+        .unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 1, "a 400 must stop at the first send");
+    assert!(matches!(outcome.result, Err(Error::Upstream { status: 400, .. })));
+}
+
+/// `Retry-After: 60` must not stall a request whose ceiling is milliseconds.
+#[tokio::test]
+async fn retry_after_never_exceeds_the_backoff_ceiling() {
+    let dispatcher = retrying(1, 1, 10);
+    let plan = plan_of(1);
+    let seen = AtomicUsize::new(0);
+    let started = Instant::now();
+    let err = dispatcher
+        .run(&plan, |_c| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { Err::<ChatResponse, _>(upstream_retry_after(503, 60)) }
+        })
+        .await
+        .unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    assert_eq!(seen.load(Ordering::SeqCst), 2, "capped wait, then one retry");
+    assert!(matches!(err, Error::Upstream { status: 503, .. }));
+}
+
+/// Retries spend the same `RROUTER_MAX_ATTEMPTS` budget as fallbacks.
+#[tokio::test]
+async fn retries_stay_inside_the_total_send_budget() {
+    let dispatcher = retrying(5, 0, 0).with_max_attempts(3);
+    let plan = plan_of(4);
+    let seen = AtomicUsize::new(0);
+    let err = dispatcher
+        .run(&plan, |_c| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { Err::<ChatResponse, _>(upstream(503)) }
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Upstream { status: 503, .. }));
+    assert_eq!(seen.load(Ordering::SeqCst), 3, "the cap counts retries too");
+}
+
+/// A retry is not another account failure: three sends of one candidate are one strike.
+#[tokio::test]
+async fn retries_count_as_one_breaker_failure() {
+    let dispatcher = retrying(2, 0, 0);
+    let plan = plan_of(1);
+    let conn = plan.candidates[0].connection;
+    let seen = AtomicUsize::new(0);
+    let err = dispatcher
+        .run(&plan, |_c| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { Err::<ChatResponse, _>(upstream(503)) }
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Upstream { status: 503, .. }));
+    assert_eq!(seen.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        dispatcher.breaker().state(conn),
+        BreakerState::Closed,
+        "three sends of one candidate must not trip a threshold-3 breaker"
+    );
+}
+
+/// Retries never sleep past the headers-phase budget the caller granted.
+#[tokio::test]
+async fn retry_sleep_never_passes_the_headers_deadline() {
+    let dispatcher = Dispatcher::new(Breaker::new()).with_retry_policy(RetryPolicy {
+        attempts: 2,
+        base: Duration::from_millis(500),
+        max: Duration::from_secs(5),
+        budget: Some(Duration::from_millis(5)),
+    });
+    let plan = plan_of(1);
+    let seen = AtomicUsize::new(0);
+    let started = Instant::now();
+    let err = dispatcher
+        .run(&plan, |_c| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { Err::<ChatResponse, _>(upstream(503)) }
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Upstream { status: 503, .. }));
+    assert_eq!(seen.load(Ordering::SeqCst), 1, "the 500 ms backoff cannot fit");
+    assert!(started.elapsed() < Duration::from_millis(200), "{:?}", started.elapsed());
+}
+
+/// The pure form of the curve: `min(base * 2^n, max)`, ±20%, capped by `Retry-After`.
+#[test]
+fn backoff_doubles_caps_and_jitters_within_twenty_percent() {
+    let policy = RetryPolicy {
+        attempts: 5,
+        base: Duration::from_millis(100),
+        max: Duration::from_millis(500),
+        budget: None,
+    };
+    assert_eq!(policy.delay(0, None, 0.5), Duration::from_millis(100));
+    assert_eq!(policy.delay(1, None, 0.5), Duration::from_millis(200));
+    assert_eq!(policy.delay(2, None, 0.5), Duration::from_millis(400));
+    assert_eq!(policy.delay(3, None, 0.5), Duration::from_millis(500), "800 ms capped at the ceiling");
+    assert_eq!(policy.delay(3, None, 1.0), Duration::from_millis(500), "jitter never exceeds the ceiling");
+    assert_eq!(policy.delay(0, None, 0.0), Duration::from_millis(80), "-20%");
+    assert_eq!(policy.delay(0, None, 1.0), Duration::from_millis(120), "+20%");
+    assert_eq!(
+        policy.delay(2, Some(Duration::from_millis(5)), 0.5),
+        Duration::from_millis(5),
+        "Retry-After caps the wait"
+    );
+    assert_eq!(
+        policy.delay(2, Some(Duration::from_secs(60)), 0.5),
+        Duration::from_millis(400),
+        "a huge Retry-After cannot lengthen the wait past the curve"
+    );
+    assert_eq!(
+        policy.delay(3, Some(Duration::from_secs(60)), 0.5),
+        Duration::from_millis(500),
+        "Retry-After is capped by the ceiling, not the other way round"
+    );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useSearchParams } from "react-router-dom";
 import { ModelSelect } from "../components/model-select";
 import {
   Button,
@@ -7,12 +8,14 @@ import {
   ErrorNote,
   Field,
   Input,
+  Modal,
   Segmented,
+  Select,
   cx,
   statusText,
 } from "../components/ui";
 import { ms } from "../lib/format";
-import { useModels, useSystem } from "../lib/queries";
+import { useCreateTemplate, useModels, useSystem, useTemplates } from "../lib/queries";
 
 /**
  * A live conversation against the gateway, so an operator can prove a model answers
@@ -75,6 +78,15 @@ export default function Playground() {
     }
   });
 
+  const templates = useTemplates();
+  const createTemplate = useCreateTemplate();
+  // The picker is an insert menu, not a live selection: it resets to its placeholder.
+  const [templatePick, setTemplatePick] = useState("");
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
+  const [saveTemplateName, setSaveTemplateName] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const templateParam = searchParams.get("template");
+
   const nextId = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const streaming = turns.some((turn) => turn.status === "streaming");
@@ -104,6 +116,20 @@ export default function Playground() {
 
   // A route change must not leave an SSE connection running in the background.
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  // "Open in Playground" on the Templates page hands the body over as a query param.
+  // Drop the param once the list resolves: a later reload must not overwrite an edit.
+  useEffect(() => {
+    if (!templateParam || !templates.data) return;
+    const row = templates.data.find((template) => template.id === templateParam);
+    if (row) {
+      setSystemPrompt(row.body);
+      setSystemOpen(true);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete("template");
+    setSearchParams(next, { replace: true });
+  }, [templateParam, templates.data, searchParams, setSearchParams]);
 
   const rememberKey = (value: string) => {
     setApiKey(value);
@@ -386,23 +412,67 @@ export default function Playground() {
           </div>
         </div>
         <div className="border-t border-line px-5 py-3">
-          <button
-            type="button"
-            aria-expanded={systemOpen}
-            aria-controls="playground-system-prompt"
-            onClick={() => setSystemOpen((open) => !open)}
-            className="flex items-center gap-2 text-[12px] font-medium text-muted transition-colors hover:text-fg"
-          >
-            <span aria-hidden className="text-faint">
-              {systemOpen ? "▾" : "▸"}
-            </span>
-            System prompt
-            {systemPrompt.trim() ? (
-              <span className="rounded-full border border-line px-1.5 py-0.5 text-[10px] text-faint">
-                set
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <button
+              type="button"
+              aria-expanded={systemOpen}
+              aria-controls="playground-system-prompt"
+              onClick={() => setSystemOpen((open) => !open)}
+              className="flex items-center gap-2 text-[12px] font-medium text-muted transition-colors hover:text-fg"
+            >
+              <span aria-hidden className="text-faint">
+                {systemOpen ? "▾" : "▸"}
               </span>
-            ) : null}
-          </button>
+              System prompt
+              {systemPrompt.trim() ? (
+                <span className="rounded-full border border-line px-1.5 py-0.5 text-[10px] text-faint">
+                  set
+                </span>
+              ) : null}
+            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Select
+                value={templatePick}
+                onChange={(id) => {
+                  setTemplatePick("");
+                  const row = templates.data?.find((template) => template.id === id);
+                  if (!row) return;
+                  setSystemPrompt(row.body);
+                  setSystemOpen(true);
+                }}
+                ariaLabel="load a saved template into the system prompt"
+                disabled={templates.isLoading || !templates.data?.length}
+                className="w-[190px]"
+              >
+                <option value="">
+                  {templates.isError
+                    ? "templates unavailable"
+                    : templates.isLoading
+                      ? "loading templates…"
+                      : templates.data?.length
+                        ? "insert template…"
+                        : "no templates"}
+                </option>
+                {templates.data?.map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {template.name}
+                  </option>
+                ))}
+              </Select>
+              <Button
+                variant="ghost"
+                onClick={() => setSaveTemplateOpen(true)}
+                disabled={systemPrompt.trim() === ""}
+                title={
+                  systemPrompt.trim() === ""
+                    ? "Write a system prompt first"
+                    : "Save this system prompt as a reusable template"
+                }
+              >
+                Save as template
+              </Button>
+            </div>
+          </div>
           {systemOpen ? (
             <textarea
               id="playground-system-prompt"
@@ -458,6 +528,51 @@ export default function Playground() {
           </div>
         </div>
       </Card>
+
+      {saveTemplateOpen ? (
+        <Modal
+          title="save as template"
+          open
+          onClose={() => setSaveTemplateOpen(false)}
+          footer={
+            <>
+              <Button onClick={() => setSaveTemplateOpen(false)}>cancel</Button>
+              <Button
+                variant="primary"
+                disabled={saveTemplateName.trim() === "" || createTemplate.isPending}
+                onClick={() =>
+                  createTemplate.mutate(
+                    { name: saveTemplateName.trim(), body: systemPrompt },
+                    {
+                      onSuccess: () => {
+                        setSaveTemplateOpen(false);
+                        setSaveTemplateName("");
+                      },
+                    },
+                  )
+                }
+              >
+                {createTemplate.isPending ? "saving…" : "save template"}
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-3">
+            <Field label="name" hint="unique; shown in the Templates page and the picker">
+              <Input
+                value={saveTemplateName}
+                onChange={setSaveTemplateName}
+                placeholder="support-reply"
+                ariaLabel="template name"
+              />
+            </Field>
+            <p className="max-h-24 overflow-hidden whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-faint">
+              {systemPrompt}
+            </p>
+            {createTemplate.isError ? <ErrorNote error={createTemplate.error} /> : null}
+          </div>
+        </Modal>
+      ) : null}
     </div>
   );
 }

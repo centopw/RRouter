@@ -53,6 +53,7 @@ const Health = page(() => import("./pages/health"));
 const Keys = page(() => import("./pages/keys"));
 const Aliases = page(() => import("./pages/aliases"));
 const Combos = page(() => import("./pages/combos"));
+const Templates = page(() => import("./pages/templates"));
 const Models = page(() => import("./pages/models"));
 const Playground = page(() => import("./pages/playground"));
 const Settings = page(() => import("./pages/settings"));
@@ -81,6 +82,7 @@ const router = createBrowserRouter(
             { path: "connections", element: <Navigate to="/providers" replace /> },
             { path: "models", element: <Models /> },
             { path: "playground", element: <Playground /> },
+            { path: "templates", element: <Templates /> },
             { path: "settings", element: <Settings /> },
             { path: "keys", element: <Keys /> },
             { path: "aliases", element: <Aliases /> },

@@ -18,6 +18,21 @@ const DEFAULT_MAX_ATTEMPTS: usize = 4;
 /// Upper bound on `RROUTER_MAX_ATTEMPTS`: more sends than this per request turn a
 /// provider outage into a slow client-visible failure for no diagnostic gain.
 const MAX_ATTEMPTS_CEILING: usize = 8;
+/// Extra tries per candidate when `RROUTER_RETRY_ATTEMPTS` is unset: one retry keeps a
+/// transient 503 from spending a second account, which is the whole point.
+const DEFAULT_RETRY_ATTEMPTS: usize = 1;
+/// Upper bound on per-candidate retries. Together with `RROUTER_MAX_ATTEMPTS` this is
+/// what stops an outage from turning one request into a retry storm.
+const MAX_RETRY_ATTEMPTS: usize = 5;
+/// First backoff when `RROUTER_RETRY_BASE_MS` is unset.
+const DEFAULT_RETRY_BASE_MS: usize = 200;
+/// Upper bound on the first backoff: a longer one would exceed the request timeout
+/// before any fallback is tried.
+const MAX_RETRY_BASE_MS: usize = 5_000;
+/// Backoff ceiling when `RROUTER_RETRY_MAX_MS` is unset.
+const DEFAULT_RETRY_MAX_MS: usize = 5_000;
+/// Upper bound on the backoff ceiling.
+const MAX_RETRY_MAX_MS: usize = 60_000;
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 20;
 /// Response cache lifetime when `RROUTER_CACHE_TTL_SECS` is unset.
 const DEFAULT_CACHE_TTL_SECS: usize = 300;
@@ -118,6 +133,12 @@ pub struct Config {
     pub max_concurrency: usize,
     /// Upstream sends per client request, clamped to `1..=8` (default 4).
     pub max_attempts: usize,
+    /// Extra tries per provider before falling back, clamped to `0..=5` (default 1).
+    pub retry_attempts: usize,
+    /// First retry backoff in milliseconds, clamped to `0..=5000` (default 200).
+    pub retry_base_ms: u64,
+    /// Retry backoff ceiling in milliseconds, clamped to `0..=60000` (default 5000).
+    pub retry_max_ms: u64,
     /// Seconds graceful shutdown may spend draining live streams; `0` waits forever.
     pub shutdown_grace_secs: u64,
     /// Ordering of equal-priority connections. Priority itself always dominates.
@@ -235,6 +256,29 @@ impl Config {
         let max_concurrency = usize_var("RROUTER_MAX_CONCURRENCY", 0, &mut problems);
         let max_attempts =
             clamp_attempts(usize_var("RROUTER_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS, &mut problems));
+        // Retries are clamped, never refused: an operator writing 99 wants "retry hard",
+        // and garbage still stops startup like every other numeric knob.
+        let retry_attempts = clamped_var(
+            "RROUTER_RETRY_ATTEMPTS",
+            DEFAULT_RETRY_ATTEMPTS,
+            0,
+            MAX_RETRY_ATTEMPTS,
+            &mut problems,
+        );
+        let retry_base_ms = clamped_var(
+            "RROUTER_RETRY_BASE_MS",
+            DEFAULT_RETRY_BASE_MS,
+            0,
+            MAX_RETRY_BASE_MS,
+            &mut problems,
+        ) as u64;
+        let retry_max_ms = clamped_var(
+            "RROUTER_RETRY_MAX_MS",
+            DEFAULT_RETRY_MAX_MS,
+            0,
+            MAX_RETRY_MAX_MS,
+            &mut problems,
+        ) as u64;
         let shutdown_grace_secs = secs_var_allow_zero(
             "RROUTER_SHUTDOWN_GRACE_SECS",
             DEFAULT_SHUTDOWN_GRACE_SECS,
@@ -301,6 +345,9 @@ impl Config {
                 admin_token,
                 max_concurrency,
                 max_attempts,
+                retry_attempts,
+                retry_base_ms,
+                retry_max_ms,
                 shutdown_grace_secs,
                 strategy,
                 cache,
@@ -463,7 +510,7 @@ impl Serialize for Redacted<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let c = self.0;
-        let mut st = s.serialize_struct("Config", 23)?;
+        let mut st = s.serialize_struct("Config", 26)?;
         st.serialize_field("host", &c.host.to_string())?;
         st.serialize_field("port", &c.port)?;
         st.serialize_field("data_dir", &c.data_dir.to_string_lossy())?;
@@ -482,6 +529,9 @@ impl Serialize for Redacted<'_> {
         )?;
         st.serialize_field("max_concurrency", &c.max_concurrency)?;
         st.serialize_field("max_attempts", &c.max_attempts)?;
+        st.serialize_field("retry_attempts", &c.retry_attempts)?;
+        st.serialize_field("retry_base_ms", &c.retry_base_ms)?;
+        st.serialize_field("retry_max_ms", &c.retry_max_ms)?;
         st.serialize_field("shutdown_grace_secs", &c.shutdown_grace_secs)?;
         st.serialize_field("strategy", c.strategy.as_str())?;
         st.serialize_field("cache", c.cache.as_str())?;
@@ -521,6 +571,9 @@ mod tests {
             admin_token: None,
             max_concurrency: 0,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            retry_attempts: DEFAULT_RETRY_ATTEMPTS,
+            retry_base_ms: DEFAULT_RETRY_BASE_MS as u64,
+            retry_max_ms: DEFAULT_RETRY_MAX_MS as u64,
             shutdown_grace_secs: DEFAULT_SHUTDOWN_GRACE_SECS,
             strategy: Strategy::Priority,
             cache: CacheMode::Off,
@@ -586,6 +639,115 @@ mod tests {
         assert_eq!(clamp_attempts(8), 8);
         assert_eq!(clamp_attempts(100), MAX_ATTEMPTS_CEILING);
         assert_eq!(clamp_attempts(usize::MAX), MAX_ATTEMPTS_CEILING);
+    }
+
+    /// Retry knobs: unset means the documented defaults, oversized values clamp into
+    /// the windows, `0` disables a stage, and garbage stops startup like every other
+    /// numeric setting.
+    #[test]
+    fn retry_settings_default_clamp_and_refuse_garbage() {
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV.lock().unwrap_or_else(|p| p.into_inner());
+        let read = |name: &str, default: usize, max: usize, problems: &mut Vec<String>| {
+            clamped_var(name, default, 0, max, problems)
+        };
+
+        for name in ["RROUTER_RETRY_ATTEMPTS", "RROUTER_RETRY_BASE_MS", "RROUTER_RETRY_MAX_MS"] {
+            std::env::remove_var(name);
+        }
+        let mut problems = Vec::new();
+        assert_eq!(
+            read("RROUTER_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS, &mut problems),
+            1,
+            "one retry per candidate is the default"
+        );
+        assert_eq!(
+            read("RROUTER_RETRY_BASE_MS", DEFAULT_RETRY_BASE_MS, MAX_RETRY_BASE_MS, &mut problems),
+            200
+        );
+        assert_eq!(
+            read("RROUTER_RETRY_MAX_MS", DEFAULT_RETRY_MAX_MS, MAX_RETRY_MAX_MS, &mut problems),
+            5_000
+        );
+        assert!(problems.is_empty());
+
+        std::env::set_var("RROUTER_RETRY_ATTEMPTS", "2");
+        std::env::set_var("RROUTER_RETRY_BASE_MS", "1");
+        std::env::set_var("RROUTER_RETRY_MAX_MS", "50");
+        let mut problems = Vec::new();
+        assert_eq!(
+            read("RROUTER_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS, &mut problems),
+            2
+        );
+        assert_eq!(
+            read("RROUTER_RETRY_BASE_MS", DEFAULT_RETRY_BASE_MS, MAX_RETRY_BASE_MS, &mut problems),
+            1
+        );
+        assert_eq!(
+            read("RROUTER_RETRY_MAX_MS", DEFAULT_RETRY_MAX_MS, MAX_RETRY_MAX_MS, &mut problems),
+            50
+        );
+        assert!(problems.is_empty());
+
+        std::env::set_var("RROUTER_RETRY_ATTEMPTS", "0");
+        std::env::set_var("RROUTER_RETRY_BASE_MS", "0");
+        std::env::set_var("RROUTER_RETRY_MAX_MS", "0");
+        let mut problems = Vec::new();
+        assert_eq!(
+            read("RROUTER_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS, &mut problems),
+            0,
+            "zero retries is a legitimate off switch"
+        );
+        assert_eq!(
+            read("RROUTER_RETRY_BASE_MS", DEFAULT_RETRY_BASE_MS, MAX_RETRY_BASE_MS, &mut problems),
+            0
+        );
+        assert_eq!(
+            read("RROUTER_RETRY_MAX_MS", DEFAULT_RETRY_MAX_MS, MAX_RETRY_MAX_MS, &mut problems),
+            0
+        );
+        assert!(problems.is_empty());
+
+        std::env::set_var("RROUTER_RETRY_ATTEMPTS", "99");
+        std::env::set_var("RROUTER_RETRY_BASE_MS", "999999");
+        std::env::set_var("RROUTER_RETRY_MAX_MS", "999999");
+        let mut problems = Vec::new();
+        assert_eq!(
+            read("RROUTER_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS, &mut problems),
+            MAX_RETRY_ATTEMPTS
+        );
+        assert_eq!(
+            read("RROUTER_RETRY_BASE_MS", DEFAULT_RETRY_BASE_MS, MAX_RETRY_BASE_MS, &mut problems),
+            MAX_RETRY_BASE_MS
+        );
+        assert_eq!(
+            read("RROUTER_RETRY_MAX_MS", DEFAULT_RETRY_MAX_MS, MAX_RETRY_MAX_MS, &mut problems),
+            MAX_RETRY_MAX_MS
+        );
+        assert!(problems.is_empty(), "an oversized bound is clamped, not refused");
+
+        std::env::set_var("RROUTER_RETRY_ATTEMPTS", "many");
+        std::env::set_var("RROUTER_RETRY_BASE_MS", "-1");
+        std::env::set_var("RROUTER_RETRY_MAX_MS", "5s");
+        let mut problems = Vec::new();
+        assert_eq!(
+            read("RROUTER_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS, &mut problems),
+            DEFAULT_RETRY_ATTEMPTS,
+            "garbage falls back to the default"
+        );
+        assert_eq!(
+            read("RROUTER_RETRY_BASE_MS", DEFAULT_RETRY_BASE_MS, MAX_RETRY_BASE_MS, &mut problems),
+            DEFAULT_RETRY_BASE_MS
+        );
+        assert_eq!(
+            read("RROUTER_RETRY_MAX_MS", DEFAULT_RETRY_MAX_MS, MAX_RETRY_MAX_MS, &mut problems),
+            DEFAULT_RETRY_MAX_MS
+        );
+        assert_eq!(problems.len(), 3, "each bad value must fail startup: {problems:?}");
+
+        for name in ["RROUTER_RETRY_ATTEMPTS", "RROUTER_RETRY_BASE_MS", "RROUTER_RETRY_MAX_MS"] {
+            std::env::remove_var(name);
+        }
     }
 
     /// Retention is a bound, not a promise: unset keeps everything, an oversized number

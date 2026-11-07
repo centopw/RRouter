@@ -331,6 +331,29 @@ pub struct Combo {
     pub created_at: i64,
 }
 
+/// A reusable named system prompt; `body` is the current revision.
+///
+/// `version` counts body revisions only — renaming a template does not consume one — so
+/// every version number maps to exactly one stored body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptTemplate {
+    pub id: String,
+    pub name: String,
+    pub body: String,
+    pub version: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One historical body of a template. `version` matches [`PromptTemplate::version`]
+/// when that revision is the current one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptTemplateVersion {
+    pub version: i64,
+    pub body: String,
+    pub created_at: i64,
+}
+
 /// One row of the model registry.
 ///
 /// `source` decides precedence — `custom` > `upstream` > `synced` > `catalog`
@@ -1529,6 +1552,192 @@ impl Store {
         Ok(n > 0)
     }
 
+    // ----- prompt templates --------------------------------------------------------
+
+    /// Create a template at version 1 and record that revision in its history.
+    ///
+    /// Name and body limits are enforced here rather than in the route: the store is the
+    /// only writer, so an operator's script talking to the database directly gets the
+    /// same rule as the admin API.
+    pub async fn create_template(&self, name: &str, body: &str) -> Result<PromptTemplate> {
+        validate_template(name, body)?;
+        let id = Uuid::new_v4().to_string();
+        let now = now();
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        let taken: Option<String> = tx
+            .query_row(
+                "SELECT id FROM prompt_templates WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(migrations::db_err)?;
+        if taken.is_some() {
+            return Err(Error::BadRequest(format!(
+                "template name already exists: {name}"
+            )));
+        }
+        tx.execute(
+            "INSERT INTO prompt_templates (id, name, body, version, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 1, ?4, ?4)",
+            params![id, name, body, now],
+        )
+        .map_err(migrations::db_err)?;
+        insert_template_version(&tx, &id, 1, body, now)?;
+        tx.commit().map_err(migrations::db_err)?;
+        Ok(PromptTemplate {
+            id,
+            name: name.to_string(),
+            body: body.to_string(),
+            version: 1,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub async fn get_template(&self, id: &str) -> Result<Option<PromptTemplate>> {
+        let conn = self.conn();
+        conn.query_row(
+            &format!("SELECT {TEMPLATE_COLUMNS} FROM prompt_templates WHERE id = ?1"),
+            params![id],
+            row_to_template,
+        )
+        .optional()
+        .map_err(migrations::db_err)
+    }
+
+    /// Lookup by the unique name. The gateway uses it to tell a duplicate name (409)
+    /// from any other write failure.
+    pub async fn get_template_by_name(&self, name: &str) -> Result<Option<PromptTemplate>> {
+        let conn = self.conn();
+        conn.query_row(
+            &format!("SELECT {TEMPLATE_COLUMNS} FROM prompt_templates WHERE name = ?1"),
+            params![name],
+            row_to_template,
+        )
+        .optional()
+        .map_err(migrations::db_err)
+    }
+
+    pub async fn list_templates(&self) -> Result<Vec<PromptTemplate>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {TEMPLATE_COLUMNS} FROM prompt_templates ORDER BY name ASC"
+            ))
+            .map_err(migrations::db_err)?;
+        let rows = stmt.query_map([], row_to_template).map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    /// Rename and/or republish a template. A body change appends a revision and bumps
+    /// [`PromptTemplate::version`]; a rename alone leaves the version and `updated_at`
+    /// untouched, because neither describes the prompt text.
+    pub async fn update_template(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        body: &str,
+    ) -> Result<PromptTemplate> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        let existing: Option<PromptTemplate> = tx
+            .query_row(
+                &format!("SELECT {TEMPLATE_COLUMNS} FROM prompt_templates WHERE id = ?1"),
+                params![id],
+                row_to_template,
+            )
+            .optional()
+            .map_err(migrations::db_err)?;
+        let Some(mut row) = existing else {
+            return Err(Error::NotFound(format!("template {id}")));
+        };
+        let name = name.unwrap_or(&row.name);
+        validate_template(name, body)?;
+        if name != row.name {
+            let conflict: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM prompt_templates WHERE name = ?1 AND id <> ?2",
+                    params![name, id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(migrations::db_err)?;
+            if conflict.is_some() {
+                return Err(Error::BadRequest(format!(
+                    "template name already exists: {name}"
+                )));
+            }
+            row.name = name.to_string();
+        }
+        if body != row.body {
+            row.version += 1;
+            row.body = body.to_string();
+            row.updated_at = now();
+            insert_template_version(&tx, id, row.version, body, row.updated_at)?;
+        }
+        tx.execute(
+            "UPDATE prompt_templates SET name = ?2, body = ?3, version = ?4, updated_at = ?5 \
+             WHERE id = ?1",
+            params![id, row.name, row.body, row.version, row.updated_at],
+        )
+        .map_err(migrations::db_err)?;
+        tx.commit().map_err(migrations::db_err)?;
+        Ok(row)
+    }
+
+    /// Delete a template and every revision it owns, atomically. `false` means no such id.
+    pub async fn delete_template(&self, id: &str) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        tx.execute(
+            "DELETE FROM prompt_template_versions WHERE template_id = ?1",
+            params![id],
+        )
+        .map_err(migrations::db_err)?;
+        let deleted = tx
+            .execute("DELETE FROM prompt_templates WHERE id = ?1", params![id])
+            .map_err(migrations::db_err)?;
+        tx.commit().map_err(migrations::db_err)?;
+        Ok(deleted > 0)
+    }
+
+    /// Revision history, newest first. Empty when the id has no revisions.
+    pub async fn template_versions(&self, id: &str) -> Result<Vec<PromptTemplateVersion>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT version, body, created_at FROM prompt_template_versions \
+                 WHERE template_id = ?1 ORDER BY version DESC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params![id], |r| {
+                Ok(PromptTemplateVersion {
+                    version: r.get(0)?,
+                    body: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
     // ----- response cache ----------------------------------------------------------
 
     /// Serve a cached response, or `None` when the key is absent or expired.
@@ -1996,6 +2205,64 @@ impl CredentialStore for Store {
 const CONN_COLUMNS: &str = "id, provider, auth_type, name, email, priority, is_active, data, \
                             backoff_level, last_error, last_error_code, last_error_at, \
                             created_at, updated_at, weight";
+
+/// Columns of a [`PromptTemplate`], in the order [`row_to_template`] reads them. Shared
+/// by every reader so a new column cannot desynchronize one query from the rest.
+const TEMPLATE_COLUMNS: &str = "id, name, body, version, created_at, updated_at";
+
+/// Operator-facing limits. A template is a prompt, not a document store: 100 characters
+/// of name is a label, and 100k characters of body covers every published system prompt
+/// while keeping one admin response small enough to inline.
+const TEMPLATE_NAME_MAX: usize = 100;
+const TEMPLATE_BODY_MAX: usize = 100_000;
+
+/// Reject a template the API would accept but the product cannot render. Counted in
+/// characters, not bytes, so a non-ASCII prompt is not penalised.
+fn validate_template(name: &str, body: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(Error::BadRequest("template name is required".to_string()));
+    }
+    if name.chars().count() > TEMPLATE_NAME_MAX {
+        return Err(Error::BadRequest(format!(
+            "template name must be at most {TEMPLATE_NAME_MAX} characters"
+        )));
+    }
+    if body.chars().count() > TEMPLATE_BODY_MAX {
+        return Err(Error::BadRequest(format!(
+            "template body must be at most {TEMPLATE_BODY_MAX} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn row_to_template(r: &Row<'_>) -> rusqlite::Result<PromptTemplate> {
+    Ok(PromptTemplate {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        body: r.get(2)?,
+        version: r.get(3)?,
+        created_at: r.get(4)?,
+        updated_at: r.get(5)?,
+    })
+}
+
+/// Append one revision. Callers own the transaction, so the history row and the live row
+/// commit together.
+fn insert_template_version(
+    tx: &rusqlite::Transaction<'_>,
+    template_id: &str,
+    version: i64,
+    body: &str,
+    created_at: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO prompt_template_versions (template_id, version, body, created_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![template_id, version, body, created_at],
+    )
+    .map_err(migrations::db_err)?;
+    Ok(())
+}
 
 /// Weighted-strategy bounds. The column is clamped on read and write so a hand-edited
 /// database cannot produce a zero-traffic account or an unbounded weighted cycle.

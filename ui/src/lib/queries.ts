@@ -14,6 +14,8 @@ import {
   type OAuthProvider,
   type OAuthStatus,
   type SystemInfo,
+  type Template,
+  type TemplateVersion,
   type UpdateConnection,
   type UpdateKey,
   type UsageBucket,
@@ -34,6 +36,8 @@ export const qk = {
   modelProviders: ["model-providers"] as const,
   aliases: ["aliases"] as const,
   combos: ["combos"] as const,
+  templates: ["templates"] as const,
+  templateVersions: (id: string) => ["template-versions", id] as const,
   usage: (limit: number) => ["usage", limit] as const,
   usageDetail: (requestId: string) => ["usage-detail", requestId] as const,
   usagePages: (filters: UsageFilters) => ["usage-pages", filters] as const,
@@ -145,6 +149,49 @@ export function useAliases() {
 
 export function useCombos() {
   return useQuery({ queryKey: qk.combos, queryFn: () => list<Combo>("/api/combos") });
+}
+
+export function useTemplates() {
+  return useQuery({ queryKey: qk.templates, queryFn: () => list<Template>("/api/templates") });
+}
+
+export function useCreateTemplate() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { name: string; body: string }) =>
+      api.post<Template>("/api/templates", input),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.templates }),
+  });
+}
+
+/** A changed body appends a revision, so the history joins the list invalidation. */
+export function useUpdateTemplate() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name, body }: { id: string; name: string; body: string }) =>
+      api.put<Template>(`/api/templates/${encodeURIComponent(id)}`, { name, body }),
+    onSuccess: (row) => {
+      void client.invalidateQueries({ queryKey: qk.templates });
+      void client.invalidateQueries({ queryKey: qk.templateVersions(row.id) });
+    },
+  });
+}
+
+export function useDeleteTemplate() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.del<{ deleted: boolean }>(`/api/templates/${encodeURIComponent(id)}`),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.templates }),
+  });
+}
+
+/** Newest first, straight from the server; loaded only while a history panel is open. */
+export function useTemplateVersions(id: string | null) {
+  return useQuery({
+    queryKey: qk.templateVersions(id ?? ""),
+    queryFn: () => list<TemplateVersion>(`/api/templates/${encodeURIComponent(id ?? "")}/versions`),
+    enabled: id !== null && id !== "",
+  });
 }
 
 export function useUsage(limit = 1000, hours?: number) {

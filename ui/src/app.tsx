@@ -38,6 +38,7 @@ const NAV: NavItem[] = [
   { to: "/activity", label: "Activity", icon: icon("M3 12h4l2-6 3 12 2-6h5"), group: "Gateway" },
   { to: "/logs", label: "Logs", icon: icon("M4 6h16M4 12h16M4 18h10"), group: "Gateway" },
   { to: "/playground", label: "Playground", icon: icon("M4 5h16v11H8l-4 4V5z"), group: "Gateway" },
+  { to: "/templates", label: "Templates", icon: icon("M6 4h9l3 3v13H6zM15 4v4h3M9 12h6M9 16h4"), group: "Gateway" },
   { to: "/providers", label: "Providers", icon: icon("M9 15l6-6M8 7H6a4 4 0 000 8h2M16 17h2a4 4 0 000-8h-2"), group: "Gateway" },
   { to: "/models", label: "Models", icon: icon("M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3zM4 7.5l8 4.5 8-4.5M12 12v9"), group: "Gateway" },
   { to: "/keys", label: "API Keys", icon: icon("M15 7a4 4 0 11-3.5 5.9L4 20H2v-3l8.1-8.1A4 4 0 0115 7z"), group: "Access" },

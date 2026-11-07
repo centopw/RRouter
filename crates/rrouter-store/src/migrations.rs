@@ -8,12 +8,37 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 14;
+pub(crate) const SCHEMA_VERSION: i64 = 15;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
 ];
+
+/// V15: reusable prompt templates. `prompt_templates` holds the live name and latest
+/// body; `prompt_template_versions` is the append-only history, keyed by
+/// `(template_id, version)` so re-reading one revision is an index hit. The history has
+/// no foreign key: a delete removes both tables in one transaction (see
+/// [`Store::delete_template`]), and `ON DELETE CASCADE` would require a per-connection
+/// pragma this store already sets, for no gain over the explicit delete.
+const V15: &str = r#"
+CREATE TABLE IF NOT EXISTS prompt_templates (
+  id TEXT PRIMARY KEY,
+  name TEXT UNIQUE NOT NULL,
+  body TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS prompt_template_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(template_id, version)
+);
+"#;
 
 /// V14: per-key guardrails. One JSON blob rather than a column per field: the policy is
 /// a small document an operator edits as a unit, and every field is optional, so NULL
@@ -277,12 +302,13 @@ mod tests {
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN \
                  ('connections','api_keys','model_aliases','disabled_models','combos','usage',\
-                  'attempts','connection_stats','key_models','response_cache')",
+                  'attempts','connection_stats','key_models','response_cache',\
+                  'prompt_templates','prompt_template_versions')",
                 [],
                 |r| r.get(0),
             )
             .expect("count");
-        assert_eq!(tables, 10);
+        assert_eq!(tables, 12);
     }
 
     #[test]

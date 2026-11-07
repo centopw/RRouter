@@ -8,6 +8,7 @@ pub mod models;
 pub mod oauth;
 pub mod settings;
 pub mod system;
+pub mod templates;
 pub mod usage;
 
 use axum::http::StatusCode;

@@ -5,16 +5,25 @@
 //! 2. If *nothing* is eligible but some candidate opens within
 //!    [`MAX_SKIP_WAIT`], sleep at most that long and retry it once. This keeps a
 //!    client from paying a 30 s breaker window for a 300 ms blip, and it is the
-//!    only place this module ever sleeps — a 429/5xx mid-flight never waits.
-//! 3. Retryable failures (`Error::is_retryable_upstream`) record a breaker
-//!    failure and move to the next candidate.
-//! 4. Non-retryable failures return immediately: retrying a 400 on another
+//!    only ordering wait this module performs; a 429/5xx mid-flight never waits
+//!    here beyond the retry backoff in rule 3.
+//! 3. A retryable failure is retried on the **same** candidate up to
+//!    [`RetryPolicy::attempts`] extra times, sleeping an exponentially backed-off,
+//!    jittered `min(base * 2^n, max)` between sends (capped by an upstream
+//!    `Retry-After` and by the time the caller gave the headers phase). A 503 is
+//!    usually a blip; falling back on the first one spends a healthy account for
+//!    nothing. [`crate::Dispatcher::run_streaming`] retries through the same
+//!    decision ([`retry_wait`]), so a streamed request pays the same price.
+//! 4. Only once a candidate's retries are exhausted does it record **one** breaker
+//!    failure and the next candidate get tried, so a flaky retry cannot trip an
+//!    account faster than a hard failure.
+//! 5. Non-retryable failures return immediately: retrying a 400 on another
 //!    account just burns requests.
-//! 5. Success closes the breaker and returns the winning candidate.
+//! 6. Success closes the breaker and returns the winning candidate.
 
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rrouter_core::{Error, Result};
 use uuid::Uuid;
@@ -26,6 +35,85 @@ use crate::candidate::{Candidate, Plan};
 pub(crate) const MAX_SKIP_WAIT: Duration = Duration::from_secs(2);
 /// Default number of upstream sends per request.
 pub const DEFAULT_MAX_ATTEMPTS: usize = 4;
+/// Extra tries per candidate after the first, when no policy is supplied.
+pub const DEFAULT_RETRY_ATTEMPTS: usize = 1;
+/// The most extra tries per candidate a policy may ask for.
+pub const MAX_RETRY_ATTEMPTS: usize = 5;
+/// First backoff when no policy is supplied.
+pub const DEFAULT_RETRY_BASE: Duration = Duration::from_millis(200);
+/// Backoff ceiling when no policy is supplied.
+pub const DEFAULT_RETRY_MAX: Duration = Duration::from_millis(5_000);
+
+/// How often one candidate is retried, and how long to wait between tries.
+///
+/// The total number of sends still belongs to [`Dispatcher::max_attempts`]: retries
+/// spend that budget like any other send, so `attempts` can never turn one request
+/// into an unbounded stream of upstream calls.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Extra tries per candidate after the first, clamped to `0..=`[`MAX_RETRY_ATTEMPTS`].
+    pub attempts: usize,
+    /// First backoff. Each further retry of the same candidate doubles it.
+    pub base: Duration,
+    /// Backoff ceiling; also the longest an upstream `Retry-After` may make us sleep.
+    pub max: Duration,
+    /// Time the caller granted the headers phase. A retry whose sleep would run past
+    /// it is abandoned instead of slept; `None` means the caller enforces its own
+    /// deadline (tests, admin probes).
+    pub budget: Option<Duration>,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            attempts: DEFAULT_RETRY_ATTEMPTS,
+            base: DEFAULT_RETRY_BASE,
+            max: DEFAULT_RETRY_MAX,
+            budget: None,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Sleep before retry `retry_index` (0-based) of one candidate.
+    ///
+    /// `min(base * 2^retry_index, max)` plus ±20% jitter, capped by `max` and — when the
+    /// upstream sent one — by its `Retry-After`, which is itself capped by `max` so a
+    /// `Retry-After: 60` cannot stall a request whose ceiling is milliseconds.
+    ///
+    /// `fraction` is the jitter source in `[0, 1]`. Production passes
+    /// [`clock_fraction`]; tests pass a fixed value, which keeps the curve exact.
+    pub fn delay(&self, retry_index: usize, retry_after: Option<Duration>, fraction: f64) -> Duration {
+        // `2^n` saturates well before it can overflow the duration multiply.
+        let doublings = 1u32 << retry_index.min(16);
+        let capped = self.base.saturating_mul(doublings).min(self.max);
+        // 800..=1200 thousandths: -20% .. +20%, computed in integers so a fixed
+        // fraction produces an exact duration.
+        let thousandths = 800 + (400.0 * fraction.clamp(0.0, 1.0)).round() as u64;
+        let jittered_nanos = capped.as_nanos() * u128::from(thousandths) / 1_000;
+        let jittered =
+            Duration::from_nanos(u64::try_from(jittered_nanos).unwrap_or(u64::MAX)).min(self.max);
+        match retry_after {
+            Some(wait) => jittered.min(wait).min(self.max),
+            None => jittered,
+        }
+    }
+
+    /// Absolute deadline of the caller's headers budget, when one was granted.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.budget.and_then(|budget| Instant::now().checked_add(budget))
+    }
+}
+
+/// Jitter fraction in `[0, 1)` from the system clock. No `rand` dependency, and the
+/// nanosecond field is enough: the point is that clients failing at the same instant do
+/// not retry in lockstep.
+fn clock_fraction() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| f64::from(since.subsec_nanos() % 10_000) / 10_000.0)
+        .unwrap_or(0.5)
+}
 
 /// One attempt's result, tagged with the candidate it was sent to.
 #[derive(Debug)]
@@ -38,16 +126,26 @@ pub struct AttemptOutcome<T> {
 pub struct Dispatcher {
     pub(crate) breaker: Arc<Breaker>,
     max_attempts: usize,
+    /// Shared with [`crate::Dispatcher::run_streaming`], which retries on the same curve.
+    pub(crate) retry: RetryPolicy,
 }
 
 impl Dispatcher {
     pub fn new(breaker: Breaker) -> Self {
-        Self { breaker: Arc::new(breaker), max_attempts: DEFAULT_MAX_ATTEMPTS }
+        Self {
+            breaker: Arc::new(breaker),
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            retry: RetryPolicy::default(),
+        }
     }
 
     /// Build from an already-shared breaker (e.g. one the planner also inspects).
     pub fn with_shared_breaker(breaker: Arc<Breaker>) -> Self {
-        Self { breaker, max_attempts: DEFAULT_MAX_ATTEMPTS }
+        Self {
+            breaker,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            retry: RetryPolicy::default(),
+        }
     }
 
     /// The breaker itself, for callers that want to inspect state.
@@ -61,6 +159,13 @@ impl Dispatcher {
         self
     }
 
+    /// Override the per-candidate retry policy (default [`RetryPolicy::default`]).
+    /// `attempts` is clamped to [`MAX_RETRY_ATTEMPTS`].
+    pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
+        self.retry = RetryPolicy { attempts: retry.attempts.min(MAX_RETRY_ATTEMPTS), ..retry };
+        self
+    }
+
     pub fn breaker(&self) -> &Breaker {
         &self.breaker
     }
@@ -70,11 +175,19 @@ impl Dispatcher {
     }
 
     /// Non-streaming fallback run. `send` performs exactly one upstream attempt.
+    ///
+    /// A retryable failure is sent to the **same** candidate again after
+    /// [`RetryPolicy::delay`], up to its `attempts` extra tries and the
+    /// [`Dispatcher::max_attempts`] send cap. Only an exhausted candidate counts as a
+    /// breaker failure, so retries do not trip an account faster than a hard failure.
     pub async fn run<T, F, Fut>(&self, plan: &Plan, send: F) -> Result<AttemptOutcome<T>>
     where
         F: Fn(Candidate) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
+        // The budget covers ordering too: the skipped-candidate wait below is part of
+        // the headers phase the caller timed.
+        let deadline = self.retry.deadline();
         let mut order = self.attempt_order(plan).await;
         if order.is_empty() {
             return Err(no_route(plan, "every candidate is blocked by its circuit breaker"));
@@ -86,26 +199,50 @@ impl Dispatcher {
             let Some((candidate, mut claim)) = self.next_claim(plan, &mut order).await else {
                 break;
             };
-            sends += 1;
-            let result = send(candidate.clone()).await;
-            // Disarm before settling so `Drop` cannot double-report.
-            claim.disarm();
-            match result {
-                Ok(resp) => {
-                    self.breaker.record_success(candidate.connection);
-                    return Ok(AttemptOutcome { candidate, result: Ok(resp) });
-                }
-                Err(err) if !err.is_retryable_upstream() => {
-                    // A non-retryable error (bad client request, translation failure) says
-                    // nothing about the account: the upstream answered sanely. Releasing the
-                    // probe keeps it eligible instead of counting a client 400 toward a trip.
-                    self.breaker.record_success(candidate.connection);
-                    return Ok(AttemptOutcome { candidate, result: Err(err) });
-                }
-                Err(err) => {
-                    self.breaker
-                        .record_failure(candidate.connection, status_of(&err), retry_after(&err));
-                    last = Some(err);
+            let mut retries = 0usize;
+            loop {
+                sends += 1;
+                let result = send(candidate.clone()).await;
+                match result {
+                    Ok(resp) => {
+                        // Disarm before settling so `Drop` cannot double-report.
+                        claim.disarm();
+                        self.breaker.record_success(candidate.connection);
+                        return Ok(AttemptOutcome { candidate, result: Ok(resp) });
+                    }
+                    Err(err) if !err.is_retryable_upstream() => {
+                        // A non-retryable error (bad client request, translation failure) says
+                        // nothing about the account: the upstream answered sanely. Releasing the
+                        // probe keeps it eligible instead of counting a client 400 toward a trip.
+                        claim.disarm();
+                        self.breaker.record_success(candidate.connection);
+                        return Ok(AttemptOutcome { candidate, result: Err(err) });
+                    }
+                    Err(err) => {
+                        if let Some(wait) =
+                            retry_wait(&self.retry, &err, retries, sends, self.max_attempts, deadline)
+                        {
+                            tracing::debug!(
+                                connection = %candidate.connection,
+                                retry = retries + 1,
+                                wait_ms = wait.as_millis() as u64,
+                                "retrying candidate after transient upstream failure"
+                            );
+                            tokio::time::sleep(wait).await;
+                            retries += 1;
+                            continue;
+                        }
+                        // Retries exhausted (or no time left): one breaker failure for
+                        // the candidate, then the next one.
+                        claim.disarm();
+                        self.breaker.record_failure(
+                            candidate.connection,
+                            status_of(&err),
+                            retry_after(&err),
+                        );
+                        last = Some(err);
+                        break;
+                    }
                 }
             }
         }
@@ -201,6 +338,38 @@ pub(crate) fn no_route(plan: &Plan, detail: &str) -> Error {
     Error::NoRoute { model: plan.model.clone(), detail: detail.to_string() }
 }
 
+
+/// May a retry sleep this long without running past the caller's deadline?
+///
+/// No deadline means the caller enforces its own (tests and probes pass `None`).
+fn within_budget(deadline: Option<Instant>, wait: Duration) -> bool {
+    let Some(deadline) = deadline else { return true };
+    Instant::now().checked_add(wait).is_some_and(|at| at <= deadline)
+}
+
+/// The one retry decision both [`Dispatcher::run`] and
+/// [`Dispatcher::run_streaming`] make: should `err` be retried on the **same**
+/// candidate, and if so after how long?
+///
+/// `None` when the candidate has no try left (`retries` reached
+/// [`RetryPolicy::attempts`]), when the request has spent its sends
+/// (`max_attempts`), or when the [`RetryPolicy::delay`] sleep would overrun the
+/// caller's headers budget. Keeping the arithmetic in `delay` and the gating here
+/// means a streamed request backs off exactly like a JSON one.
+pub(crate) fn retry_wait(
+    retry: &RetryPolicy,
+    err: &Error,
+    retries: usize,
+    sends: usize,
+    max_attempts: usize,
+    deadline: Option<Instant>,
+) -> Option<Duration> {
+    if retries >= retry.attempts || sends >= max_attempts {
+        return None;
+    }
+    let wait = retry.delay(retries, retry_after(err), clock_fraction());
+    within_budget(deadline, wait).then_some(wait)
+}
 
 /// Upstream status for breaker bookkeeping; transport/timeout failures have no
 /// HTTP status and are recorded as 0 (generic trip).

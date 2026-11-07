@@ -521,7 +521,7 @@ fn model_costs_returns_published_rows_for_the_named_providers() {
 }
 
 #[test]
-fn v6_database_migrates_to_fourteen() {
+fn v6_database_migrates_to_fifteen() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
@@ -620,7 +620,7 @@ fn v6_database_migrates_to_fourteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
         ("idx_usage_request", "the usage row is looked up by request id"),
@@ -641,7 +641,7 @@ fn v6_database_migrates_to_fourteen() {
 /// connection defaults to weight 100 (the plain round-robin share), and the two new
 /// tables start empty.
 #[test]
-fn v8_database_migrates_to_fourteen() {
+fn v8_database_migrates_to_fifteen() {
     let dir = TempDir::new("v8");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -723,7 +723,7 @@ fn v8_database_migrates_to_fourteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
 
     let weight: i64 = conn
         .query_row("SELECT weight FROM connections", [], |r| r.get(0))
@@ -748,7 +748,7 @@ fn v8_database_migrates_to_fourteen() {
 /// A v9 database gains the money columns without touching existing rows: spend recorded
 /// before v10 stays at "unknown price", and every key stays unlimited.
 #[test]
-fn v9_database_migrates_to_fourteen() {
+fn v9_database_migrates_to_fifteen() {
     let dir = TempDir::new("v9");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -830,13 +830,13 @@ fn v9_database_migrates_to_fourteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
 }
 
 /// A v10 database gains the response cache in place: the migration only adds a table and
 /// its index, so every existing row is untouched and the version reaches 13.
 #[test]
-fn v10_database_migrates_to_fourteen() {
+fn v10_database_migrates_to_fifteen() {
     let dir = TempDir::new("v10");
     {
         // A real v10 database: the current schema with the v11 table and the v12 column
@@ -861,7 +861,7 @@ fn v10_database_migrates_to_fourteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     for (kind, name) in [("table", "response_cache"), ("index", "idx_cache_expiry")] {
         let found: i64 = conn
             .query_row(
@@ -1559,7 +1559,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// A v11 database gains `budget_window` in place: an existing key reads as `total`
 /// (lifetime, unchanged behaviour), and the version reaches 14.
 #[test]
-fn v11_database_migrates_to_fourteen_with_total_windows() {
+fn v11_database_migrates_to_fifteen_with_total_windows() {
     let dir = TempDir::new("v11");
     let id = Uuid::new_v4();
     {
@@ -1595,13 +1595,13 @@ fn v11_database_migrates_to_fourteen_with_total_windows() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
 }
 
 /// v12 shipped no `attempts(ts)` index; the retention sweep deletes by `ts`, so opening
 /// a v12 database adds the index and bumps the marker.
 #[test]
-fn v12_database_migrates_to_fourteen_with_the_attempt_ts_index() {
+fn v12_database_migrates_to_fifteen_with_the_attempt_ts_index() {
     let dir = TempDir::new("v12");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -1620,7 +1620,7 @@ fn v12_database_migrates_to_fourteen_with_the_attempt_ts_index() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     let indexes: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type = 'index' \
@@ -1932,7 +1932,7 @@ fn policy_with_term() -> Guardrails {
 /// v13 shipped no guardrails column; opening a v13 database adds it, and the key that
 /// existed before it keeps the only policy a pre-v14 key can have: none.
 #[test]
-fn v13_database_migrates_to_fourteen_with_the_guardrails_column() {
+fn v13_database_migrates_to_fifteen_with_the_guardrails_column() {
     let dir = TempDir::new("v13");
     let id = Uuid::new_v4();
     {
@@ -1962,7 +1962,7 @@ fn v13_database_migrates_to_fourteen_with_the_guardrails_column() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     let columns: i64 = conn
         .query_row(
             "SELECT count(*) FROM pragma_table_info('api_keys') WHERE name = 'guardrails'",
@@ -1971,6 +1971,65 @@ fn v13_database_migrates_to_fourteen_with_the_guardrails_column() {
         )
         .expect("column");
     assert_eq!(columns, 1, "the policy column exists after the migration");
+}
+
+/// v14 shipped no template tables; opening a v14 database adds them at v15, writable,
+/// and leaves everything a v14 database already held alone.
+#[test]
+fn v14_database_migrates_to_fifteen_with_the_template_tables() {
+    let dir = TempDir::new("v14");
+    let key = Uuid::new_v4();
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        // Start from the current schema, then remove exactly what v15 adds.
+        drop(Store::open(&dir.db(), None).expect("current schema"));
+        conn.execute_batch(
+            "DROP TABLE prompt_template_versions; DROP TABLE prompt_templates; \
+             PRAGMA user_version = 14;",
+        )
+        .expect("rewind to v14");
+        conn.execute(
+            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at) \
+             VALUES (?1, 'h', 'legacy', 1, 1)",
+            [key.to_string()],
+        )
+        .expect("legacy key");
+    }
+
+    let store = Store::open(&dir.db(), None).expect("open runs the v15 step");
+    rt().block_on(async {
+        let created = store
+            .create_template("legacy-app", "You are legacy.")
+            .await
+            .expect("templates table is writable");
+        assert_eq!(created.version, 1);
+        assert_eq!(
+            store.template_versions(&created.id).await.expect("history").len(),
+            1,
+            "the history table is writable"
+        );
+        assert!(
+            store.get_api_key(key).await.expect("read").is_some(),
+            "a v14 key survives"
+        );
+    });
+    drop(store);
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 15);
+    for table in ["prompt_templates", "prompt_template_versions"] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .expect("table");
+        assert_eq!(n, 1, "{table} exists after the migration");
+    }
 }
 
 /// A minimal usage row at `ts`, identified by `marker` in the model name so a test can
@@ -2285,4 +2344,151 @@ fn usage_filters_compose_with_the_cursor() {
         .collect();
     assert_eq!(filtered, oracle, "same rows, same order");
     assert_eq!(filtered.len(), 4);
+}
+
+// ----- prompt templates -------------------------------------------------------------
+
+#[test]
+fn templates_create_list_get_rename_delete() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let support = s.create_template("support", "You are support.").await.expect("create");
+        assert_eq!(support.name, "support");
+        assert_eq!(support.body, "You are support.");
+        assert_eq!(support.version, 1);
+        assert!(support.created_at > 0);
+        assert_eq!(support.created_at, support.updated_at);
+        assert_eq!(
+            Uuid::parse_str(&support.id).expect("uuid id").to_string(),
+            support.id,
+            "template ids are UUID strings"
+        );
+
+        s.create_template("billing", "You are billing.").await.expect("second");
+        let all = s.list_templates().await.expect("list");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].name, "billing", "list is ordered by name");
+
+        let got = s.get_template(&support.id).await.expect("get").expect("row");
+        assert_eq!(got.body, "You are support.");
+        assert!(s.get_template("no-such-id").await.expect("get").is_none());
+        assert_eq!(
+            s.get_template_by_name("support").await.expect("by name").expect("row").id,
+            support.id
+        );
+
+        let renamed = s
+            .update_template(&support.id, Some("helpdesk"), "You are support.")
+            .await
+            .expect("rename");
+        assert_eq!(renamed.name, "helpdesk");
+        assert_eq!(renamed.body, "You are support.");
+        assert_eq!(renamed.version, 1, "a rename does not create a revision");
+        assert!(s.get_template_by_name("support").await.expect("by name").is_none());
+
+        assert!(s.delete_template(&support.id).await.expect("delete"));
+        assert!(!s.delete_template(&support.id).await.expect("delete again"));
+        assert!(s.get_template(&support.id).await.expect("get").is_none());
+        assert_eq!(s.list_templates().await.expect("list").len(), 1);
+    });
+}
+
+#[test]
+fn template_body_change_bumps_version_and_history_is_newest_first() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let t = s.create_template("agent", "one").await.expect("create");
+
+        let same = s.update_template(&t.id, None, "one").await.expect("same body");
+        assert_eq!(same.version, 1, "an unchanged body is not a new revision");
+        assert_eq!(same.updated_at, t.updated_at);
+        assert_eq!(s.template_versions(&t.id).await.expect("history").len(), 1);
+
+        let two = s.update_template(&t.id, None, "two").await.expect("body change");
+        assert_eq!(two.version, 2);
+        assert_eq!(two.body, "two");
+        assert_eq!(two.name, "agent");
+        assert_eq!(two.created_at, t.created_at, "the first timestamp is kept");
+        assert!(two.updated_at >= t.updated_at);
+
+        let three = s
+            .update_template(&t.id, Some("agent-v2"), "three")
+            .await
+            .expect("rename + body");
+        assert_eq!(three.version, 3);
+        assert_eq!(three.name, "agent-v2");
+
+        let history = s.template_versions(&t.id).await.expect("history");
+        let versions: Vec<i64> = history.iter().map(|v| v.version).collect();
+        assert_eq!(versions, vec![3, 2, 1], "newest first");
+        let bodies: Vec<&str> = history.iter().map(|v| v.body.as_str()).collect();
+        assert_eq!(bodies, vec!["three", "two", "one"]);
+        assert!(s.template_versions("no-such-id").await.expect("history").is_empty());
+    });
+}
+
+#[test]
+fn deleting_a_template_removes_its_versions() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let t = s.create_template("auditor", "v1").await.expect("create");
+        s.update_template(&t.id, None, "v2").await.expect("bump");
+        assert_eq!(s.template_versions(&t.id).await.expect("history").len(), 2);
+
+        assert!(s.delete_template(&t.id).await.expect("delete"));
+        assert!(
+            s.template_versions(&t.id).await.expect("history").is_empty(),
+            "the history rows go with the template"
+        );
+
+        // A new template under the same name starts its own history.
+        let again = s.create_template("auditor", "fresh").await.expect("recreate");
+        assert_eq!(again.version, 1);
+        assert_eq!(s.template_versions(&again.id).await.expect("history").len(), 1);
+    });
+}
+
+#[test]
+fn template_duplicate_names_and_lengths_are_rejected() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let first = s.create_template("dup", "body").await.expect("create");
+        let err = s.create_template("dup", "other").await.expect_err("duplicate name");
+        assert_eq!(err.status(), 400, "{err}");
+
+        let other = s.create_template("other", "body").await.expect("second");
+        let err = s
+            .update_template(&other.id, Some("dup"), "body")
+            .await
+            .expect_err("rename onto a taken name");
+        assert_eq!(err.status(), 400, "{err}");
+        // Renaming to the name it already has is not a conflict.
+        s.update_template(&first.id, Some("dup"), "body").await.expect("same name");
+
+        let err = s.update_template("missing", None, "body").await.expect_err("unknown id");
+        assert_eq!(err.status(), 404, "{err}");
+
+        // Name: empty/blank and 101 characters are refused, 100 is accepted.
+        assert_eq!(s.create_template("", "b").await.expect_err("empty").status(), 400);
+        assert_eq!(s.create_template("   ", "b").await.expect_err("blank").status(), 400);
+        let long_name = "n".repeat(101);
+        assert_eq!(s.create_template(&long_name, "b").await.expect_err("long").status(), 400);
+        s.create_template(&"n".repeat(100), "b").await.expect("100-char name");
+
+        // Body: exactly 100k characters is accepted, one more is not.
+        s.create_template("max-body", &"x".repeat(100_000)).await.expect("max body");
+        let err = s
+            .create_template("over-body", &"x".repeat(100_001))
+            .await
+            .expect_err("over max body");
+        assert_eq!(err.status(), 400, "{err}");
+        assert!(
+            s.get_template_by_name("over-body").await.expect("lookup").is_none(),
+            "a rejected create writes nothing"
+        );
+    });
 }

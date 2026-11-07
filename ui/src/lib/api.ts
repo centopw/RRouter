@@ -245,6 +245,19 @@ export type NewKey = { id: string; key: string };
 export type Alias = { alias: string; target: string };
 export type Combo = { name: string; models: string[] };
 
+/** A reusable system prompt. `version` counts body revisions; a rename does not bump it. */
+export type Template = {
+  id: string;
+  name: string;
+  body: string;
+  version: number;
+  created_at: number;
+  updated_at: number;
+};
+
+/** One historical body; the highest `version` is also the live one. */
+export type TemplateVersion = { version: number; body: string; created_at: number };
+
 export type UsageSummaryRow = {
   provider: string;
   model: string;

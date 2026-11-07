@@ -101,6 +101,17 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/combos",
             get(routes::combos::list).post(routes::combos::create).delete(routes::combos::remove),
         )
+        .route(
+            "/templates",
+            get(routes::templates::list).post(routes::templates::create),
+        )
+        .route(
+            "/templates/{id}",
+            get(routes::templates::get)
+                .put(routes::templates::update)
+                .delete(routes::templates::remove),
+        )
+        .route("/templates/{id}/versions", get(routes::templates::versions))
         .route("/usage", get(routes::usage::list))
         .route("/usage/export.csv", get(routes::usage::export_csv))
         .route("/usage/{request_id}", get(routes::usage::detail))

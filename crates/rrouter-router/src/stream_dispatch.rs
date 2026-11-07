@@ -17,7 +17,7 @@ use rrouter_core::{Error, Result};
 
 use crate::breaker::Breaker;
 use crate::candidate::Candidate;
-use crate::dispatch::{no_route, retry_after, status_of};
+use crate::dispatch::{no_route, retry_after, retry_wait, status_of};
 use crate::Dispatcher;
 
 /// Upstream body chunks for one streamed response.
@@ -26,6 +26,18 @@ pub type ByteStream = BoxStream<'static, Result<Bytes>>;
 impl Dispatcher {
     /// Streaming fallback run. `open` performs exactly one upstream request and
     /// returns as soon as response **headers** are available (body not read).
+    ///
+    /// A retryable error from `open` has not committed a byte — the client has seen
+    /// nothing — so it is retried on the **same** candidate through the same
+    /// [`retry_wait`] decision the JSON path uses: same backoff, same
+    /// [`crate::dispatch::RetryPolicy::attempts`], and the same
+    /// [`Dispatcher::max_attempts`] send cap. Only an exhausted candidate records a
+    /// breaker failure, so a flaky retry cannot trip an account faster than a hard
+    /// failure.
+    ///
+    /// Once `open` yields a stream the commit point is the first body byte the client
+    /// receives. A failure after that is terminal ([`Committed`] surfaces it once):
+    /// re-sending then would duplicate output the client already saw.
     pub async fn run_streaming<F, Fut>(
         &self,
         plan: &crate::candidate::Plan,
@@ -35,6 +47,7 @@ impl Dispatcher {
         F: Fn(Candidate) -> Fut,
         Fut: Future<Output = Result<ByteStream>>,
     {
+        let deadline = self.retry.deadline();
         let mut order = self.attempt_order(plan).await;
         if order.is_empty() {
             return Err(no_route(plan, "every candidate is blocked by its circuit breaker"));
@@ -46,24 +59,55 @@ impl Dispatcher {
             let Some((candidate, mut claim)) = self.next_claim(plan, &mut order).await else {
                 break;
             };
-            sends += 1;
-            let opened = open(candidate.clone()).await;
-            claim.disarm();
-            match opened {
-                Ok(stream) => {
-                    let committed =
-                        Committed::new(stream, self.breaker_arc(), candidate.connection);
-                    return Ok((candidate, Box::pin(committed)));
-                }
-                Err(err) if !err.is_retryable_upstream() => {
-                    // The account answered sanely; the request was bad. Release the probe.
-                    self.breaker.record_success(candidate.connection);
-                    return Err(err);
-                }
-                Err(err) => {
-                    self.breaker
-                        .record_failure(candidate.connection, status_of(&err), retry_after(&err));
-                    last = Some(err);
+            let mut retries = 0usize;
+            loop {
+                sends += 1;
+                let opened = open(candidate.clone()).await;
+                match opened {
+                    Ok(stream) => {
+                        // Nothing has been polled yet, so no byte reached the client:
+                        // this attempt is a success even if the body fails later.
+                        claim.disarm();
+                        let committed =
+                            Committed::new(stream, self.breaker_arc(), candidate.connection);
+                        return Ok((candidate, Box::pin(committed)));
+                    }
+                    Err(err) if !err.is_retryable_upstream() => {
+                        // The account answered sanely; the request was bad. Release the probe.
+                        claim.disarm();
+                        self.breaker.record_success(candidate.connection);
+                        return Err(err);
+                    }
+                    Err(err) => {
+                        if let Some(wait) = retry_wait(
+                            &self.retry,
+                            &err,
+                            retries,
+                            sends,
+                            self.max_attempts(),
+                            deadline,
+                        ) {
+                            tracing::debug!(
+                                connection = %candidate.connection,
+                                retry = retries + 1,
+                                wait_ms = wait.as_millis() as u64,
+                                "retrying stream open after transient upstream failure"
+                            );
+                            tokio::time::sleep(wait).await;
+                            retries += 1;
+                            continue;
+                        }
+                        // Retries exhausted (or no time left): one breaker failure for
+                        // the candidate, then the next one.
+                        claim.disarm();
+                        self.breaker.record_failure(
+                            candidate.connection,
+                            status_of(&err),
+                            retry_after(&err),
+                        );
+                        last = Some(err);
+                        break;
+                    }
                 }
             }
         }
