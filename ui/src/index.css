@@ -105,6 +105,21 @@ textarea,
   transition-timing-function: var(--ease-standard);
 }
 
+@keyframes drawer-in {
+  from {
+    transform: translateX(16px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.drawer-panel {
+  animation: drawer-in var(--motion-fast) var(--ease-standard);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -146,11 +161,6 @@ h1[tabindex="-1"]:focus-visible {
 
 /* The traffic chart shows the peak bucket's tooltip until the chart is touched;
    hovering any column (including the peak) takes over from CSS alone. */
-.traffic:hover .traffic-peak-tip,
-.traffic:focus-within .traffic-peak-tip {
-  display: none;
-}
-
 @keyframes rrouter-pulse {
   0%,
   100% {
@@ -162,6 +172,21 @@ h1[tabindex="-1"]:focus-visible {
 }
 .pulse {
   animation: rrouter-pulse 2s ease-in-out infinite;
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(16px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.drawer-panel {
+  animation: drawer-in var(--motion-fast) var(--ease-standard);
 }
 
 @media (prefers-reduced-motion: reduce) {

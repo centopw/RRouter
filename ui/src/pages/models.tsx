@@ -16,23 +16,21 @@ import {
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS, CapabilityChips } from "../components/capability-chips";
-import { ago, compact, ms } from "../lib/format";
+import { compact } from "../lib/format";
 import { compareModels } from "../lib/models";
-import { qk, useConnections, useModelProviders, useModels } from "../lib/queries";
-import { api, type Capabilities, type FetchResult, type Model, type ModelProvider, type ModelTest, type SyncResult } from "../lib/api";
+import { useToast } from "../components/toast";
+import { qk, useModelProviders, useModels } from "../lib/queries";
+import { api, type Capabilities, type Model, type ModelProvider, type ModelTest, type SyncResult } from "../lib/api";
 
 const ALL = "all";
 
 export default function Models() {
   const models = useModels();
   const providers = useModelProviders();
-  const connections = useConnections();
-  const client = useQueryClient();
+    const client = useQueryClient();
 
   const [provider, setProvider] = useState(ALL);
   const [query, setQuery] = useState("");
-  const [connectionId, setConnectionId] = useState("");
-  const [tested, setTested] = useState<Record<string, ModelTest>>({});
   const [customOpen, setCustomOpen] = useState(false);
 
   // Modal re-focuses itself whenever `onClose` changes identity, so keep it stable or
@@ -47,38 +45,6 @@ export default function Models() {
 
   const sync = useMutation({
     mutationFn: () => api.post<SyncResult>("/api/models/sync"),
-    onSuccess: invalidateRegistry,
-  });
-
-  const providerInfo = providers.data?.find((p) => p.id === provider);
-  const providerConnections = useMemo(
-    () =>
-      (connections.data ?? []).filter((c) => provider === ALL || c.provider === provider),
-    [connections.data, provider],
-  );
-  const fetchConnection =
-    providerConnections.find((c) => c.id === connectionId) ?? providerConnections[0];
-
-  // The provider `fetch` would actually talk to: the filter, or the chosen connection's
-  // provider when the filter is "all".
-  const fetchProviderId = provider === ALL ? fetchConnection?.provider : provider;
-  const fetchProvider = providers.data?.find((p) => p.id === fetchProviderId);
-
-  // Why `fetch` cannot run, phrased so the disabled control's title says what to do next.
-  const fetchBlocker = (() => {
-    if (!connections.data || !providers.data) return "loading connections…";
-    if (provider !== ALL && !providerInfo) return `${provider} is not a provider this gateway knows`;
-    if (providerConnections.length === 0)
-      return provider === ALL
-        ? "no connections yet; add a connection first"
-        : `${provider} has no connection; add one on the connections page`;
-    if (fetchProvider && !fetchProvider.listed)
-      return `${fetchProvider.id} has no model list endpoint; add models with add custom model`;
-    return undefined;
-  })();
-
-  const fetchUpstream = useMutation({
-    mutationFn: (id: string) => api.post<FetchResult>("/api/models/fetch", { connection_id: id }),
     onSuccess: invalidateRegistry,
   });
 
@@ -106,20 +72,18 @@ export default function Models() {
 
   const test = useMutation({
     mutationFn: (model: Model) => api.post<ModelTest>("/api/models/test", { model: model.ref }),
-    onSuccess: (result, model) => setTested((prev) => ({ ...prev, [model.ref]: result })),
+    onSuccess: (result, model) => {
+      if (result.ok) {
+        toast.success(`Test passed · ${model.ref}`, `${result.status} · ${result.latency_ms}ms`);
+      } else {
+        toast.error(`Test failed · ${model.ref}`, result.error ?? `status ${result.status}`);
+      }
+    },
     onError: (error, model) =>
-      setTested((prev) => ({
-        ...prev,
-        [model.ref]: {
-          ok: false,
-          status: 0,
-          latency_ms: 0,
-          model: model.ref,
-          error: error instanceof Error ? error.message : String(error),
-        },
-      })),
+      toast.error(`Test failed · ${model.ref}`, error instanceof Error ? error.message : String(error)),
   });
 
+  const toast = useToast();
   const remove = useMutation({
     mutationFn: (model: Model) =>
       api.del<{ deleted: boolean }>(
@@ -155,6 +119,7 @@ export default function Models() {
   const toggleTarget = toggle.isPending ? (toggle.variables?.id ?? null) : null;
   const removeTarget = remove.isPending ? (remove.variables?.ref ?? null) : null;
   const [deleting, setDeleting] = useState<Model | null>(null);
+  const [editing, setEditing] = useState<Model | null>(null);
 
   const columns = useMemo<Array<Column<Model>>>(() => [
     {
@@ -276,49 +241,34 @@ export default function Models() {
       align: "right",
       render: (m) => {
         const pending = testTarget === m.ref;
-        const result = tested[m.ref];
-        const detail = result
-          ? [result.reply ?? result.error ?? "no reply", `${result.latency_ms}ms`].join(" · ")
-          : undefined;
         return (
-          <div className="flex flex-col items-end gap-1">
-            <div className="flex items-center gap-1.5">
+          <div className="flex items-center justify-end gap-1.5">
+            <Button onClick={() => setEditing(m)} title="edit display, limits, price and capabilities">
+              edit
+            </Button>
+            <Button
+              variant="quiet"
+              onClick={() => test.mutate(m)}
+              disabled={pending}
+              title={`send a 16-token completion to ${m.ref}`}
+            >
+              {pending ? "testing…" : "test"}
+            </Button>
+            {m.source === "custom" ? (
               <Button
-                variant="quiet"
-                onClick={() => test.mutate(m)}
-                disabled={pending}
-                title={`send a 16-token completion to ${m.ref}`}
+                variant="danger"
+                onClick={() => setDeleting(m)}
+                disabled={removeTarget === m.ref}
+                title="delete this custom row"
               >
-                {pending ? "testing…" : "test"}
+                delete
               </Button>
-              {m.source === "custom" ? (
-                <Button
-                  variant="danger"
-                  onClick={() => setDeleting(m)}
-                  disabled={removeTarget === m.ref}
-                  title="delete this custom row"
-                >
-                  delete
-                </Button>
-              ) : null}
-            </div>
-            {result ? (
-              <span
-                title={detail}
-                className={cx(
-                  "block max-w-[200px] truncate font-mono text-[11px] tnum",
-                  result.ok ? "text-pos" : "text-neg",
-                )}
-              >
-                {result.ok ? "ok" : "err"} · {result.status} · {ms(result.latency_ms)} ·{" "}
-                {result.reply ?? result.error ?? "no reply"}
-              </span>
             ) : null}
           </div>
         );
       },
     },
-  ], [tested, testTarget, toggleTarget, removeTarget]);
+  ], [testTarget, toggleTarget, removeTarget]);
 
   return (
     <>
@@ -344,10 +294,7 @@ export default function Models() {
               <Select
                 ariaLabel="provider filter"
                 value={provider}
-                onChange={(v) => {
-                  setProvider(v);
-                  setConnectionId("");
-                }}
+                onChange={setProvider}
               >
                 <option value={ALL}>all providers</option>
                 {(providers.data ?? []).map((p) => (
@@ -365,38 +312,6 @@ export default function Models() {
                 ariaLabel="filter models"
               />
             </div>
-            <Button
-              onClick={() => sync.mutate()}
-              disabled={sync.isPending}
-              title="refresh context, capabilities, and pricing from models.dev (does not add models)"
-            >
-              {sync.isPending ? "syncing…" : "sync metadata"}
-            </Button>
-            <span title={fetchBlocker} className="inline-flex w-[200px]">
-              <Select
-                ariaLabel="fetch connection"
-                value={fetchConnection?.id ?? ""}
-                onChange={setConnectionId}
-                disabled={providerConnections.length === 0}
-              >
-                {providerConnections.length === 0 ? (
-                  <option value="">no connection</option>
-                ) : (
-                  providerConnections.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.provider} · {c.email ?? c.name ?? c.id.slice(0, 8)}
-                    </option>
-                  ))
-                )}
-              </Select>
-            </span>
-            <Button
-              onClick={() => fetchConnection && fetchUpstream.mutate(fetchConnection.id)}
-              disabled={!fetchConnection || fetchUpstream.isPending || Boolean(fetchBlocker)}
-              title={fetchBlocker ?? "store this connection's own model list as upstream rows"}
-            >
-              {fetchUpstream.isPending ? "fetching…" : "fetch"}
-            </Button>
             <Button variant="primary" onClick={() => setCustomOpen(true)}>
               add custom model
             </Button>
@@ -404,20 +319,6 @@ export default function Models() {
         }
       />
 
-      {sync.data ? (
-        <p className="mb-2 text-[12px] text-muted">
-          synced <span className="tnum text-fg">{sync.data.models}</span> models over{" "}
-          <span className="tnum text-fg">{sync.data.providers}</span> providers{" "}
-          <span className="text-faint">· {ago(sync.data.synced_at)}</span>
-        </p>
-      ) : null}
-      {fetchUpstream.data ? (
-        <p className="mb-2 text-[12px] text-muted">
-          <span className="tnum text-fg">{fetchUpstream.data.added}</span> new of{" "}
-          <span className="tnum text-fg">{fetchUpstream.data.count}</span> listed by{" "}
-          {fetchUpstream.data.provider}
-        </p>
-      ) : null}
 
       {models.isError ? (
         <div className="mb-3">
@@ -429,9 +330,9 @@ export default function Models() {
           <ErrorNote error={providers.error} onRetry={() => void providers.refetch()} />
         </div>
       ) : null}
-      {sync.isError || fetchUpstream.isError || toggle.isError || remove.isError ? (
+      {sync.isError || toggle.isError || remove.isError ? (
         <div className="mb-3">
-          <ErrorNote error={sync.error ?? fetchUpstream.error ?? toggle.error ?? remove.error} />
+          <ErrorNote error={sync.error ?? toggle.error ?? remove.error} />
         </div>
       ) : null}
 
@@ -458,6 +359,16 @@ export default function Models() {
         </Card>
       )}
 
+      {editing ? (
+        <CustomModelModal
+          providers={providers.data}
+          defaultProvider={editing.provider}
+          initial={editing}
+          onClose={() => setEditing(null)}
+          onSaved={invalidateRegistry}
+        />
+      ) : null}
+
       {customOpen ? (
         <CustomModelModal
           providers={providers.data}
@@ -475,22 +386,29 @@ export default function Models() {
 function CustomModelModal({
   providers,
   defaultProvider,
+  initial,
   onClose,
   onSaved,
 }: {
   providers: ModelProvider[] | undefined;
   defaultProvider: string;
+  /** Present when editing an existing row: it becomes a custom override of that ref. */
+  initial?: Model;
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [form, setForm] = useState({
-    provider: defaultProvider || providers?.[0]?.id || "",
-    id: "",
-    display: "",
-    context: "",
-    maxOutput: "",
+    provider: initial?.provider ?? (defaultProvider || providers?.[0]?.id || ""),
+    id: initial?.id ?? "",
+    display: initial?.display ?? "",
+    context: initial?.context ? String(initial.context) : "",
+    maxOutput: initial?.max_output ? String(initial.max_output) : "",
+    priceIn: initial?.cost ? String(initial.cost.input) : "",
+    priceOut: initial?.cost ? String(initial.cost.output) : "",
   });
-  const [caps, setCaps] = useState<Partial<Record<keyof Capabilities, boolean>>>({});
+  const [caps, setCaps] = useState<Partial<Record<keyof Capabilities, boolean>>>(
+    initial ? { ...initial.capabilities } : {},
+  );
 
   const create = useMutation({
     mutationFn: () =>
@@ -500,6 +418,13 @@ function CustomModelModal({
         display: form.display.trim() || null,
         context: numeric(form.context),
         max_output: numeric(form.maxOutput),
+        cost:
+          form.priceIn.trim() !== "" || form.priceOut.trim() !== ""
+            ? {
+                input: Number(form.priceIn) || 0,
+                output: Number(form.priceOut) || 0,
+              }
+            : null,
         capabilities: Object.fromEntries(CAPABILITY_KEYS.map((key) => [key, caps[key] === true])),
       }),
     onSuccess: () => {
@@ -512,14 +437,15 @@ function CustomModelModal({
 
   return (
     <Modal
-      title="add custom model"
+      title={initial ? "edit model" : "add custom model"}
+      description={initial ? `${initial.provider}/${initial.id} — saves an operator override for this model.` : undefined}
       open
       onClose={onClose}
       footer={
         <>
           <Button onClick={onClose}>cancel</Button>
           <Button variant="primary" disabled={!ready} onClick={() => create.mutate()}>
-            {create.isPending ? "adding…" : "add model"}
+            {create.isPending ? "saving…" : initial ? "save changes" : "add model"}
           </Button>
         </>
       }
@@ -531,6 +457,7 @@ function CustomModelModal({
               ariaLabel="custom model provider"
               value={form.provider}
               onChange={(v) => setForm((f) => ({ ...f, provider: v }))}
+              disabled={Boolean(initial)}
             >
               {(providers ?? []).map((p) => (
                 <option key={p.id} value={p.id}>
@@ -545,6 +472,7 @@ function CustomModelModal({
               onChange={(v) => setForm((f) => ({ ...f, id: v }))}
               placeholder="my-model"
               ariaLabel="custom model id"
+              disabled={Boolean(initial)}
             />
           </Field>
         </div>
@@ -576,10 +504,28 @@ function CustomModelModal({
             />
           </Field>
         </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="price in /1M" hint="USD per million tokens; empty = unpublished">
+            <Input
+              type="number"
+              value={form.priceIn}
+              onChange={(v) => setForm((f) => ({ ...f, priceIn: v }))}
+              placeholder="1.00"
+              ariaLabel="custom model input price"
+            />
+          </Field>
+          <Field label="price out /1M" hint="USD per million tokens">
+            <Input
+              type="number"
+              value={form.priceOut}
+              onChange={(v) => setForm((f) => ({ ...f, priceOut: v }))}
+              placeholder="4.00"
+              ariaLabel="custom model output price"
+            />
+          </Field>
+        </div>
         <div className="flex min-w-0 flex-col gap-1.5">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">
-            capabilities
-          </span>
+          <span className="text-[12px] font-semibold text-ink-soft">capabilities</span>
           <div className="grid grid-cols-3 gap-x-3 gap-y-1.5">
             {CAPABILITY_KEYS.map((key) => (
               <label key={key} className="flex items-center gap-2 text-[12px] text-muted">

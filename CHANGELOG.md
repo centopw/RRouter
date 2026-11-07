@@ -51,6 +51,12 @@ All notable changes. Dates are local; versions follow semver once tagged.
   log, so nothing counts, resets or repairs a counter.
 
 ### Changed
+- Dialogs are right-hand drawers; test results and other transient outcomes use a toast
+  stack. The Logs row is clickable everywhere with a clock time + relative age. Models can be
+  edited per row (display, context, output, price, capabilities), metadata sync/fetch moved to
+  Settings with an explanation of each, and the API key is configured in a creation drawer and
+  revealed there once. Aliases and combos gained edit flows. Chart tooltips appear only on
+  hover, and the supplied brand logo replaces the interim mark.
 - The shell is light throughout: white rail, collapsible to icons, light-mode logo, and every
   dialog rebuilt as a flat card with a header, scrollable body and sticky footer. Destructive
   actions (provider, key, user, invitation, template, alias, combo, custom model, quota clear)

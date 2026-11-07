@@ -797,6 +797,7 @@ export function Modal({
   footer,
   width = "md",
   description,
+  variant = "drawer",
 }: {
   title: string;
   open: boolean;
@@ -807,6 +808,8 @@ export function Modal({
   width?: "md" | "lg" | "xl";
   /** Optional second line under the title. */
   description?: string;
+  /** Right-hand side sheet by default; small centred dialog for confirmations. */
+  variant?: "drawer" | "dialog";
 }) {
   const titleId = useId();
   const describedBy = useId();
@@ -827,10 +830,16 @@ export function Modal({
   }, [open, onClose]);
 
   if (!open) return null;
-  const widths = { md: "max-w-[560px]", lg: "max-w-[720px]", xl: "max-w-[900px]" } as const;
+  const drawer = variant === "drawer";
+  const dialogWidths = { md: "max-w-[560px]", lg: "max-w-[720px]", xl: "max-w-[900px]" } as const;
+  const drawerWidths = { md: "max-w-[520px]", lg: "max-w-[700px]", xl: "max-w-[880px]" } as const;
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-[rgba(16,18,20,0.48)] p-0 backdrop-blur-[1.5px] min-[560px]:items-center min-[560px]:p-6"
+      className={
+        drawer
+          ? "fixed inset-0 z-50 flex justify-end bg-[rgba(16,18,20,0.38)] backdrop-blur-[1.5px]"
+          : "fixed inset-0 z-50 flex items-end justify-center bg-[rgba(16,18,20,0.48)] p-0 backdrop-blur-[1.5px] min-[560px]:items-center min-[560px]:p-6"
+      }
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -844,9 +853,16 @@ export function Modal({
         aria-labelledby={titleId}
         aria-describedby={description ? describedBy : undefined}
         className={cx(
-          "flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-[14px] border border-line bg-surface",
-          "shadow-[0_24px_64px_rgba(16,18,20,0.22)] min-[560px]:rounded-[12px]",
-          widths[width],
+          "flex w-full flex-col overflow-hidden border bg-surface shadow-[0_24px_64px_rgba(16,18,20,0.22)]",
+          drawer
+            ? cx(
+                "drawer-panel h-full border-l border-line",
+                drawerWidths[width],
+              )
+            : cx(
+                "max-h-[92vh] rounded-t-[14px] rounded-[12px] border-line min-[560px]:rounded-[12px]",
+                dialogWidths[width],
+              ),
         )}
       >
         <header className="flex items-start justify-between gap-4 border-b border-line px-5 py-4 min-[560px]:px-6">
@@ -863,7 +879,7 @@ export function Modal({
           <button
             type="button"
             onClick={onClose}
-            aria-label="close dialog"
+            aria-label="close"
             className="-mr-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
           >
             <X size={16} aria-hidden />
@@ -878,6 +894,7 @@ export function Modal({
       </div>
     </div>
   );
+
 }
 
 /**
@@ -907,6 +924,7 @@ export function ConfirmDialog({
       title={title}
       open={open}
       onClose={onClose}
+      variant="dialog"
       footer={
         <>
           <Button onClick={onClose} disabled={busy}>

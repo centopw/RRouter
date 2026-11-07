@@ -12,6 +12,7 @@ export default function Aliases() {
   const [name, setName] = useState("");
   const [target, setTarget] = useState("");
   const [pending, setPending] = useState<{ alias: string } | null>(null);
+  const [editing, setEditing] = useState(false);
 
   const invalidate = () => {
     void client.invalidateQueries({ queryKey: qk.aliases });
@@ -24,6 +25,7 @@ export default function Aliases() {
     onSuccess: () => {
       setName("");
       setTarget("");
+      setEditing(false);
       invalidate();
     },
   });
@@ -45,9 +47,20 @@ export default function Aliases() {
       title: "",
       align: "right",
       render: (r) => (
-        <Button variant="danger" onClick={() => setPending({ alias: r.alias })}>
-          delete
-        </Button>
+        <span className="flex justify-end gap-1.5">
+          <Button
+            onClick={() => {
+              setName(r.alias);
+              setTarget(r.target);
+              setEditing(true);
+            }}
+          >
+            edit
+          </Button>
+          <Button variant="danger" onClick={() => setPending({ alias: r.alias })}>
+            delete
+          </Button>
+        </span>
       ),
     },
   ];
@@ -86,8 +99,19 @@ export default function Aliases() {
             </div>
           ) : null}
           <CardFooter>
+            {editing ? (
+              <Button
+                onClick={() => {
+                  setName("");
+                  setTarget("");
+                  setEditing(false);
+                }}
+              >
+                cancel
+              </Button>
+            ) : null}
             <Button type="submit" variant="primary" disabled={!name.trim() || !target || save.isPending}>
-              save alias
+              {editing ? "update alias" : "save alias"}
             </Button>
           </CardFooter>
         </form>

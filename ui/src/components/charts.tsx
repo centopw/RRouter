@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { compact, pct, usd } from "../lib/format";
-import { niceMax, peakIndex, xLabelIndices } from "../lib/activity";
+import { niceMax, xLabelIndices } from "../lib/activity";
 import { Dot, cx } from "./ui";
 
 /**
@@ -259,7 +259,6 @@ export function TrafficChart({
   labelEvery?: number;
 }) {
   const max = niceMax(Math.max(0, ...buckets.map((b) => b.total)));
-  const peak = peakIndex(buckets.map((b) => b.total));
   const ticks = [1, 0.5, 0];
   const labelIdx = new Set(xLabelIndices(buckets.length, labelEvery ?? Math.ceil(buckets.length / 6)));
 
@@ -301,7 +300,7 @@ export function TrafficChart({
                 >
                   <div
                     className="flex h-full w-full max-w-[56px] flex-col-reverse rounded-t-[3px] outline-none group-focus-visible:ring-2 group-focus-visible:ring-[var(--color-accent)]"
-                    style={{ opacity: peak === i || peak === -1 ? 1 : 0.92 }}
+                    style={{ opacity: 1 }}
                   >
                     {b.total === 0 ? (
                       <div
@@ -330,14 +329,6 @@ export function TrafficChart({
                   >
                     {tip}
                   </div>
-                  {i === peak ? (
-                    <div
-                      className="traffic-peak-tip pointer-events-none absolute top-1/2 z-10 block w-[208px] -translate-y-1/2"
-                      style={left ? { left: "calc(100% + 8px)" } : { right: "calc(100% + 8px)" }}
-                    >
-                      {tip}
-                    </div>
-                  ) : null}
                 </div>
               );
             })}

@@ -35,23 +35,13 @@ import {
 export default function Keys() {
   const keys = useKeys();
   const client = useQueryClient();
-  const [name, setName] = useState("");
-  const [issued, setIssued] = useState<NewKey | null>(null);
   const [editing, setEditing] = useState<KeyResult | null>(null);
+  const [creating, setCreating] = useState(false);
   const [revoking, setRevoking] = useState<KeyResult | null>(null);
 
   // The Modal re-focuses itself whenever `onClose` changes identity; keep it stable.
   const closeEdit = useCallback(() => setEditing(null), []);
 
-  const create = useMutation({
-    mutationFn: () => api.post<NewKey>("/api/keys", { name: name || null }),
-    onSuccess: (key) => {
-      setIssued(key);
-      setName("");
-      void client.invalidateQueries({ queryKey: qk.keys });
-      void client.invalidateQueries({ queryKey: qk.system });
-    },
-  });
 
   const remove = useMutation({
     mutationFn: (id: string) => api.del<{ deleted: boolean }>(`/api/keys/${id}`),
@@ -120,6 +110,11 @@ export default function Keys() {
       <PageHeader
         title="API Keys"
         subtitle="Clients authenticate with these against /v1. Keys are stored hashed; the plaintext is shown once."
+        actions={
+          <Button variant="primary" onClick={() => setCreating(true)}>
+            create key
+          </Button>
+        }
       />
 
       {keys.isError ? (
@@ -128,48 +123,13 @@ export default function Keys() {
         </div>
       ) : null}
 
-      {issued ? (
-        <Card className="mb-3 border-[var(--color-accent)]/35 bg-[var(--color-accent)]/10 px-5 py-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-[12px] text-[var(--color-accent-text)]">Copy this key now — it is not shown again.</div>
-              <code className="mt-1 block truncate font-mono text-[13px] text-fg">{issued.key}</code>
-            </div>
-            <Button
-              variant="primary"
-              onClick={() => {
-                void navigator.clipboard.writeText(issued.key);
-              }}
-            >
-              copy
-            </Button>
-          </div>
-        </Card>
-      ) : null}
-
       <Card>
         <CardHeader
           title="Keys"
           action={
-            <form
-              className="flex items-center gap-2"
-              onSubmit={(e) => {
-                e.preventDefault();
-                create.mutate();
-              }}
-            >
-              <Input value={name} onChange={setName} placeholder="key name" ariaLabel="new key name" className="w-[200px]" />
-              <Button type="submit" variant="primary" disabled={create.isPending}>
-                create key
-              </Button>
-            </form>
+            <span className="text-[11.5px] text-faint">{keys.data?.length ?? 0} configured</span>
           }
         />
-        {create.isError ? (
-          <div className="px-5 pb-3">
-            <ErrorNote error={create.error} />
-          </div>
-        ) : null}
         <DataTable
           columns={columns}
           rows={keys.data}
@@ -185,6 +145,17 @@ export default function Keys() {
           </span>
         </div>
       </Card>
+
+      {creating ? (
+        <CreateKeyModal
+          onClose={() => setCreating(false)}
+          onCreated={() => {
+            setCreating(false);
+            void client.invalidateQueries({ queryKey: qk.keys });
+            void client.invalidateQueries({ queryKey: qk.system });
+          }}
+        />
+      ) : null}
 
       {editing ? (
         <KeyLimitsModal key={editing.id} row={editing} onClose={closeEdit} />
@@ -453,6 +424,129 @@ const SCOPES: ReadonlyArray<{ id: KeyScope; label: string }> = [
   { id: "inference", label: "Inference" },
   { id: "admin", label: "Admin" },
 ];
+
+/** Configure a key before it exists; the plaintext is revealed inside this drawer once. */
+function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const [name, setName] = useState("");
+  const [scope, setScope] = useState<KeyScope>("inference");
+  const [rpm, setRpm] = useState("");
+  const [tpm, setTpm] = useState("");
+  const [tokens, setTokens] = useState("");
+  const [budget, setBudget] = useState("");
+  const [reset, setReset] = useState<BudgetWindow>("total");
+  const [models, setModels] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<unknown>(null);
+  const [created, setCreated] = useState<NewKey | null>(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      const key = await api.post<NewKey>("/api/keys", { name: name.trim() || null });
+      const patch: UpdateKey = {
+        scope,
+        rpm: Number(rpm) || 0,
+        tpm: Number(tpm) || 0,
+        budget_tokens: Number(tokens) || 0,
+        budget_window: reset,
+        allowed_models: models.length > 0 ? models : null,
+      };
+      const parsed = parseUsd(budget);
+      if (!("problem" in parsed)) patch.budget_micros = parsed.micros;
+      await api.patch<KeyResult>(`/api/keys/${key.id}`, patch);
+      setCreated(key);
+    } catch (e) {
+      setFailure(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (created) {
+    return (
+      <Modal
+        title="Key created"
+        open
+        onClose={onCreated}
+        description="This is the only time the plaintext is shown. Store it before closing."
+        footer={<Button variant="primary" onClick={onCreated}>done</Button>}
+      >
+        <div className="flex flex-col gap-3">
+          <CopyChip value={created.key} />
+          <p className="text-[12.5px] text-muted">
+            Clients send it as <code className="font-mono text-[11px]">Authorization: Bearer …</code>{" "}
+            against the endpoint on the Keys page.
+          </p>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal
+      title="Create API key"
+      open
+      onClose={onClose}
+      description="Limits are optional; empty means unlimited. The key is minted only when you create it."
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            cancel
+          </Button>
+          <Button variant="primary" onClick={submit} disabled={busy}>
+            {busy ? "creating…" : "create key"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <Field label="name" hint="how this key appears in logs and budgets">
+          <Input value={name} onChange={setName} placeholder="production-app" ariaLabel="key name" />
+        </Field>
+        <Field label="scope" hint="admin keys manage the gateway and cannot spend tokens">
+          <Segmented
+            options={[
+              { id: "inference", label: "Inference" },
+              { id: "admin", label: "Admin" },
+            ]}
+            value={scope}
+            onChange={(v) => setScope(v as KeyScope)}
+            ariaLabel="key scope"
+          />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="requests / min" hint="empty = unlimited">
+            <Input type="number" value={rpm} onChange={setRpm} ariaLabel="requests per minute" />
+          </Field>
+          <Field label="tokens / min" hint="empty = unlimited">
+            <Input type="number" value={tpm} onChange={setTpm} ariaLabel="tokens per minute" />
+          </Field>
+          <Field label="token budget" hint="empty = unlimited">
+            <Input type="number" value={tokens} onChange={setTokens} ariaLabel="token budget" />
+          </Field>
+          <Field label="spend budget (USD)" hint="empty = unlimited">
+            <Input value={budget} onChange={setBudget} ariaLabel="spend budget" />
+          </Field>
+        </div>
+        <Field label="budget window" hint="when the counters reset">
+          <Select
+            value={reset}
+            onChange={(v) => setReset(v as BudgetWindow)}
+            ariaLabel="budget window"
+          >
+            <option value="total">total (never)</option>
+            <option value="daily">daily</option>
+            <option value="weekly">weekly</option>
+            <option value="monthly">monthly</option>
+          </Select>
+        </Field>
+        <ModelPicker selected={models} onChange={setModels} />
+        {failure ? <ErrorNote error={failure} /> : null}
+      </div>
+    </Modal>
+  );
+}
 
 function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void }) {
   const [active, setActive] = useState(row.is_active);

@@ -10,6 +10,7 @@ import {
 } from "react-router-dom";
 import "./index.css";
 import { Shell } from "./app";
+import { ToastProvider } from "./components/toast";
 import { AuthGuard } from "./pages/auth/guard";
 
 const queryClient = new QueryClient({
@@ -252,7 +253,9 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <FatalBoundary>
       <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
+        <ToastProvider>
+          <RouterProvider router={router} />
+        </ToastProvider>
       </QueryClientProvider>
     </FatalBoundary>
   </StrictMode>,

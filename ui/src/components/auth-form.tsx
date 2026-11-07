@@ -20,7 +20,7 @@ export function AuthShell({
     <div className="flex min-h-full flex-col bg-bg text-fg">
       <header className="flex h-16 shrink-0 items-center gap-3 border-b border-line px-4 min-[820px]:px-7">
         <img
-          src={`${import.meta.env.BASE_URL}logo-mark-light.svg`}
+          src={`${import.meta.env.BASE_URL}logo-light.png`}
           alt=""
           width={26}
           height={26}

@@ -40,6 +40,7 @@ import {
   type OAuthProvider,
 } from "../lib/api";
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
+import { useToast } from "../components/toast";
 
 type AddStep = "kind" | "provider" | "key";
 
@@ -210,7 +211,7 @@ export default function Providers() {
           <Button onClick={() => setRouting(r)} title="edit routing priority and weight">
             edit
           </Button>
-          <TestButton id={r.id} onResult={(text, tone) => setNotice({ tone, text })} />
+          <TestButton id={r.id} />
           <Button
             onClick={() => toggle.mutate({ id: r.id, active: !r.is_active })}
             title={r.is_active ? "stop routing through this account" : "route through this account again"}
@@ -743,7 +744,8 @@ function ApiKeyForm({
   );
 }
 
-function TestButton({ id, onResult }: { id: string; onResult: (text: string, tone: "pos" | "neg") => void }) {
+function TestButton({ id }: { id: string }) {
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
   return (
     <Button
@@ -754,12 +756,13 @@ function TestButton({ id, onResult }: { id: string; onResult: (text: string, ton
           const res = await api.post<{ ok: boolean; status: number; latency_ms: number; error?: string }>(
             `/api/connections/${id}/test`,
           );
-          onResult(
-            res.ok ? `test ok · ${res.status} · ${res.latency_ms}ms` : `test failed · ${res.status} · ${res.error ?? ""}`,
-            res.ok ? "pos" : "neg",
-          );
+          if (res.ok) {
+            toast.success(`Connection works · ${res.status} · ${res.latency_ms}ms`);
+          } else {
+            toast.error(`Connection failed · ${res.status}`, res.error ?? undefined);
+          }
         } catch (e) {
-          onResult(e instanceof Error ? e.message : String(e), "neg");
+          toast.error("Connection test failed", e instanceof Error ? e.message : String(e));
         } finally {
           setBusy(false);
         }

@@ -12,6 +12,7 @@ export default function Combos() {
   const [name, setName] = useState("");
   const [models, setModels] = useState<string[]>([""]);
   const [pending, setPending] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
 
   const invalidate = () => {
     void client.invalidateQueries({ queryKey: qk.combos });
@@ -25,6 +26,7 @@ export default function Combos() {
     onSuccess: () => {
       setName("");
       setModels([""]);
+      setEditing(false);
       invalidate();
     },
   });
@@ -57,9 +59,20 @@ export default function Combos() {
       title: "",
       align: "right",
       render: (r) => (
-        <Button variant="danger" onClick={() => setPending(r.name)}>
-          delete
-        </Button>
+        <span className="flex justify-end gap-1.5">
+          <Button
+            onClick={() => {
+              setName(r.name);
+              setModels(r.models.length > 0 ? r.models : [""]);
+              setEditing(true);
+            }}
+          >
+            edit
+          </Button>
+          <Button variant="danger" onClick={() => setPending(r.name)}>
+            delete
+          </Button>
+        </span>
       ),
     },
   ];
@@ -100,8 +113,19 @@ export default function Combos() {
             </div>
           ) : null}
           <CardFooter>
+            {editing ? (
+              <Button
+                onClick={() => {
+                  setName("");
+                  setModels([""]);
+                  setEditing(false);
+                }}
+              >
+                cancel
+              </Button>
+            ) : null}
             <Button type="submit" variant="primary" disabled={!name.trim() || !models.some(Boolean) || save.isPending}>
-              save combo
+              {editing ? "update combo" : "save combo"}
             </Button>
           </CardFooter>
         </form>

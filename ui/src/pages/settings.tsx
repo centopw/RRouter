@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { api } from "../lib/api";
-import { useSystem } from "../lib/queries";
-import { Button, Card, CardHeader, ErrorNote, Field, Input, PageHeader, cx } from "../components/ui";
+import { api, type FetchResult, type SyncResult } from "../lib/api";
+import { qk, useConnections, useSystem } from "../lib/queries";
+import { Button, Card, CardHeader, ErrorNote, Field, Input, PageHeader, Select, cx } from "../components/ui";
 import { uptime } from "../lib/format";
 
 /** White-label brand fields stored through `/api/settings` (flat object). */
@@ -31,6 +31,10 @@ export default function Settings() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingRtk, setSavingRtk] = useState(false);
+  const connections = useConnections();
+  const [connectionId, setConnectionId] = useState("");
+  const [metadataBusy, setMetadataBusy] = useState<null | "sync" | "fetch">(null);
+  const [metadataNote, setMetadataNote] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
 
   useEffect(() => {
@@ -145,6 +149,98 @@ export default function Settings() {
               {error instanceof Error ? error.message : String(error)}
             </span>
           ) : null}
+        </div>
+      </Card>
+
+      <Card className="mt-5">
+        <CardHeader
+          title="Model metadata"
+          action={<span className="text-[11.5px] text-faint">registry-only · never changes routing</span>}
+        />
+        <div className="flex flex-col gap-4 px-5 pb-5">
+          <div className="grid gap-4 min-[800px]:grid-cols-2">
+            <div>
+              <p className="text-[12.5px] leading-relaxed text-muted">
+                <span className="font-medium text-fg">sync metadata</span> downloads models.dev and
+                updates context windows, prices and capabilities for models this gateway already
+                lists. It never adds or removes a model, so it cannot change routing.
+              </p>
+              <Button
+                className="mt-3"
+                disabled={metadataBusy !== null}
+                onClick={async () => {
+                  setMetadataBusy("sync");
+                  setMetadataNote(null);
+                  try {
+                    const result = await api.post<SyncResult>("/api/models/sync");
+                    setMetadataNote(`synced ${result.models} models from ${result.providers} providers`);
+                    await client.invalidateQueries({ queryKey: qk.models });
+                  } catch (e) {
+                    setError(e);
+                  } finally {
+                    setMetadataBusy(null);
+                  }
+                }}
+              >
+                {metadataBusy === "sync" ? "syncing…" : "sync metadata"}
+              </Button>
+            </div>
+            <div>
+              <p className="text-[12.5px] leading-relaxed text-muted">
+                <span className="font-medium text-fg">fetch</span> asks one connected account for
+                the model list the provider itself serves, and stores those ids as upstream rows.
+                Use it after adding a provider or when a new model is missing.
+              </p>
+              <div className="mt-3 flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <Select
+                    ariaLabel="fetch connection"
+                    value={connectionId || (connections.data?.[0]?.id ?? "")}
+                    onChange={setConnectionId}
+                    disabled={(connections.data ?? []).length === 0}
+                  >
+                    {(connections.data ?? []).length === 0 ? (
+                      <option value="">no connections</option>
+                    ) : (
+                      (connections.data ?? []).map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.provider} · {c.email ?? c.name ?? c.id.slice(0, 8)}
+                        </option>
+                      ))
+                    )}
+                  </Select>
+                </div>
+                <Button
+                  disabled={
+                    metadataBusy !== null ||
+                    (connections.data ?? []).length === 0
+                  }
+                  onClick={async () => {
+                    const target = connectionId || connections.data?.[0]?.id;
+                    if (!target) return;
+                    setMetadataBusy("fetch");
+                    setMetadataNote(null);
+                    try {
+                      const result = await api.post<FetchResult>("/api/models/fetch", {
+                        connection_id: target,
+                      });
+                      setMetadataNote(
+                        `${result.added} new of ${result.count} listed by ${result.provider}`,
+                      );
+                      await client.invalidateQueries({ queryKey: qk.models });
+                    } catch (e) {
+                      setError(e);
+                    } finally {
+                      setMetadataBusy(null);
+                    }
+                  }}
+                >
+                  {metadataBusy === "fetch" ? "fetching…" : "fetch"}
+                </Button>
+              </div>
+            </div>
+          </div>
+          {metadataNote ? <p className="text-[12px] text-[var(--color-pos)]">{metadataNote}</p> : null}
         </div>
       </Card>
 

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Badge, Button, Card, EmptyState, ErrorNote, PageHeader, Segmented, Select, cx } from "../components/ui";
-import { compact, ms, splitRef } from "../lib/format";
+import { ago, compact, ms, splitRef } from "../lib/format";
 import {
   usageFilterQuery,
   useConnections,
@@ -321,28 +321,30 @@ function LogTable({
             <div
               key={key}
               role="row"
+              tabIndex={0}
+              aria-label={`open request ${key}`}
+              onClick={() => onSelect(key)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelect(key);
+                }
+              }}
               className={cx(
                 GRID,
-                "border-b border-[var(--color-rule)] px-6 py-2.5 text-[13px] last:border-0",
+                "cursor-pointer border-b border-[var(--color-rule)] px-6 py-2.5 text-[13px] last:border-0",
                 selected ? "bg-[var(--color-surface-2)]" : "hover:bg-[var(--color-row-hover)]",
               )}
             >
-              <span role="cell">
-                <button
-                  type="button"
-                  aria-pressed={selected}
-                  onClick={() => onSelect(key)}
-                  className="font-mono text-[12px] text-muted hover:text-fg"
-                  title={new Date(row.ts * 1000).toLocaleString()}
-                >
-                  {new Date(row.ts * 1000).toLocaleString(undefined, {
-                    month: "short",
-                    day: "numeric",
+              <span role="cell" className="flex flex-col" title={new Date(row.ts * 1000).toLocaleString()}>
+                <span className="font-mono text-[12px] text-fg">
+                  {new Date(row.ts * 1000).toLocaleTimeString(undefined, {
                     hour: "2-digit",
                     minute: "2-digit",
                     second: "2-digit",
                   })}
-                </button>
+                </span>
+                <span className="text-[10.5px] text-faint">{ago(row.ts)}</span>
               </span>
               <span role="cell" className="min-w-0 truncate font-mono text-[12px]">
                 <span className="text-faint">{provider ?? row.provider}/</span>
