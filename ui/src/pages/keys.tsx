@@ -22,6 +22,7 @@ import {
   ApiError,
   api,
   type BudgetWindow,
+  type Guardrails,
   type KeyModelMap,
   type KeyResult,
   type NewKey,
@@ -226,7 +227,31 @@ function Limits({ row }: { row: KeyResult }) {
           <span className="text-muted">{row.budget_window}</span>
         </span>
       ) : null}
+      {row.guardrails ? (
+        <span>
+          <span className="text-faint"> · </span>
+          <Guarded guardrails={row.guardrails} />
+        </span>
+      ) : null}
     </span>
+  );
+}
+
+/** Faint table marker; the tooltip spells out every check the key carries. */
+function Guarded({ guardrails }: { guardrails: Guardrails }) {
+  const cap = guardrails.max_prompt_chars;
+  // Defaults are dropped on the wire, so a policy that only caps prompts has no `blocked`.
+  const blocked = guardrails.blocked ?? [];
+  if (cap === undefined && blocked.length === 0 && !guardrails.scan_output) return null;
+  const limits = [
+    cap === undefined ? "prompt length: unlimited" : `prompt: at most ${compact(cap)} chars`,
+    blocked.length === 0 ? "no blocked phrases" : `blocked: ${blocked.join(", ")}`,
+    guardrails.scan_output ? "responses scanned too — a hit blocks the reply" : "prompts only",
+  ];
+  return (
+    <Badge title={limits.join("\n")}>
+      {blocked.length > 0 ? `${blocked.length} blocked` : "guarded"}
+    </Badge>
   );
 }
 
@@ -400,6 +425,10 @@ function validateMap(
   return null;
 }
 
+/** The server's policy limits; enforcing them here keeps a 400 from ever being the first hint. */
+const MAX_BLOCKED_TERMS = 200;
+const MAX_TERM_CHARS = 200;
+
 function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void }) {
   const [active, setActive] = useState(row.is_active);
   const [rpm, setRpm] = useState(row.rpm > 0 ? String(row.rpm) : "");
@@ -410,6 +439,13 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
   const [expires, setExpires] = useState(toDateInput(row.expires_at));
   const [allowed, setAllowed] = useState<string[]>(row.allowed_models ?? []);
   const [resets, setResets] = useState<BudgetWindow>(row.budget_window);
+  const [maxPrompt, setMaxPrompt] = useState(
+    row.guardrails?.max_prompt_chars !== undefined ? String(row.guardrails.max_prompt_chars) : "",
+  );
+  const [blocked, setBlocked] = useState<string[]>(row.guardrails?.blocked ?? []);
+  const [scanOutput, setScanOutput] = useState(row.guardrails?.scan_output ?? false);
+  const [term, setTerm] = useState("");
+  const [guardProblem, setGuardProblem] = useState<string | null>(null);
 
   // `baseline === null` until the map has been read once: until then the section shows
   // loading or its retry, and a save leaves the server's map untouched rather than clearing it.
@@ -451,6 +487,29 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
     setPairs(pairs.map((pair, i) => (i === index ? { ...pair, ...next } : pair)));
   };
 
+  const addTerm = () => {
+    // Stored trimmed and lowercased: the server matches substrings case-insensitively,
+    // so two spellings of one phrase would be two chips that block the same text.
+    const next = term.trim().toLowerCase();
+    if (next === "") return;
+    if (blocked.length >= MAX_BLOCKED_TERMS) {
+      setGuardProblem(`a key carries at most ${MAX_BLOCKED_TERMS} blocked phrases`);
+      return;
+    }
+    if ([...next].length > MAX_TERM_CHARS) {
+      setGuardProblem(`a blocked phrase is limited to ${MAX_TERM_CHARS} characters`);
+      return;
+    }
+    if (blocked.includes(next)) {
+      setTerm("");
+      setGuardProblem(null);
+      return;
+    }
+    setBlocked([...blocked, next]);
+    setTerm("");
+    setGuardProblem(null);
+  };
+
   const summary =
     baseline === null
       ? map.isError
@@ -474,6 +533,23 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
       return;
     }
     setProblem(null);
+    // `0` is a real cap here ("no prompt at all"), so empty must stay absent rather than
+    // collapse into the 0-is-unlimited spelling the other limits use.
+    const capText = maxPrompt.trim();
+    const cap = capText === "" ? undefined : Number(capText);
+    if (cap !== undefined && (!Number.isInteger(cap) || cap < 0)) {
+      setGuardProblem("max prompt characters: whole number, or empty for unlimited");
+      return;
+    }
+    setGuardProblem(null);
+    const guardrails: Guardrails | null =
+      cap === undefined && blocked.length === 0 && !scanOutput
+        ? null
+        : {
+            ...(cap === undefined ? {} : { max_prompt_chars: cap }),
+            blocked,
+            scan_output: scanOutput,
+          };
     setFailure(null);
     setBusy(true);
     const patch: UpdateKey = {
@@ -485,6 +561,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
       budget_window: resets,
       allowed_models: allowed.length === 0 ? null : allowed,
       expires_at: fromDateInput(expires),
+      guardrails,
     };
     void (async () => {
       // Limits first, then the map: a failed PUT keeps the modal open with the error and
@@ -694,9 +771,120 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
           ) : null}
         </section>
 
+        <section className="flex min-w-0 flex-col gap-2">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">
+              guardrails
+            </span>
+            <span className="text-[11px] text-faint tnum">
+              {blocked.length}/{MAX_BLOCKED_TERMS} blocked
+            </span>
+          </div>
+          <span className="text-[11px] text-faint">
+            Case-insensitive substring match, no regex. A hit refuses the request; with
+            response scanning it refuses the reply too.
+          </span>
+
+          <Field label="max prompt characters" hint="empty = unlimited; 0 refuses every prompt">
+            <Input
+              type="number"
+              value={maxPrompt}
+              onChange={(v) => {
+                setMaxPrompt(v);
+                setGuardProblem(null);
+              }}
+              placeholder="unlimited"
+              ariaLabel="max prompt characters"
+              disabled={busy}
+            />
+          </Field>
+
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">
+              blocked phrases
+            </span>
+            <form
+              className="flex items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                addTerm();
+              }}
+            >
+              <input
+                value={term}
+                disabled={busy}
+                placeholder="phrase to block"
+                aria-label="blocked phrase"
+                onChange={(e) => {
+                  setTerm(e.target.value);
+                  setGuardProblem(null);
+                }}
+                className="h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 text-[13px] text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
+              />
+              <Button
+                type="submit"
+                disabled={
+                  busy || term.trim() === "" || blocked.length >= MAX_BLOCKED_TERMS
+                }
+              >
+                add
+              </Button>
+            </form>
+            {blocked.length === 0 ? (
+              <div className="text-[12px] text-faint">
+                none — every prompt passes through
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {blocked.map((phrase) => (
+                  <span
+                    key={phrase}
+                    className="inline-flex max-w-full items-center gap-1 rounded-md border border-line bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
+                  >
+                    <span className="break-all font-mono">{phrase}</span>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      aria-label={`remove blocked phrase ${phrase}`}
+                      onClick={() => setBlocked(blocked.filter((p) => p !== phrase))}
+                      className="text-faint hover:text-neg"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <label className="flex items-start gap-2 text-[13px] text-fg">
+            <input
+              type="checkbox"
+              checked={scanOutput}
+              disabled={busy}
+              aria-label="scan responses"
+              onChange={(e) => setScanOutput(e.target.checked)}
+              className="mt-0.5 h-3.5 w-3.5 rounded border border-line-strong bg-[var(--color-surface-2)] accent-[var(--color-accent)]"
+            />
+            <span>
+              scan responses
+              <span className="mt-0.5 block text-[11px] text-faint">
+                a matching response is refused before it reaches the client, and a stream is
+                cut with an error instead of completing. Needs at least one blocked phrase.
+              </span>
+            </span>
+          </label>
+
+          {guardProblem ? (
+            <span role="alert" className="text-[12px] text-neg">
+              {guardProblem}
+            </span>
+          ) : null}
+        </section>
+
         <div className="flex items-center justify-between gap-3 text-[11px] text-faint">
           <span className="font-mono">{row.id}</span>
-          <span>0 or empty limits mean unlimited</span>
+          <span>0 or empty limits mean unlimited, except max prompt characters</span>
         </div>
 
         {failure ? <InlineError error={failure} /> : null}

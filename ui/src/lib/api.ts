@@ -176,11 +176,26 @@ export type KeyModelMap = { from: string; to: string };
 export type BudgetWindow = "total" | "daily" | "weekly" | "monthly";
 
 /**
+ * Traffic policy on one key. `max_prompt_chars` absent means unlimited — `0` is a real
+ * cap ("no prompt at all"), not the "unlimited" spelling the other numeric limits use.
+ * `blocked` holds case-insensitive substrings, stored trimmed, lowercased and unique;
+ * `scan_output` also checks responses, where a hit cuts a stream with an error.
+ * The server omits defaulted fields and stores an all-default policy as null, so a
+ * policy that only caps prompts arrives without `blocked` or `scan_output`.
+ */
+export type Guardrails = {
+  max_prompt_chars?: number;
+  blocked: string[];
+  scan_output: boolean;
+};
+
+/**
  * A gateway key with its governance limits. `rpm`/`tpm`/`budget_tokens`/
  * `budget_micros` use 0 for "unlimited"; `allowed_models` null means any model;
  * `expires_at` null means never. `spent_micros` is the key's USD spend in
  * millionths of a dollar, so 1 USD = 1_000_000.
  * `models` is the key's rewrite map, absent when the server predates it.
+ * `guardrails` null means no checks at all.
  */
 export type KeyResult = {
   id: string;
@@ -200,6 +215,7 @@ export type KeyResult = {
   allowed_models: string[] | null;
   expires_at: number | null;
   models?: KeyModelMap[];
+  guardrails: Guardrails | null;
 };
 
 /** Exactly the fields `PATCH /api/keys/{id}` accepts; null clears a nullable field. */
@@ -214,6 +230,8 @@ export type UpdateKey = Partial<{
   budget_window: BudgetWindow;
   allowed_models: string[] | null;
   expires_at: number | null;
+  /** Whole policy replace; null clears every check. */
+  guardrails: Guardrails | null;
 }>;
 
 /** Exactly the fields `PATCH /api/connections/{id}` accepts; weight is clamped to 1..=1000. */
