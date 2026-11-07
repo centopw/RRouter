@@ -175,17 +175,27 @@ export type UsageFilters = {
   status?: "2xx" | "error";
 };
 
+/**
+ * The filter half of `/api/usage`'s query string. Shared by the log walk and the CSV export
+ * so both select exactly the same rows; the cursor and limit stay with the walk.
+ */
+export function usageFilterQuery(filters: UsageFilters): URLSearchParams {
+  const query = new URLSearchParams();
+  if (filters.hours !== null) query.set("hours", String(filters.hours));
+  if (filters.provider) query.set("provider", filters.provider);
+  if (filters.model) query.set("model", filters.model);
+  if (filters.keyId) query.set("key_id", filters.keyId);
+  if (filters.status) query.set("status", filters.status);
+  return query;
+}
+
 /** Keyset-paged request log, newest first. Load older until the server reports no cursor. */
 export function useUsagePage(filters: UsageFilters) {
   return useInfiniteQuery({
     queryKey: qk.usagePages(filters),
     queryFn: ({ pageParam }) => {
-      const query = new URLSearchParams({ limit: String(USAGE_PAGE_SIZE) });
-      if (filters.hours !== null) query.set("hours", String(filters.hours));
-      if (filters.provider) query.set("provider", filters.provider);
-      if (filters.model) query.set("model", filters.model);
-      if (filters.keyId) query.set("key_id", filters.keyId);
-      if (filters.status) query.set("status", filters.status);
+      const query = usageFilterQuery(filters);
+      query.set("limit", String(USAGE_PAGE_SIZE));
       if (pageParam) {
         query.set("before", String(pageParam.before));
         query.set("before_id", String(pageParam.before_id));

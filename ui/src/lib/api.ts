@@ -55,17 +55,55 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const text = await res.text();
   const body: unknown = text ? safeJson(text) : null;
-  if (!res.ok) {
-    const message =
-      (isObject(body) && isObject(body.error) && typeof body.error.message === "string"
-        ? body.error.message
-        : null) ?? `${res.status} ${res.statusText}`;
-    if (res.status === 401 && isAdminPath(path)) {
-      window.dispatchEvent(new Event(ADMIN_REQUIRED_EVENT));
-    }
-    throw new ApiError(res.status, message, body);
-  }
+  if (!res.ok) throw apiError(res, body, path);
   return body as T;
+}
+
+/**
+ * The one failure shape: the server's `{error: {message}}` when it sent one, otherwise the
+ * status line. A 401 on an admin path re-asks for the token, whichever fetch hit it.
+ */
+function apiError(res: Response, body: unknown, path: string): ApiError {
+  const message =
+    (isObject(body) && isObject(body.error) && typeof body.error.message === "string"
+      ? body.error.message
+      : null) ?? `${res.status} ${res.statusText}`;
+  if (res.status === 401 && isAdminPath(path)) {
+    window.dispatchEvent(new Event(ADMIN_REQUIRED_EVENT));
+  }
+  return new ApiError(res.status, message, body);
+}
+
+/**
+ * Binary fetch for the CSV export: same token and failure shape as `request`, but the body
+ * stays a blob and the server's `content-disposition` filename comes along.
+ */
+export async function download(path: string): Promise<{ blob: Blob; filename: string | null }> {
+  const token = isAdminPath(path) ? adminToken() : null;
+  const res = await fetch(path, { headers: token ? { "x-admin-token": token } : {} });
+  if (!res.ok) {
+    const text = await res.text();
+    const body: unknown = text ? safeJson(text) : null;
+    throw apiError(res, body, path);
+  }
+  return {
+    blob: await res.blob(),
+    filename: attachmentName(res.headers.get("content-disposition")),
+  };
+}
+
+/** `filename="x.csv"`, or RFC 5987 `filename*=UTF-8''x.csv`; null when unnamed. */
+function attachmentName(header: string | null): string | null {
+  if (!header) return null;
+  const encoded = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header)?.[1]?.trim();
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return null;
+    }
+  }
+  return /filename\s*=\s*"?([^";]+)"?/i.exec(header)?.[1]?.trim() ?? null;
 }
 
 function safeJson(text: string): unknown {

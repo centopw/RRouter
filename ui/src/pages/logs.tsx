@@ -1,8 +1,15 @@
 import { useMemo, useState } from "react";
 import { Badge, Button, Card, EmptyState, ErrorNote, PageHeader, Segmented, Select, cx } from "../components/ui";
 import { compact, ms, splitRef } from "../lib/format";
-import { useConnections, useKeys, useModels, useUsagePage, type UsageFilters } from "../lib/queries";
-import type { Model, UsageEvent } from "../lib/api";
+import {
+  usageFilterQuery,
+  useConnections,
+  useKeys,
+  useModels,
+  useUsagePage,
+  type UsageFilters,
+} from "../lib/queries";
+import { download, type Model, type UsageEvent } from "../lib/api";
 import { cacheLabel, RequestDetail } from "./activity/request-log";
 
 /** Incident review: every request newest first, filtered on the server, paged backwards on demand. */
@@ -26,6 +33,8 @@ export default function Logs() {
   const [keyId, setKeyId] = useState(ALL);
   const [rangeId, setRangeId] = useState<RangeId>("24h");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const range = RANGES.find((r) => r.id === rangeId) ?? RANGES[1];
   // Every filter reaches the server and is part of the query key: a change restarts from page one.
@@ -85,17 +94,47 @@ export default function Logs() {
     setKeyId(ALL);
   };
 
+  // Same filters as the table, without its cursor: the server streams every matching row.
+  const exportCsv = async () => {
+    setExporting(true);
+    setExportError(null);
+    try {
+      const query = usageFilterQuery(filters);
+      const { blob, filename } = await download(`/api/usage/export.csv?${query}`);
+      const now = new Date();
+      const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(
+        now.getDate(),
+      ).padStart(2, "0")}`;
+      saveBlob(blob, filename ?? `rrouter-usage-${stamp}.csv`);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="mx-auto max-w-[1160px] max-[820px]:-mx-4">
       <PageHeader
         title="Logs"
         subtitle="Every request, newest first. Filter, select one to inspect it, load older on demand."
         actions={
-          <Button variant="quiet" onClick={() => void usage.refetch()} disabled={usage.isFetching}>
-            {usage.isFetching ? "Refreshing…" : "Refresh"}
-          </Button>
+          <>
+            <Button variant="quiet" onClick={() => void exportCsv()} disabled={exporting}>
+              {exporting ? "Exporting…" : "Export CSV"}
+            </Button>
+            <Button variant="quiet" onClick={() => void usage.refetch()} disabled={usage.isFetching}>
+              {usage.isFetching ? "Refreshing…" : "Refresh"}
+            </Button>
+          </>
         }
       />
+
+      {exportError ? (
+        <div className="mb-4">
+          <ErrorNote error={exportError} />
+        </div>
+      ) : null}
 
       <Card>
         <div className="flex flex-wrap items-center gap-2 border-b border-line px-5 py-3">
@@ -138,7 +177,22 @@ export default function Logs() {
               </option>
             ))}
           </Select>
+          <Button
+            variant="quiet"
+            className="ml-auto"
+            onClick={() => void exportCsv()}
+            disabled={exporting}
+            title="Download these rows as CSV"
+          >
+            {exporting ? "Exporting…" : "Export CSV"}
+          </Button>
         </div>
+
+        {exportError ? (
+          <div className="border-t border-line px-5 py-2">
+            <ErrorNote error={exportError} />
+          </div>
+        ) : null}
 
         <div className="border-t border-line">
           {usage.isPending ? (
@@ -334,6 +388,18 @@ function LogTable({
 function rowKey(row: UsageEvent): string {
   if (row.request_id) return row.request_id;
   return row.id !== null ? `#${row.id}` : `${row.ts}:${row.model}:${row.latency_ms}`;
+}
+
+/** Hand a blob to the browser's downloader, then drop the object URL it used. */
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function isFailed(row: UsageEvent): boolean {
