@@ -11,7 +11,9 @@ import {
   Input,
   Modal,
   PageHeader,
+  ConfirmDialog,
   Segmented,
+  Select,
   cx,
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
@@ -19,6 +21,7 @@ import { OAuthDialog } from "../components/oauth-dialog";
 import {
   qk,
   useAccountQuotas,
+  useAccountSubscriptions,
   useClearAccountQuota,
   useConnections,
   useModelProviders,
@@ -30,6 +33,8 @@ import {
   api,
   type AccountQuotaRow,
   type AccountQuotaWindow,
+  type AccountSubscription,
+  type SubscriptionWindow,
   type Connection,
   type ModelProvider,
   type OAuthProvider,
@@ -52,7 +57,9 @@ export default function Providers() {
   const [notice, setNotice] = useState<{ tone: "pos" | "neg"; text: string } | null>(null);
   const [routing, setRouting] = useState<Connection | null>(null);
   const [quotaFor, setQuotaFor] = useState<AccountQuotaRow | null>(null);
+  const [removing, setRemoving] = useState<Connection | null>(null);
   const quotas = useAccountQuotas();
+  const subscriptions = useAccountSubscriptions();
 
   const accounts = connections.data ?? [];
   const connectedIds = useMemo(() => new Set(accounts.map((a) => a.provider)), [accounts]);
@@ -210,14 +217,7 @@ export default function Providers() {
           >
             {r.is_active ? "disable" : "enable"}
           </Button>
-          <Button
-            variant="danger"
-            onClick={() => {
-              if (confirm(`Remove ${r.name ?? r.provider}? Clients routed only here will fall back or fail.`)) {
-                remove.mutate(r.id);
-              }
-            }}
-          >
+          <Button variant="danger" onClick={() => setRemoving(r)}>
             remove
           </Button>
         </span>
@@ -235,6 +235,19 @@ export default function Providers() {
             add provider
           </Button>
         }
+      />
+
+      <ConfirmDialog
+        open={removing !== null}
+        title="Remove provider account"
+        message={<>Remove <span className="font-medium">{removing?.name ?? removing?.provider}</span>? Requests routed only here fall back or fail, and its stored credential is deleted.</>}
+        confirmLabel="Remove account"
+        busy={remove.isPending}
+        onConfirm={() => {
+          if (removing) remove.mutate(removing.id);
+          setRemoving(null);
+        }}
+        onClose={() => setRemoving(null)}
       />
 
       {notice ? (
@@ -286,10 +299,43 @@ export default function Providers() {
         <div className="mt-4">
           <Card>
             <CardHeader
-              title="Account quotas"
+              title="Subscription limits"
               action={
                 <span className="text-[11px] text-faint">
-                  per account · UTC calendar windows · an exhausted account is skipped by the router
+                  {subscriptions.isFetching ? "refreshing…" : "from your provider plan · refreshes every minute"}
+                </span>
+              }
+            />
+            {subscriptions.isError ? (
+              <div className="px-5 pb-4">
+                <ErrorNote error={subscriptions.error} onRetry={() => void subscriptions.refetch()} />
+              </div>
+            ) : subscriptions.isLoading ? (
+              <p className="px-5 pb-4 text-[12.5px] text-faint">reading plan limits…</p>
+            ) : (subscriptions.data ?? []).length === 0 ? (
+              <p className="px-5 pb-4 text-[12.5px] text-muted">
+                No subscription limits to show. Claude and Codex sign-ins report their plan windows;
+                API-key accounts have none.
+              </p>
+            ) : (
+              <div>
+                {(subscriptions.data ?? []).map((account) => (
+                  <SubscriptionRow key={account.connection_id} account={account} />
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      ) : null}
+
+      {!connections.isLoading && accounts.length > 0 ? (
+        <div className="mt-4">
+          <Card>
+            <CardHeader
+              title="Operator limits"
+              action={
+                <span className="text-[11px] text-faint">
+                  optional caps you set · an exhausted account is skipped by the router
                 </span>
               }
             />
@@ -670,18 +716,13 @@ function ApiKeyForm({
       }}
     >
       <Field label="provider">
-        <select
-          value={provider}
-          onChange={(e) => setProvider(e.target.value)}
-          aria-label="api key provider"
-          className="h-8 w-full rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 text-[13px] text-fg"
-        >
+        <Select value={provider} onChange={setProvider} ariaLabel="api key provider">
           {providers.map((p) => (
             <option key={p.id} value={p.id}>
               {p.display}
             </option>
           ))}
-        </select>
+        </Select>
       </Field>
       <Field label="label" hint="how this account appears in the table">
         <Input value={name} onChange={setName} placeholder="production-key" ariaLabel="account label" />
@@ -742,6 +783,78 @@ const QUOTA_WINDOWS = [
   { id: "monthly" as const, label: "monthly" },
 ];
 
+/** Green under 70%, amber to 89%, red at 90%+. Text carries the number too. */
+function usageTone(percent: number): { fill: string; text: string } {
+  if (percent >= 90) return { fill: "bg-[var(--color-neg-fill)]", text: "text-[var(--color-neg)]" };
+  if (percent >= 70) return { fill: "bg-[var(--color-warn)]", text: "text-[var(--color-warn)]" };
+  return { fill: "bg-[var(--color-pos)]", text: "text-[var(--color-pos)]" };
+}
+
+/** "1h 35m" until the window rolls over; empty when the provider gave no timestamp. */
+function until(ts: number | null): string {
+  if (!ts) return "";
+  const secs = Math.max(0, ts - Math.floor(Date.now() / 1000));
+  if (secs < 3600) return `${Math.max(1, Math.round(secs / 60))}m`;
+  if (secs < 86_400) return `${Math.floor(secs / 3600)}h ${Math.round((secs % 3600) / 60)}m`;
+  return `${Math.floor(secs / 86_400)}d ${Math.round((secs % 86_400) / 3600)}h`;
+}
+
+function WindowBar({ window }: { window: SubscriptionWindow }) {
+  const percent = Math.round(window.used_percent);
+  const tone = usageTone(percent);
+  const short = window.id === "five_hour" ? "5h" : window.id === "weekly" ? "wk" : window.label.toLowerCase();
+  return (
+    <div className="flex items-center gap-2 text-[11.5px]">
+      <span className="w-9 shrink-0 text-faint" title={window.label}>
+        {short}
+      </span>
+      <span className="h-1.5 min-w-[48px] flex-1 overflow-hidden rounded-full bg-rule" aria-hidden>
+        <span className={cx("block h-full rounded-full", tone.fill)} style={{ width: `${percent}%` }} />
+      </span>
+      <span className={cx("w-9 shrink-0 text-right font-medium tnum", tone.text)}>{percent}%</span>
+      {window.resets_at ? (
+        <span className="w-14 shrink-0 text-right text-faint" title={`resets ${when(window.resets_at)}`}>
+          {until(window.resets_at)}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function SubscriptionRow({ account }: { account: AccountSubscription }) {
+  return (
+    <div className="border-b border-rule px-5 py-3 last:border-0">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <span className="text-[13.5px] font-medium text-fg">
+          {account.provider === "claude" ? "Claude" : account.provider === "codex" ? "Codex" : account.provider}
+        </span>
+        <span className="min-w-0 truncate text-[12px] text-muted">{account.name ?? ""}</span>
+        {account.plan ? <Badge tone="neutral">{account.plan}</Badge> : null}
+        {account.error ? (
+          <span
+            className="max-w-full truncate text-[11.5px] text-faint"
+            title={account.error}
+          >
+            {account.error.length > 110 ? `${account.error.slice(0, 110)}…` : account.error}
+          </span>
+        ) : (
+          <span className="ml-auto flex items-center gap-1.5 text-[11px] text-faint">
+            <Dot tone="pos" />
+            live
+          </span>
+        )}
+      </div>
+      {account.windows.length > 0 ? (
+        <div className="mt-2 grid gap-1.5 min-[700px]:grid-cols-2 min-[1100px]:grid-cols-3">
+          {account.windows.map((window) => (
+            <WindowBar key={window.id} window={window} />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /**
  * What the account spent inside its window, against each limit it sets. A quota with
  * no limit still shows the spend: "unlimited" is a permission, not an absence of data.
@@ -781,6 +894,7 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
   const [tokens, setTokens] = useState(row.max_tokens > 0 ? String(row.max_tokens) : "");
   const [cost, setCost] = useState(usdInput(row.max_cost_micros));
   const [failure, setFailure] = useState<unknown>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   const countProblem = (value: string): string | null => {
     const text = value.trim();
@@ -817,6 +931,7 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
     <Modal
       title="Account quota"
       open
+      width="lg"
       onClose={onClose}
       footer={
         <>
@@ -824,16 +939,7 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
             cancel
           </Button>
           {configured ? (
-            <Button
-              variant="danger"
-              disabled={busy}
-              onClick={() => {
-                if (confirm(`Remove the quota for ${row.name ?? row.provider}? It becomes unlimited.`)) {
-                  setFailure(null);
-                  clear.mutate(row.connection_id, { onSuccess: onClose, onError: setFailure });
-                }
-              }}
-            >
+            <Button variant="danger" disabled={busy} onClick={() => setConfirmClear(true)}>
               clear
             </Button>
           ) : null}
@@ -843,6 +949,20 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
         </>
       }
     >
+      <ConfirmDialog
+        open={confirmClear}
+        title="Clear account quota"
+        message={<>The operator limits for <span className="font-medium">{row.name ?? row.provider}</span> are removed. Its subscription limits, when the provider exposes them, are unaffected.</>}
+        confirmLabel="Clear quota"
+        busy={clear.isPending}
+        onConfirm={() => {
+          setFailure(null);
+          clear.mutate(row.connection_id, { onSuccess: onClose, onError: setFailure });
+          setConfirmClear(false);
+        }}
+        onClose={() => setConfirmClear(false)}
+      />
+
       <div className="flex flex-col gap-4">
         <p className="text-[12px] leading-relaxed text-muted">
           Measured from the start of the current UTC window. The router skips an account

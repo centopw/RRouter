@@ -11,6 +11,8 @@ import {
   ListBullets,
   MagnifyingGlass,
   PlugsConnected,
+  SidebarSimple,
+  SignOut,
   Shuffle,
   UsersThree,
 } from "@phosphor-icons/react";
@@ -53,6 +55,7 @@ const NAV: NavItem[] = [
 /** A first run (no accounts, no keys) lands on the wizard once; the flag is set by the
  *  wizard itself when the operator skips or finishes, so this never fights a choice. */
 const SETUP_DISMISSED = "rrouter:setup-dismissed";
+const SIDEBAR_COLLAPSED = "rrouter:sidebar-collapsed";
 
 export function Shell() {
   const health = useHealth();
@@ -77,6 +80,24 @@ export function Shell() {
 
   const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // A collapsed rail keeps the icons and drops the labels; the choice survives reloads.
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(SIDEBAR_COLLAPSED) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleCollapsed = () => {
+    setCollapsed((value) => {
+      try {
+        window.localStorage.setItem(SIDEBAR_COLLAPSED, value ? "0" : "1");
+      } catch {
+        // Storage can be unavailable; the in-memory choice still works.
+      }
+      return !value;
+    });
+  };
   // Any 401 from an admin path means the deployment set RROUTER_ADMIN_TOKEN and this tab
   // has not presented it yet (or presented a wrong one).
   const [adminRequired, setAdminRequired] = useState(false);
@@ -125,34 +146,58 @@ export function Shell() {
 
   return (
     <div className="flex h-full flex-col min-[820px]:flex-row">
-      <aside className="hidden w-[236px] shrink-0 flex-col border-r border-line bg-[var(--color-sidebar)] min-[820px]:flex">
-        <div className="px-3 pt-3">
-          <div className="flex items-center gap-2 rounded-lg px-2 py-2">
-            <img
-              src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark.png`}
-              alt=""
-              width={30}
-              height={30}
-              className="h-[30px] w-[30px] shrink-0 select-none object-contain"
-            />
-            <span className="truncate text-[14px] font-semibold tracking-[-0.01em] text-white">{name}</span>
-          </div>
+      <aside
+        className={cx(
+          "hidden shrink-0 flex-col border-r border-line bg-[var(--color-sidebar)] transition-[width] duration-[var(--motion-base)] min-[820px]:flex",
+          collapsed ? "w-[68px]" : "w-[236px]",
+        )}
+      >
+        <div className={cx("flex items-center gap-2 pt-3", collapsed ? "justify-center px-2" : "px-3")}>
+          <img
+            src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark-light.png`}
+            alt=""
+            width={30}
+            height={30}
+            className="h-[30px] w-[30px] shrink-0 select-none object-contain"
+          />
+          {!collapsed ? (
+            <span className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-[-0.01em] text-fg">
+              {name}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            aria-label={collapsed ? "expand sidebar" : "collapse sidebar"}
+            aria-expanded={!collapsed}
+            title={collapsed ? "expand sidebar" : "collapse sidebar"}
+            className={cx(
+              "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text",
+              collapsed && "mt-1",
+            )}
+          >
+            <SidebarSimple size={16} aria-hidden />
+          </button>
         </div>
 
-        <div className="px-3 pb-2">
-          <JumpButton onClick={() => setPaletteOpen(true)} />
+        <div className={collapsed ? "px-2 pb-1 pt-3" : "px-3 pb-2 pt-2"}>
+          <JumpButton onClick={() => setPaletteOpen(true)} collapsed={collapsed} />
         </div>
 
-        <nav className="mt-3 flex-1 overflow-y-auto px-2 pb-3" aria-label="Dashboard">
+        <nav className={cx("mt-2 flex-1 overflow-y-auto pb-3", collapsed ? "px-2" : "px-2")} aria-label="Dashboard">
           {groups.map(([group, items]) => (
-            <div key={group} className="mb-4">
-              <div className="px-2 pb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-white/45">
-                {group}
-              </div>
+            <div key={group} className="mb-3">
+              {collapsed ? (
+                <div aria-hidden className="mx-2 mb-2 border-t border-line" />
+              ) : (
+                <div className="px-2 pb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-faint">
+                  {group}
+                </div>
+              )}
               <ul className="space-y-0.5">
                 {items.map((item) => (
                   <li key={item.to}>
-                    <NavItemLink item={item} variant="sidebar" />
+                    <NavItemLink item={item} variant="sidebar" collapsed={collapsed} />
                   </li>
                 ))}
               </ul>
@@ -160,27 +205,34 @@ export function Shell() {
           ))}
         </nav>
 
-        <SessionFooter />
+        <SessionFooter collapsed={collapsed} />
 
-        <SidebarFooter
-          endpoint={endpoint}
-          running={running}
-          uptimeSecs={health.data?.uptime_secs ?? 0}
-          version={health.data?.version}
-          note={brand.footer_text}
-        />
+        {collapsed ? (
+          <div className="flex justify-center border-t border-line py-3" title={running ? "gateway running" : "gateway unreachable"}>
+            <RunningDot running={running} />
+            <span className="sr-only">{running ? "Gateway running" : "Gateway unreachable"}</span>
+          </div>
+        ) : (
+          <SidebarFooter
+            endpoint={endpoint}
+            running={running}
+            uptimeSecs={health.data?.uptime_secs ?? 0}
+            version={health.data?.version}
+            note={brand.footer_text}
+          />
+        )}
       </aside>
 
-      <header className="shrink-0 border-b border-white/10 bg-[var(--color-sidebar)] min-[820px]:hidden">
+      <header className="shrink-0 border-b border-line bg-surface min-[820px]:hidden">
         <div className="flex h-14 items-center gap-3 px-3">
           <img
-            src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark.png`}
+            src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark-light.png`}
             alt=""
             width={24}
             height={24}
             className="h-6 w-6 shrink-0 select-none object-contain"
           />
-          <span className="text-[13px] font-semibold text-white">{name}</span>
+          <span className="text-[13px] font-semibold text-fg">{name}</span>
           <span className="flex items-center gap-1.5">
             <RunningDot running={running} />
             <span className="sr-only">{running ? "Gateway running" : "Gateway unreachable"}</span>
@@ -189,7 +241,7 @@ export function Shell() {
             type="button"
             onClick={() => setPaletteOpen(true)}
             aria-label="Jump to a page or model"
-            className="ml-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-white/5 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+            className="ml-auto flex h-11 w-11 items-center justify-center rounded-full border border-line-strong bg-surface text-muted transition-colors hover:bg-surface-3 hover:text-fg"
           >
             <MagnifyingGlass size={18} aria-hidden />
           </button>
@@ -217,17 +269,30 @@ export function Shell() {
 
 /** The sidebar's palette affordance. It is a button, not an input: the real field lives
  *  in the dialog, so ⌘K and the click share one entry point. */
-function JumpButton({ onClick }: { onClick: () => void }) {
+function JumpButton({ onClick, collapsed }: { onClick: () => void; collapsed?: boolean }) {
+  if (collapsed) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label="Jump to a page or model"
+        title="Jump to… (⌘K)"
+        className="mx-auto flex h-9 w-9 items-center justify-center rounded-full border border-line-strong bg-surface text-faint hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+      >
+        <MagnifyingGlass size={15} aria-hidden />
+      </button>
+    );
+  }
   return (
     <button
       type="button"
       onClick={onClick}
       aria-label="Jump to a page or model"
-      className="flex h-9 w-full items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 text-left text-[13px] text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+      className="flex h-9 w-full items-center gap-2 rounded-full border border-line-strong bg-surface px-3 text-left text-[13px] text-muted transition-colors hover:bg-surface-3 hover:text-fg"
     >
       <MagnifyingGlass size={14} aria-hidden />
       <span className="truncate">Jump to…</span>
-      <kbd className="ml-auto shrink-0 rounded border border-white/20 px-1 py-0.5 font-sans text-[10px] text-white/50">
+      <kbd className="ml-auto shrink-0 rounded border border-line px-1 py-0.5 font-sans text-[10px] text-faint">
         ⌘K
       </kbd>
     </button>
@@ -247,28 +312,45 @@ function RunningDot({ running }: { running: boolean }) {
 /** Endpoint, liveness and version in one card. `CopyChip` carries its own aria-label,
  *  and truncates rather than widening the 236px rail. */
 /** The signed-in person, and the way out. */
-function SessionFooter() {
+function SessionFooter({ collapsed }: { collapsed?: boolean }) {
   const state = useAuthState();
   const signOut = useSignOut();
   const navigate = useNavigate();
   const user = state.data?.user;
   if (!user) return null;
-  return (
-    <div className="flex items-center gap-2 border-t border-white/10 px-3 py-2.5">
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[12px] font-medium text-white">{user.name}</div>
-        <div className="truncate text-[11px] text-white/50">{user.email}</div>
+  const signOutAndLeave = () =>
+    signOut.mutate(undefined, {
+      onSettled: () => navigate("/sign-in", { replace: true }),
+    });
+  if (collapsed) {
+    return (
+      <div className="flex flex-col items-center gap-1 border-t border-line py-2">
+        <span
+          title={`${user.name} · ${user.email}`}
+          className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-3 text-[12px] font-semibold text-fg"
+        >
+          {user.name.slice(0, 1).toUpperCase()}
+        </span>
+        <button
+          type="button"
+          onClick={signOutAndLeave}
+          disabled={signOut.isPending}
+          aria-label="sign out"
+          title="sign out"
+          className="flex h-8 w-8 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg"
+        >
+          <SignOut size={15} aria-hidden />
+        </button>
       </div>
-      <Button
-        variant="quiet"
-        className="text-white/60 hover:bg-white/10 hover:text-white"
-        disabled={signOut.isPending}
-        onClick={() =>
-          signOut.mutate(undefined, {
-            onSettled: () => navigate("/sign-in", { replace: true }),
-          })
-        }
-      >
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 border-t border-line px-3 py-2.5">
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[12px] font-medium text-fg">{user.name}</div>
+        <div className="truncate text-[11px] text-faint">{user.email}</div>
+      </div>
+      <Button variant="quiet" disabled={signOut.isPending} onClick={signOutAndLeave}>
         sign out
       </Button>
     </div>
@@ -289,19 +371,19 @@ function SidebarFooter({
   note?: string;
 }) {
   return (
-    <div className="border-t border-white/10 px-3 py-3">
-      <div className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-2">
-        <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-white/45">Endpoint</div>
+    <div className="border-t border-line px-3 py-3">
+      <div className="rounded-[8px] border border-line bg-surface-2 px-2.5 py-2">
+        <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-faint">Endpoint</div>
         <div className="mt-1 flex min-w-0">
           <CopyChip value={endpoint} display={endpoint.replace(/^https?:\/\//, "")} onDark />
         </div>
-        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-white/70">
+        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
           <RunningDot running={running} />
           <span className="truncate">
             {running ? `Running · up ${uptime(uptimeSecs)}` : "unreachable"}
           </span>
         </div>
-        <div className="mt-0.5 truncate text-[11px] text-white/45">
+        <div className="mt-0.5 truncate text-[11px] text-faint">
           v{version ?? "—"} · {note?.trim() || "MIT"}
         </div>
       </div>
@@ -311,20 +393,32 @@ function SidebarFooter({
 
 /** One nav item, two orientations: the rail stacks a left accent bar, the mobile tab row
  *  a bottom one. `NavLink` owns `aria-current`, so active state is announced, not just seen. */
-function NavItemLink({ item, variant }: { item: NavItem; variant: "sidebar" | "tab" }) {
+function NavItemLink({
+  item,
+  variant,
+  collapsed = false,
+}: {
+  item: NavItem;
+  variant: "sidebar" | "tab";
+  collapsed?: boolean;
+}) {
   return (
     <NavLink
       to={item.to}
+      title={variant === "sidebar" && collapsed ? item.label : undefined}
+      aria-label={variant === "sidebar" && collapsed ? item.label : undefined}
       className={({ isActive }) =>
         cx(
           "relative flex items-center text-[13px] transition-colors",
           variant === "tab"
             ? "h-11 shrink-0 gap-2 whitespace-nowrap rounded-lg px-3"
-            : "gap-2.5 rounded-lg px-2.5 py-2",
+            : collapsed
+              ? "justify-center rounded-[8px] px-0 py-2"
+              : "gap-2.5 rounded-[8px] px-2.5 py-2",
           variant === "sidebar"
             ? isActive
-              ? "bg-white/10 font-medium text-white"
-              : "text-white/70 hover:bg-white/10 hover:text-white"
+              ? "bg-[var(--color-selected)] font-medium text-accent-text"
+              : "text-ink-soft hover:bg-surface-3 hover:text-fg"
             : isActive
               ? "bg-accent font-medium text-[var(--color-accent-ink)]"
               : "text-muted hover:bg-surface-3 hover:text-fg",
@@ -340,12 +434,14 @@ function NavItemLink({ item, variant }: { item: NavItem; variant: "sidebar" | "t
                 "absolute rounded-full bg-[var(--color-nav-accent)]",
                 variant === "tab"
                   ? "inset-x-2 bottom-0 h-[2px]"
-                  : "left-0 top-1.5 h-[calc(100%-12px)] w-[2px]",
+                  : collapsed
+                    ? "inset-y-1.5 left-0 w-[2px]"
+                    : "left-0 top-1.5 h-[calc(100%-12px)] w-[2px]",
               )}
             />
           ) : null}
-          <span className="shrink-0 opacity-90">{item.icon}</span>
-          {item.label}
+          <span className="shrink-0">{item.icon}</span>
+          {collapsed ? null : item.label}
         </>
       )}
     </NavLink>
@@ -486,7 +582,7 @@ function AdminGate({ onUnlock }: { onUnlock: () => void }) {
       >
         <div className="flex items-center gap-2.5">
           <img
-            src={`${import.meta.env.BASE_URL}logo-mark.png`}
+            src={`${import.meta.env.BASE_URL}logo-mark-light.png`}
             alt=""
             width={26}
             height={26}

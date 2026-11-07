@@ -87,6 +87,9 @@ export default function Logs() {
   const filtersActive = status !== "all" || provider !== ALL || model !== ALL || keyId !== ALL;
   const baseUrl = `${window.location.origin}/v1`;
 
+  const dirty =
+    status !== "all" || provider !== ALL || model !== ALL || keyId !== ALL || rangeId !== "24h";
+
   const clearFilters = () => {
     setStatus("all");
     setProvider(ALL);
@@ -137,55 +140,58 @@ export default function Logs() {
       ) : null}
 
       <Card>
-        <div className="flex flex-wrap items-center gap-2 border-b border-line px-5 py-3">
+        <div className="flex flex-col gap-2 border-b border-line px-5 py-3 min-[900px]:flex-row min-[900px]:items-center">
           <Segmented
             options={RANGES.map((r) => ({ id: r.id, label: r.label }))}
             value={rangeId}
             onChange={setRangeId}
             ariaLabel="time range"
+            className="shrink-0"
           />
-          <Select value={status} onChange={(v) => setStatus(v as Status)} ariaLabel="status">
-            <option value="all">All statuses</option>
-            <option value="errors">Errors</option>
-            <option value="2xx">2xx only</option>
-          </Select>
-          <Select value={provider} onChange={setProvider} ariaLabel="provider">
-            <option value={ALL}>All providers</option>
-            {providers.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </Select>
-          <Select value={model} onChange={setModel} ariaLabel="model">
-            <option value={ALL}>All models</option>
-            {modelGroups.map(([p, list]) => (
-              <optgroup key={p} label={p}>
-                {list.map((m) => (
-                  <option key={m.ref} value={m.ref}>
-                    {m.display ?? m.id}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </Select>
-          <Select value={keyId} onChange={setKeyId} ariaLabel="key">
-            <option value={ALL}>All keys</option>
-            {(keys.data ?? []).map((k) => (
-              <option key={k.id} value={k.id}>
-                {k.name ?? k.id}
-              </option>
-            ))}
-          </Select>
-          <Button
-            variant="quiet"
-            className="ml-auto"
-            onClick={() => void exportCsv()}
-            disabled={exporting}
-            title="Download these rows as CSV"
-          >
-            {exporting ? "Exporting…" : "Export CSV"}
-          </Button>
+          <span aria-hidden className="hidden h-6 w-px bg-line min-[900px]:block" />
+          <div className="grid min-w-0 flex-1 grid-cols-2 gap-2 min-[700px]:flex min-[700px]:flex-wrap min-[700px]:items-center">
+            <Select className="w-full min-[700px]:w-[140px]" value={status} onChange={(v) => setStatus(v as Status)} ariaLabel="status">
+              <option value="all">All statuses</option>
+              <option value="errors">Errors</option>
+              <option value="2xx">2xx only</option>
+            </Select>
+            <Select className="w-full min-[700px]:w-[150px]" value={provider} onChange={setProvider} ariaLabel="provider">
+              <option value={ALL}>All providers</option>
+              {providers.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </Select>
+            <Select className="w-full min-[700px]:w-[210px]" value={model} onChange={setModel} ariaLabel="model">
+              <option value={ALL}>All models</option>
+              {modelGroups.map(([p, list]) => (
+                <optgroup key={p} label={p}>
+                  {list.map((m) => (
+                    <option key={m.ref} value={m.ref}>
+                      {m.display ?? m.id}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </Select>
+            <Select className="w-full min-[700px]:w-[150px]" value={keyId} onChange={setKeyId} ariaLabel="key">
+              <option value={ALL}>All keys</option>
+              {(keys.data ?? []).map((k) => (
+                <option key={k.id} value={k.id}>
+                  {k.name ?? k.id}
+                </option>
+              ))}
+            </Select>
+            {dirty ? (
+              <Button variant="quiet" onClick={clearFilters} className="justify-self-start">
+                clear filters
+              </Button>
+            ) : null}
+          </div>
+          <span className="shrink-0 text-[11.5px] text-faint tnum min-[900px]:text-right">
+            {loaded.length.toLocaleString()} loaded
+          </span>
         </div>
 
         {exportError ? (

@@ -118,6 +118,9 @@ pub struct ModelItem {
     pub source: String,
     pub enabled: bool,
     pub available: bool,
+    /// A family its provider has retired (or models.dev marks deprecated). Still
+    /// routable when a client names it explicitly, but never offered first.
+    pub deprecated: bool,
 }
 
 impl ModelItem {
@@ -134,6 +137,7 @@ impl ModelItem {
             source: source.to_string(),
             enabled: true,
             available: false,
+            deprecated: rrouter_router::catalog::is_retired(provider, id),
         }
     }
 }
@@ -211,7 +215,7 @@ pub fn merge(
         }
     }
 
-    items
+    let mut out: Vec<ModelItem> = items
         .into_values()
         // A model is listed only when its provider is connected right now. This is the
         // whole point of the registry: what the gateway can route, not what exists.
@@ -219,9 +223,19 @@ pub fn merge(
         .map(|mut item| {
             item.enabled = !disabled.contains(&item.id);
             item.available = true;
+            item.deprecated =
+                item.deprecated || rrouter_router::catalog::is_retired(&item.provider, &item.id);
             item
         })
-        .collect()
+        .collect();
+    // Newest first inside each provider; retired families after everything current.
+    out.sort_by(|a, b| {
+        a.provider
+            .cmp(&b.provider)
+            .then_with(|| a.deprecated.cmp(&b.deprecated))
+            .then_with(|| rrouter_router::catalog::compare_newest(&a.id, &b.id))
+    });
+    out
 }
 
 /// Apply one row's stated facts to an item. Absent fields never erase present ones,
@@ -240,6 +254,9 @@ fn overlay(item: &mut ModelItem, row: &ModelRow) {
         item.cost = row.cost.as_ref().and_then(parse_cost);
     }
     item.capabilities.overlay(&row.caps);
+    if row.caps.get("deprecated").and_then(Value::as_bool) == Some(true) {
+        item.deprecated = true;
+    }
 }
 
 /// `cost: {input, output, cache_read, cache_write}` in USD per million tokens.
@@ -399,6 +416,7 @@ pub async fn item(state: &AppState, provider: &str, id: &str) -> Result<Option<M
         .await?
         .iter()
         .any(|c| c.is_active && c.provider == provider);
+    item.deprecated = item.deprecated || rrouter_router::catalog::is_retired(provider, id);
     Ok(Some(item))
 }
 
@@ -501,6 +519,11 @@ fn caps_from_models_dev(entry: &Value) -> Value {
     }
     if let Some(flag) = entry.get("reasoning").and_then(Value::as_bool) {
         caps.insert("reasoning".into(), Value::Bool(flag));
+    }
+    // models.dev occasionally flags retired ids; keep the flag with the row so the
+    // registry can sort and label them without another column.
+    if let Some(flag) = entry.get("deprecated").and_then(Value::as_bool) {
+        caps.insert("deprecated".into(), Value::Bool(flag));
     }
     let modalities = entry.get("modalities");
     let input = modalities.and_then(|m| m.get("input")).and_then(Value::as_array);
@@ -629,6 +652,39 @@ pub fn spawn_daily_sync(state: std::sync::Arc<AppState>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The registry lists current models newest-first and retired/synced-deprecated
+    /// rows last, whatever order the store returned.
+    #[test]
+    fn merge_orders_newest_first_and_deprecated_last() {
+        let catalog = rrouter_router::Catalog::builtin();
+        let rows = vec![ModelRow {
+            provider: "claude".to_string(),
+            model: "claude-sonnet-4-5".to_string(),
+            display: None,
+            context: None,
+            max_output: None,
+            caps: json!({"deprecated": true}),
+            cost: None,
+            source: SOURCE_SYNCED.to_string(),
+            updated_at: 0,
+        }];
+        let active: BTreeSet<String> = ["claude".to_string()].into_iter().collect();
+        let items = merge(catalog.all(), &rows, &BTreeSet::new(), &active);
+        let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "claude-haiku-4-5",
+                "claude-opus-4-1",
+                "claude-sonnet-4",
+                "claude-sonnet-4-5",
+            ],
+            "newest first; the deprecated row sorts last"
+        );
+        assert!(items.last().expect("row").deprecated);
+        assert!(!items[0].deprecated);
+    }
 
     #[test]
     fn models_url_drops_operation_and_avoids_v1_v1() {

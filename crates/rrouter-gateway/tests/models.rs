@@ -219,7 +219,7 @@ const CAPABILITY_KEYS: [&str; 9] = [
 // ------------------------------------------------------------------------- tests
 
 #[tokio::test]
-async fn catalog_rows_have_nine_capabilities_and_are_sorted() {
+async fn catalog_rows_have_nine_capabilities_and_are_sorted_newest_first() {
     let h = harness();
     h.connect("codex", "http://127.0.0.1:9").await;
     let data = h.models().await;
@@ -242,9 +242,16 @@ async fn catalog_rows_have_nine_capabilities_and_are_sorted() {
             )
         })
         .collect();
-    let mut sorted = order.clone();
-    sorted.sort();
-    assert_eq!(order, sorted, "items must be sorted by provider, then id");
+    // Newest family first inside a provider: 6 > 5.6 > an unversioned id. Retired rows
+    // (none in this catalog) would sort last.
+    let newest: Vec<(String, String)> = vec![
+        ("codex".into(), "gpt-6-luna".into()),
+        ("codex".into(), "gpt-6-sol".into()),
+        ("codex".into(), "gpt-5.6-luna".into()),
+        ("codex".into(), "gpt-5.6-terra".into()),
+        ("codex".into(), "gpt-reserve".into()),
+    ];
+    assert_eq!(order, newest, "items must be grouped by provider, newest first");
 
     let codex = h.item("codex/gpt-5.6-luna").await;
     assert_eq!(codex["source"], "catalog");

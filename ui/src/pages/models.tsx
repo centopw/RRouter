@@ -9,6 +9,7 @@ import {
   Field,
   Input,
   Modal,
+  ConfirmDialog,
   PageHeader,
   Select,
   cx,
@@ -16,6 +17,7 @@ import {
 import { DataTable, type Column } from "../components/table";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS, CapabilityChips } from "../components/capability-chips";
 import { ago, compact, ms } from "../lib/format";
+import { compareModels } from "../lib/models";
 import { qk, useConnections, useModelProviders, useModels } from "../lib/queries";
 import { api, type Capabilities, type FetchResult, type Model, type ModelProvider, type ModelTest, type SyncResult } from "../lib/api";
 
@@ -129,7 +131,7 @@ export default function Models() {
   const all = useMemo(
     () =>
       [...(models.data ?? [])].sort(
-        (a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id),
+        (a, b) => a.provider.localeCompare(b.provider) || compareModels(a, b),
       ),
     [models.data],
   );
@@ -152,6 +154,7 @@ export default function Models() {
   const testTarget = test.isPending ? (test.variables?.ref ?? null) : null;
   const toggleTarget = toggle.isPending ? (toggle.variables?.id ?? null) : null;
   const removeTarget = remove.isPending ? (remove.variables?.ref ?? null) : null;
+  const [deleting, setDeleting] = useState<Model | null>(null);
 
   const columns = useMemo<Array<Column<Model>>>(() => [
     {
@@ -165,14 +168,21 @@ export default function Models() {
       title: "model",
       render: (m) => (
         <div className="min-w-[190px] max-w-[300px]">
-          <div
-            title={m.ref}
-            className={cx(
-              "truncate font-mono text-[12px]",
-              m.enabled ? "text-fg" : "text-faint",
-            )}
-          >
-            {m.ref}
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span
+              title={m.ref}
+              className={cx(
+                "truncate font-mono text-[12px]",
+                m.enabled ? "text-fg" : "text-faint",
+              )}
+            >
+              {m.ref}
+            </span>
+            {m.deprecated ? (
+              <Badge tone="warn" title="this family is retired by its provider">
+                deprecated
+              </Badge>
+            ) : null}
           </div>
           {m.display && m.display !== m.id ? (
             <div className="mt-0.5 truncate text-[11px] text-faint">{m.display}</div>
@@ -284,7 +294,7 @@ export default function Models() {
               {m.source === "custom" ? (
                 <Button
                   variant="danger"
-                  onClick={() => remove.mutate(m)}
+                  onClick={() => setDeleting(m)}
                   disabled={removeTarget === m.ref}
                   title="delete this custom row"
                 >
@@ -312,6 +322,19 @@ export default function Models() {
 
   return (
     <>
+      <ConfirmDialog
+        open={deleting !== null}
+        title="Delete custom model"
+        message={<>Remove <span className="font-mono">{deleting?.ref}</span> from this gateway's registry? Requests naming it fail until it is listed again.</>}
+        confirmLabel="Delete model"
+        busy={remove.isPending}
+        onConfirm={() => {
+          if (deleting) remove.mutate(deleting);
+          setDeleting(null);
+        }}
+        onClose={() => setDeleting(null)}
+      />
+
       <PageHeader
         title="Models"
         subtitle="Every model this gateway can route, with its limits, price, and capabilities."

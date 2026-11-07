@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { ArrowUp, SlidersHorizontal, Square } from "@phosphor-icons/react";
 import { useSearchParams } from "react-router-dom";
 import { ModelSelect } from "../components/model-select";
 import {
   Button,
-  Card,
-  CardHeader,
   ErrorNote,
   Field,
   Input,
@@ -66,7 +65,7 @@ export default function Playground() {
   const [dialect, setDialect] = useState<Dialect>("chat");
   const [model, setModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
-  const [systemOpen, setSystemOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [temp, setTemp] = useState("1");
   const [draft, setDraft] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -124,7 +123,7 @@ export default function Playground() {
     const row = templates.data.find((template) => template.id === templateParam);
     if (row) {
       setSystemPrompt(row.body);
-      setSystemOpen(true);
+      setSettingsOpen(true);
     }
     const next = new URLSearchParams(searchParams);
     next.delete("template");
@@ -346,91 +345,161 @@ export default function Playground() {
         ? "No models are registered yet."
         : undefined;
 
+  const modelLabel = models.data?.find((m) => m.ref === model)?.display ?? model;
+
   return (
-    <div className="space-y-5">
-      <header className="flex flex-wrap items-start justify-between gap-3">
+    <div className="mx-auto flex w-full max-w-[880px] flex-col gap-4 pb-2">
+      <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-[30px] font-semibold tracking-[-0.02em] text-fg">Playground</h1>
-          <p className="mt-1 text-[13.5px] text-muted">
-            Send a real request through the gateway and watch the model answer token by token.
+          <h1 className="text-[22px] font-semibold leading-tight tracking-[-0.02em] text-fg">
+            Playground
+          </h1>
+          <p className="mt-0.5 text-[12.5px] text-muted">
+            A live conversation through the gateway. Same endpoint, headers and SSE frames a client sees.
           </p>
         </div>
-        <Segmented
-          options={DIALECTS}
-          value={dialect}
-          onChange={setDialect}
-          ariaLabel="endpoint dialect"
-        />
+        <div className="flex items-center gap-2">
+          <span className="hidden font-mono text-[11px] text-faint min-[700px]:inline">
+            {ENDPOINTS[dialect]}
+          </span>
+          <Button onClick={() => setSettingsOpen(true)}>
+            <SlidersHorizontal size={14} aria-hidden />
+            Parameters
+          </Button>
+        </div>
       </header>
 
-      <Card>
-        <CardHeader
-          title="Request"
-          action={<span className="font-mono text-[11px] text-faint">{ENDPOINTS[dialect]}</span>}
-        />
-        {models.isError ? (
-          <div className="px-5 pb-4">
-            <ErrorNote error={models.error} onRetry={() => void models.refetch()} />
-          </div>
-        ) : null}
-        <div className="flex flex-wrap items-end gap-3 px-5 pb-4">
-          <div className="min-w-[240px] flex-1">
-            <Field label="Model" hint={modelHint}>
+      {models.isError ? <ErrorNote error={models.error} onRetry={() => void models.refetch()} /> : null}
+      {keyMissing ? (
+        <div className="rounded-[8px] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-[12.5px] text-[var(--color-warn-ink)]">
+          This gateway requires a key. Add one in Parameters before sending.
+        </div>
+      ) : null}
+
+      <div className="flex min-h-[320px] flex-col gap-5 rounded-[12px] border border-line bg-[var(--color-bg)] px-4 py-5 min-[700px]:px-6">
+        {turns.length === 0 ? (
+          <EmptyPlayground
+            model={modelLabel}
+            onPick={(prompt) => setDraft(prompt)}
+          />
+        ) : (
+          turns.map((turn) => <TurnCard key={turn.id} turn={turn} />)
+        )}
+      </div>
+
+      <div className="sticky bottom-0 z-10 -mx-1 bg-gradient-to-t from-[var(--color-bg)] via-[var(--color-bg)] to-transparent px-1 pb-1 pt-2">
+        <div className="rounded-[16px] border border-line-strong bg-surface shadow-[0_1px_2px_rgba(16,18,20,0.05)] focus-within:border-[var(--color-accent-text)]">
+          <textarea
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={onComposerKeyDown}
+            rows={2}
+            aria-label="message"
+            placeholder={model ? `Message ${modelLabel}…` : "Choose a model in Parameters to start…"}
+            className="block max-h-[220px] w-full resize-none rounded-t-[16px] bg-transparent px-4 pt-3.5 text-[14px] leading-relaxed text-fg placeholder:text-faint focus:outline-none"
+          />
+          <div className="flex flex-wrap items-center gap-2 px-3 pb-2.5 pt-1">
+            <div className="min-w-[180px] max-w-[260px] flex-1">
               <ModelSelect value={model} onChange={setModel} ariaLabel="model" />
-            </Field>
+            </div>
+            <span className="hidden text-[11px] text-faint min-[560px]:inline">
+              {temp === "1" ? "temperature 1" : `temperature ${temp}`}
+            </span>
+            <span className="ml-auto hidden items-center gap-1 text-[11px] text-faint min-[820px]:flex">
+              <kbd className={kbdClass}>⌘↵</kbd> send · <kbd className={kbdClass}>Esc</kbd> stop
+            </span>
+            {streaming ? (
+              <button
+                type="button"
+                onClick={() => abortRef.current?.abort()}
+                aria-label="stop generating"
+                title="Stop"
+                className="flex h-9 w-9 items-center justify-center rounded-full border border-line-strong bg-surface text-fg hover:bg-surface-3"
+              >
+                <Square size={13} weight="fill" aria-hidden />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={send}
+                disabled={!canSend}
+                title={canSend ? "Send (⌘↵)" : (sendBlocker ?? undefined)}
+                aria-label="send message"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-[var(--color-accent-ink)] transition-colors hover:bg-fg disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <ArrowUp size={16} weight="bold" aria-hidden />
+              </button>
+            )}
           </div>
-          {needsKey ? (
+        </div>
+      </div>
+
+      <Modal
+        title="Parameters"
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        width="lg"
+        description="Request shape, credentials and instructions for this conversation."
+        footer={<Button onClick={() => setSettingsOpen(false)}>done</Button>}
+      >
+        <div className="flex flex-col gap-5">
+          <div className="flex flex-wrap items-end gap-3">
             <div className="min-w-[220px] flex-1">
-              <Field label="API key" hint="Kept in this tab's session only.">
-                <Input
-                  type="password"
-                  value={apiKey}
-                  onChange={rememberKey}
-                  placeholder="sk-…"
-                  ariaLabel="gateway API key"
+              <Field label="Model" hint={modelHint}>
+                <ModelSelect value={model} onChange={setModel} ariaLabel="model" />
+              </Field>
+            </div>
+            <div className="w-[150px]">
+              <Field label="Temperature" hint={dialect === "messages" ? "Anthropic accepts 0–1" : undefined}>
+                <input
+                  type="number"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={temp}
+                  aria-label="temperature"
+                  onChange={(event) => setTemp(event.target.value)}
+                  onBlur={() => setTemp(String(parseTemperature(temp)))}
+                  className={inputClass}
                 />
               </Field>
             </div>
-          ) : null}
-          <div className="w-[132px]">
-            <Field
-              label="Temperature"
-              hint={dialect === "messages" ? "Anthropic accepts 0–1" : undefined}
-            >
-              <input
-                type="number"
-                min={0}
-                max={2}
-                step={0.1}
-                value={temp}
-                aria-label="temperature"
-                onChange={(event) => setTemp(event.target.value)}
-                onBlur={() => setTemp(String(parseTemperature(temp)))}
-                className={inputClass}
+          </div>
+
+          <Field label="Endpoint" hint="The body is built for this dialect; the gateway translates the reply back.">
+            <div className="flex items-center gap-3">
+              <Segmented options={DIALECTS} value={dialect} onChange={setDialect} ariaLabel="endpoint dialect" />
+              <code className="truncate font-mono text-[11.5px] text-muted">{ENDPOINTS[dialect]}</code>
+            </div>
+          </Field>
+
+          {needsKey ? (
+            <Field label="API key" hint="Kept in this tab's session only.">
+              <Input
+                type="password"
+                value={apiKey}
+                onChange={rememberKey}
+                placeholder="sk-…"
+                ariaLabel="gateway API key"
               />
             </Field>
-          </div>
-        </div>
-        <div className="border-t border-line px-5 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <button
-              type="button"
-              aria-expanded={systemOpen}
-              aria-controls="playground-system-prompt"
-              onClick={() => setSystemOpen((open) => !open)}
-              className="flex items-center gap-2 text-[12px] font-medium text-muted transition-colors hover:text-fg"
-            >
-              <span aria-hidden className="text-faint">
-                {systemOpen ? "▾" : "▸"}
-              </span>
-              System prompt
-              {systemPrompt.trim() ? (
-                <span className="rounded-full border border-line px-1.5 py-0.5 text-[10px] text-faint">
-                  set
-                </span>
-              ) : null}
-            </button>
-            <div className="flex flex-wrap items-center gap-2">
+          ) : null}
+
+          <div className="border-t border-line pt-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Field label="System prompt" hint="Optional instructions sent before the conversation.">
+                <textarea
+                  id="playground-system-prompt"
+                  value={systemPrompt}
+                  onChange={(event) => setSystemPrompt(event.target.value)}
+                  rows={4}
+                  aria-label="system prompt"
+                  placeholder="You are a concise assistant. Answer in the language of the question."
+                  className={textareaClass}
+                />
+              </Field>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
               <Select
                 value={templatePick}
                 onChange={(id) => {
@@ -438,11 +507,10 @@ export default function Playground() {
                   const row = templates.data?.find((template) => template.id === id);
                   if (!row) return;
                   setSystemPrompt(row.body);
-                  setSystemOpen(true);
                 }}
                 ariaLabel="load a saved template into the system prompt"
                 disabled={templates.isLoading || !templates.data?.length}
-                className="w-[190px]"
+                className="min-w-[200px] flex-1"
               >
                 <option value="">
                   {templates.isError
@@ -460,78 +528,20 @@ export default function Playground() {
                 ))}
               </Select>
               <Button
-                variant="ghost"
                 onClick={() => setSaveTemplateOpen(true)}
                 disabled={systemPrompt.trim() === ""}
-                title={
-                  systemPrompt.trim() === ""
-                    ? "Write a system prompt first"
-                    : "Save this system prompt as a reusable template"
-                }
+                title={systemPrompt.trim() === "" ? "Write a system prompt first" : "Save this prompt as a template"}
               >
                 Save as template
               </Button>
             </div>
           </div>
-          {systemOpen ? (
-            <textarea
-              id="playground-system-prompt"
-              value={systemPrompt}
-              onChange={(event) => setSystemPrompt(event.target.value)}
-              rows={3}
-              aria-label="system prompt"
-              placeholder="Optional: instructions the model receives before the conversation."
-              className={cx(textareaClass, "mt-2")}
-            />
-          ) : null}
         </div>
-      </Card>
-
-      <section className="space-y-3" aria-label="Conversation">
-        {turns.length === 0 ? (
-          <EmptyPlayground />
-        ) : (
-          turns.map((turn) => <TurnCard key={turn.id} turn={turn} />)
-        )}
-      </section>
-
-      <Card>
-        <div className="p-4">
-          <textarea
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={onComposerKeyDown}
-            rows={3}
-            aria-label="message"
-            placeholder={model ? `Message ${model}…` : "Choose a model to start…"}
-            className={textareaClass}
-          />
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <p className="text-[11px] text-faint">
-              <kbd className={kbdClass}>⌘↵</kbd> or <kbd className={kbdClass}>Ctrl↵</kbd> to send ·{" "}
-              <kbd className={kbdClass}>Esc</kbd> to stop
-            </p>
-            {streaming ? (
-              <Button variant="danger" onClick={() => abortRef.current?.abort()}>
-                Stop
-              </Button>
-            ) : (
-              <Button
-                variant="primary"
-                onClick={send}
-                disabled={!canSend}
-                title={canSend ? undefined : (sendBlocker ?? undefined)}
-              >
-                Send
-              </Button>
-            )}
-          </div>
-        </div>
-      </Card>
+      </Modal>
 
       {saveTemplateOpen ? (
         <Modal
-          title="save as template"
+          title="Save as template"
           open
           onClose={() => setSaveTemplateOpen(false)}
           footer={
@@ -581,20 +591,31 @@ function TurnCard({ turn }: { turn: Turn }) {
   const [rawOpen, setRawOpen] = useState(false);
   const assistant = turn.role === "assistant";
 
+  if (!assistant) {
+    return (
+      <article className="ml-auto max-w-[85%] rounded-[14px] bg-surface-3 px-4 py-2.5">
+        <p className="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg">
+          {turn.text}
+        </p>
+      </article>
+    );
+  }
+
   return (
-    <Card as="article">
-      <div className="flex flex-wrap items-center justify-between gap-2 px-5 pt-3.5 pb-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">
-            {assistant ? "Assistant" : "You"}
-          </span>
-          {turn.model ? (
-            <span className="truncate font-mono text-[11px] text-faint">{turn.model}</span>
-          ) : null}
-        </div>
-        {assistant ? (
-          <span className={cx("text-[11px]", turn.status === "error" ? "text-neg" : "text-faint")}>
-            {STATUS_LABEL[turn.status]}
+    <article className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span aria-hidden className="h-2 w-2 rounded-full bg-[var(--color-accent)]" />
+        <span className="font-mono text-[11px] text-muted">{turn.model ?? "assistant"}</span>
+        <span className={cx("text-[11px]", turn.status === "error" ? "text-neg" : "text-faint")}>
+          {STATUS_LABEL[turn.status]}
+        </span>
+        {turn.latency !== null ? (
+          <span className="ml-auto font-mono text-[11px] text-faint tnum">
+            {turn.ttft !== null ? `first token ${ms(turn.ttft)} · ` : ""}
+            {ms(turn.latency)}
+            {turn.promptTokens !== null || turn.completionTokens !== null
+              ? ` · ${turn.promptTokens ?? "—"} in / ${turn.completionTokens ?? "—"} out`
+              : ""}
           </span>
         ) : null}
       </div>
@@ -602,19 +623,19 @@ function TurnCard({ turn }: { turn: Turn }) {
       <div
         aria-live={turn.status === "streaming" ? "polite" : undefined}
         aria-busy={turn.status === "streaming" ? true : undefined}
-        className="px-5 pb-4 pt-1"
+        className="text-[14px] leading-7 text-fg"
       >
         {turn.text ? (
-          <p className="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg">
+          <p className="whitespace-pre-wrap break-words">
             {turn.text}
             {turn.status === "streaming" ? (
               <span
                 aria-hidden
-                className="ml-0.5 inline-block h-3.5 w-0.5 translate-y-0.5 bg-accent motion-safe:animate-pulse"
+                className="ml-0.5 inline-block h-4 w-0.5 translate-y-0.5 bg-accent motion-safe:animate-pulse"
               />
             ) : null}
           </p>
-        ) : assistant && turn.status !== "error" ? (
+        ) : turn.status !== "error" ? (
           <p className="text-[13px] text-faint">
             {turn.status === "streaming"
               ? "Waiting for the first token…"
@@ -624,76 +645,68 @@ function TurnCard({ turn }: { turn: Turn }) {
           </p>
         ) : null}
         {turn.error ? (
-          <div className="mt-3">
+          <div className="mt-2">
             <ErrorNote error={turn.error} />
           </div>
         ) : null}
       </div>
 
-      {assistant ? (
-        <>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-line px-5 py-2 tnum">
-            <span className="font-mono text-[11px] text-faint">
-              TTFT{" "}
-              <span className="text-muted">{turn.ttft === null ? "—" : ms(turn.ttft)}</span>
-            </span>
-            <span className="font-mono text-[11px] text-faint">
-              total{" "}
-              <span className="text-muted">
-                {turn.latency === null ? "—" : ms(turn.latency)}
-              </span>
-            </span>
-            {turn.promptTokens !== null || turn.completionTokens !== null ? (
-              <span className="font-mono text-[11px] text-faint">
-                tokens{" "}
-                <span className="text-muted">
-                  {turn.promptTokens ?? "—"} in / {turn.completionTokens ?? "—"} out
-                </span>
-              </span>
-            ) : null}
-            {turn.status !== "streaming" ? (
-              <Button
-                variant="quiet"
-                className="ml-auto"
-                onClick={() => setRawOpen((open) => !open)}
-              >
-                {rawOpen ? "Hide raw" : "Raw"}
-              </Button>
-            ) : null}
-          </div>
+      {turn.status !== "streaming" ? (
+        <div>
+          <button
+            type="button"
+            onClick={() => setRawOpen((open) => !open)}
+            className="text-[11.5px] text-faint underline-offset-2 hover:text-fg hover:underline"
+          >
+            {rawOpen ? "hide raw frames" : "raw frames"}
+          </button>
           {rawOpen ? (
-            <div className="border-t border-line px-5 py-3">
-              <p className="mb-1.5 text-[11px] text-faint">Unparsed SSE frames</p>
-              {turn.raw ? (
-                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--color-bg)] p-3 font-mono text-[11px] leading-relaxed text-faint">
-                  {turn.raw}
-                </pre>
-              ) : (
-                <p className="text-[12px] text-faint">No frames were received.</p>
-              )}
-            </div>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-[8px] border border-line bg-surface-2 p-3 font-mono text-[11px] leading-relaxed text-muted">
+              {turn.raw || "No frames were received."}
+            </pre>
           ) : null}
-        </>
+        </div>
       ) : null}
-    </Card>
+    </article>
   );
 }
 
-function EmptyPlayground() {
+/** The calm first screen: say what this place does, then offer real starting prompts. */
+function EmptyPlayground({ model, onPick }: { model: string; onPick: (prompt: string) => void }) {
+  const prompts = [
+    "Explain what this gateway does in two sentences.",
+    "Write a SQL query that joins users to their latest order.",
+    "Summarise the risks of sending customer data to three providers.",
+    "Draft a one-paragraph changelog for a retry policy.",
+  ];
   return (
-    <Card className="px-5 py-10">
-      <div className="mx-auto max-w-md text-center">
-        <h2 className="text-[14px] font-medium text-fg">Nothing sent yet</h2>
-        <p className="mt-1.5 text-[13px] leading-relaxed text-muted">
-          Send a prompt to call a real model through this gateway and watch the reply stream in.
-          Each answer reports time to first token, total latency, the tokens the provider returned,
-          and the raw SSE frames behind it.
-        </p>
-        <p className="mt-3 font-mono text-[11px] text-faint">
-          ⌘↵ / Ctrl↵ to send · Esc to stop a stream
+    <div className="flex flex-1 flex-col items-center justify-center gap-6 pb-8 pt-6 text-center">
+      <div>
+        <h2 className="text-[24px] font-semibold tracking-[-0.02em] text-fg">
+          What do you want to test?
+        </h2>
+        <p className="mx-auto mt-2 max-w-[46ch] text-[13px] leading-relaxed text-muted">
+          {model
+            ? `Messages go to ${model} through the real gateway. Nothing is simulated.`
+            : "Pick a model in Parameters, then send a message to see the real reply stream."}
         </p>
       </div>
-    </Card>
+      <div className="grid w-full max-w-[560px] gap-2 min-[640px]:grid-cols-2">
+        {prompts.map((prompt) => (
+          <button
+            key={prompt}
+            type="button"
+            onClick={() => onPick(prompt)}
+            className="rounded-[10px] border border-line bg-surface px-3.5 py-2.5 text-left text-[12.5px] leading-relaxed text-ink-soft transition-colors hover:border-line-strong hover:bg-surface-2"
+          >
+            {prompt}
+          </button>
+        ))}
+      </div>
+      <p className="text-[11px] text-faint">
+        <kbd className={kbdClass}>⌘↵</kbd> send · <kbd className={kbdClass}>Esc</kbd> stop a stream
+      </p>
+    </div>
   );
 }
 

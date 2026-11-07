@@ -209,7 +209,7 @@ async fn probe(
     // The probe must name a model the provider actually serves: sending a
     // placeholder like "ping" makes every provider answer 400 model_not_found,
     // which reads as a broken credential. Use the provider's cheapest known model.
-    let model = probe_model(state, spec);
+    let model = probe_model(state, spec).await;
     let mut req = ChatRequest::new(model);
     req.messages.push(Message::text(Role::User, "ping"));
     // Some providers reject a 1-token completion (minimum output length), so ask for
@@ -287,17 +287,86 @@ async fn probe(
 
 /// A model this provider can serve, for connectivity probes.
 ///
-/// Preference order: the connection's own `base_url_override` implies a test server
-/// the operator controls, so the catalog guess is irrelevant there — any id works.
-/// Otherwise take the first catalog entry for the provider, then the spec default.
-fn probe_model(state: &AppState, spec: &rrouter_auth::ProviderSpec) -> String {
-    state
+/// Candidate ids come from the catalog plus every registry row for the provider (a
+/// synced or operator row may know a model the built-in snapshot does not). Retired
+/// families are excluded, then the order is: known price (cheapest first), small family,
+/// newest version, id. A probe must never spend an expensive model's minimum output or
+/// land on a model the provider has retired.
+async fn probe_model(state: &AppState, spec: &rrouter_auth::ProviderSpec) -> String {
+    let rows = state.store.list_models().await.unwrap_or_default();
+    let vendor = rrouter_router::catalog::models_dev_provider(spec.id);
+    let mut candidates: std::collections::BTreeSet<String> = state
         .catalog
         .all()
         .into_iter()
-        .find(|m| m.provider == spec.id)
+        .filter(|m| m.provider == spec.id)
         .map(|m| m.id)
-        .unwrap_or_else(|| spec.id.to_string())
+        .collect();
+    // A synced models.dev row describes a model; it does not prove this account can call
+    // it. Keep those ids only when nothing proven exists, so a probe cannot fail on a
+    // model the provider never listed.
+    let mut proven: std::collections::BTreeSet<String> = candidates.clone();
+    for row in &rows {
+        if row.provider != spec.id {
+            continue;
+        }
+        candidates.insert(row.model.clone());
+        if row.source != "synced" {
+            proven.insert(row.model.clone());
+        }
+    }
+    if !proven.is_empty() {
+        candidates = proven;
+    }
+    candidates.retain(|id| !rrouter_router::catalog::is_retired(spec.id, id));
+    if candidates.is_empty() {
+        return spec.id.to_string();
+    }
+    // Cheapest published input rate for a candidate; the provider's own row wins over
+    // the models.dev vendor row of the same id.
+    let rate = |id: &str| -> Option<f64> {
+        let mut best: Option<(u8, f64)> = None;
+        for row in rows.iter().filter(|r| r.model == id) {
+            if row.provider != spec.id && row.provider != vendor {
+                continue;
+            }
+            let Some(input) = row.cost.as_ref().and_then(|cost| cost.get("input")) else {
+                continue;
+            };
+            let Some(input) = input.as_f64() else { continue };
+            let key = u8::from(row.provider == spec.id);
+            let replace = match best {
+                None => true,
+                Some((best_key, best_rate)) => key > best_key || (key == best_key && input < best_rate),
+            };
+            if replace {
+                best = Some((key, input));
+            }
+        }
+        best.map(|(_, input)| input)
+    };
+    let mut ids: Vec<String> = candidates.into_iter().collect();
+    order_probe_candidates(&mut ids, rate);
+    ids.into_iter().next().unwrap_or_else(|| spec.id.to_string())
+}
+
+/// Probe order: cheapest known price, then the smaller family, then the newest version,
+/// then the id. Pure so the rule is testable without a provider.
+fn order_probe_candidates(ids: &mut [String], rate: impl Fn(&str) -> Option<f64>) {
+    ids.sort_by(|a, b| {
+        let (ra, rb) = (rate(a), rate(b));
+        match (ra, rb) {
+            (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| {
+            rrouter_router::catalog::probe_class(a).cmp(&rrouter_router::catalog::probe_class(b))
+        })
+        .then_with(|| rrouter_router::catalog::compare_newest(a, b))
+        .then_with(|| a.cmp(b))
+    });
 }
 
 fn default_auth_type(spec: &rrouter_auth::ProviderSpec) -> &'static str {
@@ -405,6 +474,37 @@ fn string_or_none(v: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The probe never picks a retired model and prefers the cheapest current family;
+    /// with no prices it falls back to family size, then version.
+    #[test]
+    fn probe_order_skips_retired_and_prefers_cheap_current_models() {
+        let mut ids = vec![
+            "claude-3-7-sonnet-latest".to_string(),
+            "claude-opus-4-1".to_string(),
+            "claude-sonnet-4-5".to_string(),
+            "claude-haiku-4-5".to_string(),
+        ];
+        ids.retain(|id| !rrouter_router::catalog::is_retired("claude", id));
+        order_probe_candidates(&mut ids, |_| None);
+        assert_eq!(
+            ids,
+            vec![
+                "claude-haiku-4-5".to_string(),
+                "claude-sonnet-4-5".to_string(),
+                "claude-opus-4-1".to_string(),
+            ],
+            "retired gone, cheap family first, newest version inside a family"
+        );
+
+        // A published price outranks family class.
+        order_probe_candidates(&mut ids, |id| match id {
+            "claude-opus-4-1" => Some(1.0),
+            "claude-haiku-4-5" => Some(2.0),
+            _ => None,
+        });
+        assert_eq!(ids[0], "claude-opus-4-1");
+    }
 
     #[test]
     fn views_never_carry_token_values() {

@@ -5,6 +5,7 @@ import {
   Card,
   CardHeader,
   CopyChip,
+  ConfirmDialog,
   ErrorNote,
   Field,
   Input,
@@ -41,6 +42,8 @@ export default function Users() {
   const revoke = useRevokeInvite();
   const [inviting, setInviting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<AuthUser | null>(null);
+  const [revoking, setRevoking] = useState<Invitation | null>(null);
 
   const columns: Array<Column<AuthUser>> = [
     {
@@ -106,9 +109,7 @@ export default function Users() {
             variant="danger"
             disabled={u.is_owner}
             title={u.is_owner ? "the owner cannot be removed" : undefined}
-            onClick={() => {
-              if (confirm(`Remove ${u.email}? Their sessions end immediately.`)) remove.mutate(u.id);
-            }}
+            onClick={() => setRemoving(u)}
           >
             remove
           </Button>
@@ -130,7 +131,7 @@ export default function Users() {
       title: "",
       align: "right",
       render: (i) => (
-        <Button variant="danger" disabled={revoke.isPending} onClick={() => revoke.mutate(i.id)}>
+        <Button variant="danger" disabled={revoke.isPending} onClick={() => setRevoking(i)}>
           revoke
         </Button>
       ),
@@ -147,6 +148,32 @@ export default function Users() {
             invite someone
           </Button>
         }
+      />
+
+      <ConfirmDialog
+        open={removing !== null}
+        title="Remove user"
+        message={<>Remove <span className="font-medium">{removing?.email}</span>? Their sessions end immediately and the account cannot sign in again.</>}
+        confirmLabel="Remove user"
+        busy={remove.isPending}
+        onConfirm={() => {
+          if (removing) remove.mutate(removing.id);
+          setRemoving(null);
+        }}
+        onClose={() => setRemoving(null)}
+      />
+
+      <ConfirmDialog
+        open={revoking !== null}
+        title="Revoke invitation"
+        message={<>The link sent to <span className="font-medium">{revoking?.email}</span> stops working. They can be invited again.</>}
+        confirmLabel="Revoke invitation"
+        busy={revoke.isPending}
+        onConfirm={() => {
+          if (revoking) revoke.mutate(revoking.id);
+          setRevoking(null);
+        }}
+        onClose={() => setRevoking(null)}
       />
 
       {notice ? (

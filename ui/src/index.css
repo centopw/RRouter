@@ -7,7 +7,7 @@
      flat: near-black nav and primary ink, white surfaces, a single muted navy accent,
      hairline borders instead of shadows. Components reference tokens only. */
   --color-bg: #f8f8f8;
-  --color-sidebar: #101214;
+  --color-sidebar: #ffffff;
   --color-surface: #ffffff;
   --color-surface-2: #f8f8f8;
   --color-surface-3: #f1f2f4;
@@ -60,42 +60,6 @@
   --ease-standard: cubic-bezier(0.4, 0, 0, 1);
 }
 
-/* Opt-in dark palette: the values this app shipped before the light redesign. Light is
-   the default and is never chosen from the OS setting automatically. */
-[data-theme="dark"] {
-  --color-bg: #0b0f17;
-  --color-sidebar: #080b12;
-  --color-surface: #10151f;
-  --color-surface-2: #1a1f2b;
-  --color-surface-3: #151b26;
-  --color-row-hover: #151b26;
-  --color-selected: #1f2633;
-  --color-rule: #20293a;
-  --color-line: #2d3748;
-  --color-line-strong: #4b5563;
-  --color-fg: #ffffff;
-  --color-ink-soft: #d7dde8;
-  --color-muted: #94a3b8;
-  --color-faint: #7c8aa0;
-  --color-accent: #00d4ff;
-  --color-accent-text: #67e8f9;
-  --color-accent-ink: #04121a;
-  --color-accent-2: #8a2bff;
-  --color-info: #3b82f6;
-  --color-nav-accent: #00d4ff;
-  --color-pos: #22c55e;
-  --color-pos-tint: rgba(34, 197, 94, 0.1);
-  --color-warn: #f59e0b;
-  --color-warn-tint: rgba(245, 158, 11, 0.1);
-  --color-warn-line: rgba(245, 158, 11, 0.35);
-  --color-warn-ink: #fbbf24;
-  --color-neg: #ef4444;
-  --color-neg-fill: #ef4444;
-  --color-neg-tint: rgba(239, 68, 68, 0.1);
-  --color-neg-line: rgba(239, 68, 68, 0.35);
-  --color-neg-ink: #fca5a5;
-}
-
 /* Categorical series for charts and the models table: assigned per model in a stable
    order, never used for status. `static` because the chart tints segments through
    inline styles, which Tailwind's usage scan cannot see. */
@@ -108,14 +72,6 @@
   --color-series-6: #626f86; /* "other" */
 }
 
-[data-theme="dark"] {
-  --color-series-1: #00d4ff;
-  --color-series-2: #b58cff;
-  --color-series-3: #f59e0b;
-  --color-series-4: #f472b6;
-  --color-series-5: #3b82f6;
-  --color-series-6: #94a3b8;
-}
 
 html,
 body,

@@ -1,5 +1,22 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { Check, Copy } from "@phosphor-icons/react";
+import {
+  Children,
+  isValidElement,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { createPortal } from "react-dom";
+import {
+  CaretDown,
+  Check,
+  Copy,
+  MagnifyingGlass,
+  WarningOctagon,
+  X,
+} from "@phosphor-icons/react";
 
 /** Shared primitives. Every page composes these; none of them fetches. */
 
@@ -355,6 +372,12 @@ export function Input({
   );
 }
 
+/**
+ * Searchable dropdown. Drop-in for the old native `<select>`: the same `value`,
+ * `onChange` and `<option>`/`<optgroup>` children, but the menu is ours — filter-as-you-
+ * type, keyboard navigation, and no OS styling. The popover is portalled and positioned
+ * from the trigger, so it is never clipped by a scrolling modal.
+ */
 export function Select({
   value,
   onChange,
@@ -370,21 +393,221 @@ export function Select({
   disabled?: boolean;
   className?: string;
 }) {
+  const options = useMemo(() => readOptions(children), [children]);
+  const selected = options.find((option) => option.value === value);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [rect, setRect] = useState<{ left: number; top: number; width: number } | null>(null);
+  const listId = useId();
+
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return options;
+    return options.filter(
+      (option) =>
+        option.label.toLowerCase().includes(needle) ||
+        option.value.toLowerCase().includes(needle) ||
+        (option.group?.toLowerCase().includes(needle) ?? false),
+    );
+  }, [options, query]);
+
+  const place = () => {
+    const box = trigger.current?.getBoundingClientRect();
+    if (!box) return;
+    const height = Math.min(320, Math.max(120, options.length * 32 + 56));
+    const below = window.innerHeight - box.bottom;
+    const top = below > height + 12 ? box.bottom + 6 : Math.max(8, box.top - height - 6);
+    setRect({ left: box.left, top, width: box.width });
+  };
+
+  const show = () => {
+    if (disabled) return;
+    setQuery("");
+    const index = options.findIndex((option) => option.value === value);
+    setActive(Math.max(0, index));
+    place();
+    setOpen(true);
+  };
+
+  const close = () => setOpen(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (trigger.current?.contains(target)) return;
+      if (document.getElementById(listId)?.contains(target)) return;
+      close();
+    };
+    const onScroll = () => close();
+    const onResize = () => close();
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [open, listId]);
+
+  const choose = (option: Option) => {
+    if (option.disabled) return;
+    onChange(option.value);
+    close();
+    trigger.current?.focus();
+  };
+
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    if (!open) {
+      if (["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        show();
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActive((index) => Math.min(filtered.length - 1, index + 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActive((index) => Math.max(0, index - 1));
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setActive(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      setActive(Math.max(0, filtered.length - 1));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const option = filtered[active];
+      if (option) choose(option);
+    }
+  };
+
   return (
-    <select
-      value={value}
-      disabled={disabled}
-      aria-label={ariaLabel}
-      onChange={(e) => onChange(e.target.value)}
-      className={cx(control, "appearance-none pr-7 bg-[right_0.5rem_center] bg-no-repeat", className)}
-      style={{
-        backgroundImage:
-          "url(\"data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%239b9b9b' stroke-width='1.5'%3E%3Cpath d='M3 5l3 3 3-3'/%3E%3C/svg%3E\")",
-      }}
-    >
-      {children}
-    </select>
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        disabled={disabled}
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => (open ? close() : show())}
+        onKeyDown={onKeyDown}
+        className={cx(
+          control,
+          "flex items-center justify-between gap-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text",
+          className,
+        )}
+      >
+        <span className={cx("truncate", selected ? "text-fg" : "text-faint")}>
+          {selected?.label ?? "select…"}
+        </span>
+        <CaretDown size={12} aria-hidden className="shrink-0 text-faint" />
+      </button>
+      {open && rect
+        ? createPortal(
+            <div
+              id={listId}
+              role="listbox"
+              aria-label={ariaLabel}
+              style={{ left: rect.left, top: rect.top, width: Math.max(rect.width, 200) }}
+              className="fixed z-[70] overflow-hidden rounded-[8px] border border-line bg-surface shadow-[0_12px_32px_rgba(16,18,20,0.16)]"
+            >
+              {options.length > 4 ? (
+                <div className="flex items-center gap-2 border-b border-line px-2.5 py-2">
+                  <MagnifyingGlass size={14} aria-hidden className="text-faint" />
+                  <input
+                    autoFocus
+                    value={query}
+                    onChange={(event) => {
+                      setQuery(event.target.value);
+                      setActive(0);
+                    }}
+                    onKeyDown={onKeyDown}
+                    placeholder="filter…"
+                    aria-label={`filter ${ariaLabel}`}
+                    className="h-6 w-full bg-transparent text-[12.5px] text-fg placeholder:text-faint focus:outline-none"
+                  />
+                  <X
+                    size={13}
+                    aria-hidden
+                    className="shrink-0 cursor-pointer text-faint hover:text-fg"
+                    onClick={() => setQuery("")}
+                  />
+                </div>
+              ) : null}
+              <div className="max-h-[264px] overflow-auto py-1">
+                {filtered.length === 0 ? (
+                  <div className="px-3 py-2 text-[12px] text-faint">no match</div>
+                ) : (
+                  filtered.map((option, index) => (
+                    <button
+                      key={`${option.group ?? ""}:${option.value}`}
+                      type="button"
+                      role="option"
+                      aria-selected={option.value === value}
+                      disabled={option.disabled}
+                      onMouseEnter={() => setActive(index)}
+                      onClick={() => choose(option)}
+                      className={cx(
+                        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px]",
+                        index === active && "bg-[var(--color-selected)]",
+                        option.value === value ? "font-medium text-fg" : "text-ink-soft",
+                        option.disabled && "cursor-not-allowed text-faint",
+                      )}
+                    >
+                      <span className="w-3 shrink-0">
+                        {option.value === value ? <Check size={12} weight="bold" aria-hidden /> : null}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                      {option.group ? (
+                        <span className="shrink-0 text-[10.5px] text-faint">{option.group}</span>
+                      ) : null}
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   );
+}
+
+type Option = { value: string; label: string; group?: string; disabled?: boolean };
+
+/** Flatten `<option>`/`<optgroup>` children into plain option data. */
+function readOptions(children: ReactNode, group?: string): Option[] {
+  const out: Option[] = [];
+  Children.forEach(children, (child) => {
+    if (!isValidElement(child)) return;
+    const props = child.props as { value?: unknown; children?: ReactNode; label?: string; disabled?: boolean };
+    if (child.type === "option") {
+      const raw = props.children;
+      const label = Children.toArray(raw)
+        .map((part) => (typeof part === "string" || typeof part === "number" ? String(part) : ""))
+        .join("")
+        .trim();
+      out.push({
+        value: String(props.value ?? label),
+        label,
+        group,
+        disabled: Boolean(props.disabled),
+      });
+    } else if (child.type === "optgroup") {
+      out.push(...readOptions(props.children, props.label));
+    }
+  });
+  return out;
 }
 
 /** Card footer for form actions: a hairline separates actions from the fields. */
@@ -549,14 +772,21 @@ export function Modal({
   onClose,
   children,
   footer,
+  width = "md",
+  description,
 }: {
   title: string;
   open: boolean;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  /** Dialog width: md 560, lg 720, xl 900. */
+  width?: "md" | "lg" | "xl";
+  /** Optional second line under the title. */
+  description?: string;
 }) {
   const titleId = useId();
+  const describedBy = useId();
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -565,33 +795,117 @@ export function Modal({
     };
     document.addEventListener("keydown", onKey);
     ref.current?.focus();
-    return () => document.removeEventListener("keydown", onKey);
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previous;
+    };
   }, [open, onClose]);
 
   if (!open) return null;
+  const widths = { md: "max-w-[560px]", lg: "max-w-[720px]", xl: "max-w-[900px]" } as const;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/70 p-4 pt-[10vh]">
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-[rgba(16,18,20,0.48)] p-0 backdrop-blur-[1.5px] min-[560px]:items-center min-[560px]:p-6"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
       <div
         ref={ref}
         tabIndex={-1}
-        // Focus lands here for screen readers; the accent focus ring is for controls.
         style={{ outline: "none" }}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="w-full max-w-lg rounded-[var(--radius-card)] border border-line-strong bg-surface shadow-2xl focus:outline-none focus-visible:outline-none"
+        aria-describedby={description ? describedBy : undefined}
+        className={cx(
+          "flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-[14px] border border-line bg-surface",
+          "shadow-[0_24px_64px_rgba(16,18,20,0.22)] min-[560px]:rounded-[12px]",
+          widths[width],
+        )}
       >
-        <div className="flex items-center justify-between border-b border-line px-5 py-3">
-          <h2 id={titleId} className="text-[15px] font-medium">
-            {title}
-          </h2>
-          <Button variant="quiet" onClick={onClose}>
-            close
-          </Button>
-        </div>
-        <div className="max-h-[65vh] overflow-auto px-5 py-4">{children}</div>
-        {footer ? <div className="flex justify-end gap-2 border-t border-line px-5 py-3">{footer}</div> : null}
+        <header className="flex items-start justify-between gap-4 border-b border-line px-5 py-4 min-[560px]:px-6">
+          <div className="min-w-0">
+            <h2 id={titleId} className="text-[18px] font-semibold leading-tight text-fg">
+              {title}
+            </h2>
+            {description ? (
+              <p id={describedBy} className="mt-1 text-[12.5px] leading-relaxed text-muted">
+                {description}
+              </p>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="close dialog"
+            className="-mr-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+          >
+            <X size={16} aria-hidden />
+          </button>
+        </header>
+        <div className="min-h-0 flex-1 overflow-auto px-5 py-5 min-[560px]:px-6">{children}</div>
+        {footer ? (
+          <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3.5 min-[560px]:px-6">
+            {footer}
+          </footer>
+        ) : null}
       </div>
     </div>
+  );
+}
+
+/**
+ * Destructive confirmation. Every destructive action in the dashboard routes through
+ * this dialog instead of `window.confirm`, so the consequence, the object and the
+ * confirming verb are all visible at once.
+ */
+export function ConfirmDialog({
+  open,
+  title,
+  message,
+  confirmLabel = "Delete",
+  busy = false,
+  onConfirm,
+  onClose,
+}: {
+  open: boolean;
+  title: string;
+  message: ReactNode;
+  confirmLabel?: string;
+  busy?: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal
+      title={title}
+      open={open}
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            cancel
+          </Button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className="inline-flex h-8 items-center gap-1.5 rounded-full bg-[var(--color-neg-fill)] px-3.5 text-[13px] font-semibold text-white transition-colors hover:bg-[var(--color-neg)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {busy ? "working…" : confirmLabel}
+          </button>
+        </>
+      }
+    >
+      <div className="flex items-start gap-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--color-neg-tint)] text-[var(--color-neg)]">
+          <WarningOctagon size={19} aria-hidden />
+        </span>
+        <div className="min-w-0 text-[13.5px] leading-relaxed text-ink-soft">{message}</div>
+      </div>
+    </Modal>
   );
 }

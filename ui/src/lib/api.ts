@@ -140,6 +140,11 @@ export const api = {
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
 
+export async function getAccountSubscriptions(): Promise<AccountSubscription[]> {
+  const body = await api.get<{ accounts?: AccountSubscription[] }>("/api/accounts/usage");
+  return body.accounts ?? [];
+}
+
 export async function getAccountQuotas(): Promise<AccountQuotaRow[]> {
   const body = await api.get<{ quotas?: AccountQuotaRow[] }>("/api/accounts/quotas");
   return body.quotas ?? [];
@@ -215,6 +220,26 @@ export type AccountQuotaRow = {
   cost_micros: number;
   exhausted: boolean;
   resets_at: number | null;
+};
+
+/** One window reported by the provider's own usage endpoint. */
+export type SubscriptionWindow = {
+  id: string;
+  label: string;
+  used_percent: number;
+  window_seconds: number | null;
+  resets_at: number | null;
+};
+
+/** Plan limits read from the provider; `error` explains why there are none. */
+export type AccountSubscription = {
+  connection_id: string;
+  provider: string;
+  name: string | null;
+  plan: string | null;
+  windows: SubscriptionWindow[];
+  error: string | null;
+  fetched_at: number;
 };
 
 export type UpdateAccountQuota = Partial<{
@@ -445,6 +470,8 @@ export type Model = {
   source: "catalog" | "upstream" | "custom" | "synced";
   enabled: boolean;
   available: boolean;
+  /** A family its provider retired (or models.dev marks deprecated): listed last. */
+  deprecated: boolean;
 };
 
 export type ModelProvider = {

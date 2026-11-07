@@ -10,6 +10,7 @@ import {
   Field,
   Input,
   Modal,
+  ConfirmDialog,
   PageHeader,
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
@@ -72,11 +73,8 @@ export default function Templates() {
     }
   };
 
-  const del = (row: Template) => {
-    if (confirm(`Delete template "${row.name}"? Its version history goes with it.`)) {
-      remove.mutate(row.id);
-    }
-  };
+  const [deleting, setDeleting] = useState<Template | null>(null);
+  const del = (row: Template) => setDeleting(row);
 
   /** A restored body is a PUT, so the server records it as the next version. */
   const restore = (row: Template, version: TemplateVersion) => {
@@ -155,6 +153,19 @@ export default function Templates() {
 
   return (
     <>
+      <ConfirmDialog
+        open={deleting !== null}
+        title="Delete template"
+        message={<>Delete <span className="font-medium">{deleting?.name}</span> and its whole version history? Playground prompts that used it are unaffected, but the template cannot be restored.</>}
+        confirmLabel="Delete template"
+        busy={remove.isPending}
+        onConfirm={() => {
+          if (deleting) remove.mutate(deleting.id);
+          setDeleting(null);
+        }}
+        onClose={() => setDeleting(null)}
+      />
+
       <PageHeader
         title="Templates"
         subtitle="Reusable system prompts. Write one here, then load it into the Playground."

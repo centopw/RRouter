@@ -1,7 +1,8 @@
 import { useMemo, useState, type ReactNode } from "react";
 import type { Model } from "../lib/api";
 import { useModelProviders, useModels } from "../lib/queries";
-import { cx } from "./ui";
+import { Badge, cx } from "./ui";
+import { compareModels } from "../lib/models";
 
 /**
  * Multi-select over model refs, grouped by provider. Built for a permission list
@@ -109,6 +110,7 @@ export function ModelPicker({
                       ref_={m.ref}
                       label={m.display ?? m.id}
                       dim={!m.enabled}
+                      deprecated={m.deprecated}
                       checked={chosen.has(m.ref)}
                       disabled={disabled}
                       onToggle={() => toggle(m.ref)}
@@ -141,6 +143,7 @@ function Row({
   checked,
   disabled,
   dim,
+  deprecated,
   onToggle,
 }: {
   ref_: string;
@@ -148,6 +151,7 @@ function Row({
   checked: boolean;
   disabled?: boolean;
   dim?: boolean;
+  deprecated?: boolean;
   onToggle: () => void;
 }) {
   return (
@@ -163,6 +167,11 @@ function Row({
         className="h-3.5 w-3.5 shrink-0 rounded border border-line-strong bg-[var(--color-surface-2)] accent-[var(--color-accent)]"
       />
       <span className={cx("truncate", dim ? "text-faint" : "text-muted")}>{label}</span>
+      {deprecated ? (
+        <Badge tone="warn" title="this family is retired by its provider">
+          deprecated
+        </Badge>
+      ) : null}
     </label>
   );
 }
@@ -181,6 +190,6 @@ function group(models: Model[] | undefined, query: string) {
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([provider, list]) => ({
       provider,
-      models: [...list].sort((a, b) => a.ref.localeCompare(b.ref)),
+      models: [...list].sort(compareModels),
     }));
 }

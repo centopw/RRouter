@@ -14,6 +14,7 @@ import {
   Segmented,
   Select,
   PageHeader,
+  ConfirmDialog,
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { ModelPicker } from "../components/model-picker";
@@ -37,6 +38,7 @@ export default function Keys() {
   const [name, setName] = useState("");
   const [issued, setIssued] = useState<NewKey | null>(null);
   const [editing, setEditing] = useState<KeyResult | null>(null);
+  const [revoking, setRevoking] = useState<KeyResult | null>(null);
 
   // The Modal re-focuses itself whenever `onClose` changes identity; keep it stable.
   const closeEdit = useCallback(() => setEditing(null), []);
@@ -92,14 +94,7 @@ export default function Keys() {
           <Button onClick={() => setEditing(r)} title={`edit limits for ${r.name ?? r.id}`}>
             edit
           </Button>
-          <Button
-            variant="danger"
-            onClick={() => {
-              if (confirm(`Revoke key ${r.name ?? r.id}? Clients using it stop working immediately.`)) {
-                remove.mutate(r.id);
-              }
-            }}
-          >
+          <Button variant="danger" onClick={() => setRevoking(r)}>
             delete
           </Button>
         </div>
@@ -109,6 +104,19 @@ export default function Keys() {
 
   return (
     <>
+      <ConfirmDialog
+        open={revoking !== null}
+        title="Revoke key"
+        message={<>Every client using <span className="font-mono">{revoking?.name ?? revoking?.id}</span> stops working immediately. This cannot be undone.</>}
+        confirmLabel="Revoke key"
+        busy={remove.isPending}
+        onConfirm={() => {
+          if (revoking) remove.mutate(revoking.id);
+          setRevoking(null);
+        }}
+        onClose={() => setRevoking(null)}
+      />
+
       <PageHeader
         title="API Keys"
         subtitle="Clients authenticate with these against /v1. Keys are stored hashed; the plaintext is shown once."
@@ -601,6 +609,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
   return (
     <Modal
       title="Key limits"
+      width="lg"
       open
       onClose={onClose}
       footer={

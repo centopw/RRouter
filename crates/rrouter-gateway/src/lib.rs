@@ -15,6 +15,7 @@ pub mod error;
 pub mod headers;
 pub mod metrics;
 pub mod models_registry;
+pub mod provider_usage;
 pub mod proxy;
 pub mod routes;
 pub mod settings;
@@ -114,6 +115,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/templates/{id}/versions", get(routes::templates::versions))
         .route("/accounts/quotas", get(routes::quotas::list))
+        .route("/accounts/usage", get(routes::quotas::usage))
         .route(
             "/accounts/quotas/{id}",
             put(routes::quotas::update).delete(routes::quotas::remove),

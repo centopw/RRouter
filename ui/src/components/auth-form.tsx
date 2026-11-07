@@ -50,7 +50,7 @@ export function AuthCard({ children, className }: { children: ReactNode; classNa
   return (
     <section
       className={cx(
-        "rounded-[8px] border border-line bg-surface px-6 py-7 shadow-[0_1px_2px_rgba(16,18,20,0.04)] min-[560px]:px-8",
+        "rounded-[8px] border border-line bg-surface px-6 py-8 shadow-[0_1px_2px_rgba(16,18,20,0.04)] min-[560px]:px-8",
         className,
       )}
     >

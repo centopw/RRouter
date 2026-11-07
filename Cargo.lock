@@ -1334,6 +1334,7 @@ name = "rrouter-gateway"
 version = "0.2.3"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "bytes",
  "futures-util",
  "http",

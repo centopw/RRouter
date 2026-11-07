@@ -8,6 +8,7 @@ import {
   ErrorNote,
   Field,
   Input,
+  Select,
   StatusPill,
   cx,
 } from "../../components/ui";
@@ -729,21 +730,22 @@ function RequestStep({
         <label htmlFor="setup-model" className="text-[13px] text-muted">
           Model
         </label>
-        <select
-          id="setup-model"
-          value={model}
-          onChange={(e) => {
-            setChosen(e.target.value);
-            setProbeError(null);
-          }}
-          className="h-8 max-w-full rounded-lg border border-line bg-surface-2 px-2 font-mono text-[12px] text-fg"
-        >
-          {candidates.map((m) => (
-            <option key={m.ref} value={m.ref}>
-              {m.ref}
-            </option>
-          ))}
-        </select>
+        <div className="min-w-[240px] max-w-[420px] flex-1">
+          <Select
+            value={model}
+            onChange={(value) => {
+              setChosen(value);
+              setProbeError(null);
+            }}
+            ariaLabel="setup model"
+          >
+            {candidates.map((m) => (
+              <option key={m.ref} value={m.ref}>
+                {m.ref}
+              </option>
+            ))}
+          </Select>
+        </div>
       </div>
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">

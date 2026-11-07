@@ -92,6 +92,16 @@ async fn rows(state: &AppState) -> rrouter_core::Result<Vec<Row>> {
         .collect())
 }
 
+/// `GET /api/accounts/usage` — subscription windows reported by the provider (Claude's
+/// 5-hour/weekly buckets, Codex's primary/secondary windows). Read-only: these are the
+/// plan's limits, not operator quotas.
+pub async fn usage(State(state): State<Arc<AppState>>) -> Response {
+    match crate::provider_usage::list(&state).await {
+        Ok(value) => ok_json(value),
+        Err(e) => admin_error(&e),
+    }
+}
+
 pub async fn list(State(state): State<Arc<AppState>>) -> Response {
     match rows(&state).await {
         Ok(rows) => ok_json(json!({

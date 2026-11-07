@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Button, Card, CardFooter, CardHeader, ErrorNote, Field, Input, PageHeader } from "../components/ui";
+import { Button, Card, CardFooter, CardHeader, ConfirmDialog, ErrorNote, Field, Input, PageHeader } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { ModelSelect } from "../components/model-select";
 import { qk, useAliases } from "../lib/queries";
@@ -11,6 +11,7 @@ export default function Aliases() {
   const client = useQueryClient();
   const [name, setName] = useState("");
   const [target, setTarget] = useState("");
+  const [pending, setPending] = useState<{ alias: string } | null>(null);
 
   const invalidate = () => {
     void client.invalidateQueries({ queryKey: qk.aliases });
@@ -44,7 +45,7 @@ export default function Aliases() {
       title: "",
       align: "right",
       render: (r) => (
-        <Button variant="danger" onClick={() => remove.mutate(r.alias)}>
+        <Button variant="danger" onClick={() => setPending({ alias: r.alias })}>
           delete
         </Button>
       ),
@@ -94,7 +95,20 @@ export default function Aliases() {
 
       <Card>
         <CardHeader title="Saved aliases" />
-        <DataTable
+        <ConfirmDialog
+        open={pending !== null}
+        title="Delete alias"
+        message={<>Clients calling <span className="font-mono">{pending?.alias}</span> will get a model-not-found error until they use another name.</>}
+        confirmLabel="Delete alias"
+        busy={remove.isPending}
+        onConfirm={() => {
+          if (pending) remove.mutate(pending.alias);
+          setPending(null);
+        }}
+        onClose={() => setPending(null)}
+      />
+
+      <DataTable
           columns={columns}
           rows={aliases.data}
           rowKey={(r) => r.alias}

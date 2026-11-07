@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Button, Card, CardFooter, CardHeader, ErrorNote, Field, Input, PageHeader } from "../components/ui";
+import { Button, Card, CardFooter, CardHeader, ConfirmDialog, ErrorNote, Field, Input, PageHeader } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { ModelChain } from "../components/model-select";
 import { qk, useCombos } from "../lib/queries";
@@ -11,6 +11,7 @@ export default function Combos() {
   const client = useQueryClient();
   const [name, setName] = useState("");
   const [models, setModels] = useState<string[]>([""]);
+  const [pending, setPending] = useState<string | null>(null);
 
   const invalidate = () => {
     void client.invalidateQueries({ queryKey: qk.combos });
@@ -56,7 +57,7 @@ export default function Combos() {
       title: "",
       align: "right",
       render: (r) => (
-        <Button variant="danger" onClick={() => remove.mutate(r.name)}>
+        <Button variant="danger" onClick={() => setPending(r.name)}>
           delete
         </Button>
       ),
@@ -105,6 +106,19 @@ export default function Combos() {
           </CardFooter>
         </form>
       </Card>
+
+      <ConfirmDialog
+        open={pending !== null}
+        title="Delete combo"
+        message={<>The fallback chain <span className="font-mono">{pending}</span> stops existing. Requests naming it fail until they use another model.</>}
+        confirmLabel="Delete combo"
+        busy={remove.isPending}
+        onConfirm={() => {
+          if (pending) remove.mutate(pending);
+          setPending(null);
+        }}
+        onClose={() => setPending(null)}
+      />
 
       <Card>
         <CardHeader title="Saved combos" />

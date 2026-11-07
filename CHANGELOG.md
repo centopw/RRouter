@@ -5,6 +5,14 @@ All notable changes. Dates are local; versions follow semver once tagged.
 ## Unreleased
 
 ### Added
+- Model lists are newest-first (version- and date-aware) and retired families (Claude 3.x,
+  GPT-4 turbo, gpt-5-codex) sort last, carry a `deprecated` badge, and are never chosen by a
+  connectivity probe. Probes prefer the cheapest current model, using the provider's own list
+  or a synced price, so testing an account no longer spends `claude-3-7-sonnet`.
+- Subscription usage: `/api/accounts/usage` reads the plan windows the provider already
+  reports (Claude's 5-hour and weekly buckets, Codex's primary/secondary windows), cached for
+  a minute, and the Providers page shows them as read-only bars next to the optional operator
+  caps. The provider stays the source of truth; RRouter never invents a percentage.
 - Dashboard accounts: first-run owner creation with the one-time setup code printed at startup,
   argon2id passwords, HttpOnly session cookies, ten single-use recovery codes, invite-only
   sign-up, and the admin/member/viewer roles (`/api/auth/*`, `/api/users`, `/api/users/invites`).
@@ -32,6 +40,14 @@ All notable changes. Dates are local; versions follow semver once tagged.
   log, so nothing counts, resets or repairs a counter.
 
 ### Changed
+- The shell is light throughout: white rail, collapsible to icons, light-mode logo, and every
+  dialog rebuilt as a flat card with a header, scrollable body and sticky footer. Destructive
+  actions (provider, key, user, invitation, template, alias, combo, custom model, quota clear)
+  confirm in a dialog instead of `window.confirm`, and every dropdown is the dashboard's own
+  searchable, keyboard-navigable list.
+- Logs filters sit in one toolbar (range, status, provider, model, key) with a clear action,
+  instead of wrapping into a stack, and the Playground reads as a conversation: centered thread,
+  suggestion starters, and a composer with the model and send control inline.
 - The dashboard now signs you in as a user. The pasted admin token moved behind "Use an admin
   token instead" on the sign-in screen, and loopback/break-glass access is unchanged for the API.
 - The request detail opens as a dialog when a row is clicked (Activity and Logs) instead of

@@ -60,7 +60,7 @@ export default function SignIn() {
     <AuthShell>
       <AuthCard>
         <AuthTitle title="Sign in" lead={`to RRouter at ${window.location.host}`} />
-        <form onSubmit={submit} className="flex flex-col gap-4">
+        <form onSubmit={submit} className="flex flex-col gap-5">
           <AuthField label="Email" htmlFor="signin-email">
             <AuthInput
               id="signin-email"
@@ -81,7 +81,7 @@ export default function SignIn() {
             rules={false}
             aside={<AuthFooterLink to="/forgot">Forgot password?</AuthFooterLink>}
           />
-          <label className="flex items-center gap-2 text-[13px]">
+          <label className="mt-1 flex items-center gap-2 text-[13px]">
             <input
               type="checkbox"
               checked={remember}
@@ -97,11 +97,11 @@ export default function SignIn() {
         </form>
       </AuthCard>
 
-      <p className="mt-5 text-center text-[12.5px] text-muted">
+      <p className="mx-auto mt-7 max-w-[380px] text-center text-[12.5px] leading-relaxed text-muted">
         Got an invitation? Open the link an admin sent you to create your account.
       </p>
 
-      <div className="mt-4 text-center">
+      <div className="mt-5 text-center">
         {tokenOpen ? (
           <div className="mx-auto mt-3 flex max-w-[340px] flex-col gap-2 text-left">
             <AuthField

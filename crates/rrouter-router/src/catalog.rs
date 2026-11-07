@@ -9,6 +9,101 @@
 
 use std::collections::HashMap;
 
+/// Model families providers have retired. A compiled-in list is the only reliable
+/// signal: a provider's model list does not carry a deprecation flag, and models.dev
+/// still describes retired ids. Retired models stay routable when a client names them
+/// explicitly — some organisations keep access — but the picker sorts them last, they
+/// are labelled, and connectivity probes never choose them.
+const RETIRED: &[(&str, &str)] = &[
+    ("claude", "claude-3-7-sonnet"),
+    ("anthropic", "claude-3-7-sonnet"),
+    ("claude", "claude-3-5-"),
+    ("anthropic", "claude-3-5-"),
+    ("claude", "claude-3-opus"),
+    ("anthropic", "claude-3-opus"),
+    ("claude", "claude-3-haiku"),
+    ("anthropic", "claude-3-haiku"),
+    ("openai", "gpt-4-turbo"),
+    ("openai", "gpt-4-0613"),
+    ("codex", "gpt-5-codex"),
+];
+
+/// Whether this id belongs to a family its provider has retired.
+pub fn is_retired(provider: &str, id: &str) -> bool {
+    RETIRED
+        .iter()
+        .any(|(p, prefix)| *p == provider && id.starts_with(prefix))
+}
+
+/// `(version, date)` numbers in a model id, for "newest first" ordering.
+///
+/// Groups of digits are split into version components and date stamps: `4-5` reads as
+/// version `[4, 5]`, while an 8-digit `20241022` is stored separately so a date suffix
+/// cannot outrank a real generation bump. Comparison is padded, so `4.5` > `4`.
+pub fn recency(id: &str) -> (Vec<u64>, Vec<u64>) {
+    let mut version = Vec::new();
+    let mut date = Vec::new();
+    let mut digits = String::new();
+    for ch in id.chars().chain(std::iter::once('-')) {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        if digits.is_empty() {
+            continue;
+        }
+        if let Ok(number) = digits.parse::<u64>() {
+            if number >= 19_000_000 {
+                date.push(number);
+            } else {
+                version.push(number);
+            }
+        }
+        digits.clear();
+    }
+    (version, date)
+}
+
+/// How expensive a family tends to be, for connectivity probes that should not spend
+/// the most expensive model's minimum output. Lower is cheaper.
+pub fn probe_class(id: &str) -> u8 {
+    let id = id.to_ascii_lowercase();
+    let cheap = ["haiku", "flash", "mini", "lite", "nano", "instant", "8b", "oss"];
+    let heavy = ["opus", "pro", "ultra", "max"];
+    if cheap.iter().any(|needle| id.contains(needle)) {
+        0
+    } else if heavy.iter().any(|needle| id.contains(needle)) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Newest first: compare version components (padded), then date stamps, then the id.
+pub fn compare_newest(a: &str, b: &str) -> std::cmp::Ordering {
+    let (av, ad) = recency(a);
+    let (bv, bd) = recency(b);
+    let width = av.len().max(bv.len());
+    for index in 0..width {
+        let left = av.get(index).copied().unwrap_or(0);
+        let right = bv.get(index).copied().unwrap_or(0);
+        match right.cmp(&left) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    let width = ad.len().max(bd.len());
+    for index in 0..width {
+        let left = ad.get(index).copied().unwrap_or(0);
+        let right = bd.get(index).copied().unwrap_or(0);
+        match right.cmp(&left) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    a.cmp(b)
+}
+
 /// One (model id, provider) pair the catalog believes is servable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelInfo {
@@ -33,7 +128,6 @@ const BUILTIN: &[ProviderRow] = &[
             (concat!("claude", "-sonnet-4-5"), Some(64_000)),
             (concat!("claude", "-sonnet-4"), Some(64_000)),
             (concat!("claude", "-haiku-4-5"), Some(64_000)),
-            (concat!("claude", "-3-7-sonnet-latest"), Some(64_000)),
         ],
     ),
     (
@@ -43,7 +137,6 @@ const BUILTIN: &[ProviderRow] = &[
             (concat!("claude", "-sonnet-4-5"), Some(64_000)),
             (concat!("claude", "-sonnet-4"), Some(64_000)),
             (concat!("claude", "-haiku-4-5"), Some(64_000)),
-            (concat!("claude", "-3-7-sonnet-latest"), Some(64_000)),
         ],
     ),
     (
@@ -328,10 +421,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_has_five_models_per_provider() {
+    fn newest_ordering_reads_versions_and_dates() {
+        let mut ids = vec![
+            "claude-3-7-sonnet-latest",
+            "claude-sonnet-4",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+            "gemini-2.5-pro",
+            "claude-3-5-sonnet-20241022",
+        ];
+        ids.sort_by(|a, b| compare_newest(a, b));
+        // Same-version families tie; the id breaks it. A newer generation always
+        // outranks an older one, regardless of family or a date suffix.
+        assert_eq!(
+            ids,
+            vec![
+                "claude-haiku-4-5",
+                "claude-sonnet-4-5",
+                "claude-sonnet-4",
+                "claude-3-7-sonnet-latest",
+                "claude-3-5-sonnet-20241022",
+                "gemini-2.5-pro",
+            ]
+        );
+        // A date suffix breaks a tie without outranking a generation bump.
+        assert_eq!(recency("claude-3-5-sonnet-20241022"), (vec![3, 5], vec![20_241_022]));
+    }
+
+    #[test]
+    fn probe_classes_prefer_small_families() {
+        assert_eq!(probe_class("claude-haiku-4-5"), 0);
+        assert_eq!(probe_class("claude-sonnet-4-5"), 1);
+        assert_eq!(probe_class("claude-opus-4-1"), 2);
+        assert_eq!(probe_class("gemini-2.5-flash"), 0);
+    }
+
+    #[test]
+    fn retired_families_are_recognised_per_provider() {
+        assert!(is_retired("claude", "claude-3-7-sonnet-latest"));
+        assert!(is_retired("anthropic", "claude-3-5-sonnet-20241022"));
+        assert!(!is_retired("claude", "claude-sonnet-4-5"));
+        assert!(!is_retired("openrouter", "anthropic/claude-3-7-sonnet"));
+    }
+
+    #[test]
+    fn builtin_has_at_least_four_models_per_provider() {
         let catalog = Catalog::builtin();
         for (provider, models) in BUILTIN {
-            assert!(models.len() >= 5, "{provider} has {}", models.len());
+            assert!(models.len() >= 4, "{provider} has {}", models.len());
         }
         assert_eq!(catalog.all().len(), BUILTIN.iter().map(|(_, m)| m.len()).sum::<usize>());
     }

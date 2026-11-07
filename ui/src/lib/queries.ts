@@ -2,6 +2,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import {
   api,
   clearAccountQuota,
+  getAccountSubscriptions,
   getAccountQuotas,
   list,
   listPage,
@@ -45,6 +46,7 @@ export const qk = {
   system: ["system"] as const,
   connections: ["connections"] as const,
   accountQuotas: ["accounts", "quotas"] as const,
+  accountSubscriptions: ["accounts", "subscriptions"] as const,
   authState: ["auth", "state"] as const,
   users: ["users"] as const,
   invites: ["users", "invites"] as const,
@@ -80,6 +82,17 @@ export function useSystem() {
 
 export function useConnections() {
   return useQuery({ queryKey: qk.connections, queryFn: () => list<Connection>("/api/connections") });
+}
+
+export function useAccountSubscriptions() {
+  return useQuery({
+    queryKey: qk.accountSubscriptions,
+    queryFn: getAccountSubscriptions,
+    // Provider usage endpoints are shared with the vendor's own client; a minute is
+    // frequent enough for a dashboard and polite to the upstream.
+    refetchInterval: 60_000,
+    staleTime: 55_000,
+  });
 }
 
 export function useAccountQuotas() {
