@@ -1408,6 +1408,19 @@ fn affinity_of(req: &ChatRequest) -> u64 {
     hasher.finish()
 }
 
+/// Codex answers through the Responses endpoint with sampling controls removed: a
+/// ChatGPT-backed account rejects `temperature`/`top_p` outright instead of ignoring
+/// them ("Unsupported parameter: temperature"), which failed every Playground turn.
+fn drop_unsupported_sampling(provider: &str, body: &mut Value) {
+    if provider != "codex" {
+        return;
+    }
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("temperature");
+        obj.remove("top_p");
+    }
+}
+
 /// Forward a client body unchanged in its own dialect, patching only routing fields.
 ///
 /// The canonical model cannot represent every protocol feature, and two of the losses
@@ -1733,21 +1746,19 @@ impl Attempt<'_> {
     /// Build the upstream body for one attempt. Never mutates the canonical request, so
     /// concurrent attempts all see the client's original values.
     fn outbound(&self, candidate: &Candidate, dialect: Dialect) -> Result<Value> {
-        if dialect == self.inbound {
-            return Ok(same_dialect_body(
-                dialect,
-                self.raw,
-                &candidate.model,
-                self.upstream_stream,
-            ));
-        }
-        let mut request = self.canonical.clone();
-        request.model = candidate.model.clone();
-        // Unknown inbound fields travel with the same-dialect hint only, and the
-        // canonical request already carries them with that hint. Replacing `extra`
-        // with the raw client body re-inserted fields the translator had rewritten:
-        // a string `input` overwrote the translated list ("Input must be a list").
-        rrouter_translate::build_request(dialect, &request, self.upstream_stream)
+        let mut body = if dialect == self.inbound {
+            same_dialect_body(dialect, self.raw, &candidate.model, self.upstream_stream)
+        } else {
+            let mut request = self.canonical.clone();
+            request.model = candidate.model.clone();
+            // Unknown inbound fields travel with the same-dialect hint only, and the
+            // canonical request already carries them with that hint. Replacing `extra`
+            // with the raw client body re-inserted fields the translator had rewritten:
+            // a string `input` overwrote the translated list ("Input must be a list").
+            rrouter_translate::build_request(dialect, &request, self.upstream_stream)?
+        };
+        drop_unsupported_sampling(&candidate.provider, &mut body);
+        Ok(body)
     }
 
     /// Identity of the exact upstream request this attempt would send for `candidate`.

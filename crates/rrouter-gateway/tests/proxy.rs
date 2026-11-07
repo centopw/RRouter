@@ -598,7 +598,10 @@ async fn chat_client_to_a_stream_only_responses_provider_is_translated_and_reass
     let h = harness(false);
     h.connect("codex", &mock).await;
 
-    let (status, body) = h.post("/v1/chat/completions", openai_chat_body("codex/gpt-5.6-luna")).await;
+    let mut request = openai_chat_body("codex/gpt-5.6-luna");
+    request["temperature"] = json!(0.7);
+    request["top_p"] = json!(0.9);
+    let (status, body) = h.post("/v1/chat/completions", request).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["object"], "chat.completion");
     assert_eq!(body["choices"][0]["message"]["content"], "Hello");
@@ -613,6 +616,8 @@ async fn chat_client_to_a_stream_only_responses_provider_is_translated_and_reass
     assert_eq!(sent["store"], false, "codex rejects stored responses: {sent}");
     assert_eq!(sent["stream"], true, "codex rejects non-streaming requests: {sent}");
     assert_eq!(sent["model"], "gpt-5.6-luna");
+    assert!(sent.get("temperature").is_none(), "codex rejects temperature: {sent}");
+    assert!(sent.get("top_p").is_none(), "codex rejects top_p: {sent}");
 }
 
 /// Anthropic clients (Claude Code) mark cache breakpoints with `cache_control`. The

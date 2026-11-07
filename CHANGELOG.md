@@ -51,6 +51,9 @@ All notable changes. Dates are local; versions follow semver once tagged.
   log, so nothing counts, resets or repairs a counter.
 
 ### Fixed
+- Codex rejects `temperature` and `top_p` instead of ignoring them, failing every
+  Playground turn; the gateway strips those sampling controls for the codex provider on
+  both the chat→Responses translation and same-dialect Responses passthrough.
 - Sign-in reads the submitted DOM values instead of React state, so browser autofill and
   password managers (which can fill fields without firing `input`) work on the first submit.
 - Dialogs are right-hand drawers; test results and other transient outcomes use a toast
