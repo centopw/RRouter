@@ -1847,10 +1847,59 @@ impl Attempt<'_> {
             let bytes = resp.bytes().await.map_err(transport_error)?;
             return Err(upstream_error(&candidate, status.as_u16(), &bytes));
         }
+        // Some OpenAI-compatible providers ignore `stream: true` and answer with one JSON
+        // body. Forwarding those bytes to the SSE decoder produces an empty, successful
+        // stream; convert the body to chat-completion chunks instead. Dialects with a
+        // different event grammar keep the old behaviour rather than inventing frames.
+        if dialect == Dialect::OpenAiChat
+            && resp
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|value| value.starts_with("application/json"))
+        {
+            let body: Value = resp.json().await.map_err(transport_error)?;
+            let frames = json_chat_as_sse(&body, &candidate.model);
+            return Ok(Box::pin(OpenStream {
+                bytes: Box::pin(futures_util::stream::once(async move { Ok(frames) })),
+            }));
+        }
         Ok(Box::pin(OpenStream {
             bytes: Box::pin(resp.bytes_stream().map(|c| c.map_err(transport_error))),
         }))
     }
+}
+
+/// A non-streaming OpenAI chat body as the SSE frames a streaming client expects: one
+/// content chunk, one finish chunk, `[DONE]`.
+fn json_chat_as_sse(body: &Value, model: &str) -> Bytes {
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let text = body
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mut frames = String::new();
+    if !text.is_empty() {
+        let chunk = serde_json::json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": null}]
+        });
+        frames.push_str(&format!("data: {chunk}\n\n"));
+    }
+    let mut finish = serde_json::json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    });
+    if let Some(usage) = body.get("usage").filter(|value| value.is_object()) {
+        finish["usage"] = usage.clone();
+    }
+    frames.push_str(&format!("data: {finish}\n\n"));
+    frames.push_str("data: [DONE]\n\n");
+    Bytes::from(frames)
 }
 
 /// Per-request bookkeeping: the id the client sees, the attempt counter that numbers

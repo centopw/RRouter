@@ -5067,3 +5067,30 @@ async fn token_saver_compresses_tool_results_and_can_be_bypassed() {
     let tool = sent[1]["messages"][1]["content"].as_str().expect("tool content");
     assert!(tool.starts_with("src/main.rs:1:"), "bypass kept the raw dump");
 }
+
+/// An OpenAI-compatible provider that ignores `stream:true` still produces a usable SSE
+/// stream instead of an empty success.
+#[tokio::test]
+async fn json_reply_to_a_stream_request_is_converted_to_sse() {
+    let mock = Mock::start(vec![openai_reply("converted text")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let mut body = openai_chat_body("gpt-4.1");
+    body["stream"] = json!(true);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    let res = h.router.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-type"], "text/event-stream");
+    let text = String::from_utf8(
+        res.into_body().collect().await.expect("body").to_bytes().to_vec(),
+    )
+    .expect("utf8");
+    assert!(text.contains("converted text"), "{text}");
+    assert!(text.contains("[DONE]"), "{text}");
+}
