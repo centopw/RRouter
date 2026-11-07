@@ -172,6 +172,8 @@ ready-to-import dashboard with those panels.
 ## 8. Security checklist
 
 - [ ] TLS terminates at the proxy; `RROUTER_HOST=127.0.0.1`.
+- [ ] RRouter already sends `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`
+      and a CSP for HTML; the proxy only needs to add HSTS.
 - [ ] `/api/*` and `/metrics` require authentication at the proxy.
 - [ ] `RROUTER_REQUIRE_API_KEY=true` for shared deployments; give each team its own key.
 - [ ] Per-key limits set (rpm, tpm, budget, allowed models, expiry) for keys handed to others.
