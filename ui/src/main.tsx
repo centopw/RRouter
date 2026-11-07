@@ -62,6 +62,8 @@ const Providers = page(() => import("./pages/providers"));
 const Setup = page(() => import("./pages/setup"));
 const Logs = page(() => import("./pages/logs"));
 const Users = page(() => import("./pages/users"));
+const Audit = page(() => import("./pages/audit"));
+const Account = page(() => import("./pages/account"));
 const SignIn = page(() => import("./pages/auth/sign-in"));
 const Register = page(() => import("./pages/auth/register"));
 const TokenSignIn = page(() => import("./pages/auth/token-signin"));
@@ -149,6 +151,8 @@ const router = createBrowserRouter(
             { path: "settings", element: <Settings /> },
             { path: "keys", element: <Keys /> },
             { path: "users", element: <Users /> },
+            { path: "audit", element: <Audit /> },
+            { path: "account", element: <Account /> },
             { path: "aliases", element: <Aliases /> },
             { path: "combos", element: <Combos /> },
             { path: "health", element: <Health /> },

@@ -116,6 +116,9 @@ impl AppState {
             (0, 0)
         } else {
             let cutoff = now.saturating_sub(days.saturating_mul(SECS_PER_DAY));
+            if let Err(e) = self.store.prune_audit(cutoff).await {
+                tracing::warn!(error = %e, "audit retention delete failed");
+            }
             match self.store.prune_usage(cutoff).await {
                 Ok(report) => (report.usage, report.attempts),
                 Err(e) => {

@@ -120,6 +120,7 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/accounts/quotas/{id}",
             put(routes::quotas::update).delete(routes::quotas::remove),
         )
+        .route("/audit", get(routes::audit::list))
         .route("/users", get(routes::users::list))
         .route(
             "/users/{id}",
@@ -166,6 +167,15 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/api/auth/logout", post(routes::auth::logout))
         .route("/api/auth/recover", post(routes::auth::recover))
         .route("/api/auth/invites/{token}", get(routes::auth::invite))
+        .route("/api/auth/me", get(routes::auth::me).put(routes::auth::update_me))
+        .route(
+            "/api/auth/me/sessions/revoke-others",
+            post(routes::auth::revoke_other_sessions),
+        )
+        .route(
+            "/api/auth/me/sessions/{id}",
+            axum::routing::delete(routes::auth::revoke_session),
+        )
         .route("/api/auth/signup", post(routes::auth::signup));
 
     let ops = Router::new()
@@ -178,6 +188,7 @@ pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(auth_api)
         .route("/health", get(routes::health::health))
+        .route("/ready", get(routes::health::ready))
         .route("/v1/models", get(v1_models))
         .route("/v1/models/{*id}", get(v1_model))
         .route("/v1/chat/completions", post(proxy::proxy))

@@ -77,6 +77,14 @@ impl User {
     }
 }
 
+/// One live session row. The hash never leaves the gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub token_hash: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
 /// A pending (or consumed) invitation. `token_hash` is not exposed back to the caller
 /// after creation except from the endpoint that issues the link.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,6 +384,30 @@ impl Store {
             .map_err(migrations::db_err)
     }
 
+    /// Display-name change. Email is the identity and is not editable in v1.
+    pub async fn rename_user(&self, id: Uuid, name: &str) -> Result<Option<User>> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 100 {
+            return Err(Error::BadRequest("name must be 1–100 characters".into()));
+        }
+        self.conn()
+            .execute(
+                "UPDATE users SET name = ?2 WHERE id = ?1",
+                params![id.to_string(), name],
+            )
+            .map_err(migrations::db_err)?;
+        self.user(id).await
+    }
+
+    pub async fn delete_sessions_except(&self, user_id: Uuid, keep: &str) -> Result<usize> {
+        self.conn()
+            .execute(
+                "DELETE FROM user_sessions WHERE user_id = ?1 AND token_hash <> ?2",
+                params![user_id.to_string(), keep],
+            )
+            .map_err(migrations::db_err)
+    }
+
     pub async fn mark_signed_in(&self, id: Uuid) -> Result<()> {
         self.conn()
             .execute(
@@ -446,6 +478,42 @@ impl Store {
             )
             .optional()
             .map_err(migrations::db_err)
+    }
+
+    /// Every live session of one user, newest first. The token hash stays inside the
+    /// gateway: callers derive a public id from it, never expose it.
+    pub async fn sessions_for_user(&self, user_id: Uuid) -> Result<Vec<SessionInfo>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT token_hash, created_at, expires_at FROM user_sessions \
+                 WHERE user_id = ?1 AND expires_at > ?2 ORDER BY created_at DESC",
+            )
+            .map_err(migrations::db_err)?;
+        let now = now();
+        let rows = stmt
+            .query_map(params![user_id.to_string(), now], |r| {
+                Ok(SessionInfo {
+                    token_hash: r.get(0)?,
+                    created_at: r.get(1)?,
+                    expires_at: r.get(2)?,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        rows.map(|row| row.map_err(migrations::db_err)).collect()
+    }
+
+    /// Revoke one session, scoped to its owner so a leaked public id cannot end someone
+    /// else's session.
+    pub async fn delete_user_session(&self, user_id: Uuid, token_hash: &str) -> Result<bool> {
+        let changed = self
+            .conn()
+            .execute(
+                "DELETE FROM user_sessions WHERE user_id = ?1 AND token_hash = ?2",
+                params![user_id.to_string(), token_hash],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(changed == 1)
     }
 
     pub async fn delete_session(&self, token_hash: &str) -> Result<()> {

@@ -1,5 +1,6 @@
 //! Admin + public JSON API. Nothing here touches the `/v1` hot path.
 
+pub mod audit;
 pub mod auth;
 pub mod combos;
 pub mod connections;

@@ -42,6 +42,23 @@ pub fn user_json(user: &User) -> Value {
     })
 }
 
+/// Persist one audit row; auditing never fails the request it describes.
+pub(crate) async fn audit(state: &AppState, kind: &str, actor: Option<&str>, ip: &str, detail: &str) {
+    if let Err(e) = state
+        .store
+        .record_audit(kind, actor, Some(ip), Some(detail))
+        .await
+    {
+        tracing::warn!(kind, error = %e, "audit write failed");
+    }
+}
+
+/// Public id for one session row: a hash of the stored hash, so the API can name a
+/// session without exposing anything that authenticates.
+pub(crate) fn session_public_id(token_hash: &str) -> String {
+    hash_secret(&format!("rrouter-session:{token_hash}"))
+}
+
 /// A machine-readable failure with an explicit status (auth has codes the core error
 /// enum does not carry, such as `already_initialized`).
 fn fail(status: StatusCode, code: &str, message: &str) -> Response {
@@ -149,6 +166,7 @@ pub async fn setup(State(state): State<Arc<AppState>>, headers: HeaderMap, body:
         Err(e) => return admin_error(&e),
     };
     state.auth.retire();
+    audit(&state, "setup", Some(&user.email), &auth::client_ip(&headers, None), "owner account created").await;
     tracing::info!(email = %user.email, "setup: owner account created");
     let codes = match issue_recovery_codes(&state, &user).await {
         Ok(codes) => codes,
@@ -301,12 +319,163 @@ async fn stored_hash(state: &AppState, user: &User) -> Option<String> {
     state.store.password_hash(user.id).await.ok().flatten()
 }
 
+/// `GET /api/auth/me` — the signed-in person and every live session of theirs.
+pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let Some(user) = current_user(&state, &headers).await else {
+        return fail(StatusCode::UNAUTHORIZED, "sign_in_required", "sign in to continue");
+    };
+    let current = session_token(&headers)
+        .map(|token| session_key(&token))
+        .unwrap_or_default();
+    let sessions = match state.store.sessions_for_user(user.id).await {
+        Ok(rows) => rows,
+        Err(e) => return admin_error(&e),
+    };
+    let sessions: Vec<Value> = sessions
+        .iter()
+        .map(|session| {
+            json!({
+                "id": session_public_id(&session.token_hash),
+                "created_at": session.created_at,
+                "expires_at": session.expires_at,
+                "current": session.token_hash == current,
+            })
+        })
+        .collect();
+    ok_json(json!({ "user": user_json(&user), "sessions": sessions }))
+}
+
+/// `PUT /api/auth/me` — rename, or change the password with the current one.
+pub async fn update_me(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Body) -> Response {
+    let Some(user) = current_user(&state, &headers).await else {
+        return fail(StatusCode::UNAUTHORIZED, "sign_in_required", "sign in to continue");
+    };
+    let value = match body_json(body).await {
+        Ok(v) => v,
+        Err(resp) => return *resp,
+    };
+    let ip = auth::client_ip(&headers, None);
+    let mut cookie: Option<Response> = None;
+    if let Some(name) = text(&value, "name") {
+        if let Err(e) = state.store.rename_user(user.id, &name).await {
+            return admin_error(&e);
+        }
+        audit(&state, "profile_updated", Some(&user.email), &ip, "name changed").await;
+    }
+    if let Some(password) = value.get("new_password").and_then(Value::as_str) {
+        if password.chars().count() < MIN_PASSWORD {
+            return fail(StatusCode::BAD_REQUEST, "password_too_short", "use at least 12 characters");
+        }
+        let current = value.get("current_password").and_then(Value::as_str).unwrap_or("");
+        let stored = match state.store.password_hash(user.id).await {
+            Ok(Some(hash)) => hash,
+            _ => return admin_error(&Error::Store("account has no password".into())),
+        };
+        if !verify_password(current, &stored) {
+            audit(&state, "password_change_failed", Some(&user.email), &ip, "wrong current password").await;
+            return fail(StatusCode::FORBIDDEN, "invalid_password", "the current password is incorrect");
+        }
+        let hash = match hash_password(password) {
+            Ok(hash) => hash,
+            Err(e) => return admin_error(&e),
+        };
+        if let Err(e) = state.store.set_user_password(user.id, &hash).await {
+            return admin_error(&e);
+        }
+        audit(&state, "password_changed", Some(&user.email), &ip, "sessions ended").await;
+        // The password change ended every session, including this one; keep the current
+        // tab signed in with a fresh cookie.
+        match start_session(&state, &headers, &user.id, false).await {
+            Ok(resp) => cookie = Some(resp),
+            Err(e) => return admin_error(&e),
+        }
+    }
+    let refreshed = state.store.user(user.id).await.ok().flatten().unwrap_or(user);
+    let payload = json!({ "user": user_json(&refreshed) });
+    let mut resp = cookie.unwrap_or_else(|| ok_json(Value::Null));
+    *resp.status_mut() = StatusCode::OK;
+    *resp.body_mut() = axum::body::Body::from(payload.to_string());
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    resp
+}
+
+/// `DELETE /api/auth/me/sessions/{id}` — revoke one device.
+pub async fn revoke_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let Some(user) = current_user(&state, &headers).await else {
+        return fail(StatusCode::UNAUTHORIZED, "sign_in_required", "sign in to continue");
+    };
+    let current = session_token(&headers)
+        .map(|token| session_key(&token))
+        .unwrap_or_default();
+    let sessions = match state.store.sessions_for_user(user.id).await {
+        Ok(rows) => rows,
+        Err(e) => return admin_error(&e),
+    };
+    let Some(target) = sessions.into_iter().find(|s| session_public_id(&s.token_hash) == id) else {
+        return fail(StatusCode::NOT_FOUND, "session_not_found", "that session is no longer active");
+    };
+    let revoking_current = target.token_hash == current;
+    match state.store.delete_user_session(user.id, &target.token_hash).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return fail(StatusCode::NOT_FOUND, "session_not_found", "that session is no longer active")
+        }
+        Err(e) => return admin_error(&e),
+    }
+    audit(&state, "session_revoked", Some(&user.email), &auth::client_ip(&headers, None), "one device").await;
+    let mut resp = StatusCode::NO_CONTENT.into_response();
+    if revoking_current {
+        clear_session_cookie(&mut resp, is_secure(&headers));
+    }
+    resp
+}
+
+/// `POST /api/auth/me/sessions/revoke-others` — end every other device.
+pub async fn revoke_other_sessions(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let Some(user) = current_user(&state, &headers).await else {
+        return fail(StatusCode::UNAUTHORIZED, "sign_in_required", "sign in to continue");
+    };
+    let Some(token) = session_token(&headers) else {
+        return fail(StatusCode::UNAUTHORIZED, "sign_in_required", "sign in to continue");
+    };
+    match state.store.delete_sessions_except(user.id, &session_key(&token)).await {
+        Ok(count) => {
+            audit(
+                &state,
+                "sessions_revoked",
+                Some(&user.email),
+                &auth::client_ip(&headers, None),
+                &format!("{count} other device(s)"),
+            )
+            .await;
+            ok_json(json!({ "revoked": count }))
+        }
+        Err(e) => admin_error(&e),
+    }
+}
+
 /// `POST /api/auth/logout` — clears the session both server- and client-side.
 pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(token) = session_token(&headers) {
+        let user = current_user(&state, &headers).await;
         if let Err(e) = state.store.delete_session(&session_key(&token)).await {
             return admin_error(&e);
         }
+        audit(
+            &state,
+            "sign_out",
+            user.as_ref().map(|u| u.email.as_str()),
+            &auth::client_ip(&headers, None),
+            "session ended",
+        )
+        .await;
     }
     let mut resp = StatusCode::NO_CONTENT.into_response();
     clear_session_cookie(&mut resp, is_secure(&headers));
@@ -315,11 +484,16 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
 
 /// `POST /api/auth/recover` — a recovery code resets the password and ends every other
 /// session. The response never says whether the email exists.
-pub async fn recover(State(state): State<Arc<AppState>>, body: Body) -> Response {
+pub async fn recover(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     let value = match body_json(body).await {
         Ok(v) => v,
         Err(resp) => return *resp,
     };
+    let ip = auth::client_ip(&headers, None);
     let invalid = || {
         fail(
             StatusCode::BAD_REQUEST,
@@ -330,6 +504,22 @@ pub async fn recover(State(state): State<Arc<AppState>>, body: Body) -> Response
     let Some(email) = text(&value, "email") else {
         return invalid();
     };
+    // Recovery codes are 64-bit and single use, but a script can still guess: the same
+    // per-email bucket as sign-in keeps the endpoint honest.
+    let email = normalize_email(&email);
+    let key = format!("recover:{email}");
+    if let Some(wait) = state.auth.throttle(&key) {
+        let mut resp = fail(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_attempts",
+            "Too many attempts. Try again in a minute.",
+        );
+        if let Ok(value) = HeaderValue::from_str(&wait.to_string()) {
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        return resp;
+    }
     let Some(code) = text(&value, "recovery_code") else {
         return invalid();
     };
@@ -337,7 +527,8 @@ pub async fn recover(State(state): State<Arc<AppState>>, body: Body) -> Response
     if password.chars().count() < MIN_PASSWORD {
         return fail(StatusCode::BAD_REQUEST, "password_too_short", "use at least 12 characters");
     }
-    let Ok(user) = state.store.user_by_email(&normalize_email(&email)).await else {
+    let Ok(user) = state.store.user_by_email(&email).await else {
+        state.auth.note_failure(&key);
         return invalid();
     };
     let Some(user) = user.filter(|u| !u.disabled) else {
@@ -352,8 +543,10 @@ pub async fn recover(State(state): State<Arc<AppState>>, body: Body) -> Response
         Err(e) => return admin_error(&e),
     };
     if consumed != Some(user.id) {
+        state.auth.note_failure(&key);
         return invalid();
     }
+    state.auth.clear_failures(&key);
     let hash = match hash_password(password) {
         Ok(hash) => hash,
         Err(e) => return admin_error(&e),
@@ -361,6 +554,7 @@ pub async fn recover(State(state): State<Arc<AppState>>, body: Body) -> Response
     if let Err(e) = state.store.set_user_password(user.id, &hash).await {
         return admin_error(&e);
     }
+    audit(&state, "password_reset", Some(&user.email), &ip, "recovery code used; sessions ended").await;
     tracing::info!(email = %user.email, "password reset with a recovery code; sessions ended");
     StatusCode::NO_CONTENT.into_response()
 }
@@ -435,6 +629,14 @@ pub async fn signup(State(state): State<Arc<AppState>>, headers: HeaderMap, body
     if let Err(e) = state.store.consume_invite(invite.id, crate::now_unix()).await {
         return admin_error(&e);
     }
+    audit(
+        &state,
+        "invitation_accepted",
+        Some(&user.email),
+        &auth::client_ip(&headers, None),
+        &format!("role {}", user.role.as_str()),
+    )
+    .await;
     tracing::info!(email = %user.email, role = user.role.as_str(), "invitation accepted");
     let codes = match issue_recovery_codes(&state, &user).await {
         Ok(codes) => codes,
@@ -493,6 +695,14 @@ pub async fn create_invite(State(state): State<Arc<AppState>>, body: Body) -> Re
         Ok(invite) => invite,
         Err(e) => return admin_error(&e),
     };
+    audit(
+        &state,
+        "invitation_created",
+        Some(&creator.email),
+        &auth::client_ip(&HeaderMap::new(), None),
+        &format!("{} as {}", invite.email, invite.role.as_str()),
+    )
+    .await;
     tracing::info!(email = %invite.email, role = invite.role.as_str(), "invitation created");
     (
         StatusCode::CREATED,

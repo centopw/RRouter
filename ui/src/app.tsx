@@ -7,6 +7,8 @@ import {
   FileText,
   GearSix,
   Heartbeat,
+  ListMagnifyingGlass,
+  UserCircle,
   Key,
   ListBullets,
   MagnifyingGlass,
@@ -48,6 +50,8 @@ const NAV: NavItem[] = [
   { to: "/users", label: "Users", icon: glyph(UsersThree), group: "Access" },
   { to: "/aliases", label: "Aliases", icon: glyph(ArrowsLeftRight), group: "Routing" },
   { to: "/combos", label: "Combos", icon: glyph(Shuffle), group: "Routing" },
+  { to: "/account", label: "My account", icon: glyph(UserCircle), group: "System" },
+  { to: "/audit", label: "Audit", icon: glyph(ListMagnifyingGlass), group: "System" },
   { to: "/health", label: "Health", icon: glyph(Heartbeat), group: "System" },
   { to: "/settings", label: "Settings", icon: glyph(GearSix), group: "System" },
 ];

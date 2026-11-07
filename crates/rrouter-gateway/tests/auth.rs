@@ -443,3 +443,76 @@ async fn owner_cannot_be_demoted_or_deleted_and_recovery_codes_work_once() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "a code works once: {body}");
     assert_eq!(body["error"]["code"], "invalid_recovery");
 }
+
+/// Self-service: rename, change password (ends other sessions), list sessions, and the
+/// audit trail records it all.
+#[tokio::test]
+async fn profile_sessions_and_audit_are_the_users_own() {
+    let h = harness();
+    let (cookie, _) = h.setup().await;
+
+    let (status, _, me) = h.call(Method::GET, "/api/auth/me", None, &auth_headers(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "me: {me}");
+    assert_eq!(me["sessions"].as_array().expect("sessions").len(), 1);
+    assert_eq!(me["sessions"][0]["current"], true);
+
+    let (status, _, renamed) = h
+        .call(
+            Method::PUT,
+            "/api/auth/me",
+            Some(json!({"name": "Ada B. Lovelace"})),
+            &csrf(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "rename: {renamed}");
+    assert_eq!(renamed["user"]["name"], "Ada B. Lovelace");
+
+    let (status, _, _) = h
+        .call(
+            Method::PUT,
+            "/api/auth/me",
+            Some(json!({"current_password": "wrong", "new_password": "brand new passphrase"})),
+            &csrf(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, headers, _) = h
+        .call(
+            Method::PUT,
+            "/api/auth/me",
+            Some(json!({
+                "current_password": "correct horse battery",
+                "new_password": "brand new passphrase",
+            })),
+            &csrf(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let fresh = cookie_of(&headers).expect("rotated cookie");
+    let (status, _, _) = h.call(Method::GET, "/api/users", None, &auth_headers(&cookie)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the old session ended");
+    let (status, _, users) = h.call(Method::GET, "/api/users", None, &auth_headers(&fresh)).await;
+    assert_eq!(status, StatusCode::OK, "the current tab stays signed in: {users}");
+
+    let (status, _, audit) = h.call(Method::GET, "/api/audit?limit=50", None, &auth_headers(&fresh)).await;
+    assert_eq!(status, StatusCode::OK, "audit: {audit}");
+    let kinds: Vec<&str> = audit["data"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter_map(|row| row["kind"].as_str())
+        .collect();
+    for expected in ["setup", "profile_updated", "password_changed", "password_change_failed"] {
+        assert!(kinds.contains(&expected), "missing {expected} in {kinds:?}");
+    }
+
+    let (status, _, _) = h
+        .post("/api/auth/me/sessions/revoke-others", Value::Null, &csrf(&fresh))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, ready) = h.call(Method::GET, "/ready", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ready["ready"], true);
+}

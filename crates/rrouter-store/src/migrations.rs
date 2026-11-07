@@ -8,12 +8,28 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 18;
+pub(crate) const SCHEMA_VERSION: i64 = 19;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19,
 ];
+
+/// V19: security audit trail. One row per interesting identity/administration action —
+/// sign-in, failure, setup, invitation, role/disable change, password reset, session
+/// revoke. `detail` is free text written by the handler; no tokens, hashes or passwords
+/// are ever stored. Retention follows the usage sweep.
+const V19: &str = r#"
+CREATE TABLE IF NOT EXISTS audit_events (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts     INTEGER NOT NULL,
+  kind   TEXT NOT NULL,
+  actor  TEXT,
+  ip     TEXT,
+  detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts DESC);
+"#;
 
 /// V18: dashboard users. Identity is a dashboard concept only — `/v1` clients still
 /// authenticate with gateway keys, and the admin token and admin keys remain the

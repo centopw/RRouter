@@ -31,6 +31,11 @@ import {
 } from "./api";
 import {
   authState,
+  getMe,
+  listAudit,
+  revokeOtherSessions,
+  revokeSession,
+  updateMe,
   createInvite,
   listInvites,
   listUsers,
@@ -48,6 +53,8 @@ export const qk = {
   accountQuotas: ["accounts", "quotas"] as const,
   accountSubscriptions: ["accounts", "subscriptions"] as const,
   authState: ["auth", "state"] as const,
+  me: ["auth", "me"] as const,
+  audit: (kind: string) => ["audit", kind] as const,
   users: ["users"] as const,
   invites: ["users", "invites"] as const,
   keys: ["keys"] as const,
@@ -447,5 +454,42 @@ export function useRevokeInvite() {
   return useMutation({
     mutationFn: revokeInvite,
     onSuccess: () => void client.invalidateQueries({ queryKey: qk.invites }),
+  });
+}
+
+// ---------------------------------------------------------------- audit and account
+
+export function useAudit(kind: string) {
+  return useQuery({ queryKey: qk.audit(kind), queryFn: () => listAudit(kind || undefined) });
+}
+
+export function useMe() {
+  return useQuery({ queryKey: qk.me, queryFn: getMe });
+}
+
+export function useUpdateMe() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: updateMe,
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: qk.me });
+      void client.invalidateQueries({ queryKey: qk.authState });
+    },
+  });
+}
+
+export function useRevokeSession() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: revokeSession,
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.me }),
+  });
+}
+
+export function useRevokeOtherSessions() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: revokeOtherSessions,
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.me }),
   });
 }

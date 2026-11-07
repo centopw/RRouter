@@ -21,6 +21,7 @@
 //!
 
 mod crypto;
+mod audit;
 mod migrations;
 mod store;
 mod users;
@@ -33,8 +34,9 @@ pub use store::{
     PromptTemplateVersion, PruneReport, StatusFilter, Store, UsageBucket, UsageModelBucket,
     UsageQuery, UsageRecord, UsageSummary, API_KEY_PREFIX,
 };
+pub use audit::AuditEvent;
 pub use users::{
     hash_password, hash_secret, normalize_email, random_recovery_codes, random_setup_code,
-    random_token, verify_password, Invite, User, UserRole,
+    random_token, verify_password, Invite, SessionInfo, User, UserRole,
 };
 pub use rrouter_auth::{CredentialStore, Credentials};

@@ -135,3 +135,49 @@ export function apiCode(error: unknown): string {
   }
   return "";
 }
+
+export type AuditEvent = {
+  id: number;
+  ts: number;
+  kind: string;
+  actor: string | null;
+  ip: string | null;
+  detail: string | null;
+};
+
+export async function listAudit(kind?: string, before?: number): Promise<AuditEvent[]> {
+  const params = new URLSearchParams({ limit: "100" });
+  if (kind) params.set("kind", kind);
+  if (before) params.set("before", String(before));
+  const body = await api.get<{ data?: AuditEvent[] }>(`/api/audit?${params}`);
+  return body.data ?? [];
+}
+
+export type SessionRow = {
+  id: string;
+  created_at: number;
+  expires_at: number;
+  current: boolean;
+};
+
+export type Me = { user: AuthUser; sessions: SessionRow[] };
+
+export function getMe(): Promise<Me> {
+  return api.get<Me>("/api/auth/me");
+}
+
+export function updateMe(patch: {
+  name?: string;
+  current_password?: string;
+  new_password?: string;
+}): Promise<{ user: AuthUser }> {
+  return api.put<{ user: AuthUser }>("/api/auth/me", patch);
+}
+
+export function revokeSession(id: string): Promise<void> {
+  return api.del<void>(`/api/auth/me/sessions/${encodeURIComponent(id)}`);
+}
+
+export function revokeOtherSessions(): Promise<{ revoked: number }> {
+  return api.post<{ revoked: number }>("/api/auth/me/sessions/revoke-others");
+}
