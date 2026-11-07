@@ -20,9 +20,9 @@ logging, metrics) and 9router (dashboard, providers, combos, usage).
 Status: phases 1–12 landed and verified live (key governance, observability, ops knobs,
 routing strategies, UX, cost accounting, protocol breadth, cache, budget windows, JSON
 logs + access line). Release 0.2.0 is published with all four binaries, and the installer
-was verified against it. 0.2.1 is published (cache, budget windows, admin-token UI, JSON logs, Logs page with server
-filters). Phase 13 (CSV export) shipped after it; phase 14 (usage retention and database
-maintenance) is in progress and will be released as 0.2.2.
+was verified against it. 0.2.1 published cache, budget windows, the admin-token UI, JSON logs and the Logs page; 0.2.2
+adds CSV export and usage retention with a daily maintenance sweep. Phases 1–14 are shipped and
+verified live (installer, release binaries, multi-arch image).
 
 ## Phase 1 — key governance (contract)
 
