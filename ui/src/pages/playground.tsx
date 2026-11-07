@@ -348,7 +348,7 @@ export default function Playground() {
   const modelLabel = models.data?.find((m) => m.ref === model)?.display ?? model;
 
   return (
-    <div className="mx-auto flex w-full max-w-[880px] flex-col gap-4 pb-2">
+    <div className="mx-auto flex min-h-[calc(100dvh-7rem)] w-full max-w-[880px] flex-col gap-4 pb-2">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-[22px] font-semibold leading-tight tracking-[-0.02em] text-fg">
@@ -376,7 +376,7 @@ export default function Playground() {
         </div>
       ) : null}
 
-      <div className="flex min-h-[320px] flex-col gap-5 rounded-[12px] border border-line bg-[var(--color-bg)] px-4 py-5 min-[700px]:px-6">
+      <div className="flex min-h-[280px] flex-1 flex-col gap-5 rounded-[12px] border border-line bg-[var(--color-bg)] px-4 py-5 min-[700px]:px-6">
         {turns.length === 0 ? (
           <EmptyPlayground
             model={modelLabel}
@@ -387,7 +387,7 @@ export default function Playground() {
         )}
       </div>
 
-      <div className="sticky bottom-0 z-10 -mx-1 bg-gradient-to-t from-[var(--color-bg)] via-[var(--color-bg)] to-transparent px-1 pb-1 pt-2">
+      <div className="z-10 px-1 pb-1 pt-1">
         <div className="rounded-[16px] border border-line-strong bg-surface shadow-[0_1px_2px_rgba(16,18,20,0.05)] focus-within:border-[var(--color-accent-text)]">
           <textarea
             value={draft}
@@ -399,8 +399,8 @@ export default function Playground() {
             className="block max-h-[220px] w-full resize-none rounded-t-[16px] bg-transparent px-4 pt-3.5 text-[14px] leading-relaxed text-fg placeholder:text-faint focus:outline-none"
           />
           <div className="flex flex-wrap items-center gap-2 px-3 pb-2.5 pt-1">
-            <div className="min-w-[180px] max-w-[260px] flex-1">
-              <ModelSelect value={model} onChange={setModel} ariaLabel="model" />
+            <div className="min-w-[160px] max-w-[240px] flex-1">
+              <ModelSelect value={model} onChange={setModel} ariaLabel="model" plain />
             </div>
             <span className="hidden text-[11px] text-faint min-[560px]:inline">
               {temp === "1" ? "temperature 1" : `temperature ${temp}`}

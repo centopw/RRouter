@@ -389,6 +389,7 @@ export function Select({
   ariaLabel,
   disabled,
   className,
+  plain = false,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -396,6 +397,8 @@ export function Select({
   ariaLabel: string;
   disabled?: boolean;
   className?: string;
+  /** Borderless trigger for a composer: the menu still has the full popover. */
+  plain?: boolean;
 }) {
   const options = useMemo(() => readOptions(children), [children]);
   const selected = options.find((option) => option.value === value);
@@ -518,9 +521,12 @@ export function Select({
         onClick={() => (open ? close() : show())}
         onKeyDown={onKeyDown}
         className={cx(
-          control,
-          "flex items-center justify-between gap-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text",
-          open && "border-accent-text",
+          plain
+            ? "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-full border border-transparent bg-transparent px-2 text-left text-[12.5px] text-ink-soft hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+            : control,
+          !plain &&
+            "flex items-center justify-between gap-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text",
+          !plain && open && "border-accent-text",
           className,
         )}
       >

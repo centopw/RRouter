@@ -17,6 +17,8 @@ export type ModelSelectProps = {
   provider?: string | null;
   disabled?: boolean;
   className?: string;
+  /** Borderless trigger for the composer. */
+  plain?: boolean;
 };
 
 export function ModelSelect({
@@ -27,6 +29,7 @@ export function ModelSelect({
   provider,
   disabled,
   className,
+  plain,
 }: ModelSelectProps) {
   const models = useModels();
   const groups = useGroups(models.data, provider);
@@ -40,6 +43,7 @@ export function ModelSelect({
       disabled={disabled || models.isLoading}
       onChange={onChange}
       className={className}
+      plain={plain}
     >
       {allowEmpty !== undefined ? <option value="">{allowEmpty}</option> : null}
       {missing ? <option value={value}>{value} (missing)</option> : null}
