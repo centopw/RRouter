@@ -27,7 +27,12 @@ fn resp(model: &str) -> ChatResponse {
 }
 
 fn upstream(status: u16) -> Error {
-    Error::Upstream { provider: "p".into(), status, body: String::new(), payload: None }
+    Error::Upstream {
+        provider: "p".into(),
+        status,
+        body: String::new(),
+        payload: None,
+    }
 }
 
 /// An upstream failure carrying the `Retry-After` header the proxy would parse.
@@ -55,7 +60,10 @@ async fn conn(store: &Store, provider: &str, model_hint: &str, priority: i32) ->
         .create_connection(provider, "api_key", Default::default(), Some(model_hint))
         .await
         .expect("create connection");
-    store.set_connection_priority(c.id, priority).await.expect("priority");
+    store
+        .set_connection_priority(c.id, priority)
+        .await
+        .expect("priority");
     c.id
 }
 
@@ -63,7 +71,14 @@ async fn conn(store: &Store, provider: &str, model_hint: &str, priority: i32) ->
 /// least-latency strategy.
 async fn least_latency_order(planner: &Planner, store: &Store) -> Vec<Uuid> {
     planner
-        .plan(&Catalog::builtin(), store, "openai/gpt-5", false, None, Strategy::LeastLatency)
+        .plan(
+            &Catalog::builtin(),
+            store,
+            "openai/gpt-5",
+            false,
+            None,
+            Strategy::LeastLatency,
+        )
         .await
         .expect("plan")
         .candidates
@@ -92,11 +107,24 @@ fn plan_of(n: usize) -> Plan {
 async fn alias_resolves_one_hop_without_looping() {
     let store = Store::open_in_memory().unwrap();
     let id = conn(&store, "claude", "primary", 0).await;
-    store.upsert_alias("fast", "claude/primary-x").await.unwrap();
-    store.upsert_alias("claude/primary-x", "claude/never-reached").await.unwrap();
+    store
+        .upsert_alias("fast", "claude/primary-x")
+        .await
+        .unwrap();
+    store
+        .upsert_alias("claude/primary-x", "claude/never-reached")
+        .await
+        .unwrap();
     let planner = Planner::new();
     let plan = planner
-        .plan(&Catalog::builtin(), &store, "fast", false, None, Strategy::Priority)
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            "fast",
+            false,
+            None,
+            Strategy::Priority,
+        )
         .await
         .unwrap();
     assert_eq!(plan.candidates.len(), 1);
@@ -113,7 +141,17 @@ async fn self_referential_alias_does_not_loop() {
     store.upsert_alias("loop", "loop").await.unwrap();
     let planner = Planner::new();
     // Resolves via catalog fallback/lookup and terminates.
-    let plan = planner.plan(&Catalog::builtin(), &store, "loop", false, None, Strategy::Priority).await.unwrap();
+    let plan = planner
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            "loop",
+            false,
+            None,
+            Strategy::Priority,
+        )
+        .await
+        .unwrap();
     assert_eq!(plan.candidates.len(), 1);
     assert_eq!(plan.candidates[0].model, "loop");
 }
@@ -132,7 +170,14 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
     let _codex = conn(&store, "codex", "gpt-5", 0).await;
     let planner = Planner::new();
     let plan = planner
-        .plan(&Catalog::builtin(), &store, "claude/claude-opus-5-5", false, None, Strategy::Priority)
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            "claude/claude-opus-5-5",
+            false,
+            None,
+            Strategy::Priority,
+        )
         .await
         .unwrap();
     assert_eq!(plan.candidates.len(), 1);
@@ -142,10 +187,21 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
 
     // Unprefixed ids keep the old behaviour: any active provider may serve them.
     let bare = planner
-        .plan(&Catalog::builtin(), &store, "mystery-model", false, None, Strategy::Priority)
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            "mystery-model",
+            false,
+            None,
+            Strategy::Priority,
+        )
         .await
         .unwrap();
-    let providers: Vec<&str> = bare.candidates.iter().map(|c| c.provider.as_str()).collect();
+    let providers: Vec<&str> = bare
+        .candidates
+        .iter()
+        .map(|c| c.provider.as_str())
+        .collect();
     assert!(providers.contains(&"claude"));
     assert!(providers.contains(&"codex"));
 }
@@ -157,7 +213,14 @@ async fn explicit_provider_wins_over_catalog_guess() {
     let id = conn(&store, "github", "gpt-4.1", 0).await;
     let planner = Planner::new();
     let plan = planner
-        .plan(&Catalog::builtin(), &store, "github/gpt-4.1", false, None, Strategy::Priority)
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            "github/gpt-4.1",
+            false,
+            None,
+            Strategy::Priority,
+        )
         .await
         .unwrap();
     assert_eq!(plan.candidates.len(), 1);
@@ -170,15 +233,38 @@ async fn combo_preserves_declared_order() {
     let store = Store::open_in_memory().unwrap();
     let a = conn(&store, "xai", "grok-4", 9).await;
     let b = conn(&store, "openai", "gpt-5", 9).await;
-    store.upsert_combo("chain", &["xai/grok-4".into(), "openai/gpt-5".into()]).await.unwrap();
+    store
+        .upsert_combo("chain", &["xai/grok-4".into(), "openai/gpt-5".into()])
+        .await
+        .unwrap();
     let planner = Planner::new();
-    let plan = planner.plan(&Catalog::builtin(), &store, "combo:chain", false, None, Strategy::Priority).await.unwrap();
+    let plan = planner
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            "combo:chain",
+            false,
+            None,
+            Strategy::Priority,
+        )
+        .await
+        .unwrap();
     assert_eq!(plan.candidates.len(), 2);
     assert_eq!(plan.candidates[0].connection, a);
     assert_eq!(plan.candidates[1].connection, b);
 
     // Bare combo name resolves the same way.
-    let bare = planner.plan(&Catalog::builtin(), &store, "chain", false, None, Strategy::Priority).await.unwrap();
+    let bare = planner
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            "chain",
+            false,
+            None,
+            Strategy::Priority,
+        )
+        .await
+        .unwrap();
     assert_eq!(bare.candidates, plan.candidates);
 }
 
@@ -190,11 +276,37 @@ async fn round_robin_alternates_equal_priority_connections() {
     let c = conn(&store, "openai", "gpt-5", 5).await;
     let planner = Planner::new();
     let catalog = Catalog::builtin();
-    let first = planner.plan(&catalog, &store, "openai/gpt-5", false, None, Strategy::Priority).await.unwrap();
-    let second = planner.plan(&catalog, &store, "openai/gpt-5", false, None, Strategy::Priority).await.unwrap();
-    assert_ne!(first.candidates[0].connection, second.candidates[0].connection);
+    let first = planner
+        .plan(
+            &catalog,
+            &store,
+            "openai/gpt-5",
+            false,
+            None,
+            Strategy::Priority,
+        )
+        .await
+        .unwrap();
+    let second = planner
+        .plan(
+            &catalog,
+            &store,
+            "openai/gpt-5",
+            false,
+            None,
+            Strategy::Priority,
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        first.candidates[0].connection,
+        second.candidates[0].connection
+    );
     assert_eq!(
-        std::collections::HashSet::from([first.candidates[0].connection, second.candidates[0].connection]),
+        std::collections::HashSet::from([
+            first.candidates[0].connection,
+            second.candidates[0].connection
+        ]),
         std::collections::HashSet::from([a, b])
     );
     // Priority still dominates: the priority-5 connection is always last.
@@ -217,14 +329,19 @@ async fn weighted_puts_the_heavy_account_first_eight_times_in_ten() {
     let mut heavy_first = 0;
     for _ in 0..10 {
         let plan = planner
-            .plan(&catalog, &store, "openai/gpt-5", false, None, Strategy::Weighted)
+            .plan(
+                &catalog,
+                &store,
+                "openai/gpt-5",
+                false,
+                None,
+                Strategy::Weighted,
+            )
             .await
             .unwrap();
         assert_eq!(plan.candidates.len(), 2, "both accounts stay in the plan");
         assert!(
-            plan.candidates
-                .iter()
-                .any(|c| c.connection == light),
+            plan.candidates.iter().any(|c| c.connection == light),
             "the light account must never be dropped"
         );
         if plan.candidates[0].connection == heavy {
@@ -259,7 +376,11 @@ async fn weighted_and_latency_never_override_priority() {
             .await
             .unwrap();
         let order: Vec<Uuid> = plan.candidates.iter().map(|c| c.connection).collect();
-        assert_eq!(order, vec![first, second], "{strategy:?} reordered priority groups");
+        assert_eq!(
+            order,
+            vec![first, second],
+            "{strategy:?} reordered priority groups"
+        );
     }
 }
 
@@ -391,7 +512,10 @@ async fn cheapest_puts_the_unpriced_provider_last() {
     let unpriced = conn(&store, "github", "gpt-4.1", 0).await;
     price(&store, "openai", "gpt-4.1", 100.0, 100.0).await;
 
-    assert_eq!(order(&store, "gpt-4.1", Strategy::Cheapest).await, vec![priced, unpriced]);
+    assert_eq!(
+        order(&store, "gpt-4.1", Strategy::Cheapest).await,
+        vec![priced, unpriced]
+    );
 }
 
 /// Priority dominates the price: a cheap account an operator deliberately demoted is
@@ -404,7 +528,10 @@ async fn cheapest_never_overrides_priority() {
     price(&store, "openai", "gpt-4.1", 100.0, 100.0).await;
     price(&store, "github", "gpt-4.1", 0.01, 0.01).await;
 
-    assert_eq!(order(&store, "gpt-4.1", Strategy::Cheapest).await, vec![expensive, cheap]);
+    assert_eq!(
+        order(&store, "gpt-4.1", Strategy::Cheapest).await,
+        vec![expensive, cheap]
+    );
 }
 
 /// Price precedence follows the cost accounting: the provider's own registry row decides,
@@ -420,7 +547,10 @@ async fn cheapest_prefers_the_providers_row_over_the_vendor_row() {
     price_from(&store, "github", "gpt-4.1", "synced", 50.0, 0.0).await;
     price_from(&store, "github-copilot", "gpt-4.1", "custom", 0.5, 0.0).await;
 
-    assert_eq!(order(&store, "gpt-4.1", Strategy::Cheapest).await, vec![openai, github]);
+    assert_eq!(
+        order(&store, "gpt-4.1", Strategy::Cheapest).await,
+        vec![openai, github]
+    );
 }
 
 /// Conversations must stay on one account: KV caches are per upstream account, so
@@ -432,7 +562,16 @@ async fn affinity_pins_one_conversation_but_spreads_conversations() {
     let b = conn(&store, "openai", "gpt-5", 0).await;
     let planner = Planner::new();
     let catalog = Catalog::builtin();
-    let first_for = |key: u64| planner.plan(&catalog, &store, "openai/gpt-5", false, Some(key), Strategy::Priority);
+    let first_for = |key: u64| {
+        planner.plan(
+            &catalog,
+            &store,
+            "openai/gpt-5",
+            false,
+            Some(key),
+            Strategy::Priority,
+        )
+    };
 
     let pinned = first_for(7).await.unwrap().candidates[0].connection;
     for _ in 0..5 {
@@ -447,7 +586,11 @@ async fn affinity_pins_one_conversation_but_spreads_conversations() {
     for key in 0..32u64 {
         accounts.insert(first_for(key).await.unwrap().candidates[0].connection);
     }
-    assert_eq!(accounts, std::collections::HashSet::from([a, b]), "affinity stopped spreading");
+    assert_eq!(
+        accounts,
+        std::collections::HashSet::from([a, b]),
+        "affinity stopped spreading"
+    );
 }
 
 #[tokio::test]
@@ -456,7 +599,17 @@ async fn disabled_model_is_excluded() {
     let _ = conn(&store, "openai", "gpt-5", 0).await;
     store.set_disabled("gpt-5", true).await.unwrap();
     let planner = Planner::new();
-    let err = planner.plan(&Catalog::builtin(), &store, "openai/gpt-5", false, None, Strategy::Priority).await.unwrap_err();
+    let err = planner
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            "openai/gpt-5",
+            false,
+            None,
+            Strategy::Priority,
+        )
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::NoRoute { .. }), "{err:?}");
 }
 
@@ -472,13 +625,19 @@ fn breaker_trips_opens_probes_and_reopens() {
     assert!(breaker.is_available(id), "2 failures must not trip");
     breaker.record_failure(id, 500, None);
     let wait = breaker.check(id).expect("open after 3 failures");
-    assert!(wait > Duration::ZERO && wait <= Duration::from_secs(30), "{wait:?}");
+    assert!(
+        wait > Duration::ZERO && wait <= Duration::from_secs(30),
+        "{wait:?}"
+    );
     assert!(matches!(breaker.state(id), BreakerState::Open { .. }));
 
     // After the window: first call allowed as the single half-open probe.
     let later = Instant::now() + Duration::from_secs(31);
     assert!(breaker.check_at(id, later).is_none());
-    assert!(matches!(breaker.state_at(id, later), BreakerState::HalfOpen { .. }));
+    assert!(matches!(
+        breaker.state_at(id, later),
+        BreakerState::HalfOpen { .. }
+    ));
     breaker.record_success(id);
     assert_eq!(breaker.state(id), BreakerState::Closed);
 
@@ -507,7 +666,10 @@ fn half_open_admits_exactly_one_probe() {
     assert!(breaker.check_at(id, later).is_none());
 
     // First caller wins the probe slot...
-    assert!(matches!(breaker.claim_at(id, later), Ok(ProbeTicket::Probe { .. })));
+    assert!(matches!(
+        breaker.claim_at(id, later),
+        Ok(ProbeTicket::Probe { .. })
+    ));
     // ...everyone else is told to wait, including via the read path.
     assert!(breaker.claim_at(id, later).is_err());
     assert!(breaker.check_at(id, later).is_some());
@@ -519,7 +681,10 @@ fn half_open_admits_exactly_one_probe() {
 
     // A successful probe closes it and restores full eligibility.
     let later = later + Duration::from_secs(31);
-    assert!(matches!(breaker.claim_at(id, later), Ok(ProbeTicket::Probe { .. })));
+    assert!(matches!(
+        breaker.claim_at(id, later),
+        Ok(ProbeTicket::Probe { .. })
+    ));
     breaker.record_success(id);
     assert!(breaker.check(id).is_none());
 }
@@ -537,7 +702,10 @@ fn unclaimed_candidate_never_leaks_a_probe_slot() {
     let later = Instant::now() + Duration::from_secs(31);
     assert!(breaker.check_at(id, later).is_none());
     // No claim happened, so the slot is still free for a real attempt.
-    assert!(matches!(breaker.claim_at(id, later), Ok(ProbeTicket::Probe { .. })));
+    assert!(matches!(
+        breaker.claim_at(id, later),
+        Ok(ProbeTicket::Probe { .. })
+    ));
     breaker.record_success(id);
     assert!(breaker.check(id).is_none());
 }
@@ -579,7 +747,10 @@ async fn streamed_success_settles_the_breaker_on_drop() {
         "dropping a healthy committed stream must count as a success; got {:?}",
         breaker.state(conn)
     );
-    assert!(breaker.claim(conn).is_ok(), "no probe slot may be left taken");
+    assert!(
+        breaker.claim(conn).is_ok(),
+        "no probe slot may be left taken"
+    );
 }
 
 #[test]
@@ -658,11 +829,18 @@ async fn dead_credential_falls_through_to_the_next_account() {
         })
         .await
         .unwrap();
-    assert_eq!(seen.load(Ordering::SeqCst), 3, "one retry, then the next account");
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        3,
+        "one retry, then the next account"
+    );
     assert_eq!(outcome.candidate.connection, plan.candidates[1].connection);
     assert_eq!(outcome.result.unwrap().model, "m");
     // A 401-class failure parks the dead account hard (5 min).
-    assert!(matches!(dispatcher.breaker().state(dead), BreakerState::Open { .. }));
+    assert!(matches!(
+        dispatcher.breaker().state(dead),
+        BreakerState::Open { .. }
+    ));
 }
 
 #[tokio::test]
@@ -678,8 +856,13 @@ async fn non_retryable_error_stops_immediately() {
         .await
         .unwrap();
     assert_eq!(seen.load(Ordering::SeqCst), 1);
-    assert!(matches!(outcome.result, Err(Error::Upstream { status: 400, .. })));
-    assert!(dispatcher.breaker().is_available(plan.candidates[0].connection));
+    assert!(matches!(
+        outcome.result,
+        Err(Error::Upstream { status: 400, .. })
+    ));
+    assert!(dispatcher
+        .breaker()
+        .is_available(plan.candidates[0].connection));
 }
 
 /// A 503 from `open` has not committed a byte, so the same candidate is retried
@@ -701,9 +884,9 @@ async fn streaming_retries_the_same_candidate_before_first_byte() {
                 if n < 3 {
                     Err(upstream(503))
                 } else {
-                    Ok(byte_stream(futures_util::stream::iter(vec![Ok(Bytes::from_static(
-                        b"data: x\n\n",
-                    ))])))
+                    Ok(byte_stream(futures_util::stream::iter(vec![Ok(
+                        Bytes::from_static(b"data: x\n\n"),
+                    )])))
                 }
             }
         })
@@ -716,7 +899,10 @@ async fn streaming_retries_the_same_candidate_before_first_byte() {
         "two retries stay on the same candidate, then it succeeds"
     );
     let body = collect_stream(stream).await.unwrap();
-    assert_eq!(body, b"data: x\n\n", "the frame reaches the client exactly once");
+    assert_eq!(
+        body, b"data: x\n\n",
+        "the frame reaches the client exactly once"
+    );
 }
 
 /// Zero retries keeps the pre-phase behaviour for streams too: one open per
@@ -734,9 +920,9 @@ async fn streaming_zero_retries_fails_over_immediately() {
                 if c.connection == first {
                     Err(upstream(503))
                 } else {
-                    Ok(byte_stream(futures_util::stream::iter(vec![Ok(Bytes::from_static(
-                        b"data: y\n\n",
-                    ))])))
+                    Ok(byte_stream(futures_util::stream::iter(vec![Ok(
+                        Bytes::from_static(b"data: y\n\n"),
+                    )])))
                 }
             }
         })
@@ -773,7 +959,9 @@ async fn streaming_client_error_is_never_retried() {
         vec![plan.candidates[0].connection],
         "a 400 must stop at the first send"
     );
-    assert!(dispatcher.breaker().is_available(plan.candidates[0].connection));
+    assert!(dispatcher
+        .breaker()
+        .is_available(plan.candidates[0].connection));
 }
 
 /// Bytes already reached the client, so the error is terminal — one error, no
@@ -797,17 +985,26 @@ async fn streaming_midstream_error_is_terminal_and_not_retried() {
         .await
         .unwrap();
     assert_eq!(winner.connection, plan.candidates[0].connection);
-    assert_eq!(stream.next().await.expect("chunk").unwrap(), Bytes::from_static(b"partial"));
+    assert_eq!(
+        stream.next().await.expect("chunk").unwrap(),
+        Bytes::from_static(b"partial")
+    );
     let err = stream.next().await.expect("terminal error").unwrap_err();
     assert!(matches!(err, Error::Upstream { status: 502, .. }));
-    assert!(stream.next().await.is_none(), "the error is terminal and surfaces once");
+    assert!(
+        stream.next().await.is_none(),
+        "the error is terminal and surfaces once"
+    );
     assert_eq!(
         sent.into_inner().unwrap(),
         vec![winner.connection],
         "no retry once bytes were emitted"
     );
     // One 502 is recorded against the connection (three would open the breaker).
-    assert_eq!(dispatcher.breaker().state(winner.connection), BreakerState::Closed);
+    assert_eq!(
+        dispatcher.breaker().state(winner.connection),
+        BreakerState::Closed
+    );
 }
 
 /// A retry is not another account failure: three opens of one candidate are one strike.
@@ -863,7 +1060,11 @@ async fn streaming_retries_stay_inside_the_total_send_budget() {
         Err(err) => err,
     };
     assert!(matches!(err, Error::Upstream { status: 503, .. }));
-    assert_eq!(seen.load(Ordering::SeqCst), 3, "the cap counts stream opens too");
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        3,
+        "the cap counts stream opens too"
+    );
 }
 
 #[tokio::test]
@@ -892,7 +1093,11 @@ async fn repeated_failures_open_the_first_candidate_and_skip_it() {
         })
         .await
         .unwrap();
-    assert_eq!(seen.load(Ordering::SeqCst), 1, "open breaker must not be sent to");
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "open breaker must not be sent to"
+    );
     assert_eq!(outcome.candidate.connection, plan.candidates[1].connection);
 }
 
@@ -932,7 +1137,11 @@ async fn rate_limited_candidate_does_not_block_an_eligible_one() {
         })
         .await
         .unwrap();
-    assert!(started.elapsed() < Duration::from_millis(100), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "{:?}",
+        started.elapsed()
+    );
     assert_eq!(outcome.candidate.connection, healthy);
 }
 
@@ -947,10 +1156,21 @@ async fn skipped_candidate_is_waited_for_once_when_nothing_else_is_eligible() {
     assert!(breaker.check(only).is_some());
 
     let started = Instant::now();
-    let outcome = dispatcher.run(&plan, |_c| async move { Ok(resp("m")) }).await.unwrap();
+    let outcome = dispatcher
+        .run(&plan, |_c| async move { Ok(resp("m")) })
+        .await
+        .unwrap();
     assert_eq!(outcome.candidate.connection, only);
-    assert!(started.elapsed() >= Duration::from_millis(250), "{:?}", started.elapsed());
-    assert!(started.elapsed() <= Duration::from_secs(3), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        started.elapsed() <= Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
@@ -978,14 +1198,20 @@ async fn cancelled_attempt_releases_the_probe_slot() {
         }),
     )
     .await;
-    assert!(cancelled.is_err(), "the attempt must have been cancelled mid-flight");
+    assert!(
+        cancelled.is_err(),
+        "the attempt must have been cancelled mid-flight"
+    );
 
     // The probe slot must be free again; a leaked claim would report PROBE_TAKEN.
     assert!(
         breaker.check(conn).is_none(),
         "a cancelled attempt must not leave the probe slot taken"
     );
-    assert!(breaker.claim(conn).is_ok(), "account must be probeable again");
+    assert!(
+        breaker.claim(conn).is_ok(),
+        "account must be probeable again"
+    );
 }
 
 #[tokio::test]
@@ -1009,7 +1235,10 @@ async fn client_error_does_not_trip_a_healthy_account() {
         matches!(dispatcher.breaker().state(conn), BreakerState::Closed),
         "client errors must not count toward the account's failure streak"
     );
-    assert!(dispatcher.breaker().claim(conn).is_ok(), "account must stay eligible");
+    assert!(
+        dispatcher.breaker().claim(conn).is_ok(),
+        "account must stay eligible"
+    );
 }
 
 /// A 503 is transient: the same candidate is retried before the fallback is spent.
@@ -1069,8 +1298,15 @@ async fn client_error_is_never_retried() {
         })
         .await
         .unwrap();
-    assert_eq!(seen.load(Ordering::SeqCst), 1, "a 400 must stop at the first send");
-    assert!(matches!(outcome.result, Err(Error::Upstream { status: 400, .. })));
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "a 400 must stop at the first send"
+    );
+    assert!(matches!(
+        outcome.result,
+        Err(Error::Upstream { status: 400, .. })
+    ));
 }
 
 /// `Retry-After: 60` must not stall a request whose ceiling is milliseconds.
@@ -1087,8 +1323,16 @@ async fn retry_after_never_exceeds_the_backoff_ceiling() {
         })
         .await
         .unwrap_err();
-    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
-    assert_eq!(seen.load(Ordering::SeqCst), 2, "capped wait, then one retry");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        2,
+        "capped wait, then one retry"
+    );
     assert!(matches!(err, Error::Upstream { status: 503, .. }));
 }
 
@@ -1152,8 +1396,16 @@ async fn retry_sleep_never_passes_the_headers_deadline() {
         .await
         .unwrap_err();
     assert!(matches!(err, Error::Upstream { status: 503, .. }));
-    assert_eq!(seen.load(Ordering::SeqCst), 1, "the 500 ms backoff cannot fit");
-    assert!(started.elapsed() < Duration::from_millis(200), "{:?}", started.elapsed());
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "the 500 ms backoff cannot fit"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 /// The pure form of the curve: `min(base * 2^n, max)`, ±20%, capped by `Retry-After`.
@@ -1168,10 +1420,26 @@ fn backoff_doubles_caps_and_jitters_within_twenty_percent() {
     assert_eq!(policy.delay(0, None, 0.5), Duration::from_millis(100));
     assert_eq!(policy.delay(1, None, 0.5), Duration::from_millis(200));
     assert_eq!(policy.delay(2, None, 0.5), Duration::from_millis(400));
-    assert_eq!(policy.delay(3, None, 0.5), Duration::from_millis(500), "800 ms capped at the ceiling");
-    assert_eq!(policy.delay(3, None, 1.0), Duration::from_millis(500), "jitter never exceeds the ceiling");
-    assert_eq!(policy.delay(0, None, 0.0), Duration::from_millis(80), "-20%");
-    assert_eq!(policy.delay(0, None, 1.0), Duration::from_millis(120), "+20%");
+    assert_eq!(
+        policy.delay(3, None, 0.5),
+        Duration::from_millis(500),
+        "800 ms capped at the ceiling"
+    );
+    assert_eq!(
+        policy.delay(3, None, 1.0),
+        Duration::from_millis(500),
+        "jitter never exceeds the ceiling"
+    );
+    assert_eq!(
+        policy.delay(0, None, 0.0),
+        Duration::from_millis(80),
+        "-20%"
+    );
+    assert_eq!(
+        policy.delay(0, None, 1.0),
+        Duration::from_millis(120),
+        "+20%"
+    );
     assert_eq!(
         policy.delay(2, Some(Duration::from_millis(5)), 0.5),
         Duration::from_millis(5),

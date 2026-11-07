@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 
 use rrouter_store::{
     cache_key, window_start, AccountQuota, ApiKey, ApiKeyPatch, AttemptRecord, BudgetWindow,
-    Credentials, Guardrails, KeyModel, KeyScope, ModelRow, PruneReport, Store, StatusFilter,
+    Credentials, Guardrails, KeyModel, KeyScope, ModelRow, PruneReport, StatusFilter, Store,
     UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
@@ -133,7 +133,11 @@ fn key_file_is_0600_and_reused_across_opens() {
         rt().block_on(s.create_connection("openai", "apikey", creds("tok2"), None))
             .expect("create");
     }
-    assert_eq!(std::fs::read(&key_path).expect("reread"), first, "key reused");
+    assert_eq!(
+        std::fs::read(&key_path).expect("reread"),
+        first,
+        "key reused"
+    );
 
     // A wrong-length hex master key is refused with a clear store error.
     let bad = Store::open(&dir.db(), Some("abc123".to_string()));
@@ -210,7 +214,10 @@ fn concurrent_merges_do_not_lose_updates() {
     assert_eq!(k.copilot_token.as_deref(), Some("CP"));
     assert_eq!(k.copilot_expires_at, Some(1_700_000_100));
     assert_eq!(k.account_label.as_deref(), Some("a@b.c"));
-    assert_eq!(k.base_url_override.as_deref(), Some("http://127.0.0.1:11434"));
+    assert_eq!(
+        k.base_url_override.as_deref(),
+        Some("http://127.0.0.1:11434")
+    );
     assert_eq!(k.extra.len(), expected_extra.len(), "extra: {:?}", k.extra);
     for field in &expected_extra {
         assert!(k.extra.contains_key(field), "lost update on {field}");
@@ -244,7 +251,10 @@ fn api_key_lifecycle_and_no_plaintext_in_db_file() {
             .expect("verify miss"),
         None
     );
-    assert_eq!(rt().block_on(store.verify_api_key("")).expect("empty"), None);
+    assert_eq!(
+        rt().block_on(store.verify_api_key("")).expect("empty"),
+        None
+    );
 
     // Second key differs; list is ordered by creation.
     let (plain2, key2) = rt().block_on(store.create_api_key(None)).expect("create");
@@ -256,16 +266,30 @@ fn api_key_lifecycle_and_no_plaintext_in_db_file() {
 
     // Deleted keys stop verifying.
     assert!(rt().block_on(store.delete_api_key(key.id)).expect("delete"));
-    assert!(!rt().block_on(store.delete_api_key(key.id)).expect("re-delete"));
-    assert_eq!(rt().block_on(store.verify_api_key(&plain)).expect("verify"), None);
+    assert!(!rt()
+        .block_on(store.delete_api_key(key.id))
+        .expect("re-delete"));
+    assert_eq!(
+        rt().block_on(store.verify_api_key(&plain)).expect("verify"),
+        None
+    );
     assert_eq!(rt().block_on(store.count_api_keys()).expect("count"), 1);
 
     // The raw DB bytes must not contain either plaintext.
     drop(store);
     let bytes = std::fs::read(dir.db()).expect("read db file");
-    assert!(!contains(&bytes, plain.as_bytes()), "plaintext key in DB file");
-    assert!(!contains(&bytes, plain2.as_bytes()), "plaintext key in DB file");
-    assert!(contains(&bytes, key.key_hash.as_bytes()), "hash should be stored");
+    assert!(
+        !contains(&bytes, plain.as_bytes()),
+        "plaintext key in DB file"
+    );
+    assert!(
+        !contains(&bytes, plain2.as_bytes()),
+        "plaintext key in DB file"
+    );
+    assert!(
+        contains(&bytes, key.key_hash.as_bytes()),
+        "hash should be stored"
+    );
 }
 
 // ----- 4b. virtual-key governance ---------------------------------------------------
@@ -285,7 +309,13 @@ fn api_key_limits_default_then_patch_merges_and_clears() {
 
         // A partial patch changes only the named field.
         let patched = s
-            .update_api_key(key.id, &ApiKeyPatch { rpm: Some(60), ..Default::default() })
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    rpm: Some(60),
+                    ..Default::default()
+                },
+            )
             .await
             .expect("patch")
             .expect("exists");
@@ -299,9 +329,9 @@ fn api_key_limits_default_then_patch_merges_and_clears() {
                 &ApiKeyPatch {
                     tpm: Some(90_000),
                     budget_tokens: Some(5_000_000),
-                    allowed_models: Some(Some(vec![
-                        "claude/claude-haiku-4-5-20251001".to_string(),
-                    ])),
+                    allowed_models: Some(Some(
+                        vec!["claude/claude-haiku-4-5-20251001".to_string()],
+                    )),
                     expires_at: Some(Some(1_800_000_000)),
                     ..Default::default()
                 },
@@ -319,7 +349,10 @@ fn api_key_limits_default_then_patch_merges_and_clears() {
         assert_eq!(patched.rpm, 60, "the earlier patch survived");
 
         // The merged row is what SQLite holds, not just what the call returned.
-        assert_eq!(s.list_api_keys().await.expect("list"), vec![patched.clone()]);
+        assert_eq!(
+            s.list_api_keys().await.expect("list"),
+            vec![patched.clone()]
+        );
 
         // `Some(None)` clears a nullable column and leaves the rest alone.
         let cleared = s
@@ -340,7 +373,13 @@ fn api_key_limits_default_then_patch_merges_and_clears() {
 
         // A disabled key is still found, so the gateway can answer 403 instead of 401.
         let off = s
-            .update_api_key(key.id, &ApiKeyPatch { is_active: Some(false), ..Default::default() })
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    is_active: Some(false),
+                    ..Default::default()
+                },
+            )
             .await
             .expect("disable")
             .expect("exists");
@@ -370,22 +409,44 @@ fn api_key_scope_defaults_to_inference_and_patches_round_trip() {
     let s = &store;
     rt().block_on(async {
         let (plain, key) = s.create_api_key(Some("dash")).await.expect("create");
-        assert_eq!(key.scope, KeyScope::Inference, "a new key may spend, not administer");
-        assert_eq!(s.verify_api_key(&plain).await.expect("verify").expect("known").scope, KeyScope::Inference);
+        assert_eq!(
+            key.scope,
+            KeyScope::Inference,
+            "a new key may spend, not administer"
+        );
+        assert_eq!(
+            s.verify_api_key(&plain)
+                .await
+                .expect("verify")
+                .expect("known")
+                .scope,
+            KeyScope::Inference
+        );
 
         let admin = s
             .update_api_key(
                 key.id,
-                &ApiKeyPatch { scope: Some(KeyScope::Admin), ..Default::default() },
+                &ApiKeyPatch {
+                    scope: Some(KeyScope::Admin),
+                    ..Default::default()
+                },
             )
             .await
             .expect("patch")
             .expect("exists");
         assert_eq!(admin.scope, KeyScope::Admin);
-        assert_eq!(admin.name.as_deref(), Some("dash"), "the scope patch touched nothing else");
+        assert_eq!(
+            admin.name.as_deref(),
+            Some("dash"),
+            "the scope patch touched nothing else"
+        );
         // The stored row is what reads back, not just the in-memory merge.
         assert_eq!(
-            s.verify_api_key(&plain).await.expect("verify").expect("known").scope,
+            s.verify_api_key(&plain)
+                .await
+                .expect("verify")
+                .expect("known")
+                .scope,
             KeyScope::Admin
         );
         assert_eq!(s.list_api_keys().await.expect("list"), vec![admin.clone()]);
@@ -394,7 +455,10 @@ fn api_key_scope_defaults_to_inference_and_patches_round_trip() {
         let back = s
             .update_api_key(
                 key.id,
-                &ApiKeyPatch { scope: Some(KeyScope::Inference), ..Default::default() },
+                &ApiKeyPatch {
+                    scope: Some(KeyScope::Inference),
+                    ..Default::default()
+                },
             )
             .await
             .expect("patch")
@@ -461,12 +525,19 @@ fn v15_database_migrates_to_nineteen_with_the_scope_column() {
         .block_on(store.get_api_key(id))
         .expect("read")
         .expect("legacy key survives");
-    assert_eq!(key.scope, KeyScope::Inference, "a v15 key may spend, not administer");
+    assert_eq!(
+        key.scope,
+        KeyScope::Inference,
+        "a v15 key may spend, not administer"
+    );
     // The upgraded column is writable, not just a read-time default.
     let patched = rt()
         .block_on(store.update_api_key(
             id,
-            &ApiKeyPatch { scope: Some(KeyScope::Admin), ..Default::default() },
+            &ApiKeyPatch {
+                scope: Some(KeyScope::Admin),
+                ..Default::default()
+            },
         ))
         .expect("patch")
         .expect("exists");
@@ -516,14 +587,25 @@ fn spent_tokens_sums_only_that_key() {
             error: None,
         };
         // a: 100 + 20 + 5 + 5 = 130 across two rows; b: 7; anonymous: excluded.
-        s.record_usage(&rec(Some(a.id), 100, 60, 10, 5, 5)).await.expect("a1");
-        s.record_usage(&rec(Some(a.id), 200, 40, 10, 0, 0)).await.expect("a2");
-        s.record_usage(&rec(Some(b.id), 300, 7, 0, 0, 0)).await.expect("b1");
-        s.record_usage(&rec(None, 400, 99, 0, 0, 0)).await.expect("anon");
+        s.record_usage(&rec(Some(a.id), 100, 60, 10, 5, 5))
+            .await
+            .expect("a1");
+        s.record_usage(&rec(Some(a.id), 200, 40, 10, 0, 0))
+            .await
+            .expect("a2");
+        s.record_usage(&rec(Some(b.id), 300, 7, 0, 0, 0))
+            .await
+            .expect("b1");
+        s.record_usage(&rec(None, 400, 99, 0, 0, 0))
+            .await
+            .expect("anon");
 
         assert_eq!(s.api_key_spend(a.id, None).await.expect("a spend"), 130);
         assert_eq!(s.api_key_spend(b.id, None).await.expect("b spend"), 7);
-        assert_eq!(s.api_key_spend(Uuid::new_v4(), None).await.expect("none"), 0);
+        assert_eq!(
+            s.api_key_spend(Uuid::new_v4(), None).await.expect("none"),
+            0
+        );
 
         let all = s.api_key_spend_all(None).await.expect("all");
         assert_eq!(all.get(&a.id).copied(), Some(130));
@@ -575,7 +657,9 @@ fn cost_micros_round_trips_and_sums_per_key() {
         assert_eq!(s.api_key_cost_spend(a.id, None).await.expect("a"), 4_250);
         assert_eq!(s.api_key_cost_spend(b.id, None).await.expect("b"), 500);
         assert_eq!(
-            s.api_key_cost_spend(Uuid::new_v4(), None).await.expect("unknown"),
+            s.api_key_cost_spend(Uuid::new_v4(), None)
+                .await
+                .expect("unknown"),
             0,
             "a key with no rows has spent nothing"
         );
@@ -597,8 +681,8 @@ fn cost_micros_round_trips_and_sums_per_key() {
 #[test]
 fn model_costs_returns_published_rows_for_the_named_providers() {
     let store = Store::open_in_memory().expect("mem");
-    let row = |provider: &str, model: &str, source: &str, cost: Option<serde_json::Value>| {
-        ModelRow {
+    let row =
+        |provider: &str, model: &str, source: &str, cost: Option<serde_json::Value>| ModelRow {
             provider: provider.to_string(),
             model: model.to_string(),
             display: None,
@@ -608,8 +692,7 @@ fn model_costs_returns_published_rows_for_the_named_providers() {
             cost,
             source: source.to_string(),
             updated_at: 0,
-        }
-    };
+        };
     rt().block_on(async {
         store
             .upsert_model(&row(
@@ -638,12 +721,20 @@ fn model_costs_returns_published_rows_for_the_named_providers() {
             .model_costs("gpt-test", &["codex", "openai"])
             .await
             .expect("costs");
-        assert_eq!(rows.len(), 1, "the unpriced row and the other model are not prices");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the unpriced row and the other model are not prices"
+        );
         assert_eq!(rows[0].provider, "openai");
         assert_eq!(rows[0].source, "synced");
         assert_eq!(rows[0].cost["input"], 1.0);
 
-        assert!(store.model_costs("gpt-test", &[]).await.expect("none").is_empty());
+        assert!(store
+            .model_costs("gpt-test", &[])
+            .await
+            .expect("none")
+            .is_empty());
     });
 }
 
@@ -724,7 +815,9 @@ fn v6_database_migrates_to_nineteen() {
         "a pre-v10 key has no money budget: unlimited, exactly as before"
     );
 
-    let recent = rt().block_on(store.recent_usage(&query(10))).expect("recent");
+    let recent = rt()
+        .block_on(store.recent_usage(&query(10)))
+        .expect("recent");
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].input_tokens, 42, "pre-v7 rows are untouched");
     assert_eq!(
@@ -738,7 +831,9 @@ fn v6_database_migrates_to_nineteen() {
     );
     // The attempt table exists and is empty: no request had a fallback yet.
     assert_eq!(
-        rt().block_on(store.attempts_for(Uuid::new_v4())).expect("attempts").len(),
+        rt().block_on(store.attempts_for(Uuid::new_v4()))
+            .expect("attempts")
+            .len(),
         0
     );
     drop(store);
@@ -750,8 +845,14 @@ fn v6_database_migrates_to_nineteen() {
     assert_eq!(version, 19);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
-        ("idx_usage_request", "the usage row is looked up by request id"),
-        ("idx_attempts_request", "attempts are read per request, in order"),
+        (
+            "idx_usage_request",
+            "the usage row is looked up by request id",
+        ),
+        (
+            "idx_attempts_request",
+            "attempts are read per request, in order",
+        ),
     ] {
         let found: i64 = conn
             .query_row(
@@ -855,10 +956,16 @@ fn v8_database_migrates_to_nineteen() {
     let weight: i64 = conn
         .query_row("SELECT weight FROM connections", [], |r| r.get(0))
         .expect("weight");
-    assert_eq!(weight, 100, "existing connections join the weighted cycle evenly");
+    assert_eq!(
+        weight, 100,
+        "existing connections join the weighted cycle evenly"
+    );
 
     for (table, why) in [
-        ("connection_stats", "least_latency needs a place to keep its EWMA"),
+        (
+            "connection_stats",
+            "least_latency needs a place to keep its EWMA",
+        ),
         ("key_models", "per-key model mapping needs its table"),
     ] {
         let found: i64 = conn
@@ -943,11 +1050,14 @@ fn v9_database_migrates_to_nineteen() {
     assert_eq!(keys[0].budget_tokens, 500, "the token budget survives");
     assert_eq!(keys[0].budget_micros, 0, "no money budget means unlimited");
     assert_eq!(
-        rt().block_on(store.api_key_cost_spend(keys[0].id, None)).expect("spend"),
+        rt().block_on(store.api_key_cost_spend(keys[0].id, None))
+            .expect("spend"),
         0
     );
 
-    let rows = rt().block_on(store.recent_usage(&query(10))).expect("usage");
+    let rows = rt()
+        .block_on(store.recent_usage(&query(10)))
+        .expect("usage");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].input_tokens, 42);
     assert_eq!(rows[0].cost_micros, 0);
@@ -978,9 +1088,12 @@ fn v10_database_migrates_to_nineteen() {
         .expect("rewind to v10");
     }
 
-    let store = Store::open(&dir.db(), None).expect("open store runs the v11, v12, v13 and v14 steps");
+    let store =
+        Store::open(&dir.db(), None).expect("open store runs the v11, v12, v13 and v14 steps");
     assert!(
-        rt().block_on(store.cache_entries()).expect("cache readable").is_empty(),
+        rt().block_on(store.cache_entries())
+            .expect("cache readable")
+            .is_empty(),
         "a fresh v11 cache starts empty"
     );
     drop(store);
@@ -1012,18 +1125,41 @@ fn connection_weight_is_clamped_into_the_supported_range() {
             .create_connection("openai", "api_key", creds("k"), Some("w"))
             .await
             .expect("connection");
-        assert_eq!(c.weight, 100, "new connections join the weighted cycle evenly");
+        assert_eq!(
+            c.weight, 100,
+            "new connections join the weighted cycle evenly"
+        );
 
-        store.set_connection_weight(c.id, 0).await.expect("clamp low");
-        let read = store.get_connection(c.id).await.expect("read").expect("exists");
-        assert_eq!(read.weight, 1, "zero would starve an account that must still serve");
+        store
+            .set_connection_weight(c.id, 0)
+            .await
+            .expect("clamp low");
+        let read = store
+            .get_connection(c.id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            read.weight, 1,
+            "zero would starve an account that must still serve"
+        );
 
-        store.set_connection_weight(c.id, 10_000).await.expect("clamp high");
-        let read = store.get_connection(c.id).await.expect("read").expect("exists");
+        store
+            .set_connection_weight(c.id, 10_000)
+            .await
+            .expect("clamp high");
+        let read = store
+            .get_connection(c.id)
+            .await
+            .expect("read")
+            .expect("exists");
         assert_eq!(read.weight, 1000);
 
         assert!(
-            store.set_connection_weight(Uuid::new_v4(), 5).await.is_err(),
+            store
+                .set_connection_weight(Uuid::new_v4(), 5)
+                .await
+                .is_err(),
             "an unknown connection is reported, not silently ignored"
         );
     });
@@ -1039,21 +1175,34 @@ fn latency_ewma_is_old_times_zero_point_eight_plus_sample_times_zero_point_two()
             .expect("connection");
 
         // First sample seeds the EWMA; later samples move it by 20%.
-        store.record_connection_latency(c.id, 100).await.expect("first");
+        store
+            .record_connection_latency(c.id, 100)
+            .await
+            .expect("first");
         let ewma = store.connection_latencies().await.expect("latencies");
         assert_eq!(ewma.get(&c.id).copied(), Some(100.0));
 
-        store.record_connection_latency(c.id, 200).await.expect("second");
+        store
+            .record_connection_latency(c.id, 200)
+            .await
+            .expect("second");
         let ewma = store.connection_latencies().await.expect("latencies");
         assert_eq!(ewma.get(&c.id).copied(), Some(120.0), "100*0.8 + 200*0.2");
 
-        store.record_connection_latency(c.id, 300).await.expect("third");
+        store
+            .record_connection_latency(c.id, 300)
+            .await
+            .expect("third");
         let ewma = store.connection_latencies().await.expect("latencies");
         assert_eq!(ewma.get(&c.id).copied(), Some(156.0), "120*0.8 + 300*0.2");
 
         // A deleted connection takes its sample with it.
         assert!(store.delete_connection(c.id).await.expect("delete"));
-        assert!(store.connection_latencies().await.expect("latencies").is_empty());
+        assert!(store
+            .connection_latencies()
+            .await
+            .expect("latencies")
+            .is_empty());
     });
 }
 
@@ -1070,21 +1219,41 @@ fn key_models_replace_whole_map_and_reject_duplicates() {
             from: "smart".into(),
             to: "claude/claude-sonnet-4-5".into(),
         };
-        assert!(
-            store.replace_key_models(key.id, &[haiku.clone(), sonnet.clone()]).await.expect("put")
-        );
+        assert!(store
+            .replace_key_models(key.id, &[haiku.clone(), sonnet.clone()])
+            .await
+            .expect("put"));
 
         // Read back in `from` order, and findable by exact client model.
-        assert_eq!(store.key_models(key.id).await.expect("models"), vec![haiku.clone(), sonnet]);
         assert_eq!(
-            store.key_model_target(key.id, "default").await.expect("target").as_deref(),
+            store.key_models(key.id).await.expect("models"),
+            vec![haiku.clone(), sonnet]
+        );
+        assert_eq!(
+            store
+                .key_model_target(key.id, "default")
+                .await
+                .expect("target")
+                .as_deref(),
             Some("claude/claude-haiku-4-5-20251001")
         );
-        assert_eq!(store.key_model_target(key.id, "unmapped").await.expect("target"), None);
+        assert_eq!(
+            store
+                .key_model_target(key.id, "unmapped")
+                .await
+                .expect("target"),
+            None
+        );
 
         // A second PUT replaces the whole map rather than merging into it.
-        let only = KeyModel { from: "default".into(), to: "openai/gpt-5".into() };
-        store.replace_key_models(key.id, std::slice::from_ref(&only)).await.expect("replace");
+        let only = KeyModel {
+            from: "default".into(),
+            to: "openai/gpt-5".into(),
+        };
+        store
+            .replace_key_models(key.id, std::slice::from_ref(&only))
+            .await
+            .expect("replace");
         assert_eq!(store.key_models(key.id).await.expect("models"), vec![only]);
         let all = store.key_models_all().await.expect("all");
         assert_eq!(all.get(&key.id).map(Vec::len), Some(1));
@@ -1095,19 +1264,28 @@ fn key_models_replace_whole_map_and_reject_duplicates() {
 
         // A duplicate `from` is refused by the primary key, and the previous state is
         // left alone because the whole write is one transaction.
-        store.replace_key_models(key.id, std::slice::from_ref(&haiku)).await.expect("put");
+        store
+            .replace_key_models(key.id, std::slice::from_ref(&haiku))
+            .await
+            .expect("put");
         assert!(
-            store.replace_key_models(key.id, &[haiku.clone(), haiku]).await.is_err(),
+            store
+                .replace_key_models(key.id, &[haiku.clone(), haiku])
+                .await
+                .is_err(),
             "one key cannot map the same client model twice"
         );
         assert_eq!(store.key_models(key.id).await.expect("models").len(), 1);
 
         assert!(
             !store
-                .replace_key_models(Uuid::new_v4(), &[KeyModel {
-                    from: "a".into(),
-                    to: "openai/gpt-5".into()
-                }])
+                .replace_key_models(
+                    Uuid::new_v4(),
+                    &[KeyModel {
+                        from: "a".into(),
+                        to: "openai/gpt-5".into()
+                    }]
+                )
                 .await
                 .expect("unknown key"),
             "an unknown key is reported, not created"
@@ -1147,8 +1325,14 @@ fn credentials_never_stored_in_plaintext() {
     // ...but not through the file. Close every handle first so WAL is checkpointed.
     drop(store);
     let bytes = std::fs::read(dir.db()).expect("read db");
-    assert!(!contains(&bytes, b"SECRET-XYZ"), "access_token leaked to disk");
-    assert!(!contains(&bytes, b"REFRESH-SECRET-ABC"), "refresh token leaked");
+    assert!(
+        !contains(&bytes, b"SECRET-XYZ"),
+        "access_token leaked to disk"
+    );
+    assert!(
+        !contains(&bytes, b"REFRESH-SECRET-ABC"),
+        "refresh token leaked"
+    );
     // The key file must not be the plaintext either.
     let key = std::fs::read(dir.path().join(KEY_FILE_NAME)).expect("key");
     assert!(!contains(&key, b"SECRET-XYZ"));
@@ -1161,13 +1345,22 @@ fn aliases_and_disabled_models_upsert_list_delete() {
     let store = Store::open_in_memory().expect("mem");
     let s = &store;
     rt().block_on(async {
-        s.upsert_alias("fast", "groq/llama-3.1-8b").await.expect("a1");
-        s.upsert_alias("smart", "anthropic/claude-sonnet-4").await.expect("a2");
-        s.upsert_alias("fast", "cerebras/llama-3.1-8b").await.expect("a1 update");
+        s.upsert_alias("fast", "groq/llama-3.1-8b")
+            .await
+            .expect("a1");
+        s.upsert_alias("smart", "anthropic/claude-sonnet-4")
+            .await
+            .expect("a2");
+        s.upsert_alias("fast", "cerebras/llama-3.1-8b")
+            .await
+            .expect("a1 update");
         let aliases = s.list_aliases().await.expect("list");
         assert_eq!(aliases.len(), 2);
         assert_eq!(aliases[0].alias, "fast");
-        assert_eq!(aliases[0].target, "cerebras/llama-3.1-8b", "upsert replaces target");
+        assert_eq!(
+            aliases[0].target, "cerebras/llama-3.1-8b",
+            "upsert replaces target"
+        );
         assert!(s.delete_alias("fast").await.expect("del"));
         assert!(!s.delete_alias("fast").await.expect("del again"));
         assert_eq!(s.list_aliases().await.expect("list").len(), 1);
@@ -1175,7 +1368,10 @@ fn aliases_and_disabled_models_upsert_list_delete() {
         s.set_disabled("gpt-4o", true).await.expect("disable");
         s.set_disabled("gpt-4o", true).await.expect("disable twice");
         s.set_disabled("o3", true).await.expect("disable");
-        assert_eq!(s.disabled_models().await.expect("dis"), vec!["gpt-4o", "o3"]);
+        assert_eq!(
+            s.disabled_models().await.expect("dis"),
+            vec!["gpt-4o", "o3"]
+        );
         s.set_disabled("gpt-4o", false).await.expect("enable");
         assert_eq!(s.disabled_models().await.expect("dis"), vec!["o3"]);
     });
@@ -1250,10 +1446,18 @@ fn usage_records_summary_and_recent_order() {
         }
     };
     rt().block_on(async {
-        s.record_usage(&rec(100, "claude", "sonnet", 10, 20, 100, 200)).await.expect("r1");
-        s.record_usage(&rec(300, "claude", "sonnet", 30, 40, 300, 200)).await.expect("r2");
-        s.record_usage(&rec(200, "claude", "sonnet", 0, 0, 200, 429)).await.expect("r3");
-        s.record_usage(&rec(400, "groq", "llama", 5, 5, 400, 200)).await.expect("r4");
+        s.record_usage(&rec(100, "claude", "sonnet", 10, 20, 100, 200))
+            .await
+            .expect("r1");
+        s.record_usage(&rec(300, "claude", "sonnet", 30, 40, 300, 200))
+            .await
+            .expect("r2");
+        s.record_usage(&rec(200, "claude", "sonnet", 0, 0, 200, 429))
+            .await
+            .expect("r3");
+        s.record_usage(&rec(400, "groq", "llama", 5, 5, 400, 200))
+            .await
+            .expect("r4");
 
         let recent = s.recent_usage(&query(3)).await.expect("recent");
         assert_eq!(recent.len(), 3);
@@ -1278,7 +1482,10 @@ fn usage_records_summary_and_recent_order() {
         let sum = s.usage_summary(None).await.expect("summary");
         assert_eq!(sum.len(), 2);
         let claude = &sum[0];
-        assert_eq!((claude.provider.as_str(), claude.model.as_str()), ("claude", "sonnet"));
+        assert_eq!(
+            (claude.provider.as_str(), claude.model.as_str()),
+            ("claude", "sonnet")
+        );
         assert_eq!(claude.requests, 3);
         assert_eq!(claude.errors, 1, "status >= 400 counts as an error");
         assert_eq!(claude.input_tokens, 40);
@@ -1287,7 +1494,10 @@ fn usage_records_summary_and_recent_order() {
         assert_eq!(claude.cache_write_tokens, 100);
         assert_eq!(claude.avg_latency_ms, 200, "(100+300+200)/3");
         let groq = &sum[1];
-        assert_eq!((groq.requests, groq.errors, groq.avg_latency_ms), (1, 0, 400));
+        assert_eq!(
+            (groq.requests, groq.errors, groq.avg_latency_ms),
+            (1, 0, 400)
+        );
 
         // A range-scoped summary is what the Activity page shows; it must not leak
         // older traffic into the window.
@@ -1298,7 +1508,10 @@ fn usage_records_summary_and_recent_order() {
 
         // Rows read back carry the id the log copies, and the endpoint they came from.
         let newest = &recent[0];
-        assert!(newest.id.is_some(), "usage ids are exposed for the request log");
+        assert!(
+            newest.id.is_some(),
+            "usage ids are exposed for the request log"
+        );
         assert_eq!(newest.endpoint.as_deref(), Some("/v1/chat/completions"));
         assert_eq!(
             cached.request_id,
@@ -1333,7 +1546,14 @@ fn attempts_round_trip_under_the_request_id() {
     let key = Uuid::new_v4();
     rt().block_on(async {
         for (attempt, conn, model, status, error, latency) in [
-            (1u32, first_conn, "gpt-4.1", 503u16, Some("upstream openai returned 503: overloaded"), 12u32),
+            (
+                1u32,
+                first_conn,
+                "gpt-4.1",
+                503u16,
+                Some("upstream openai returned 503: overloaded"),
+                12u32,
+            ),
             (2, second_conn, "gpt-4.1-mini", 200, None, 40),
         ] {
             s.record_attempt(&AttemptRecord {
@@ -1372,7 +1592,10 @@ fn attempts_round_trip_under_the_request_id() {
         let rows = s.attempts_for(request_id).await.expect("attempts");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].attempt, 1);
-        assert_eq!(rows[0].status, 503, "the failing attempt keeps its upstream status");
+        assert_eq!(
+            rows[0].status, 503,
+            "the failing attempt keeps its upstream status"
+        );
         assert_eq!(
             rows[0].error.as_deref(),
             Some("upstream openai returned 503: overloaded"),
@@ -1420,7 +1643,10 @@ fn attempts_round_trip_under_the_request_id() {
         assert_eq!(found.request_id, Some(request_id));
         assert_eq!(found.provider, "openai");
         assert!(
-            s.usage_by_request(Uuid::new_v4()).await.expect("missing").is_none(),
+            s.usage_by_request(Uuid::new_v4())
+                .await
+                .expect("missing")
+                .is_none(),
             "an unknown request id has no usage row"
         );
     });
@@ -1433,8 +1659,14 @@ fn connection_crud_status_and_list_filter() {
     let store = Store::open_in_memory().expect("mem");
     let s = &store;
     rt().block_on(async {
-        let a = s.create_connection("claude", "oauth", creds("a"), Some("one")).await.expect("a");
-        let b = s.create_connection("groq", "apikey", creds("b"), None).await.expect("b");
+        let a = s
+            .create_connection("claude", "oauth", creds("a"), Some("one"))
+            .await
+            .expect("a");
+        let b = s
+            .create_connection("groq", "apikey", creds("b"), None)
+            .await
+            .expect("b");
         assert!(a.is_active);
         assert_eq!(a.priority, 0);
         assert_eq!(a.backoff_level, 0);
@@ -1446,7 +1678,11 @@ fn connection_crud_status_and_list_filter() {
         assert_eq!(claude.len(), 1);
         assert_eq!(claude[0].id, a.id);
         assert_eq!(claude[0].name.as_deref(), Some("one"));
-        assert!(s.list_connections(Some("nope")).await.expect("none").is_empty());
+        assert!(s
+            .list_connections(Some("nope"))
+            .await
+            .expect("none")
+            .is_empty());
 
         s.update_connection_status(a.id, 2, Some("rate limited"), Some(429))
             .await
@@ -1462,7 +1698,9 @@ fn connection_crud_status_and_list_filter() {
             .is_err());
 
         // merge never erases with None
-        s.merge_credentials(b.id, Credentials::default()).await.expect("noop merge");
+        s.merge_credentials(b.id, Credentials::default())
+            .await
+            .expect("noop merge");
         let b2 = s.get_connection(b.id).await.expect("get").expect("row");
         assert_eq!(b2.credentials.access_token.as_deref(), Some("b"));
 
@@ -1484,7 +1722,9 @@ fn response_cache_expires_lazily_and_evicts_the_oldest() {
         let key = cache_key("identical request");
         assert_eq!(s.cache_get(&key, 1_000).await.expect("empty"), None);
 
-        s.cache_put(&key, r#"{"id":"a"}"#, 1_000, 1_100, 10).await.expect("put");
+        s.cache_put(&key, r#"{"id":"a"}"#, 1_000, 1_100, 10)
+            .await
+            .expect("put");
         assert_eq!(
             s.cache_get(&key, 1_050).await.expect("hit"),
             Some(r#"{"id":"a"}"#.to_string())
@@ -1496,19 +1736,16 @@ fn response_cache_expires_lazily_and_evicts_the_oldest() {
 
         // The second read is at the expiry second: no longer servable, and gone.
         assert_eq!(s.cache_get(&key, 1_100).await.expect("expired"), None);
-        assert!(s.cache_entries().await.expect("entries").is_empty(), "an expired read deletes the row");
+        assert!(
+            s.cache_entries().await.expect("entries").is_empty(),
+            "an expired read deletes the row"
+        );
 
         // Three fresh entries under a cap of two: the oldest is evicted, not the newest.
         for (i, payload) in ["a", "b", "c"].iter().enumerate() {
-            s.cache_put(
-                &cache_key(payload),
-                payload,
-                2_000 + i as i64,
-                9_000,
-                2,
-            )
-            .await
-            .expect("put");
+            s.cache_put(&cache_key(payload), payload, 2_000 + i as i64, 9_000, 2)
+                .await
+                .expect("put");
         }
         let keys: Vec<String> = s
             .cache_entries()
@@ -1517,7 +1754,11 @@ fn response_cache_expires_lazily_and_evicts_the_oldest() {
             .into_iter()
             .map(|e| e.key)
             .collect();
-        assert_eq!(keys, vec![cache_key("b"), cache_key("c")], "oldest created_at loses");
+        assert_eq!(
+            keys,
+            vec![cache_key("b"), cache_key("c")],
+            "oldest created_at loses"
+        );
         assert_eq!(
             s.cache_get(&cache_key("a"), 2_500).await.expect("evicted"),
             None
@@ -1533,10 +1774,20 @@ fn response_cache_upsert_replaces_the_body_and_hits() {
     let s = &store;
     rt().block_on(async {
         let key = cache_key("x");
-        s.cache_put(&key, "one", 100, 9_000, 10).await.expect("first");
-        assert_eq!(s.cache_get(&key, 200).await.expect("read"), Some("one".into()));
-        s.cache_put(&key, "two", 300, 9_000, 10).await.expect("second");
-        assert_eq!(s.cache_get(&key, 400).await.expect("read"), Some("two".into()));
+        s.cache_put(&key, "one", 100, 9_000, 10)
+            .await
+            .expect("first");
+        assert_eq!(
+            s.cache_get(&key, 200).await.expect("read"),
+            Some("one".into())
+        );
+        s.cache_put(&key, "two", 300, 9_000, 10)
+            .await
+            .expect("second");
+        assert_eq!(
+            s.cache_get(&key, 400).await.expect("read"),
+            Some("two".into())
+        );
         let entries = s.cache_entries().await.expect("entries");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].body, "two");
@@ -1595,26 +1846,65 @@ fn prune_usage_deletes_history_older_than_the_cutoff() {
         }
 
         let report = s.prune_usage(200).await.expect("prune");
-        assert_eq!(report, PruneReport { usage: 1, attempts: 1 }, "the report counts each table");
+        assert_eq!(
+            report,
+            PruneReport {
+                usage: 1,
+                attempts: 1
+            },
+            "the report counts each table"
+        );
 
         let remaining: Vec<i64> = s
-            .recent_usage(&UsageQuery { limit: 10, ..Default::default() })
+            .recent_usage(&UsageQuery {
+                limit: 10,
+                ..Default::default()
+            })
             .await
             .expect("usage")
             .into_iter()
             .map(|r| r.ts)
             .collect();
-        assert_eq!(remaining, vec![300, 200], "the cutoff row and newer survive");
-        assert!(s.attempts_for(attempt_request(100)).await.expect("old").is_empty());
-        assert_eq!(s.attempts_for(attempt_request(200)).await.expect("boundary").len(), 1);
-        assert_eq!(s.attempts_for(attempt_request(300)).await.expect("new").len(), 1);
+        assert_eq!(
+            remaining,
+            vec![300, 200],
+            "the cutoff row and newer survive"
+        );
+        assert!(s
+            .attempts_for(attempt_request(100))
+            .await
+            .expect("old")
+            .is_empty());
+        assert_eq!(
+            s.attempts_for(attempt_request(200))
+                .await
+                .expect("boundary")
+                .len(),
+            1
+        );
+        assert_eq!(
+            s.attempts_for(attempt_request(300))
+                .await
+                .expect("new")
+                .len(),
+            1
+        );
 
         assert_eq!(
             s.prune_usage(200).await.expect("second sweep"),
             PruneReport::default(),
             "a repeated sweep is a no-op"
         );
-        assert_eq!(s.recent_usage(&UsageQuery { limit: 10, ..Default::default() }).await.expect("usage").len(), 2);
+        assert_eq!(
+            s.recent_usage(&UsageQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .expect("usage")
+            .len(),
+            2
+        );
 
         // The maintenance pass runs against the same connection without failing.
         s.optimize().await.expect("optimize");
@@ -1660,9 +1950,11 @@ fn prune_expired_cache_drops_only_expired_rows() {
 
 fn read_blob(db: &Path, id: Uuid) -> Vec<u8> {
     let c = rusqlite::Connection::open(db).expect("open");
-    c.query_row("SELECT data FROM connections WHERE id = ?1", [id.to_string()], |r| {
-        r.get(0)
-    })
+    c.query_row(
+        "SELECT data FROM connections WHERE id = ?1",
+        [id.to_string()],
+        |r| r.get(0),
+    )
     .expect("blob")
 }
 
@@ -1758,7 +2050,10 @@ fn v12_database_migrates_to_nineteen_with_the_attempt_ts_index() {
             |r| r.get(0),
         )
         .expect("index");
-    assert_eq!(indexes, 1, "the retention sweep needs the attempts ts index");
+    assert_eq!(
+        indexes, 1,
+        "the retention sweep needs the attempts ts index"
+    );
 }
 
 /// Spend queries honour `since`: a key with rows inside and outside the window reports
@@ -1790,18 +2085,38 @@ fn spend_since_counts_only_rows_inside_the_window() {
             error: None,
         };
         let since = 1_000;
-        s.record_usage(&rec(a.id, 999, 40, 400)).await.expect("before");
-        s.record_usage(&rec(a.id, 1_000, 10, 100)).await.expect("at boundary");
-        s.record_usage(&rec(a.id, 2_000, 5, 50)).await.expect("inside");
+        s.record_usage(&rec(a.id, 999, 40, 400))
+            .await
+            .expect("before");
+        s.record_usage(&rec(a.id, 1_000, 10, 100))
+            .await
+            .expect("at boundary");
+        s.record_usage(&rec(a.id, 2_000, 5, 50))
+            .await
+            .expect("inside");
 
-        assert_eq!(s.api_key_spend(a.id, Some(since)).await.expect("tokens"), 15);
-        assert_eq!(s.api_key_cost_spend(a.id, Some(since)).await.expect("micros"), 150);
+        assert_eq!(
+            s.api_key_spend(a.id, Some(since)).await.expect("tokens"),
+            15
+        );
+        assert_eq!(
+            s.api_key_cost_spend(a.id, Some(since))
+                .await
+                .expect("micros"),
+            150
+        );
         assert_eq!(s.api_key_spend(a.id, None).await.expect("all tokens"), 55);
-        assert_eq!(s.api_key_cost_spend(a.id, None).await.expect("all micros"), 550);
+        assert_eq!(
+            s.api_key_cost_spend(a.id, None).await.expect("all micros"),
+            550
+        );
 
         let tokens_all = s.api_key_spend_all(Some(since)).await.expect("tokens all");
         assert_eq!(tokens_all.get(&a.id).copied(), Some(15));
-        let micros_all = s.api_key_cost_spend_all(Some(since)).await.expect("micros all");
+        let micros_all = s
+            .api_key_cost_spend_all(Some(since))
+            .await
+            .expect("micros all");
         assert_eq!(micros_all.get(&a.id).copied(), Some(150));
     });
 }
@@ -1878,10 +2193,14 @@ fn guardrails_round_trip_through_patch_and_clear() {
             .await
             .expect("patch")
             .expect("exists");
-        assert_eq!(patched.guardrails, Some(Guardrails {
-            max_prompt_chars: Some(500),
-            ..Default::default()
-        }), "an empty document replaces the policy, it does not merge into it");
+        assert_eq!(
+            patched.guardrails,
+            Some(Guardrails {
+                max_prompt_chars: Some(500),
+                ..Default::default()
+            }),
+            "an empty document replaces the policy, it does not merge into it"
+        );
 
         // `{}` is the same policy as `null`: none. Storing it must not create a row that
         // reads back as Some(empty).
@@ -1898,7 +2217,11 @@ fn guardrails_round_trip_through_patch_and_clear() {
             .expect("exists");
         assert_eq!(cleared.guardrails, None);
         assert_eq!(
-            s.get_api_key(key.id).await.expect("read").expect("row").guardrails,
+            s.get_api_key(key.id)
+                .await
+                .expect("read")
+                .expect("row")
+                .guardrails,
             None
         );
 
@@ -1916,7 +2239,10 @@ fn guardrails_round_trip_through_patch_and_clear() {
         let cleared = s
             .update_api_key(
                 key.id,
-                &ApiKeyPatch { guardrails: Some(None), ..Default::default() },
+                &ApiKeyPatch {
+                    guardrails: Some(None),
+                    ..Default::default()
+                },
             )
             .await
             .expect("clear")
@@ -1976,7 +2302,11 @@ fn guardrails_reject_an_unenforceable_policy() {
         assert!(message.contains("must not be empty"), "{message}");
 
         assert_eq!(
-            s.get_api_key(key.id).await.expect("read").expect("row").guardrails,
+            s.get_api_key(key.id)
+                .await
+                .expect("read")
+                .expect("row")
+                .guardrails,
             None,
             "nothing was stored"
         );
@@ -2048,14 +2378,21 @@ fn guardrails_match_case_insensitively_and_name_the_term() {
     assert_eq!(none.hit("anything"), None);
     assert!(none.is_empty());
     assert!(!none.scans_output(), "scan_output without terms is a no-op");
-    let scan_only = Guardrails { scan_output: true, ..Default::default() };
+    let scan_only = Guardrails {
+        scan_output: true,
+        ..Default::default()
+    };
     assert!(!scan_only.is_empty());
     assert!(!scan_only.scans_output(), "nothing to scan for");
     assert!(policy_with_term().scans_output());
 }
 
 fn policy_with_term() -> Guardrails {
-    Guardrails { blocked: vec!["x".into()], scan_output: true, ..Default::default() }
+    Guardrails {
+        blocked: vec!["x".into()],
+        scan_output: true,
+        ..Default::default()
+    }
 }
 
 /// v13 shipped no guardrails column; opening a v13 database adds it, and the key that
@@ -2136,7 +2473,11 @@ fn v14_database_migrates_to_nineteen_with_the_template_tables() {
             .expect("templates table is writable");
         assert_eq!(created.version, 1);
         assert_eq!(
-            store.template_versions(&created.id).await.expect("history").len(),
+            store
+                .template_versions(&created.id)
+                .await
+                .expect("history")
+                .len(),
             1,
             "the history table is writable"
         );
@@ -2199,7 +2540,13 @@ fn walk_pages(s: &Store, limit: usize, since: Option<i64>) -> Vec<UsageRecord> {
                 Some((t, i)) => (Some(t), Some(i)),
                 None => (None, None),
             };
-            let q = UsageQuery { limit, since, before_ts: bt, before_id: bi, ..Default::default() };
+            let q = UsageQuery {
+                limit,
+                since,
+                before_ts: bt,
+                before_id: bi,
+                ..Default::default()
+            };
             let page = s.recent_usage(&q).await.expect("page");
             let short = page.len() < limit;
             cursor = page.last().map(|r| (r.ts, r.id.expect("id read back")));
@@ -2232,7 +2579,10 @@ fn usage_cursor_pages_disjoint_and_ordered() {
             })
             .await
             .expect("second");
-        assert_eq!(second.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![30, 20]);
+        assert_eq!(
+            second.iter().map(|r| r.ts).collect::<Vec<_>>(),
+            vec![30, 20]
+        );
     });
     let all = walk_pages(&store, 2, None);
     let ts: Vec<i64> = all.iter().map(|r| r.ts).collect();
@@ -2251,7 +2601,10 @@ fn usage_cursor_equal_timestamps_neither_drop_nor_repeat() {
         for m in ["a", "b", "c", "d", "e"] {
             store.record_usage(&page_row(100, m)).await.expect("insert");
         }
-        store.record_usage(&page_row(200, "newer")).await.expect("insert");
+        store
+            .record_usage(&page_row(200, "newer"))
+            .await
+            .expect("insert");
     });
     let all = walk_pages(&store, 2, None);
     assert_eq!(all.len(), 6, "all rows returned: {all:?}");
@@ -2261,8 +2614,15 @@ fn usage_cursor_equal_timestamps_neither_drop_nor_repeat() {
     assert_eq!(ids.len(), 6, "no row repeats across pages");
     assert_eq!(all[0].model, "newer");
     // Within the tied group the id order is strictly descending across pages.
-    let tied: Vec<i64> = all.iter().filter(|r| r.ts == 100).map(|r| r.id.expect("id")).collect();
-    assert!(tied.windows(2).all(|w| w[0] > w[1]), "tied rows in id-desc order: {tied:?}");
+    let tied: Vec<i64> = all
+        .iter()
+        .filter(|r| r.ts == 100)
+        .map(|r| r.id.expect("id"))
+        .collect();
+    assert!(
+        tied.windows(2).all(|w| w[0] > w[1]),
+        "tied rows in id-desc order: {tied:?}"
+    );
 }
 
 #[test]
@@ -2270,14 +2630,26 @@ fn usage_cursor_composes_with_hours_window() {
     let store = Store::open_in_memory().expect("mem");
     rt().block_on(async {
         for ts in [100, 200, 300, 400, 500] {
-            store.record_usage(&page_row(ts, "x")).await.expect("insert");
+            store
+                .record_usage(&page_row(ts, "x"))
+                .await
+                .expect("insert");
         }
         // `since` keeps ts >= 200; the pair cursor then pages strictly past the ts-400 row.
         let at_400 = store
-            .recent_usage(&UsageQuery { limit: 10, since: Some(400), ..Default::default() })
+            .recent_usage(&UsageQuery {
+                limit: 10,
+                since: Some(400),
+                ..Default::default()
+            })
             .await
             .expect("400");
-        let row_400 = at_400.iter().find(|r| r.ts == 400).expect("row 400").id.expect("id");
+        let row_400 = at_400
+            .iter()
+            .find(|r| r.ts == 400)
+            .expect("row 400")
+            .id
+            .expect("id");
         let page = store
             .recent_usage(&UsageQuery {
                 limit: 2,
@@ -2288,7 +2660,10 @@ fn usage_cursor_composes_with_hours_window() {
             })
             .await
             .expect("page");
-        assert_eq!(page.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![300, 200]);
+        assert_eq!(
+            page.iter().map(|r| r.ts).collect::<Vec<_>>(),
+            vec![300, 200]
+        );
         let none = store
             .recent_usage(&UsageQuery {
                 limit: 10,
@@ -2309,7 +2684,10 @@ fn usage_cursor_composes_with_hours_window() {
             })
             .await
             .expect("below");
-        assert!(below.is_empty(), "nothing in the window is older than ts 200: {below:?}");
+        assert!(
+            below.is_empty(),
+            "nothing in the window is older than ts 200: {below:?}"
+        );
     });
 }
 
@@ -2317,7 +2695,10 @@ fn usage_cursor_composes_with_hours_window() {
 
 /// An unfiltered query for the first `limit` rows.
 fn query(limit: usize) -> UsageQuery {
-    UsageQuery { limit, ..Default::default() }
+    UsageQuery {
+        limit,
+        ..Default::default()
+    }
 }
 
 /// A usage row whose provider, model, key, and outcome are what the filters inspect.
@@ -2341,7 +2722,11 @@ fn filter_row(
 
 /// Timestamps of the rows a query returns, in page order.
 fn ts_of(s: &Store, q: &UsageQuery) -> Vec<i64> {
-    rt().block_on(s.recent_usage(q)).expect("recent").iter().map(|r| r.ts).collect()
+    rt().block_on(s.recent_usage(q))
+        .expect("recent")
+        .iter()
+        .map(|r| r.ts)
+        .collect()
 }
 
 /// Walks the filtered set with the `(ts, id)` cursor, `limit` rows at a time.
@@ -2374,7 +2759,14 @@ fn usage_filters_select_provider_model_key_and_status() {
         let rows = [
             filter_row(10, "openai", "gpt-4.1", Some(key), 200, None),
             filter_row(20, "openai", "gpt-4.1", Some(other), 500, None),
-            filter_row(30, "anthropic", "claude", Some(key), 200, Some("stream dropped")),
+            filter_row(
+                30,
+                "anthropic",
+                "claude",
+                Some(key),
+                200,
+                Some("stream dropped"),
+            ),
             filter_row(40, "openai", "gpt-4.1-mini", None, 200, None),
             filter_row(50, "openai", "openai/gpt-4.1", Some(key), 200, None),
         ];
@@ -2384,10 +2776,16 @@ fn usage_filters_select_provider_model_key_and_status() {
     });
 
     // Provider is an exact match.
-    let openai = UsageQuery { provider: Some("openai".into()), ..query(10) };
+    let openai = UsageQuery {
+        provider: Some("openai".into()),
+        ..query(10)
+    };
     assert_eq!(ts_of(&store, &openai), vec![50, 40, 20, 10]);
     // Model alone matches the stored string exactly; the ref row (ts 50) is not `gpt-4.1`.
-    let exact = UsageQuery { model: Some("gpt-4.1".into()), ..query(10) };
+    let exact = UsageQuery {
+        model: Some("gpt-4.1".into()),
+        ..query(10)
+    };
     assert_eq!(ts_of(&store, &exact), vec![20, 10]);
     // A ref matches itself exactly and its bare id.
     let both = UsageQuery {
@@ -2397,23 +2795,47 @@ fn usage_filters_select_provider_model_key_and_status() {
     };
     assert_eq!(ts_of(&store, &both), vec![50, 20, 10]);
     // Key filter.
-    let by_key = UsageQuery { key_id: Some(key), ..query(10) };
+    let by_key = UsageQuery {
+        key_id: Some(key),
+        ..query(10)
+    };
     assert_eq!(ts_of(&store, &by_key), vec![50, 30, 10]);
     // Error: status >= 400 or error text, even when the status is 2xx.
-    let errors = UsageQuery { status: Some(StatusFilter::Error), ..query(10) };
+    let errors = UsageQuery {
+        status: Some(StatusFilter::Error),
+        ..query(10)
+    };
     assert_eq!(ts_of(&store, &errors), vec![30, 20]);
     // Success: 2xx with no error text.
-    let success = UsageQuery { status: Some(StatusFilter::Success), ..query(10) };
+    let success = UsageQuery {
+        status: Some(StatusFilter::Success),
+        ..query(10)
+    };
     assert_eq!(ts_of(&store, &success), vec![50, 40, 10]);
     // Combinations.
-    let openai_key = UsageQuery { provider: Some("openai".into()), key_id: Some(key), ..query(10) };
+    let openai_key = UsageQuery {
+        provider: Some("openai".into()),
+        key_id: Some(key),
+        ..query(10)
+    };
     assert_eq!(ts_of(&store, &openai_key), vec![50, 10]);
-    let key_error = UsageQuery { key_id: Some(key), status: Some(StatusFilter::Error), ..query(10) };
+    let key_error = UsageQuery {
+        key_id: Some(key),
+        status: Some(StatusFilter::Error),
+        ..query(10)
+    };
     assert_eq!(ts_of(&store, &key_error), vec![30]);
-    let openai_error =
-        UsageQuery { provider: Some("openai".into()), status: Some(StatusFilter::Error), ..query(10) };
+    let openai_error = UsageQuery {
+        provider: Some("openai".into()),
+        status: Some(StatusFilter::Error),
+        ..query(10)
+    };
     assert_eq!(ts_of(&store, &openai_error), vec![20]);
-    let since_key = UsageQuery { since: Some(25), key_id: Some(key), ..query(10) };
+    let since_key = UsageQuery {
+        since: Some(25),
+        key_id: Some(key),
+        ..query(10)
+    };
     assert_eq!(ts_of(&store, &since_key), vec![50, 30]);
     let model_success_key = UsageQuery {
         model: Some("gpt-4.1".into()),
@@ -2427,7 +2849,10 @@ fn usage_filters_select_provider_model_key_and_status() {
         model: Some("gpt-4.1".into()),
         ..query(10)
     };
-    assert!(ts_of(&store, &mismatch).is_empty(), "provider and model must agree");
+    assert!(
+        ts_of(&store, &mismatch).is_empty(),
+        "provider and model must agree"
+    );
 }
 
 #[test]
@@ -2435,7 +2860,10 @@ fn usage_filters_compose_with_the_cursor() {
     let store = Store::open_in_memory().expect("mem");
     rt().block_on(async {
         // Odd positions fail; timestamps tie so the cursor's id half is exercised.
-        for (i, ts) in [100, 100, 100, 200, 200, 300, 300, 300].into_iter().enumerate() {
+        for (i, ts) in [100, 100, 100, 200, 200, 300, 300, 300]
+            .into_iter()
+            .enumerate()
+        {
             let status = if i % 2 == 1 { 500 } else { 200 };
             store
                 .record_usage(&filter_row(ts, "openai", "gpt-4.1", None, status, None))
@@ -2443,7 +2871,10 @@ fn usage_filters_compose_with_the_cursor() {
                 .expect("insert");
         }
     });
-    let errors = UsageQuery { status: Some(StatusFilter::Error), ..query(2) };
+    let errors = UsageQuery {
+        status: Some(StatusFilter::Error),
+        ..query(2)
+    };
     let first = rt().block_on(store.recent_usage(&errors)).expect("first");
     assert_eq!(first.len(), 2, "a full filtered page");
     let last = first.last().expect("row");
@@ -2454,17 +2885,30 @@ fn usage_filters_compose_with_the_cursor() {
             ..errors.clone()
         }))
         .expect("second");
-    assert_eq!(second.len(), 2, "the filtered walk continues past the first page");
+    assert_eq!(
+        second.len(),
+        2,
+        "the filtered walk continues past the first page"
+    );
     let first_ids: Vec<i64> = first.iter().map(|r| r.id.expect("id")).collect();
     let second_ids: Vec<i64> = second.iter().map(|r| r.id.expect("id")).collect();
-    assert!(first_ids.iter().all(|i| !second_ids.contains(i)), "pages are disjoint");
-    assert!(first.iter().chain(&second).all(|r| r.status == 500), "every page stays filtered");
+    assert!(
+        first_ids.iter().all(|i| !second_ids.contains(i)),
+        "pages are disjoint"
+    );
+    assert!(
+        first.iter().chain(&second).all(|r| r.status == 500),
+        "every page stays filtered"
+    );
 
     // The filtered walk equals the unfiltered walk restricted to failures.
     let filtered: Vec<i64> = walk_filtered(
         &store,
         2,
-        UsageQuery { status: Some(StatusFilter::Error), ..Default::default() },
+        UsageQuery {
+            status: Some(StatusFilter::Error),
+            ..Default::default()
+        },
     )
     .iter()
     .map(|r| r.id.expect("id"))
@@ -2485,7 +2929,10 @@ fn templates_create_list_get_rename_delete() {
     let store = Store::open_in_memory().expect("mem");
     let s = &store;
     rt().block_on(async {
-        let support = s.create_template("support", "You are support.").await.expect("create");
+        let support = s
+            .create_template("support", "You are support.")
+            .await
+            .expect("create");
         assert_eq!(support.name, "support");
         assert_eq!(support.body, "You are support.");
         assert_eq!(support.version, 1);
@@ -2497,16 +2944,26 @@ fn templates_create_list_get_rename_delete() {
             "template ids are UUID strings"
         );
 
-        s.create_template("billing", "You are billing.").await.expect("second");
+        s.create_template("billing", "You are billing.")
+            .await
+            .expect("second");
         let all = s.list_templates().await.expect("list");
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].name, "billing", "list is ordered by name");
 
-        let got = s.get_template(&support.id).await.expect("get").expect("row");
+        let got = s
+            .get_template(&support.id)
+            .await
+            .expect("get")
+            .expect("row");
         assert_eq!(got.body, "You are support.");
         assert!(s.get_template("no-such-id").await.expect("get").is_none());
         assert_eq!(
-            s.get_template_by_name("support").await.expect("by name").expect("row").id,
+            s.get_template_by_name("support")
+                .await
+                .expect("by name")
+                .expect("row")
+                .id,
             support.id
         );
 
@@ -2517,7 +2974,11 @@ fn templates_create_list_get_rename_delete() {
         assert_eq!(renamed.name, "helpdesk");
         assert_eq!(renamed.body, "You are support.");
         assert_eq!(renamed.version, 1, "a rename does not create a revision");
-        assert!(s.get_template_by_name("support").await.expect("by name").is_none());
+        assert!(s
+            .get_template_by_name("support")
+            .await
+            .expect("by name")
+            .is_none());
 
         assert!(s.delete_template(&support.id).await.expect("delete"));
         assert!(!s.delete_template(&support.id).await.expect("delete again"));
@@ -2533,12 +2994,18 @@ fn template_body_change_bumps_version_and_history_is_newest_first() {
     rt().block_on(async {
         let t = s.create_template("agent", "one").await.expect("create");
 
-        let same = s.update_template(&t.id, None, "one").await.expect("same body");
+        let same = s
+            .update_template(&t.id, None, "one")
+            .await
+            .expect("same body");
         assert_eq!(same.version, 1, "an unchanged body is not a new revision");
         assert_eq!(same.updated_at, t.updated_at);
         assert_eq!(s.template_versions(&t.id).await.expect("history").len(), 1);
 
-        let two = s.update_template(&t.id, None, "two").await.expect("body change");
+        let two = s
+            .update_template(&t.id, None, "two")
+            .await
+            .expect("body change");
         assert_eq!(two.version, 2);
         assert_eq!(two.body, "two");
         assert_eq!(two.name, "agent");
@@ -2557,7 +3024,11 @@ fn template_body_change_bumps_version_and_history_is_newest_first() {
         assert_eq!(versions, vec![3, 2, 1], "newest first");
         let bodies: Vec<&str> = history.iter().map(|v| v.body.as_str()).collect();
         assert_eq!(bodies, vec!["three", "two", "one"]);
-        assert!(s.template_versions("no-such-id").await.expect("history").is_empty());
+        assert!(s
+            .template_versions("no-such-id")
+            .await
+            .expect("history")
+            .is_empty());
     });
 }
 
@@ -2572,14 +3043,23 @@ fn deleting_a_template_removes_its_versions() {
 
         assert!(s.delete_template(&t.id).await.expect("delete"));
         assert!(
-            s.template_versions(&t.id).await.expect("history").is_empty(),
+            s.template_versions(&t.id)
+                .await
+                .expect("history")
+                .is_empty(),
             "the history rows go with the template"
         );
 
         // A new template under the same name starts its own history.
-        let again = s.create_template("auditor", "fresh").await.expect("recreate");
+        let again = s
+            .create_template("auditor", "fresh")
+            .await
+            .expect("recreate");
         assert_eq!(again.version, 1);
-        assert_eq!(s.template_versions(&again.id).await.expect("history").len(), 1);
+        assert_eq!(
+            s.template_versions(&again.id).await.expect("history").len(),
+            1
+        );
     });
 }
 
@@ -2589,7 +3069,10 @@ fn template_duplicate_names_and_lengths_are_rejected() {
     let s = &store;
     rt().block_on(async {
         let first = s.create_template("dup", "body").await.expect("create");
-        let err = s.create_template("dup", "other").await.expect_err("duplicate name");
+        let err = s
+            .create_template("dup", "other")
+            .await
+            .expect_err("duplicate name");
         assert_eq!(err.status(), 400, "{err}");
 
         let other = s.create_template("other", "body").await.expect("second");
@@ -2599,27 +3082,57 @@ fn template_duplicate_names_and_lengths_are_rejected() {
             .expect_err("rename onto a taken name");
         assert_eq!(err.status(), 400, "{err}");
         // Renaming to the name it already has is not a conflict.
-        s.update_template(&first.id, Some("dup"), "body").await.expect("same name");
+        s.update_template(&first.id, Some("dup"), "body")
+            .await
+            .expect("same name");
 
-        let err = s.update_template("missing", None, "body").await.expect_err("unknown id");
+        let err = s
+            .update_template("missing", None, "body")
+            .await
+            .expect_err("unknown id");
         assert_eq!(err.status(), 404, "{err}");
 
         // Name: empty/blank and 101 characters are refused, 100 is accepted.
-        assert_eq!(s.create_template("", "b").await.expect_err("empty").status(), 400);
-        assert_eq!(s.create_template("   ", "b").await.expect_err("blank").status(), 400);
+        assert_eq!(
+            s.create_template("", "b")
+                .await
+                .expect_err("empty")
+                .status(),
+            400
+        );
+        assert_eq!(
+            s.create_template("   ", "b")
+                .await
+                .expect_err("blank")
+                .status(),
+            400
+        );
         let long_name = "n".repeat(101);
-        assert_eq!(s.create_template(&long_name, "b").await.expect_err("long").status(), 400);
-        s.create_template(&"n".repeat(100), "b").await.expect("100-char name");
+        assert_eq!(
+            s.create_template(&long_name, "b")
+                .await
+                .expect_err("long")
+                .status(),
+            400
+        );
+        s.create_template(&"n".repeat(100), "b")
+            .await
+            .expect("100-char name");
 
         // Body: exactly 100k characters is accepted, one more is not.
-        s.create_template("max-body", &"x".repeat(100_000)).await.expect("max body");
+        s.create_template("max-body", &"x".repeat(100_000))
+            .await
+            .expect("max body");
         let err = s
             .create_template("over-body", &"x".repeat(100_001))
             .await
             .expect_err("over max body");
         assert_eq!(err.status(), 400, "{err}");
         assert!(
-            s.get_template_by_name("over-body").await.expect("lookup").is_none(),
+            s.get_template_by_name("over-body")
+                .await
+                .expect("lookup")
+                .is_none(),
             "a rejected create writes nothing"
         );
     });
@@ -2646,17 +3159,29 @@ fn account_quota_round_trips_and_unknown_windows_read_as_total() {
             max_cost_micros: 2_000,
         };
         store.set_account_quota(&quota).await.expect("set");
-        assert_eq!(store.account_quotas().await.expect("read"), vec![quota.clone()]);
+        assert_eq!(
+            store.account_quotas().await.expect("read"),
+            vec![quota.clone()]
+        );
 
         // Replacing the same account updates in place.
-        let replaced = AccountQuota { window: BudgetWindow::Monthly, ..quota };
+        let replaced = AccountQuota {
+            window: BudgetWindow::Monthly,
+            ..quota
+        };
         store.set_account_quota(&replaced).await.expect("replace");
         assert_eq!(store.account_quotas().await.expect("read").len(), 1);
-        assert_eq!(store.account_quotas().await.expect("read")[0].window, BudgetWindow::Monthly);
+        assert_eq!(
+            store.account_quotas().await.expect("read")[0].window,
+            BudgetWindow::Monthly
+        );
 
         store.clear_account_quota(conn.id).await.expect("clear");
         assert!(store.account_quotas().await.expect("read").is_empty());
-        store.clear_account_quota(conn.id).await.expect("clear is idempotent");
+        store
+            .clear_account_quota(conn.id)
+            .await
+            .expect("clear is idempotent");
     });
 
     // A row written with an unknown window spelling reads as all time, not as unlimited.
@@ -2742,28 +3267,55 @@ fn account_quota_exhausts_only_on_usage_inside_its_window() {
         };
 
         // Yesterday's rows are outside today's window but inside this week's.
-        store.record_usage(&rec(daily.id, day_start - 1)).await.expect("old daily row");
+        store
+            .record_usage(&rec(daily.id, day_start - 1))
+            .await
+            .expect("old daily row");
         let states = store.account_quota_states().await.expect("states");
-        let daily_state = states.iter().find(|s| s.quota.connection_id == daily.id).expect("daily");
-        assert_eq!(daily_state.usage.requests, 0, "a row before the window start is not spend");
+        let daily_state = states
+            .iter()
+            .find(|s| s.quota.connection_id == daily.id)
+            .expect("daily");
+        assert_eq!(
+            daily_state.usage.requests, 0,
+            "a row before the window start is not spend"
+        );
         assert!(!daily_state.exhausted);
 
         // One request inside the window reaches the limit.
-        store.record_usage(&rec(daily.id, day_start + 1)).await.expect("today row");
+        store
+            .record_usage(&rec(daily.id, day_start + 1))
+            .await
+            .expect("today row");
         let states = store.account_quota_states().await.expect("states");
-        let daily_state = states.iter().find(|s| s.quota.connection_id == daily.id).expect("daily");
+        let daily_state = states
+            .iter()
+            .find(|s| s.quota.connection_id == daily.id)
+            .expect("daily");
         assert_eq!(daily_state.usage.requests, 1);
         assert!(daily_state.exhausted, "1 request against a limit of 1");
-        assert!(daily_state.resets_at.is_some_and(|reset| reset > now), "a reset is advertised");
+        assert!(
+            daily_state.resets_at.is_some_and(|reset| reset > now),
+            "a reset is advertised"
+        );
 
         let exhausted = store.exhausted_accounts().await.expect("exhausted");
         assert!(exhausted.connections.contains(&daily.id));
-        assert!(!exhausted.connections.contains(&weekly.id), "a row outside the week is no spend");
-        assert!(!exhausted.connections.contains(&free.id), "no quota is unlimited");
+        assert!(
+            !exhausted.connections.contains(&weekly.id),
+            "a row outside the week is no spend"
+        );
+        assert!(
+            !exhausted.connections.contains(&free.id),
+            "no quota is unlimited"
+        );
         assert!(exhausted.retry_after_secs.is_some_and(|wait| wait > 0));
 
         // A request inside the week exhausts the weekly account too.
-        store.record_usage(&rec(weekly.id, week_start + 1)).await.expect("week row");
+        store
+            .record_usage(&rec(weekly.id, week_start + 1))
+            .await
+            .expect("week row");
         let exhausted = store.exhausted_accounts().await.expect("exhausted");
         assert!(exhausted.connections.contains(&weekly.id));
     });
@@ -2827,17 +3379,35 @@ fn account_quota_enforces_token_and_cost_limits() {
             streamed: false,
             error: None,
         };
-        store.record_usage(&rec(cost.id, 600, 1, 1)).await.expect("cost row 1");
-        store.record_usage(&rec(tokens.id, 0, 60, 40)).await.expect("token row");
+        store
+            .record_usage(&rec(cost.id, 600, 1, 1))
+            .await
+            .expect("cost row 1");
+        store
+            .record_usage(&rec(tokens.id, 0, 60, 40))
+            .await
+            .expect("token row");
         let exhausted = store.exhausted_accounts().await.expect("exhausted");
-        assert!(!exhausted.connections.contains(&cost.id), "600 of 1000 micros is not spent up");
-        assert!(exhausted.connections.contains(&tokens.id), "100 tokens of 100");
+        assert!(
+            !exhausted.connections.contains(&cost.id),
+            "600 of 1000 micros is not spent up"
+        );
+        assert!(
+            exhausted.connections.contains(&tokens.id),
+            "100 tokens of 100"
+        );
 
         // Crossing the cost limit exhausts too, and the sum is per-connection.
-        store.record_usage(&rec(cost.id, 600, 1, 1)).await.expect("cost row 2");
+        store
+            .record_usage(&rec(cost.id, 600, 1, 1))
+            .await
+            .expect("cost row 2");
         let exhausted = store.exhausted_accounts().await.expect("exhausted");
         assert!(exhausted.connections.contains(&cost.id));
-        let costs = store.account_usage_by_connection(None).await.expect("costs");
+        let costs = store
+            .account_usage_by_connection(None)
+            .await
+            .expect("costs");
         assert_eq!(costs[&cost.id].cost_micros, 1_200);
         assert_eq!(costs[&tokens.id].tokens, 100);
     });
@@ -2851,13 +3421,14 @@ fn v16_database_migrates_to_nineteen_with_account_quotas() {
     drop(Store::open(&dir.db(), None).expect("current schema"));
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("raw");
-        conn.execute_batch(
-            "DROP TABLE account_quotas; PRAGMA user_version = 16;",
-        )
-        .expect("rewind to v16");
+        conn.execute_batch("DROP TABLE account_quotas; PRAGMA user_version = 16;")
+            .expect("rewind to v16");
     }
     let store = Store::open(&dir.db(), None).expect("open runs the v17 step");
-    assert!(rt().block_on(store.account_quotas()).expect("quota read").is_empty());
+    assert!(rt()
+        .block_on(store.account_quotas())
+        .expect("quota read")
+        .is_empty());
     let connection = rt()
         .block_on(store.create_connection("claude", "oauth", creds("t"), Some("acct")))
         .expect("connection");
@@ -2901,9 +3472,18 @@ fn v17_database_migrates_to_nineteen_with_users() {
         .expect("rewind to v17");
     }
     let store = Store::open(&dir.db(), None).expect("open runs the v18 step");
-    assert!(!rt().block_on(store.users_exist()).expect("users"), "a fresh v18 has no users");
+    assert!(
+        !rt().block_on(store.users_exist()).expect("users"),
+        "a fresh v18 has no users"
+    );
     let user = rt()
-        .block_on(store.create_user("Ada", "Ada@Example.com", "hash", rrouter_store::UserRole::Admin, true))
+        .block_on(store.create_user(
+            "Ada",
+            "Ada@Example.com",
+            "hash",
+            rrouter_store::UserRole::Admin,
+            true,
+        ))
         .expect("create after migration");
     assert_eq!(user.email, "ada@example.com", "email normalised");
     assert_eq!(user.role, rrouter_store::UserRole::Admin);

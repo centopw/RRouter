@@ -8,14 +8,28 @@ use serde_json::Value;
 pub enum Part {
     Text(String),
     /// Base64 image or remote URL, already normalized to a data-URL or URL string.
-    Image { url: String, media_type: Option<String> },
+    Image {
+        url: String,
+        media_type: Option<String>,
+    },
     /// A completed or streaming tool invocation requested by the model.
-    ToolUse { id: String, name: String, input: Value },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
     /// A tool result fed back by the client.
-    ToolResult { tool_use_id: String, content: String, is_error: bool },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
     /// Provider-specific reasoning/thinking block. `payload` is the native shape
     /// and is passed through unchanged when the outbound dialect matches.
-    Reasoning { text: String, signature: Option<String> },
+    Reasoning {
+        text: String,
+        signature: Option<String>,
+    },
     /// Anything a translator could not map; preserved so round-trips lose nothing.
     Opaque(Value),
 }
@@ -28,7 +42,10 @@ pub struct Message {
 
 impl Message {
     pub fn text(role: Role, text: impl Into<String>) -> Self {
-        Self { role, parts: vec![Part::Text(text.into())] }
+        Self {
+            role,
+            parts: vec![Part::Text(text.into())],
+        }
     }
 
     /// Concatenated text of all `Part::Text` entries.
@@ -119,13 +136,26 @@ impl ChatRequest {
 /// One incremental piece of a streamed response, dialect-independent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
-    Start { id: String, model: String },
+    Start {
+        id: String,
+        model: String,
+    },
     TextDelta(String),
     ReasoningDelta(String),
-    ToolCallStart { index: u32, id: String, name: String },
-    ToolCallArgsDelta { index: u32, partial_json: String },
+    ToolCallStart {
+        index: u32,
+        id: String,
+        name: String,
+    },
+    ToolCallArgsDelta {
+        index: u32,
+        partial_json: String,
+    },
     /// Terminal signal; `reason` is the canonical reason (see [`FinishReason`]).
-    Done { reason: FinishReason, usage: Option<Usage> },
+    Done {
+        reason: FinishReason,
+        usage: Option<Usage>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

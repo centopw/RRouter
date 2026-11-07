@@ -210,9 +210,7 @@ pub fn is_secure(headers: &HeaderMap) -> bool {
 }
 
 pub fn set_session_cookie(resp: &mut Response, token: &str, remember: bool, secure: bool) {
-    let mut cookie = format!(
-        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax"
-    );
+    let mut cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax");
     if remember {
         cookie.push_str(&format!("; Max-Age={REMEMBER_SECS}"));
     }
@@ -324,7 +322,10 @@ mod tests {
         assert!(header.contains("Secure"));
 
         let mut headers = HeaderMap::new();
-        headers.insert(COOKIE, HeaderValue::from_static("a=1; rrouter_session=tok; b=2"));
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("a=1; rrouter_session=tok; b=2"),
+        );
         assert_eq!(session_token(&headers).as_deref(), Some("tok"));
         assert!(!csrf_ok(&headers));
         headers.insert("x-rrouter-csrf", HeaderValue::from_static("1"));

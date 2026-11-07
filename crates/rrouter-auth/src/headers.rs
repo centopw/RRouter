@@ -8,7 +8,10 @@ use crate::registry::{AuthStyle, ProviderKind, ProviderSpec};
 /// Auth selection: `github` → `copilot_token`; OAuth → `access_token`; `XApiKey` → `api_key`
 /// in `x-api-key`; `None` → nothing. A missing credential is an error, never an unauthenticated
 /// request: sending one would burn a retryable upstream error and mask a local bug.
-pub fn build_headers(provider: &ProviderSpec, c: &Credentials) -> rrouter_core::Result<Vec<(String, String)>> {
+pub fn build_headers(
+    provider: &ProviderSpec,
+    c: &Credentials,
+) -> rrouter_core::Result<Vec<(String, String)>> {
     let mut headers: Vec<(String, String)> = Vec::with_capacity(provider.extra_headers.len() + 2);
 
     match provider.auth {
@@ -17,10 +20,9 @@ pub fn build_headers(provider: &ProviderSpec, c: &Credentials) -> rrouter_core::
                 ProviderKind::OAuth if provider.id == "github" => c.copilot_token.as_deref(),
                 ProviderKind::OAuth => c.access_token.as_deref(),
                 // API-key provider with Bearer auth: the key is the bearer token.
-                ProviderKind::ApiKey | ProviderKind::Local => c
-                    .api_key
-                    .as_deref()
-                    .or(c.access_token.as_deref()),
+                ProviderKind::ApiKey | ProviderKind::Local => {
+                    c.api_key.as_deref().or(c.access_token.as_deref())
+                }
             };
             let token = token.ok_or_else(|| missing(provider, "bearer token"))?;
             headers.push(("authorization".to_string(), format!("Bearer {token}")));
@@ -48,10 +50,7 @@ pub fn resolve_base_url<'a>(provider: &'a ProviderSpec, c: &'a Credentials) -> &
 }
 
 fn missing(provider: &ProviderSpec, what: &str) -> rrouter_core::Error {
-    rrouter_core::Error::Unauthorized(format!(
-        "provider {} credential has no {what}",
-        provider.id
-    ))
+    rrouter_core::Error::Unauthorized(format!("provider {} credential has no {what}", provider.id))
 }
 
 #[cfg(test)]
@@ -80,7 +79,10 @@ mod tests {
         let headers =
             build_headers(registry::get("github").expect("github"), &full()).expect("headers");
         assert_eq!(header(&headers, "authorization"), Some("Bearer cp"));
-        assert_eq!(header(&headers, "copilot-integration-id"), Some("vscode-chat"));
+        assert_eq!(
+            header(&headers, "copilot-integration-id"),
+            Some("vscode-chat")
+        );
         assert_eq!(header(&headers, "editor-version"), Some("vscode/1.110.0"));
         assert_eq!(header(&headers, "X-Initiator"), Some("user"));
     }
@@ -105,23 +107,45 @@ mod tests {
 
     #[test]
     fn api_key_providers_use_bearer_and_ollama_sends_nothing() {
-        for id in ["openai", "deepseek", "gemini", "groq", "openrouter", "xai", "mistral", "together", "cerebras"] {
+        for id in [
+            "openai",
+            "deepseek",
+            "gemini",
+            "groq",
+            "openrouter",
+            "xai",
+            "mistral",
+            "together",
+            "cerebras",
+        ] {
             let headers = build_headers(registry::get(id).expect(id), &full()).expect("h");
-            assert_eq!(header(&headers, "authorization"), Some("Bearer sk-key"), "{id}");
+            assert_eq!(
+                header(&headers, "authorization"),
+                Some("Bearer sk-key"),
+                "{id}"
+            );
         }
-        let headers =
-            build_headers(registry::get("ollama").expect("ollama"), &Credentials::default())
-                .expect("h");
+        let headers = build_headers(
+            registry::get("ollama").expect("ollama"),
+            &Credentials::default(),
+        )
+        .expect("h");
         assert!(headers.is_empty(), "{headers:?}");
     }
 
     #[test]
     fn missing_credential_is_an_error() {
-        let err = build_headers(registry::get("github").expect("github"), &Credentials::default())
-            .expect_err("must fail");
+        let err = build_headers(
+            registry::get("github").expect("github"),
+            &Credentials::default(),
+        )
+        .expect_err("must fail");
         assert_eq!(err.status(), 401);
-        let err = build_headers(registry::get("anthropic").expect("anthropic"), &Credentials::default())
-            .expect_err("must fail");
+        let err = build_headers(
+            registry::get("anthropic").expect("anthropic"),
+            &Credentials::default(),
+        )
+        .expect_err("must fail");
         assert_eq!(err.status(), 401);
     }
 

@@ -74,7 +74,11 @@ pub fn authorize_url(
         .map(|(k, v)| format!("{}={}", k, percent_encode(v)))
         .collect::<Vec<_>>()
         .join("&");
-    let sep = if authorize_url.contains('?') { '&' } else { '?' };
+    let sep = if authorize_url.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
     format!("{authorize_url}{sep}{query}")
 }
 
@@ -112,7 +116,9 @@ mod tests {
     fn verifier_shape_is_rfc_compliant() {
         let v = generate_verifier();
         assert!((43..=128).contains(&v.len()), "len {}", v.len());
-        assert!(v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')));
+        assert!(v
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')));
         assert_ne!(v, generate_verifier(), "verifiers must not repeat");
     }
 
@@ -121,7 +127,9 @@ mod tests {
         let a = generate_state();
         let b = generate_state();
         assert_ne!(a, b);
-        assert!(a.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_')));
+        assert!(a
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_')));
     }
 
     #[test]

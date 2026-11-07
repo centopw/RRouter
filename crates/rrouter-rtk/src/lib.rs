@@ -117,7 +117,9 @@ pub fn compress_request(request: &mut ChatRequest) -> Option<Stats> {
 fn compress_message(message: &mut Message, stats: &mut Stats) {
     for part in &mut message.parts {
         match part {
-            Part::ToolResult { content, is_error, .. } if !*is_error => {
+            Part::ToolResult {
+                content, is_error, ..
+            } if !*is_error => {
                 *content = compress_text(content, stats, "tool_result");
             }
             // Some translators model a tool turn as a plain text part.
@@ -164,13 +166,19 @@ fn detect(text: &str) -> Option<(&'static str, Filter)> {
     if head.contains("diff --git ") || head.contains("\n@@ ") {
         return Some(("git-diff", git_diff));
     }
-    if head.contains("On branch ") || head.contains("nothing to commit") || porcelain_line(&head, 0.6) {
+    if head.contains("On branch ")
+        || head.contains("nothing to commit")
+        || porcelain_line(&head, 0.6)
+    {
         return Some(("git-status", git_status));
     }
     if looks_build(&head) {
         return Some(("build-output", build_output));
     }
-    let non_empty: Vec<&str> = head.lines().filter(|line| !line.trim().is_empty()).collect();
+    let non_empty: Vec<&str> = head
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     let first5: Vec<&&str> = non_empty.iter().take(5).collect();
     if first5.iter().any(|line| grep_line(line).is_some()) {
         return Some(("grep", grep));
@@ -195,7 +203,9 @@ fn detect(text: &str) -> Option<(&'static str, Filter)> {
 
 fn looks_git_log(head: &str) -> bool {
     head.lines().any(|line| {
-        let line = line.trim_start_matches(|c: char| matches!(c, '*' | '|' | '/' | '\\' | ' ') || c.is_whitespace());
+        let line = line.trim_start_matches(|c: char| {
+            matches!(c, '*' | '|' | '/' | '\\' | ' ') || c.is_whitespace()
+        });
         if let Some(rest) = line.strip_prefix("commit ") {
             let hash = rest.split_whitespace().next().unwrap_or("");
             hash.len() >= 7 && hash.chars().all(|c| c.is_ascii_hexdigit())
@@ -206,7 +216,10 @@ fn looks_git_log(head: &str) -> bool {
 }
 
 fn porcelain_line(head: &str, share: f64) -> bool {
-    let lines: Vec<&str> = head.lines().filter(|line| !line.trim().is_empty()).collect();
+    let lines: Vec<&str> = head
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     if lines.len() < 3 {
         return false;
     }
@@ -222,8 +235,17 @@ fn porcelain_line(head: &str, share: f64) -> bool {
 
 fn looks_build(head: &str) -> bool {
     const MARKERS: &[&str] = &[
-        "Compiling ", "Downloading ", "added ", "[ERROR]", "BUILD SUCCESS", "BUILD FAILED",
-        "ERROR:", "error[", "warning:", "npm error", "npm warn",
+        "Compiling ",
+        "Downloading ",
+        "added ",
+        "[ERROR]",
+        "BUILD SUCCESS",
+        "BUILD FAILED",
+        "ERROR:",
+        "error[",
+        "warning:",
+        "npm error",
+        "npm warn",
     ];
     MARKERS.iter().any(|marker| head.contains(marker))
 }
@@ -250,7 +272,9 @@ fn ls_line(line: &str) -> bool {
     let bytes = line.as_bytes();
     bytes.len() > 10
         && matches!(bytes[0], b'-' | b'd' | b'l' | b'c' | b'p' | b's')
-        && bytes[1..10].iter().all(|b| matches!(b, b'r' | b'w' | b'x' | b'-'))
+        && bytes[1..10]
+            .iter()
+            .all(|b| matches!(b, b'r' | b'w' | b'x' | b'-'))
         && bytes[10] == b' '
 }
 
@@ -484,7 +508,9 @@ mod tests {
     fn grep_results_are_grouped_and_capped() {
         let mut input = String::new();
         for line in 1..=40 {
-            input.push_str(&format!("src/main.rs:{line}:    let value = compute({line});\n"));
+            input.push_str(&format!(
+                "src/main.rs:{line}:    let value = compute({line});\n"
+            ));
         }
         let mut request = request_with(&input, false);
         let stats = compress_request(&mut request).expect("compressed");
@@ -502,15 +528,24 @@ mod tests {
     fn errors_small_and_unrecognised_are_untouched() {
         let big = "x".repeat(2000);
         let mut request = request_with(&big, true);
-        assert!(compress_request(&mut request).is_none(), "errors are preserved");
+        assert!(
+            compress_request(&mut request).is_none(),
+            "errors are preserved"
+        );
 
         let mut request = request_with("short output", false);
-        assert!(compress_request(&mut request).is_none(), "small output is skipped");
+        assert!(
+            compress_request(&mut request).is_none(),
+            "small output is skipped"
+        );
     }
 
     #[test]
     fn smart_truncate_keeps_head_and_tail() {
-        let input = (0..400).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        let input = (0..400)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut request = request_with(&input, false);
         let stats = compress_request(&mut request).expect("compressed");
         let text = match &request.messages[0].parts[0] {

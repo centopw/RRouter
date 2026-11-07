@@ -12,19 +12,19 @@
 pub mod credentials;
 pub mod flows;
 pub mod fresh;
-pub mod loopback;
-pub mod pkce;
-pub mod overrides;
 pub mod headers;
+pub mod loopback;
+pub mod overrides;
+pub mod pkce;
 pub mod registry;
 
 pub use credentials::Credentials;
-pub use fresh::{CredentialStore, Refresher, GITHUB_COPILOT_TOKEN_URL, LEAD_SECS};
 pub use flows::{Challenge, OAuthFlows, SignedIn};
-pub use loopback::LoopbackServer;
+pub use fresh::{CredentialStore, Refresher, GITHUB_COPILOT_TOKEN_URL, LEAD_SECS};
 pub use headers::{build_headers, resolve_base_url};
+pub use loopback::LoopbackServer;
+pub use overrides::{invalid_overrides, override_for, OverrideKind};
 pub use registry::{
     get, is_oauth, login_flow_for, AuthStyle, DeviceFlow, LoginFlow, PkceFlow, ProviderKind,
     ProviderSpec, RefreshBody, RefreshSpec, PROVIDERS,
 };
-pub use overrides::{invalid_overrides, override_for, OverrideKind};

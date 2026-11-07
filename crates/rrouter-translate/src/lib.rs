@@ -19,8 +19,6 @@ use rrouter_core::{
     ChatRequest, ChatResponse, Dialect, Error, FinishReason, Result, StreamEvent, Usage,
 };
 
-
-
 /// Parse an inbound client body into canonical form.
 pub fn parse_request(dialect: Dialect, body: &Value) -> Result<ChatRequest> {
     match dialect {
@@ -200,7 +198,9 @@ fn is_identity_key(key: &str) -> bool {
 
 /// Merge `req.extra` into `body` when it was captured from `dialect`.
 fn merge_extra(body: &mut Value, req: &ChatRequest, dialect: Dialect) {
-    let Some((src, extra)) = &req.extra else { return };
+    let Some((src, extra)) = &req.extra else {
+        return;
+    };
     if *src != dialect {
         return;
     }
@@ -338,10 +338,7 @@ fn usage_from_openai(u: Option<&Value>) -> Usage {
 
 fn usage_to_openai(usage: Usage) -> Value {
     let mut details = Map::new();
-    details.insert(
-        "cached_tokens".into(),
-        Value::from(usage.cache_read_tokens),
-    );
+    details.insert("cached_tokens".into(), Value::from(usage.cache_read_tokens));
     serde_json::json!({
         "prompt_tokens": usage.input_tokens,
         "completion_tokens": usage.output_tokens,
@@ -419,7 +416,10 @@ mod tests {
         let (src, extra) = req.extra.clone().unwrap();
         assert_eq!(src, Dialect::OpenAiChat);
         assert_eq!(extra.get("service_tier"), Some(&Value::from("flex")));
-        assert!(extra.get("model").is_none(), "identity keys are not passthrough");
+        assert!(
+            extra.get("model").is_none(),
+            "identity keys are not passthrough"
+        );
 
         let same = build_request(Dialect::OpenAiChat, &req, false).unwrap();
         assert_eq!(same.get("service_tier"), Some(&Value::from("flex")));
@@ -463,7 +463,11 @@ mod tests {
             "choices": [{"index": 0, "delta": {"content": text}}]
         });
         let frame = rrouter_core::sse::render_openai(&payload.to_string(), None);
-        assert!(frame.len() > 300, "frame should exceed 300 bytes: {}", frame.len());
+        assert!(
+            frame.len() > 300,
+            "frame should exceed 300 bytes: {}",
+            frame.len()
+        );
 
         let decode = |chunk_size: usize| {
             let mut dec = StreamDecoder::new(Dialect::OpenAiChat, "m");
@@ -475,13 +479,23 @@ mod tests {
             events
         };
         let whole = decode(frame.len());
-        assert_eq!(decode(7), whole, "frame split at arbitrary offsets must decode identically");
+        assert_eq!(
+            decode(7),
+            whole,
+            "frame split at arbitrary offsets must decode identically"
+        );
         assert_eq!(
             whole,
             vec![
-                StreamEvent::Start { id: "chatcmpl-chunk".into(), model: "gpt-4o".into() },
+                StreamEvent::Start {
+                    id: "chatcmpl-chunk".into(),
+                    model: "gpt-4o".into()
+                },
                 StreamEvent::TextDelta(text),
-                StreamEvent::Done { reason: FinishReason::Stop, usage: None },
+                StreamEvent::Done {
+                    reason: FinishReason::Stop,
+                    usage: None
+                },
             ]
         );
     }

@@ -22,9 +22,24 @@ pub async fn system(State(state): State<Arc<AppState>>) -> Response {
         names
     };
     let api_keys = state.store.count_api_keys().await.unwrap_or(0);
-    let combos = state.store.list_combos().await.map(|c| c.len()).unwrap_or(0);
-    let aliases = state.store.list_aliases().await.map(|a| a.len()).unwrap_or(0);
-    let disabled = state.store.disabled_models().await.map(|d| d.len()).unwrap_or(0);
+    let combos = state
+        .store
+        .list_combos()
+        .await
+        .map(|c| c.len())
+        .unwrap_or(0);
+    let aliases = state
+        .store
+        .list_aliases()
+        .await
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let disabled = state
+        .store
+        .disabled_models()
+        .await
+        .map(|d| d.len())
+        .unwrap_or(0);
 
     ok_json(json!({
         "version": env!("CARGO_PKG_VERSION"),

@@ -51,7 +51,9 @@ async fn mock_chat(State(_mock): State<Mock>) -> Response {
 
 /// Serve both the model list and a chat completion on one origin.
 async fn start_mock() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock");
     let addr = listener.local_addr().expect("addr");
     let router = Router::new()
         .route("/v1/models", get(mock_models))
@@ -226,7 +228,9 @@ async fn catalog_rows_have_nine_capabilities_and_are_sorted_newest_first() {
     assert!(!data.is_empty());
 
     for item in &data {
-        let caps = item["capabilities"].as_object().expect("capabilities object");
+        let caps = item["capabilities"]
+            .as_object()
+            .expect("capabilities object");
         assert_eq!(caps.len(), 9, "{} has {caps:?}", item["ref"]);
         for key in CAPABILITY_KEYS {
             assert!(caps[key].is_boolean(), "{} lacks {key}", item["ref"]);
@@ -251,7 +255,10 @@ async fn catalog_rows_have_nine_capabilities_and_are_sorted_newest_first() {
         ("codex".into(), "gpt-5.6-terra".into()),
         ("codex".into(), "gpt-reserve".into()),
     ];
-    assert_eq!(order, newest, "items must be grouped by provider, newest first");
+    assert_eq!(
+        order, newest,
+        "items must be grouped by provider, newest first"
+    );
 
     let codex = h.item("codex/gpt-5.6-luna").await;
     assert_eq!(codex["source"], "catalog");
@@ -260,7 +267,10 @@ async fn catalog_rows_have_nine_capabilities_and_are_sorted_newest_first() {
     assert_eq!(codex["capabilities"]["tools"], true);
     assert_eq!(codex["capabilities"]["vision"], false);
     assert_eq!(codex["enabled"], true);
-    assert_eq!(codex["available"], true, "a listing implies an active connection");
+    assert_eq!(
+        codex["available"], true,
+        "a listing implies an active connection"
+    );
     assert_eq!(codex["max_output"], 128_000);
 }
 
@@ -294,7 +304,11 @@ async fn custom_row_wins_over_a_catalog_id_of_the_same_provider() {
     assert_eq!(item["capabilities"]["tools"], true);
     assert_eq!(item["capabilities"]["pdf"], false);
     assert_eq!(
-        h.models().await.iter().filter(|i| i["ref"] == "codex/gpt-5").count(),
+        h.models()
+            .await
+            .iter()
+            .filter(|i| i["ref"] == "codex/gpt-5")
+            .count(),
         1,
         "a custom row must not duplicate the catalog entry"
     );
@@ -329,7 +343,9 @@ async fn custom_post_delete_round_trip() {
     assert_eq!(body["capabilities"]["search"], true);
     assert_eq!(body["capabilities"]["pdf"], false);
 
-    let (status, body) = h.delete("/api/models/custom?provider=openai&id=my-model").await;
+    let (status, body) = h
+        .delete("/api/models/custom?provider=openai&id=my-model")
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["deleted"], true);
     assert!(h
@@ -338,7 +354,9 @@ async fn custom_post_delete_round_trip() {
         .iter()
         .all(|item| item["ref"] != "openai/my-model"));
 
-    let (status, body) = h.delete("/api/models/custom?provider=openai&id=my-model").await;
+    let (status, body) = h
+        .delete("/api/models/custom?provider=openai&id=my-model")
+        .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body["error"]["code"].is_string(), "{body}");
     assert!(body["error"]["message"].is_string(), "{body}");
@@ -363,11 +381,16 @@ async fn deleting_a_non_custom_row_is_a_404() {
         })
         .await
         .expect("row");
-    let (status, _) = h.delete("/api/models/custom?provider=openai&id=synced-only").await;
+    let (status, _) = h
+        .delete("/api/models/custom?provider=openai&id=synced-only")
+        .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     // models.dev rows describe models; they never become entries of their own.
     assert!(
-        !h.models().await.iter().any(|item| item["ref"] == "openai/synced-only"),
+        !h.models()
+            .await
+            .iter()
+            .any(|item| item["ref"] == "openai/synced-only"),
         "a synced row must not add a model to the registry"
     );
 }
@@ -396,7 +419,9 @@ async fn disabled_models_flips_enabled_to_false() {
     assert_eq!(h.item("codex/shared-id").await["enabled"], false);
     assert_eq!(h.item("openai/shared-id").await["enabled"], false);
 
-    let (status, _) = h.send("PUT", "/api/disabled/shared-id/enable", Value::Null).await;
+    let (status, _) = h
+        .send("PUT", "/api/disabled/shared-id/enable", Value::Null)
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(h.item("codex/shared-id").await["enabled"], true);
 }
@@ -423,7 +448,10 @@ async fn registry_lists_nothing_until_a_provider_is_connected() {
         })
         .await
         .expect("synced row");
-    assert!(h.models().await.is_empty(), "a synced row must not list a model");
+    assert!(
+        h.models().await.is_empty(),
+        "a synced row must not list a model"
+    );
 
     h.connect("openai", "http://127.0.0.1:9").await;
     let item = h.item("openai/gpt-4.1").await;
@@ -450,10 +478,18 @@ async fn custom_row_is_hidden_until_its_provider_is_connected() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["ref"], "openai/internal-model");
     assert_eq!(body["available"], false);
-    assert!(!h.models().await.iter().any(|i| i["ref"] == "openai/internal-model"));
+    assert!(!h
+        .models()
+        .await
+        .iter()
+        .any(|i| i["ref"] == "openai/internal-model"));
 
     h.connect("openai", "http://127.0.0.1:9").await;
-    assert!(h.models().await.iter().any(|i| i["ref"] == "openai/internal-model"));
+    assert!(h
+        .models()
+        .await
+        .iter()
+        .any(|i| i["ref"] == "openai/internal-model"));
 }
 
 #[tokio::test]
@@ -466,7 +502,10 @@ async fn providers_report_connection_and_list_support() {
     let codex = data.iter().find(|p| p["id"] == "codex").expect("codex");
     assert_eq!(codex["listed"], false);
     assert_eq!(codex["has_connection"], false);
-    assert!(codex["display"].as_str().expect("display").contains("Codex"));
+    assert!(codex["display"]
+        .as_str()
+        .expect("display")
+        .contains("Codex"));
     let openai = data.iter().find(|p| p["id"] == "openai").expect("openai");
     assert_eq!(openai["listed"], true);
 
@@ -545,7 +584,9 @@ async fn model_test_runs_a_real_completion() {
     let mock = start_mock().await;
     h.connect("openai", &mock).await;
 
-    let (status, body) = h.post("/api/models/test", json!({"model": "openai/gpt-4.1"})).await;
+    let (status, body) = h
+        .post("/api/models/test", json!({"model": "openai/gpt-4.1"}))
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["ok"], true);
     assert_eq!(body["status"], 200);
@@ -559,7 +600,10 @@ async fn model_test_runs_a_real_completion() {
 async fn model_test_failure_keeps_http_200_and_reports_status() {
     let h = harness();
     let (status, body) = h
-        .post("/api/models/test", json!({"model": "no-such-provider/ghost"}))
+        .post(
+            "/api/models/test",
+            json!({"model": "no-such-provider/ghost"}),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["ok"], false);
@@ -606,7 +650,10 @@ fn sync_parser_maps_models_dev_into_rows() {
     });
     let rows = parse_models_dev(&document);
     assert!(!rows.is_empty());
-    assert!(rows.len() <= 3 * 4, "at most one row per mirrored provider id");
+    assert!(
+        rows.len() <= 3 * 4,
+        "at most one row per mirrored provider id"
+    );
 
     let find = |provider: &str, model: &str| {
         rows.iter()
@@ -624,7 +671,10 @@ fn sync_parser_maps_models_dev_into_rows() {
     assert_eq!(openai.caps["vision"], true);
     assert_eq!(openai.caps["pdf"], false);
     assert_eq!(openai.caps["audio_output"], false);
-    assert!(openai.caps.get("search").is_none(), "search is never derived");
+    assert!(
+        openai.caps.get("search").is_none(),
+        "search is never derived"
+    );
 
     // The alias map mirrors the vendor's models under product lines that serve the same
     // catalog, but never under codex: that account cannot call OpenAI's full list.

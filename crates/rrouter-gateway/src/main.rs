@@ -13,6 +13,8 @@ use rrouter_gateway::{
 };
 use rrouter_router::Catalog;
 use rrouter_store::{hash_password, random_token, Store};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 const BANNER: &str = "rrouter";
@@ -72,7 +74,11 @@ fn main() -> ExitCode {
 fn healthcheck() -> ExitCode {
     let host = std::env::var("RROUTER_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     // Binding a wildcard address is not connectable; probe loopback instead.
-    let host = if host == "0.0.0.0" || host == "::" { "127.0.0.1".to_string() } else { host };
+    let host = if host == "0.0.0.0" || host == "::" {
+        "127.0.0.1".to_string()
+    } else {
+        host
+    };
     let port = std::env::var("RROUTER_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
@@ -96,7 +102,10 @@ fn admin(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(e) => {
             eprintln!("rrouter: runtime: {e}");
@@ -186,9 +195,7 @@ fn probe_health(host: &str, port: u16) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other(format!("no address for {host}:{port}")))?;
     let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.write_all(
-        b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-    )?;
+    stream.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
     let mut head = [0u8; 32];
     let n = stream.read(&mut head)?;
     let status = String::from_utf8_lossy(&head[..n]).to_string();
@@ -203,12 +210,27 @@ fn probe_health(host: &str, port: u16) -> std::io::Result<()> {
 }
 
 fn init_tracing(filter: &str, format: LogFormat) {
-    let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("rrouter=info"));
-    let builder = tracing_subscriber::fmt().with_env_filter(env_filter).with_target(false);
+    let env_filter =
+        || EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("rrouter=info"));
+    // The capture layer is always installed: it is a no-op until an operator enables
+    // system logs, so enabling never requires a restart.
+    let registry = || {
+        tracing_subscriber::registry()
+            .with(env_filter())
+            .with(rrouter_gateway::syslog::CaptureLayer)
+    };
     // Both shapes keep the same fields; json is one object per line for log pipelines.
     match format {
-        LogFormat::Text => builder.compact().init(),
-        LogFormat::Json => builder.json().init(),
+        LogFormat::Text => registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(false)
+                    .compact(),
+            )
+            .init(),
+        LogFormat::Json => registry()
+            .with(tracing_subscriber::fmt::layer().with_target(false).json())
+            .init(),
     }
 }
 
@@ -284,7 +306,11 @@ async fn serve(config: Config) -> Result<(), String> {
         "{BANNER} {} listening on http://{}{}",
         env!("CARGO_PKG_VERSION"),
         config.socket_addr(),
-        if config.require_api_key { " (api key required)" } else { "" }
+        if config.require_api_key {
+            " (api key required)"
+        } else {
+            ""
+        }
     );
 
     // The signal must be *observed* separately from the shutdown it triggers: bounding
@@ -380,12 +406,19 @@ mod tests {
         let stop = Arc::new(tokio::sync::Notify::new());
         let waiter = Arc::clone(&stop);
         let handle = tokio::spawn(async move {
-            serve_until_shutdown(std::future::pending::<Result<(), &'static str>>(), waiter, 1)
-                .await
+            serve_until_shutdown(
+                std::future::pending::<Result<(), &'static str>>(),
+                waiter,
+                1,
+            )
+            .await
         });
 
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(!handle.is_finished(), "no signal yet: the server must keep running");
+        assert!(
+            !handle.is_finished(),
+            "no signal yet: the server must keep running"
+        );
 
         stop.notify_one();
         let result = tokio::time::timeout(Duration::from_secs(3), handle)

@@ -57,8 +57,14 @@ mod tests {
 
     #[test]
     fn parses_paths_with_query_and_trailing_segments() {
-        assert_eq!(Dialect::from_path("/v1/messages?beta=1"), Some(Dialect::AnthropicMessages));
-        assert_eq!(Dialect::from_path("/v1/chat/completions"), Some(Dialect::OpenAiChat));
+        assert_eq!(
+            Dialect::from_path("/v1/messages?beta=1"),
+            Some(Dialect::AnthropicMessages)
+        );
+        assert_eq!(
+            Dialect::from_path("/v1/chat/completions"),
+            Some(Dialect::OpenAiChat)
+        );
         assert_eq!(Dialect::from_path("/v1/models"), None);
     }
 }

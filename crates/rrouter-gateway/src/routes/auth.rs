@@ -43,7 +43,13 @@ pub fn user_json(user: &User) -> Value {
 }
 
 /// Persist one audit row; auditing never fails the request it describes.
-pub(crate) async fn audit(state: &AppState, kind: &str, actor: Option<&str>, ip: &str, detail: &str) {
+pub(crate) async fn audit(
+    state: &AppState,
+    kind: &str,
+    actor: Option<&str>,
+    ip: &str,
+    detail: &str,
+) {
     if let Err(e) = state
         .store
         .record_audit(kind, actor, Some(ip), Some(detail))
@@ -62,7 +68,11 @@ pub(crate) fn session_public_id(token_hash: &str) -> String {
 /// A machine-readable failure with an explicit status (auth has codes the core error
 /// enum does not carry, such as `already_initialized`).
 fn fail(status: StatusCode, code: &str, message: &str) -> Response {
-    let kind = if status.is_server_error() { "api_error" } else { "invalid_request_error" };
+    let kind = if status.is_server_error() {
+        "api_error"
+    } else {
+        "invalid_request_error"
+    };
     (
         status,
         axum::Json(json!({ "error": { "code": code, "message": message, "type": kind } })),
@@ -127,12 +137,22 @@ pub async fn setup(State(state): State<Arc<AppState>>, headers: HeaderMap, body:
         Err(resp) => return *resp,
     };
     match state.store.users_exist().await {
-        Ok(true) => return fail(StatusCode::CONFLICT, "already_initialized", "this RRouter already has an administrator"),
+        Ok(true) => {
+            return fail(
+                StatusCode::CONFLICT,
+                "already_initialized",
+                "this RRouter already has an administrator",
+            )
+        }
         Ok(false) => {}
         Err(e) => return admin_error(&e),
     }
     let Some(code) = text(&value, "setup_code") else {
-        return fail(StatusCode::BAD_REQUEST, "setup_code_required", "the setup code printed in the terminal is required");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "setup_code_required",
+            "the setup code printed in the terminal is required",
+        );
     };
     if !state.auth.verify(&code) {
         return fail(
@@ -142,7 +162,11 @@ pub async fn setup(State(state): State<Arc<AppState>>, headers: HeaderMap, body:
         );
     }
     let Some(name) = text(&value, "name") else {
-        return fail(StatusCode::BAD_REQUEST, "invalid_name", "enter your full name");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "enter your full name",
+        );
     };
     let Some(email) = text(&value, "email") else {
         return fail(StatusCode::BAD_REQUEST, "invalid_email", "enter your email");
@@ -152,7 +176,11 @@ pub async fn setup(State(state): State<Arc<AppState>>, headers: HeaderMap, body:
     }
     let password = value.get("password").and_then(Value::as_str).unwrap_or("");
     if password.chars().count() < MIN_PASSWORD {
-        return fail(StatusCode::BAD_REQUEST, "password_too_short", "use at least 12 characters");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "password_too_short",
+            "use at least 12 characters",
+        );
     }
     let hash = match hash_password(password) {
         Ok(hash) => hash,
@@ -161,12 +189,23 @@ pub async fn setup(State(state): State<Arc<AppState>>, headers: HeaderMap, body:
     let user = match state.store.create_first_user(&name, &email, &hash).await {
         Ok(Some(user)) => user,
         Ok(None) => {
-            return fail(StatusCode::CONFLICT, "already_initialized", "this RRouter already has an administrator")
+            return fail(
+                StatusCode::CONFLICT,
+                "already_initialized",
+                "this RRouter already has an administrator",
+            )
         }
         Err(e) => return admin_error(&e),
     };
     state.auth.retire();
-    audit(&state, "setup", Some(&user.email), &auth::client_ip(&headers, None), "owner account created").await;
+    audit(
+        &state,
+        "setup",
+        Some(&user.email),
+        &auth::client_ip(&headers, None),
+        "owner account created",
+    )
+    .await;
     tracing::info!(email = %user.email, "setup: owner account created");
     let codes = match issue_recovery_codes(&state, &user).await {
         Ok(codes) => codes,
@@ -188,7 +227,10 @@ pub async fn setup(State(state): State<Arc<AppState>>, headers: HeaderMap, body:
 
 async fn issue_recovery_codes(state: &AppState, user: &User) -> rrouter_core::Result<Vec<String>> {
     let codes = random_recovery_codes();
-    let hashes: Vec<String> = codes.iter().map(|code| hash_secret(&normalize_code(code))).collect();
+    let hashes: Vec<String> = codes
+        .iter()
+        .map(|code| hash_secret(&normalize_code(code)))
+        .collect();
     state.store.add_recovery_codes(user.id, &hashes).await?;
     Ok(codes)
 }
@@ -208,7 +250,11 @@ async fn start_session(
     remember: bool,
 ) -> rrouter_core::Result<Response> {
     let token = random_token();
-    let lifetime = if remember { REMEMBER_SECS } else { SESSION_SECS };
+    let lifetime = if remember {
+        REMEMBER_SECS
+    } else {
+        SESSION_SECS
+    };
     state
         .store
         .create_session(&session_key(&token), *user_id, crate::now_unix() + lifetime)
@@ -246,7 +292,10 @@ pub async fn login(
     if password.is_empty() {
         return invalid_credentials();
     }
-    let remember = value.get("remember").and_then(Value::as_bool).unwrap_or(false);
+    let remember = value
+        .get("remember")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let email = normalize_email(&email);
     let ip = auth::client_ip(&headers, peer.0);
     // The email bucket always applies. The IP bucket only guards non-loopback callers:
@@ -279,7 +328,10 @@ pub async fn login(
     };
     let (valid, user) = match user {
         Some(user) => {
-            let valid = verify_password(password, &stored_hash(&state, &user).await.unwrap_or_default());
+            let valid = verify_password(
+                password,
+                &stored_hash(&state, &user).await.unwrap_or_default(),
+            );
             (valid, Some(user))
         }
         None => {
@@ -322,7 +374,11 @@ async fn stored_hash(state: &AppState, user: &User) -> Option<String> {
 /// `GET /api/auth/me` — the signed-in person and every live session of theirs.
 pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let Some(user) = current_user(&state, &headers).await else {
-        return fail(StatusCode::UNAUTHORIZED, "sign_in_required", "sign in to continue");
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "sign_in_required",
+            "sign in to continue",
+        );
     };
     let current = session_token(&headers)
         .map(|token| session_key(&token))
@@ -346,9 +402,17 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
 }
 
 /// `PUT /api/auth/me` — rename, or change the password with the current one.
-pub async fn update_me(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Body) -> Response {
+pub async fn update_me(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     let Some(user) = current_user(&state, &headers).await else {
-        return fail(StatusCode::UNAUTHORIZED, "sign_in_required", "sign in to continue");
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "sign_in_required",
+            "sign in to continue",
+        );
     };
     let value = match body_json(body).await {
         Ok(v) => v,
@@ -360,20 +424,45 @@ pub async fn update_me(State(state): State<Arc<AppState>>, headers: HeaderMap, b
         if let Err(e) = state.store.rename_user(user.id, &name).await {
             return admin_error(&e);
         }
-        audit(&state, "profile_updated", Some(&user.email), &ip, "name changed").await;
+        audit(
+            &state,
+            "profile_updated",
+            Some(&user.email),
+            &ip,
+            "name changed",
+        )
+        .await;
     }
     if let Some(password) = value.get("new_password").and_then(Value::as_str) {
         if password.chars().count() < MIN_PASSWORD {
-            return fail(StatusCode::BAD_REQUEST, "password_too_short", "use at least 12 characters");
+            return fail(
+                StatusCode::BAD_REQUEST,
+                "password_too_short",
+                "use at least 12 characters",
+            );
         }
-        let current = value.get("current_password").and_then(Value::as_str).unwrap_or("");
+        let current = value
+            .get("current_password")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let stored = match state.store.password_hash(user.id).await {
             Ok(Some(hash)) => hash,
             _ => return admin_error(&Error::Store("account has no password".into())),
         };
         if !verify_password(current, &stored) {
-            audit(&state, "password_change_failed", Some(&user.email), &ip, "wrong current password").await;
-            return fail(StatusCode::FORBIDDEN, "invalid_password", "the current password is incorrect");
+            audit(
+                &state,
+                "password_change_failed",
+                Some(&user.email),
+                &ip,
+                "wrong current password",
+            )
+            .await;
+            return fail(
+                StatusCode::FORBIDDEN,
+                "invalid_password",
+                "the current password is incorrect",
+            );
         }
         let hash = match hash_password(password) {
             Ok(hash) => hash,
@@ -382,7 +471,14 @@ pub async fn update_me(State(state): State<Arc<AppState>>, headers: HeaderMap, b
         if let Err(e) = state.store.set_user_password(user.id, &hash).await {
             return admin_error(&e);
         }
-        audit(&state, "password_changed", Some(&user.email), &ip, "sessions ended").await;
+        audit(
+            &state,
+            "password_changed",
+            Some(&user.email),
+            &ip,
+            "sessions ended",
+        )
+        .await;
         // The password change ended every session, including this one; keep the current
         // tab signed in with a fresh cookie.
         match start_session(&state, &headers, &user.id, false).await {
@@ -390,7 +486,13 @@ pub async fn update_me(State(state): State<Arc<AppState>>, headers: HeaderMap, b
             Err(e) => return admin_error(&e),
         }
     }
-    let refreshed = state.store.user(user.id).await.ok().flatten().unwrap_or(user);
+    let refreshed = state
+        .store
+        .user(user.id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(user);
     let payload = json!({ "user": user_json(&refreshed) });
     let mut resp = cookie.unwrap_or_else(|| ok_json(Value::Null));
     *resp.status_mut() = StatusCode::OK;
@@ -409,7 +511,11 @@ pub async fn revoke_session(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
     let Some(user) = current_user(&state, &headers).await else {
-        return fail(StatusCode::UNAUTHORIZED, "sign_in_required", "sign in to continue");
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "sign_in_required",
+            "sign in to continue",
+        );
     };
     let current = session_token(&headers)
         .map(|token| session_key(&token))
@@ -418,18 +524,40 @@ pub async fn revoke_session(
         Ok(rows) => rows,
         Err(e) => return admin_error(&e),
     };
-    let Some(target) = sessions.into_iter().find(|s| session_public_id(&s.token_hash) == id) else {
-        return fail(StatusCode::NOT_FOUND, "session_not_found", "that session is no longer active");
+    let Some(target) = sessions
+        .into_iter()
+        .find(|s| session_public_id(&s.token_hash) == id)
+    else {
+        return fail(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "that session is no longer active",
+        );
     };
     let revoking_current = target.token_hash == current;
-    match state.store.delete_user_session(user.id, &target.token_hash).await {
+    match state
+        .store
+        .delete_user_session(user.id, &target.token_hash)
+        .await
+    {
         Ok(true) => {}
         Ok(false) => {
-            return fail(StatusCode::NOT_FOUND, "session_not_found", "that session is no longer active")
+            return fail(
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                "that session is no longer active",
+            )
         }
         Err(e) => return admin_error(&e),
     }
-    audit(&state, "session_revoked", Some(&user.email), &auth::client_ip(&headers, None), "one device").await;
+    audit(
+        &state,
+        "session_revoked",
+        Some(&user.email),
+        &auth::client_ip(&headers, None),
+        "one device",
+    )
+    .await;
     let mut resp = StatusCode::NO_CONTENT.into_response();
     if revoking_current {
         clear_session_cookie(&mut resp, is_secure(&headers));
@@ -438,14 +566,29 @@ pub async fn revoke_session(
 }
 
 /// `POST /api/auth/me/sessions/revoke-others` — end every other device.
-pub async fn revoke_other_sessions(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+pub async fn revoke_other_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
     let Some(user) = current_user(&state, &headers).await else {
-        return fail(StatusCode::UNAUTHORIZED, "sign_in_required", "sign in to continue");
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "sign_in_required",
+            "sign in to continue",
+        );
     };
     let Some(token) = session_token(&headers) else {
-        return fail(StatusCode::UNAUTHORIZED, "sign_in_required", "sign in to continue");
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "sign_in_required",
+            "sign in to continue",
+        );
     };
-    match state.store.delete_sessions_except(user.id, &session_key(&token)).await {
+    match state
+        .store
+        .delete_sessions_except(user.id, &session_key(&token))
+        .await
+    {
         Ok(count) => {
             audit(
                 &state,
@@ -523,9 +666,16 @@ pub async fn recover(
     let Some(code) = text(&value, "recovery_code") else {
         return invalid();
     };
-    let password = value.get("new_password").and_then(Value::as_str).unwrap_or("");
+    let password = value
+        .get("new_password")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if password.chars().count() < MIN_PASSWORD {
-        return fail(StatusCode::BAD_REQUEST, "password_too_short", "use at least 12 characters");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "password_too_short",
+            "use at least 12 characters",
+        );
     }
     let Ok(user) = state.store.user_by_email(&email).await else {
         state.auth.note_failure(&key);
@@ -554,7 +704,14 @@ pub async fn recover(
     if let Err(e) = state.store.set_user_password(user.id, &hash).await {
         return admin_error(&e);
     }
-    audit(&state, "password_reset", Some(&user.email), &ip, "recovery code used; sessions ended").await;
+    audit(
+        &state,
+        "password_reset",
+        Some(&user.email),
+        &ip,
+        "recovery code used; sessions ended",
+    )
+    .await;
     tracing::info!(email = %user.email, "password reset with a recovery code; sessions ended");
     StatusCode::NO_CONTENT.into_response()
 }
@@ -582,19 +739,31 @@ pub async fn invite(
                 "expires_at": invite.expires_at,
             }))
         }
-        Ok(None) => fail(StatusCode::GONE, "invite_invalid", "this invitation has expired"),
+        Ok(None) => fail(
+            StatusCode::GONE,
+            "invite_invalid",
+            "this invitation has expired",
+        ),
         Err(e) => admin_error(&e),
     }
 }
 
 /// `POST /api/auth/signup` — joins through a single-use invitation.
-pub async fn signup(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Body) -> Response {
+pub async fn signup(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     let value = match body_json(body).await {
         Ok(v) => v,
         Err(resp) => return *resp,
     };
     let Some(token) = text(&value, "token") else {
-        return fail(StatusCode::BAD_REQUEST, "invite_required", "an invitation is required");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "invite_required",
+            "an invitation is required",
+        );
     };
     let invite = match state
         .store
@@ -603,16 +772,28 @@ pub async fn signup(State(state): State<Arc<AppState>>, headers: HeaderMap, body
     {
         Ok(Some(invite)) => invite,
         Ok(None) => {
-            return fail(StatusCode::GONE, "invite_invalid", "this invitation has expired")
+            return fail(
+                StatusCode::GONE,
+                "invite_invalid",
+                "this invitation has expired",
+            )
         }
         Err(e) => return admin_error(&e),
     };
     let Some(name) = text(&value, "name") else {
-        return fail(StatusCode::BAD_REQUEST, "invalid_name", "enter your full name");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "enter your full name",
+        );
     };
     let password = value.get("password").and_then(Value::as_str).unwrap_or("");
     if password.chars().count() < MIN_PASSWORD {
-        return fail(StatusCode::BAD_REQUEST, "password_too_short", "use at least 12 characters");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "password_too_short",
+            "use at least 12 characters",
+        );
     }
     let hash = match hash_password(password) {
         Ok(hash) => hash,
@@ -626,7 +807,11 @@ pub async fn signup(State(state): State<Arc<AppState>>, headers: HeaderMap, body
         Ok(user) => user,
         Err(e) => return admin_error(&e),
     };
-    if let Err(e) = state.store.consume_invite(invite.id, crate::now_unix()).await {
+    if let Err(e) = state
+        .store
+        .consume_invite(invite.id, crate::now_unix())
+        .await
+    {
         return admin_error(&e);
     }
     audit(
@@ -663,13 +848,21 @@ pub async fn create_invite(State(state): State<Arc<AppState>>, body: Body) -> Re
         Err(resp) => return *resp,
     };
     let Some(email) = text(&value, "email") else {
-        return fail(StatusCode::BAD_REQUEST, "invalid_email", "enter the email to invite");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "invalid_email",
+            "enter the email to invite",
+        );
     };
     if let Some(problem) = email_problem(&email) {
         return fail(StatusCode::BAD_REQUEST, "invalid_email", problem);
     }
     let Some(role) = text(&value, "role").and_then(|raw| UserRole::parse(&raw)) else {
-        return fail(StatusCode::BAD_REQUEST, "invalid_role", "role must be admin, member or viewer");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "invalid_role",
+            "role must be admin, member or viewer",
+        );
     };
     // The handler is behind the admin gate, which may have admitted a token, a key or
     // a loopback call, so the invitation is attributed to the owner when it can be.
@@ -678,7 +871,11 @@ pub async fn create_invite(State(state): State<Arc<AppState>>, body: Body) -> Re
         Err(e) => return admin_error(&e),
     };
     let Some(creator) = creator else {
-        return fail(StatusCode::BAD_REQUEST, "no_user", "no administrator exists");
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "no_user",
+            "no administrator exists",
+        );
     };
     let token = random_token();
     let invite = match state

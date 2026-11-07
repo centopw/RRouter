@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 use rrouter_core::sse::{render_anthropic, SseCodec, SseFrame};
 use rrouter_core::{
     ChatRequest, ChatResponse, Dialect, FinishReason, Message, Part, Result, Role, StreamEvent,
-    ToolDef, ToolChoice, Usage,
+    ToolChoice, ToolDef, Usage,
 };
 
 use crate::{
@@ -39,8 +39,14 @@ pub fn parse_request(body: &Value) -> Result<ChatRequest> {
     req.max_tokens = opt_u32(body, "max_tokens");
     req.temperature = opt_f64(body, "temperature");
     req.top_p = opt_f64(body, "top_p");
-    req.stop = body.get("stop_sequences").map(parse_stop).unwrap_or_default();
-    req.system = body.get("system").map(system_text).filter(|s| !s.is_empty());
+    req.stop = body
+        .get("stop_sequences")
+        .map(parse_stop)
+        .unwrap_or_default();
+    req.system = body
+        .get("system")
+        .map(system_text)
+        .filter(|s| !s.is_empty());
     req.messages = parse_messages(body)?;
     let (tools, raw_tools) = parse_tools(body);
     req.tools = tools;
@@ -103,7 +109,9 @@ fn parse_block(block: &Value) -> Part {
         Some("text") => Part::Text(req_str(block, "text").unwrap_or_default().to_owned()),
         Some("image") => {
             let source = block.get("source");
-            let media_type = source.and_then(|s| req_str(s, "media_type")).map(str::to_owned);
+            let media_type = source
+                .and_then(|s| req_str(s, "media_type"))
+                .map(str::to_owned);
             let url = match source {
                 Some(s) if req_str(s, "type") == Some("base64") => {
                     let data = req_str(s, "data").unwrap_or_default();
@@ -125,7 +133,10 @@ fn parse_block(block: &Value) -> Part {
         Some("tool_result") => Part::ToolResult {
             tool_use_id: req_str(block, "tool_use_id").unwrap_or_default().to_owned(),
             content: block.get("content").map(result_text).unwrap_or_default(),
-            is_error: block.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+            is_error: block
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         },
         Some("thinking") => Part::Reasoning {
             text: req_str(block, "thinking").unwrap_or_default().to_owned(),
@@ -167,11 +178,16 @@ fn parse_tools(body: &Value) -> (Vec<ToolDef>, Option<Vec<Value>>) {
             raw.push(item.clone());
             continue;
         }
-        let Some(name) = req_str(item, "name") else { continue };
+        let Some(name) = req_str(item, "name") else {
+            continue;
+        };
         out.push(ToolDef {
             name: name.to_owned(),
             description: req_str(item, "description").map(str::to_owned),
-            parameters: item.get("input_schema").map(tool_schema).unwrap_or_else(|| tool_schema(&Value::Null)),
+            parameters: item
+                .get("input_schema")
+                .map(tool_schema)
+                .unwrap_or_else(|| tool_schema(&Value::Null)),
             // Anthropic has no strict flag; schemas are advisory only.
             strict: false,
         });
@@ -217,7 +233,10 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
     let mut body = Map::new();
     body.insert("model".into(), Value::from(req.model.clone()));
     body.insert("messages".into(), Value::from(messages));
-    body.insert("max_tokens".into(), Value::from(req.max_tokens.unwrap_or(4096)));
+    body.insert(
+        "max_tokens".into(),
+        Value::from(req.max_tokens.unwrap_or(4096)),
+    );
     body.insert("stream".into(), Value::Bool(stream));
     if let Some(system) = &req.system {
         if !system.is_empty() {
@@ -288,7 +307,11 @@ fn blocks_out(parts: &[Part]) -> Result<Value> {
                 "name": name,
                 "input": if input.is_object() { input.clone() } else { json!({}) },
             })),
-            Part::ToolResult { tool_use_id, content, is_error } => {
+            Part::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 let mut block = Map::new();
                 block.insert("type".into(), Value::from("tool_result"));
                 block.insert("tool_use_id".into(), Value::from(tool_use_id.clone()));
@@ -325,7 +348,12 @@ fn blocks_out(parts: &[Part]) -> Result<Value> {
 fn image_block(url: &str, media_type: &Option<String>) -> Value {
     if let Some(rest) = url.strip_prefix("data:") {
         if let Some((meta, data)) = rest.split_once(',') {
-            let mt = meta.split(';').next().filter(|s| !s.is_empty()).map(str::to_owned).or_else(|| media_type.clone());
+            let mt = meta
+                .split(';')
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .or_else(|| media_type.clone());
             return json!({
                 "type": "image",
                 "source": {"type": "base64", "media_type": mt.unwrap_or_else(|| "image/png".into()), "data": data},
@@ -408,7 +436,10 @@ pub struct AnthropicDecoder {
 
 impl AnthropicDecoder {
     pub fn new(model: &str) -> Self {
-        Self { model: model.to_owned(), ..Self::default() }
+        Self {
+            model: model.to_owned(),
+            ..Self::default()
+        }
     }
 
     pub fn push(&mut self, chunk: &[u8], out: &mut Vec<StreamEvent>) -> Result<()> {
@@ -443,7 +474,9 @@ impl AnthropicDecoder {
             "message_start" => {
                 let msg = v.get("message").unwrap_or(&Value::Null);
                 self.message_id = req_str(msg, "id").unwrap_or_default().to_owned();
-                let model = req_str(msg, "model").map(str::to_owned).unwrap_or_else(|| self.model.clone());
+                let model = req_str(msg, "model")
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| self.model.clone());
                 self.usage = usage_from_anthropic(msg.get("usage"));
                 self.emit_start(out, model);
             }
@@ -461,18 +494,42 @@ impl AnthropicDecoder {
                             id: id.clone(),
                             name: name.clone(),
                         });
-                        (BlockKind::ToolUse, Block { index, kind: BlockKind::ToolUse })
+                        (
+                            BlockKind::ToolUse,
+                            Block {
+                                index,
+                                kind: BlockKind::ToolUse,
+                            },
+                        )
                     }
-                    Some("thinking") => (BlockKind::Thinking, Block { index: 0, kind: BlockKind::Thinking }),
+                    Some("thinking") => (
+                        BlockKind::Thinking,
+                        Block {
+                            index: 0,
+                            kind: BlockKind::Thinking,
+                        },
+                    ),
                     Some("text") => {
                         if let Some(t) = req_str(block, "text") {
                             if !t.is_empty() {
                                 out.push(StreamEvent::TextDelta(t.to_owned()));
                             }
                         }
-                        (BlockKind::Text, Block { index: 0, kind: BlockKind::Text })
+                        (
+                            BlockKind::Text,
+                            Block {
+                                index: 0,
+                                kind: BlockKind::Text,
+                            },
+                        )
                     }
-                    _ => (BlockKind::Other, Block { index: 0, kind: BlockKind::Other }),
+                    _ => (
+                        BlockKind::Other,
+                        Block {
+                            index: 0,
+                            kind: BlockKind::Other,
+                        },
+                    ),
                 };
                 debug_assert!(kind == entry.kind);
                 if self.blocks.len() <= slot {
@@ -482,7 +539,9 @@ impl AnthropicDecoder {
             }
             "content_block_delta" => {
                 let slot = opt_u32(&v, "index").unwrap_or(0) as usize;
-                let Some(Some(block)) = self.blocks.get(slot) else { return };
+                let Some(Some(block)) = self.blocks.get(slot) else {
+                    return;
+                };
                 let delta = v.get("delta").unwrap_or(&Value::Null);
                 match req_str(delta, "type") {
                     Some("text_delta") => {
@@ -498,7 +557,9 @@ impl AnthropicDecoder {
                     Some("input_json_delta") if block.kind == BlockKind::ToolUse => {
                         out.push(StreamEvent::ToolCallArgsDelta {
                             index: block.index,
-                            partial_json: req_str(delta, "partial_json").unwrap_or_default().to_owned(),
+                            partial_json: req_str(delta, "partial_json")
+                                .unwrap_or_default()
+                                .to_owned(),
                         });
                     }
                     _ => {}
@@ -540,7 +601,10 @@ impl AnthropicDecoder {
             return;
         }
         self.sent_start = true;
-        out.push(StreamEvent::Start { id: self.message_id.clone(), model });
+        out.push(StreamEvent::Start {
+            id: self.message_id.clone(),
+            model,
+        });
     }
 
     fn emit_done(&mut self, out: &mut Vec<StreamEvent>) {
@@ -554,7 +618,10 @@ impl AnthropicDecoder {
         } else {
             FinishReason::Stop
         });
-        out.push(StreamEvent::Done { reason, usage: Some(self.usage) });
+        out.push(StreamEvent::Done {
+            reason,
+            usage: Some(self.usage),
+        });
     }
 }
 
@@ -579,7 +646,10 @@ pub struct AnthropicEncoder {
 
 impl AnthropicEncoder {
     pub fn new(model: &str) -> Self {
-        Self { model: model.to_owned(), ..Self::default() }
+        Self {
+            model: model.to_owned(),
+            ..Self::default()
+        }
     }
 
     pub fn encode(&mut self, ev: &StreamEvent) -> bytes::Bytes {
@@ -622,7 +692,10 @@ impl AnthropicEncoder {
                     self.write_tool_start(*index, id, name, &mut out);
                 }
             }
-            StreamEvent::ToolCallArgsDelta { index, partial_json } => {
+            StreamEvent::ToolCallArgsDelta {
+                index,
+                partial_json,
+            } => {
                 let idx = self
                     .tool_block(*index)
                     .unwrap_or_else(|| self.write_tool_start(*index, "", "", &mut out));
@@ -643,7 +716,10 @@ impl AnthropicEncoder {
                     delta["usage"] = usage_to_anthropic(*u);
                 }
                 out.push_str(&render_anthropic("message_delta", &delta.to_string()));
-                out.push_str(&render_anthropic("message_stop", "{\"type\":\"message_stop\"}"));
+                out.push_str(&render_anthropic(
+                    "message_stop",
+                    "{\"type\":\"message_stop\"}",
+                ));
                 self.done = true;
             }
         }
@@ -671,7 +747,10 @@ impl AnthropicEncoder {
     }
 
     fn tool_block(&self, tool_index: u32) -> Option<u32> {
-        self.tool_blocks.get(tool_index as usize).copied().filter(|i| *i != u32::MAX)
+        self.tool_blocks
+            .get(tool_index as usize)
+            .copied()
+            .filter(|i| *i != u32::MAX)
     }
 
     fn write_tool_start(&mut self, tool_index: u32, id: &str, name: &str, out: &mut String) -> u32 {
@@ -747,11 +826,19 @@ mod tests {
         let same = super::build_request(&req, false).unwrap();
         let tools = same["tools"].as_array().expect("tools");
         assert_eq!(tools.len(), 2);
-        assert_eq!(tools[1], json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 5}));
+        assert_eq!(
+            tools[1],
+            json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 5})
+        );
 
         let chat = build_request(Dialect::OpenAiChat, &req, false).unwrap();
-        assert!(chat.get("tools").and_then(|t| t.as_array()).map(|t| t.len()) == Some(1),
-            "a server tool must not be smuggled into another dialect: {chat}");
+        assert!(
+            chat.get("tools")
+                .and_then(|t| t.as_array())
+                .map(|t| t.len())
+                == Some(1),
+            "a server tool must not be smuggled into another dialect: {chat}"
+        );
     }
 
     fn sse(event: &str, data: Value) -> String {
@@ -778,11 +865,19 @@ mod tests {
         assert_eq!(req.max_tokens, Some(1024));
         assert_eq!(
             req.messages[1].parts[1],
-            Part::ToolUse { id: "toolu_1".into(), name: "get_weather".into(), input: json!({"city": "Hanoi"}) }
+            Part::ToolUse {
+                id: "toolu_1".into(),
+                name: "get_weather".into(),
+                input: json!({"city": "Hanoi"})
+            }
         );
         assert_eq!(
             req.messages[2].parts,
-            vec![Part::ToolResult { tool_use_id: "toolu_1".into(), content: "21C".into(), is_error: false }]
+            vec![Part::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "21C".into(),
+                is_error: false
+            }]
         );
     }
 
@@ -794,11 +889,19 @@ mod tests {
             Message::text(Role::User, "go"),
             Message {
                 role: Role::Assistant,
-                parts: vec![Part::ToolUse { id: "t1".into(), name: "f".into(), input: json!({"a": 1}) }],
+                parts: vec![Part::ToolUse {
+                    id: "t1".into(),
+                    name: "f".into(),
+                    input: json!({"a": 1}),
+                }],
             },
             Message {
                 role: Role::Tool,
-                parts: vec![Part::ToolResult { tool_use_id: "t1".into(), content: "done".into(), is_error: true }],
+                parts: vec![Part::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "done".into(),
+                    is_error: true,
+                }],
             },
         ];
         let body = build_request(D, &req, true).unwrap();
@@ -809,12 +912,19 @@ mod tests {
         assert_eq!(result["type"], "tool_result");
         assert_eq!(result["tool_use_id"], "t1");
         assert_eq!(result["is_error"], true);
-        assert_eq!(body["messages"][2]["role"], "user", "tool results ride in a user turn");
+        assert_eq!(
+            body["messages"][2]["role"], "user",
+            "tool results ride in a user turn"
+        );
     }
 
     #[test]
     fn system_string_and_block_array_both_parse() {
-        let plain = parse_request(D, &json!({"model": "m", "max_tokens": 1, "system": "s1", "messages": []})).unwrap();
+        let plain = parse_request(
+            D,
+            &json!({"model": "m", "max_tokens": 1, "system": "s1", "messages": []}),
+        )
+        .unwrap();
         assert_eq!(plain.system.as_deref(), Some("s1"));
         let blocks = parse_request(
             D,
@@ -840,10 +950,27 @@ mod tests {
         let resp = parse_response(&body).unwrap();
         assert_eq!(
             resp.parts[0],
-            Part::Reasoning { text: "step 1".into(), signature: Some("sig-abc".into()) }
+            Part::Reasoning {
+                text: "step 1".into(),
+                signature: Some("sig-abc".into())
+            }
         );
-        assert_eq!(resp.parts[1], Part::Reasoning { text: String::new(), signature: Some("redacted-blob".into()) });
-        assert_eq!(resp.usage, Usage { input_tokens: 9, output_tokens: 4, cache_read_tokens: 6, cache_write_tokens: 2 });
+        assert_eq!(
+            resp.parts[1],
+            Part::Reasoning {
+                text: String::new(),
+                signature: Some("redacted-blob".into())
+            }
+        );
+        assert_eq!(
+            resp.usage,
+            Usage {
+                input_tokens: 9,
+                output_tokens: 4,
+                cache_read_tokens: 6,
+                cache_write_tokens: 2
+            }
+        );
         // Signature survives the way back out.
         let out = build_response(&resp).unwrap();
         assert_eq!(out["content"][0]["signature"], "sig-abc");
@@ -861,10 +988,22 @@ mod tests {
             ("tool_use", FinishReason::ToolCalls),
         ];
         for (wire, want) in cases {
-            let body = json!({"id": "x", "model": "m", "content": [], "stop_reason": wire, "usage": {}});
-            assert_eq!(parse_response(&body).unwrap().finish_reason, want, "anthropic {wire}");
+            let body =
+                json!({"id": "x", "model": "m", "content": [], "stop_reason": wire, "usage": {}});
+            assert_eq!(
+                parse_response(&body).unwrap().finish_reason,
+                want,
+                "anthropic {wire}"
+            );
             let oi = json!({"choices": [{"message": {"role": "assistant", "content": ""}, "finish_reason": want.openai()}]});
-            assert_eq!(crate::openai_chat::parse_response(&oi).unwrap().finish_reason, want, "openai {}", want.openai());
+            assert_eq!(
+                crate::openai_chat::parse_response(&oi)
+                    .unwrap()
+                    .finish_reason,
+                want,
+                "openai {}",
+                want.openai()
+            );
         }
     }
 
@@ -894,7 +1033,13 @@ mod tests {
         dec.finish(&mut events).unwrap();
         dec.finish(&mut events).unwrap();
 
-        assert_eq!(events[0], StreamEvent::Start { id: "msg_9".into(), model: "claude-sonnet-4".into() });
+        assert_eq!(
+            events[0],
+            StreamEvent::Start {
+                id: "msg_9".into(),
+                model: "claude-sonnet-4".into()
+            }
+        );
         let text: String = events
             .iter()
             .filter_map(|e| match e {
@@ -904,7 +1049,10 @@ mod tests {
             .collect();
         assert_eq!(text, "Hello");
         assert_eq!(
-            events.iter().filter(|e| matches!(e, StreamEvent::ToolCallStart { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::ToolCallStart { .. }))
+                .count(),
             1
         );
         let json: String = events
@@ -915,13 +1063,21 @@ mod tests {
             })
             .collect();
         assert_eq!(json, "{\"a\":1}");
-        let done: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Done { .. })).collect();
+        let done: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Done { .. }))
+            .collect();
         assert_eq!(done.len(), 1);
         assert_eq!(
             *done[0],
             StreamEvent::Done {
                 reason: FinishReason::ToolCalls,
-                usage: Some(Usage { input_tokens: 12, output_tokens: 15, cache_read_tokens: 0, cache_write_tokens: 0 }),
+                usage: Some(Usage {
+                    input_tokens: 12,
+                    output_tokens: 15,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0
+                }),
             }
         );
     }
@@ -931,12 +1087,22 @@ mod tests {
         let mut dec = AnthropicDecoder::new("m");
         let mut events = Vec::new();
         dec.push(
-            sse("message_start", json!({"message": {"id": "x", "model": "m"}})).as_bytes(),
+            sse(
+                "message_start",
+                json!({"message": {"id": "x", "model": "m"}}),
+            )
+            .as_bytes(),
             &mut events,
         )
         .unwrap();
         dec.finish(&mut events).unwrap();
-        assert_eq!(events.last(), Some(&StreamEvent::Done { reason: FinishReason::Stop, usage: Some(Usage::default()) }));
+        assert_eq!(
+            events.last(),
+            Some(&StreamEvent::Done {
+                reason: FinishReason::Stop,
+                usage: Some(Usage::default())
+            })
+        );
     }
 
     #[test]
@@ -944,15 +1110,33 @@ mod tests {
         let mut enc = StreamEncoder::new(D, "claude-sonnet-4");
         let mut wire = String::new();
         for ev in [
-            StreamEvent::Start { id: "msg_1".into(), model: "claude-sonnet-4".into() },
+            StreamEvent::Start {
+                id: "msg_1".into(),
+                model: "claude-sonnet-4".into(),
+            },
             StreamEvent::ReasoningDelta("think".into()),
             StreamEvent::TextDelta("hi".into()),
-            StreamEvent::ToolCallStart { index: 0, id: "t0".into(), name: "f".into() },
-            StreamEvent::ToolCallArgsDelta { index: 0, partial_json: "{\"k\":".into() },
-            StreamEvent::ToolCallArgsDelta { index: 0, partial_json: "2}".into() },
+            StreamEvent::ToolCallStart {
+                index: 0,
+                id: "t0".into(),
+                name: "f".into(),
+            },
+            StreamEvent::ToolCallArgsDelta {
+                index: 0,
+                partial_json: "{\"k\":".into(),
+            },
+            StreamEvent::ToolCallArgsDelta {
+                index: 0,
+                partial_json: "2}".into(),
+            },
             StreamEvent::Done {
                 reason: FinishReason::Length,
-                usage: Some(Usage { input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_write_tokens: 0 }),
+                usage: Some(Usage {
+                    input_tokens: 3,
+                    output_tokens: 4,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                }),
             },
         ] {
             wire.push_str(std::str::from_utf8(&enc.encode(&ev).unwrap()).unwrap());
@@ -960,25 +1144,47 @@ mod tests {
         assert!(wire.contains("event: message_start"));
         assert!(wire.contains("\"thinking_delta\""));
         assert!(wire.contains("\"text_delta\""));
-        assert_eq!(wire.matches("event: content_block_start").count(), 3, "thinking, text, tool_use");
+        assert_eq!(
+            wire.matches("event: content_block_start").count(),
+            3,
+            "thinking, text, tool_use"
+        );
         assert_eq!(wire.matches("event: content_block_stop").count(), 3);
         assert!(wire.contains("\"partial_json\":\"{\\\"k\\\":\""));
         assert!(wire.contains("\"stop_reason\":\"max_tokens\""));
         assert_eq!(wire.matches("event: message_stop").count(), 1);
-        assert!(wire.trim_end().ends_with("data: {\"type\":\"message_stop\"}"));
+        assert!(wire
+            .trim_end()
+            .ends_with("data: {\"type\":\"message_stop\"}"));
     }
 
     #[test]
     fn encoder_output_redecodes_into_the_same_events() {
         let events = vec![
-            StreamEvent::Start { id: "msg_7".into(), model: "claude-sonnet-4".into() },
+            StreamEvent::Start {
+                id: "msg_7".into(),
+                model: "claude-sonnet-4".into(),
+            },
             StreamEvent::TextDelta("abc".into()),
-            StreamEvent::ToolCallStart { index: 0, id: "t0".into(), name: "f".into() },
-            StreamEvent::ToolCallArgsDelta { index: 0, partial_json: "{}".into() },
-            StreamEvent::Done { reason: FinishReason::ToolCalls, usage: Some(Usage::default()) },
+            StreamEvent::ToolCallStart {
+                index: 0,
+                id: "t0".into(),
+                name: "f".into(),
+            },
+            StreamEvent::ToolCallArgsDelta {
+                index: 0,
+                partial_json: "{}".into(),
+            },
+            StreamEvent::Done {
+                reason: FinishReason::ToolCalls,
+                usage: Some(Usage::default()),
+            },
         ];
         let mut enc = StreamEncoder::new(D, "claude-sonnet-4");
-        let wire: Vec<u8> = events.iter().flat_map(|e| enc.encode(e).unwrap().to_vec()).collect();
+        let wire: Vec<u8> = events
+            .iter()
+            .flat_map(|e| enc.encode(e).unwrap().to_vec())
+            .collect();
         let mut dec = AnthropicDecoder::new("claude-sonnet-4");
         let mut got = Vec::new();
         dec.push(&wire, &mut got).unwrap();
@@ -1007,7 +1213,10 @@ mod tests {
         let anthropic_body = build_request(Dialect::AnthropicMessages, &canonical, false).unwrap();
         assert_eq!(anthropic_body["system"], "sys");
         assert_eq!(anthropic_body["tools"][0]["name"], "get_weather");
-        assert!(anthropic_body["tools"][0].get("function").is_none(), "anthropic tools are flat");
+        assert!(
+            anthropic_body["tools"][0].get("function").is_none(),
+            "anthropic tools are flat"
+        );
 
         let upstream = json!({
             "id": "msg_rt",
@@ -1024,7 +1233,10 @@ mod tests {
         let call = &oi_out["choices"][0]["message"]["tool_calls"][0];
         assert_eq!(call["id"], "call_2");
         assert_eq!(call["function"]["name"], "get_weather");
-        assert_eq!(call["function"]["arguments"].as_str().unwrap(), "{\"city\":\"Hue\"}");
+        assert_eq!(
+            call["function"]["arguments"].as_str().unwrap(),
+            "{\"city\":\"Hue\"}"
+        );
         assert_eq!(oi_out["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(oi_out["usage"]["prompt_tokens"], 40);
         assert_eq!(oi_out["usage"]["completion_tokens"], 12);
@@ -1050,7 +1262,10 @@ mod tests {
         let req = parse_request(D, &body).unwrap();
         assert_eq!(
             req.messages[0].parts[1],
-            Part::Image { url: "data:image/png;base64,QUJD".into(), media_type: Some("image/png".into()) }
+            Part::Image {
+                url: "data:image/png;base64,QUJD".into(),
+                media_type: Some("image/png".into())
+            }
         );
         let out = build_request(D, &req, false).unwrap();
         let source = &out["messages"][0]["content"][1]["source"];

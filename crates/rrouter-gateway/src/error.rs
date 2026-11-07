@@ -49,7 +49,8 @@ pub fn error_response(inbound: Dialect, err: &Error) -> Response {
     let mut resp = (status, axum::Json(error_body(inbound, err))).into_response();
     if let Some(secs) = err.retry_after_secs() {
         if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
-            resp.headers_mut().insert(axum::http::header::RETRY_AFTER, value);
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
         }
     }
     resp
@@ -98,7 +99,10 @@ mod tests {
         assert_eq!(error_kind(404), ("not_found_error", "model_not_found"));
         assert_eq!(error_kind(429), ("rate_limit_error", "rate_limit_exceeded"));
         assert_eq!(error_kind(503), ("api_error", ""));
-        assert_eq!(error_kind(529), ("overloaded_error", "proportional_overload"));
+        assert_eq!(
+            error_kind(529),
+            ("overloaded_error", "proportional_overload")
+        );
     }
 
     #[test]

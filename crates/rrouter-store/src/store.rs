@@ -1,7 +1,7 @@
 //! `Store`: the single embedded SQLite database behind the gateway.
 
-use std::path::{Path, PathBuf};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -584,8 +584,9 @@ pub struct UsageQuery {
 /// A request has one attempt per candidate the dispatcher actually sent to, numbered
 /// from 1 in dispatch order, so a fallback is readable from the log alone. `status` is
 /// the upstream HTTP status when there was one and `0` when nobody answered (transport
-/// failure, timeout, breaker). A row is also the honest record of a request that failed
-/// in the end, which never produces a usage row.
+/// failure, timeout, breaker). A row is the per-candidate record of a request that
+/// failed in the end; the request itself also gets one terminal usage row carrying the
+/// client-facing error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptRecord {
     /// Row id, set when read back; ignored on write.
@@ -700,9 +701,8 @@ impl Store {
     /// (or created in) `<data_dir>/master.key`.
     pub fn open(path: &Path, master_key: Option<String>) -> Result<Self> {
         let data_dir = data_dir_for(path)?;
-        std::fs::create_dir_all(&data_dir).map_err(|e| {
-            Error::Store(format!("create data dir {}: {e}", data_dir.display()))
-        })?;
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| Error::Store(format!("create data dir {}: {e}", data_dir.display())))?;
         let cipher = match master_key {
             Some(k) => Cipher::from_hex(&k)?,
             None => Cipher::load_or_create_file(&data_dir)?,
@@ -728,9 +728,8 @@ impl Store {
         let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
             | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let mut conn = Sql::open_with_flags(path, flags).map_err(|e| {
-            Error::Store(format!("open database {}: {e}", path.display()))
-        })?;
+        let mut conn = Sql::open_with_flags(path, flags)
+            .map_err(|e| Error::Store(format!("open database {}: {e}", path.display())))?;
         Self::configure(&conn)?;
         migrations::migrate(&mut conn)?;
         Ok(Self {
@@ -936,15 +935,7 @@ impl Store {
                  (id, provider, auth_type, name, email, priority, is_active, data, backoff_level, \
                   created_at, updated_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, ?6, 0, ?7, ?7)",
-                params![
-                    id.to_string(),
-                    provider,
-                    auth_type,
-                    name,
-                    email,
-                    blob,
-                    now
-                ],
+                params![id.to_string(), provider, auth_type, name, email, blob, now],
             )
             .map_err(migrations::db_err)?;
         }
@@ -993,7 +984,9 @@ impl Store {
                              ORDER BY provider ASC, priority ASC, created_at ASC"
                         ))
                         .map_err(migrations::db_err)?;
-                    let rows = stmt.query_map([], row_to_connection).map_err(migrations::db_err)?;
+                    let rows = stmt
+                        .query_map([], row_to_connection)
+                        .map_err(migrations::db_err)?;
                     for r in rows {
                         out.push(r.map_err(migrations::db_err)?);
                     }
@@ -1063,7 +1056,13 @@ impl Store {
             )
             .map_err(migrations::db_err)?;
         let n = stmt
-            .execute(params![id.to_string(), backoff_level, last_error, code, now])
+            .execute(params![
+                id.to_string(),
+                backoff_level,
+                last_error,
+                code,
+                now
+            ])
             .map_err(migrations::db_err)?;
         if n == 0 {
             return Err(Error::NotFound(format!("connection {id}")));
@@ -1129,9 +1128,7 @@ impl Store {
             .prepare("SELECT connection_id, ewma_latency_ms FROM connection_stats")
             .map_err(migrations::db_err)?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
-            })
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))
             .map_err(migrations::db_err)?;
         let mut out = std::collections::HashMap::new();
         for row in rows {
@@ -1184,7 +1181,10 @@ impl Store {
     fn decode(&self, raw: RawConnection) -> Result<Connection> {
         let plain = self.cipher.open(raw.id.as_bytes(), &raw.data)?;
         let credentials: Credentials = serde_json::from_slice(&plain).map_err(|e| {
-            Error::Store(format!("credential blob for {} is not valid JSON: {e}", raw.id))
+            Error::Store(format!(
+                "credential blob for {} is not valid JSON: {e}",
+                raw.id
+            ))
         })?;
         Ok(Connection {
             id: raw.id,
@@ -1279,7 +1279,9 @@ impl Store {
                 Self::KEY_COLUMNS
             ))
             .map_err(migrations::db_err)?;
-        let rows = stmt.query_map([], row_to_api_key).map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], row_to_api_key)
+            .map_err(migrations::db_err)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r.map_err(migrations::db_err)?);
@@ -1355,7 +1357,10 @@ impl Store {
     pub async fn delete_api_key(&self, id: Uuid) -> Result<bool> {
         let conn = self.conn();
         let n = conn
-            .execute("DELETE FROM api_keys WHERE id = ?1", params![id.to_string()])
+            .execute(
+                "DELETE FROM api_keys WHERE id = ?1",
+                params![id.to_string()],
+            )
             .map_err(migrations::db_err)?;
         if n > 0 {
             // The key id is never reused, so its mappings can only ever be dead weight.
@@ -1380,7 +1385,10 @@ impl Store {
             .map_err(migrations::db_err)?;
         let rows = stmt
             .query_map(params![key_id.to_string()], |r| {
-                Ok(KeyModel { from: r.get(0)?, to: r.get(1)? })
+                Ok(KeyModel {
+                    from: r.get(0)?,
+                    to: r.get(1)?,
+                })
             })
             .map_err(migrations::db_err)?;
         let mut out = Vec::new();
@@ -1404,9 +1412,7 @@ impl Store {
     }
 
     /// Every key's mappings, grouped by key, for `GET /api/keys`.
-    pub async fn key_models_all(
-        &self,
-    ) -> Result<std::collections::HashMap<Uuid, Vec<KeyModel>>> {
+    pub async fn key_models_all(&self) -> Result<std::collections::HashMap<Uuid, Vec<KeyModel>>> {
         let conn = self.conn();
         let mut stmt = conn
             .prepare(
@@ -1417,7 +1423,10 @@ impl Store {
             .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    KeyModel { from: r.get(1)?, to: r.get(2)? },
+                    KeyModel {
+                        from: r.get(1)?,
+                        to: r.get(2)?,
+                    },
                 ))
             })
             .map_err(migrations::db_err)?;
@@ -1655,8 +1664,11 @@ impl Store {
             )
             .map_err(migrations::db_err)?;
         } else {
-            conn.execute("DELETE FROM disabled_models WHERE model = ?1", params![model])
-                .map_err(migrations::db_err)?;
+            conn.execute(
+                "DELETE FROM disabled_models WHERE model = ?1",
+                params![model],
+            )
+            .map_err(migrations::db_err)?;
         }
         Ok(())
     }
@@ -1666,7 +1678,9 @@ impl Store {
         let mut stmt = conn
             .prepare("SELECT model FROM disabled_models ORDER BY model ASC")
             .map_err(migrations::db_err)?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(migrations::db_err)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r.map_err(migrations::db_err)?);
@@ -1814,7 +1828,9 @@ impl Store {
             let mut stmt = conn
                 .prepare("SELECT id, name, models, created_at FROM combos ORDER BY name ASC")
                 .map_err(migrations::db_err)?;
-            let rows = stmt.query_map([], row_to_combo).map_err(migrations::db_err)?;
+            let rows = stmt
+                .query_map([], row_to_combo)
+                .map_err(migrations::db_err)?;
             let mut out = Vec::new();
             for r in rows {
                 out.push(r.map_err(migrations::db_err)?);
@@ -1909,7 +1925,9 @@ impl Store {
                 "SELECT {TEMPLATE_COLUMNS} FROM prompt_templates ORDER BY name ASC"
             ))
             .map_err(migrations::db_err)?;
-        let rows = stmt.query_map([], row_to_template).map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], row_to_template)
+            .map_err(migrations::db_err)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r.map_err(migrations::db_err)?);
@@ -2440,7 +2458,10 @@ impl Store {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(migrations::db_err)?;
         let deleted = tx
-            .execute("DELETE FROM response_cache WHERE expires_at < ?1", params![now])
+            .execute(
+                "DELETE FROM response_cache WHERE expires_at < ?1",
+                params![now],
+            )
             .map_err(migrations::db_err)?;
         tx.commit().map_err(migrations::db_err)?;
         Ok(deleted)
@@ -2651,11 +2672,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
     let raw_models: Option<String> = r.get(8)?;
     let allowed_models = match raw_models {
         Some(text) => Some(serde_json::from_str(&text).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                8,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
         })?),
         None => None,
     };
@@ -2664,11 +2681,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
     // traffic would then run unfiltered while the operator believes otherwise.
     let guardrails = match raw_guardrails {
         Some(text) => Some(serde_json::from_str(&text).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                12,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(e))
         })?),
         None => None,
     };
@@ -2707,9 +2720,8 @@ fn row_to_combo(r: &Row<'_>) -> rusqlite::Result<RawCombo> {
 }
 
 fn decode_combo(raw: RawCombo) -> Result<Combo> {
-    let models: Vec<String> = serde_json::from_str(&raw.models).map_err(|e| {
-        Error::Store(format!("combo {} has invalid models JSON: {e}", raw.name))
-    })?;
+    let models: Vec<String> = serde_json::from_str(&raw.models)
+        .map_err(|e| Error::Store(format!("combo {} has invalid models JSON: {e}", raw.name)))?;
     Ok(Combo {
         id: raw.id,
         name: raw.name,
@@ -2843,14 +2855,20 @@ mod window_tests {
 
     #[test]
     fn total_is_all_time() {
-        assert_eq!(window_start(BudgetWindow::Total, ts(2025, 6, 15, 12, 0)), None);
+        assert_eq!(
+            window_start(BudgetWindow::Total, ts(2025, 6, 15, 12, 0)),
+            None
+        );
     }
 
     #[test]
     fn daily_starts_at_utc_midnight() {
         // Sun 2025-06-15 12:34 UTC -> Sun 2025-06-15 00:00 UTC.
         let now = ts(2025, 6, 15, 12, 34);
-        assert_eq!(window_start(BudgetWindow::Daily, now), Some(ts(2025, 6, 15, 0, 0)));
+        assert_eq!(
+            window_start(BudgetWindow::Daily, now),
+            Some(ts(2025, 6, 15, 0, 0))
+        );
         // Exactly midnight belongs to the new day.
         assert_eq!(
             window_start(BudgetWindow::Daily, ts(2025, 6, 16, 0, 0)),
@@ -2891,7 +2909,10 @@ mod window_tests {
     /// (including a 31-day month and a year boundary).
     #[test]
     fn reset_is_the_end_of_the_window() {
-        assert_eq!(window_reset(BudgetWindow::Total, ts(2025, 6, 15, 0, 0)), None);
+        assert_eq!(
+            window_reset(BudgetWindow::Total, ts(2025, 6, 15, 0, 0)),
+            None
+        );
         assert_eq!(
             window_reset(BudgetWindow::Daily, ts(2025, 6, 15, 0, 0)),
             Some(ts(2025, 6, 16, 0, 0))
@@ -2920,7 +2941,10 @@ mod window_tests {
     #[test]
     fn weekly_handles_the_unix_epoch_weekday() {
         // 1970-01-01 was a Thursday, so the week of Mon 1969-12-29 is the epoch's week.
-        assert_eq!(window_start(BudgetWindow::Weekly, 0), Some(ts(1969, 12, 29, 0, 0)));
+        assert_eq!(
+            window_start(BudgetWindow::Weekly, 0),
+            Some(ts(1969, 12, 29, 0, 0))
+        );
         assert_eq!(
             window_start(BudgetWindow::Weekly, ts(1970, 1, 4, 23, 0)),
             Some(ts(1969, 12, 29, 0, 0))
@@ -2960,8 +2984,14 @@ mod window_tests {
     fn daily_and_weekly_roll_over_the_year_end() {
         // Wed 2025-12-31 is the last day of 2025; its day and week start in 2025.
         let now = ts(2025, 12, 31, 18, 0);
-        assert_eq!(window_start(BudgetWindow::Daily, now), Some(ts(2025, 12, 31, 0, 0)));
-        assert_eq!(window_start(BudgetWindow::Weekly, now), Some(ts(2025, 12, 29, 0, 0)));
+        assert_eq!(
+            window_start(BudgetWindow::Daily, now),
+            Some(ts(2025, 12, 31, 0, 0))
+        );
+        assert_eq!(
+            window_start(BudgetWindow::Weekly, now),
+            Some(ts(2025, 12, 29, 0, 0))
+        );
         // The next day crosses into 2026 without a gap.
         assert_eq!(
             window_start(BudgetWindow::Daily, ts(2026, 1, 1, 0, 0)),

@@ -48,7 +48,11 @@ enum MockReply {
     /// Audio: raw bytes with an explicit content type.
     Bytes(u16, &'static str, &'static [u8]),
     /// Arbitrary bytes in chunks, each optionally gated: proves no whole-body buffering.
-    Chunks(u16, &'static str, Vec<(Vec<u8>, Option<Arc<tokio::sync::Notify>>)>),
+    Chunks(
+        u16,
+        &'static str,
+        Vec<(Vec<u8>, Option<Arc<tokio::sync::Notify>>)>,
+    ),
     /// SSE chunks written one at a time; each may wait for a gate before it is flushed.
     Sse(Vec<SseStep>),
 }
@@ -62,7 +66,9 @@ struct SseStep {
 
 impl Mock {
     async fn start(plan: Vec<MockReply>) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
         let addr = listener.local_addr().expect("addr");
         let mock = Mock {
             inner: Arc::new(MockInner {
@@ -103,11 +109,23 @@ impl Mock {
     }
 
     fn seen(&self) -> Vec<Value> {
-        self.inner.seen.lock().expect("seen").iter().map(|(_, b)| b.clone()).collect()
+        self.inner
+            .seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .map(|(_, b)| b.clone())
+            .collect()
     }
 
     fn paths(&self) -> Vec<String> {
-        self.inner.seen.lock().expect("seen").iter().map(|(p, _)| p.clone()).collect()
+        self.inner
+            .seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect()
     }
 
     /// Every request as it reached the mock: path, `content-type`, raw bytes.
@@ -357,7 +375,12 @@ impl Harness {
         self.post_with(uri, body, &[]).await
     }
 
-    async fn post_with(&self, uri: &str, body: Value, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+    async fn post_with(
+        &self,
+        uri: &str,
+        body: Value,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
         let (status, _, value) = self.post_headers(uri, body, headers).await;
         (status, value)
     }
@@ -376,7 +399,8 @@ impl Harness {
         for (k, v) in headers {
             builder = builder.header(*k, *v);
         }
-        self.call_full(builder.body(Body::from(body.to_string())).expect("request")).await
+        self.call_full(builder.body(Body::from(body.to_string())).expect("request"))
+            .await
     }
 
     /// Wait for the usage row written for `request_id` (recorded off the response path).
@@ -419,7 +443,11 @@ impl Harness {
                     .expect("request"),
             )
             .await;
-        assert_eq!(status, StatusCode::OK, "patch {body}: {value} (headers {headers:?})");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "patch {body}: {value} (headers {headers:?})"
+        );
         value
     }
 
@@ -449,7 +477,11 @@ impl Harness {
         let status = res.status();
         let headers = res.headers().clone();
         let bytes = res.into_body().collect().await.expect("body").to_bytes();
-        (status, headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        (
+            status,
+            headers,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     /// `GET` a non-JSON endpoint (`/metrics`) and keep status, headers and text.
@@ -469,7 +501,11 @@ impl Harness {
         let status = res.status();
         let headers = res.headers().clone();
         let bytes = res.into_body().collect().await.expect("body").to_bytes();
-        (status, headers, String::from_utf8_lossy(&bytes).into_owned())
+        (
+            status,
+            headers,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
     }
 
     /// One OpenAI chat request, optionally authorized with a key.
@@ -562,7 +598,9 @@ async fn openai_non_streaming_round_trip() {
     let h = harness(false);
     h.connect("openai", &mock).await;
 
-    let (status, body) = h.post("/v1/chat/completions", openai_chat_body("gpt-4.1")).await;
+    let (status, body) = h
+        .post("/v1/chat/completions", openai_chat_body("gpt-4.1"))
+        .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["choices"][0]["message"]["content"], "hello there");
     assert_eq!(body["object"], "chat.completion");
@@ -611,12 +649,27 @@ async fn chat_client_to_a_stream_only_responses_provider_is_translated_and_reass
     assert_eq!(mock.hits(), 1);
     assert_eq!(mock.paths()[0], "/backend-api/codex/responses");
     let sent = &mock.seen()[0];
-    assert!(sent.get("messages").is_none(), "chat body reached a Responses endpoint: {sent}");
-    assert!(sent["input"].is_array(), "input must be the translated list: {sent}");
-    assert_eq!(sent["store"], false, "codex rejects stored responses: {sent}");
-    assert_eq!(sent["stream"], true, "codex rejects non-streaming requests: {sent}");
+    assert!(
+        sent.get("messages").is_none(),
+        "chat body reached a Responses endpoint: {sent}"
+    );
+    assert!(
+        sent["input"].is_array(),
+        "input must be the translated list: {sent}"
+    );
+    assert_eq!(
+        sent["store"], false,
+        "codex rejects stored responses: {sent}"
+    );
+    assert_eq!(
+        sent["stream"], true,
+        "codex rejects non-streaming requests: {sent}"
+    );
     assert_eq!(sent["model"], "gpt-5.6-luna");
-    assert!(sent.get("temperature").is_none(), "codex rejects temperature: {sent}");
+    assert!(
+        sent.get("temperature").is_none(),
+        "codex rejects temperature: {sent}"
+    );
     assert!(sent.get("top_p").is_none(), "codex rejects top_p: {sent}");
 }
 
@@ -660,13 +713,22 @@ async fn anthropic_cache_markers_survive_the_gateway() {
     assert_eq!(status, StatusCode::OK, "{out}");
 
     let sent = &mock.seen()[0];
-    assert_eq!(sent["cache_control"], body["cache_control"], "top-level breakpoint lost");
-    assert_eq!(sent["system"][0]["cache_control"]["type"], "ephemeral", "system breakpoint lost");
+    assert_eq!(
+        sent["cache_control"], body["cache_control"],
+        "top-level breakpoint lost"
+    );
+    assert_eq!(
+        sent["system"][0]["cache_control"]["type"], "ephemeral",
+        "system breakpoint lost"
+    );
     assert_eq!(
         sent["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral",
         "message breakpoint lost"
     );
-    assert_eq!(sent["tools"][0]["cache_control"]["type"], "ephemeral", "tool breakpoint lost");
+    assert_eq!(
+        sent["tools"][0]["cache_control"]["type"], "ephemeral",
+        "tool breakpoint lost"
+    );
     // Routing still rewrites the model id.
     assert_eq!(sent["model"], "haiku");
 }
@@ -768,9 +830,18 @@ async fn streaming_flushes_before_upstream_finishes() {
     );
     let done = "data: [DONE]\n\n".to_string();
     let mock = Mock::start(vec![MockReply::Sse(vec![
-        SseStep { wire: chunk_a, await_gate: None },
-        SseStep { wire: chunk_b, await_gate: Some(gate.clone()) },
-        SseStep { wire: done, await_gate: None },
+        SseStep {
+            wire: chunk_a,
+            await_gate: None,
+        },
+        SseStep {
+            wire: chunk_b,
+            await_gate: Some(gate.clone()),
+        },
+        SseStep {
+            wire: done,
+            await_gate: None,
+        },
     ])])
     .await;
     let h = harness(false);
@@ -791,11 +862,14 @@ async fn streaming_flushes_before_upstream_finishes() {
     assert_eq!(res.headers()["x-accel-buffering"], "no");
 
     let mut stream = res.into_body().into_data_stream();
-    let first = tokio::time::timeout(Duration::from_secs(5), futures_util::StreamExt::next(&mut stream))
-        .await
-        .expect("first frame before upstream finished")
-        .expect("frame")
-        .expect("bytes");
+    let first = tokio::time::timeout(
+        Duration::from_secs(5),
+        futures_util::StreamExt::next(&mut stream),
+    )
+    .await
+    .expect("first frame before upstream finished")
+    .expect("frame")
+    .expect("bytes");
     let first = String::from_utf8_lossy(&first).to_string();
     assert!(first.contains("\"A\""), "first frame: {first}");
 
@@ -864,7 +938,10 @@ async fn tool_call_round_trip_through_messages() {
     let seen = mock.seen();
     let upstream = seen[0].to_string();
     assert!(upstream.contains("toolu_in"), "upstream body: {upstream}");
-    assert!(upstream.contains("get_weather"), "upstream body: {upstream}");
+    assert!(
+        upstream.contains("get_weather"),
+        "upstream body: {upstream}"
+    );
     assert!(seen[0]["tools"].as_array().is_some_and(|t| t.len() == 1));
 }
 
@@ -874,7 +951,9 @@ async fn require_api_key_rejects_then_accepts() {
     let h = harness(true);
     h.connect("openai", &mock).await;
 
-    let (status, body) = h.post("/v1/chat/completions", openai_chat_body("gpt-4.1")).await;
+    let (status, body) = h
+        .post("/v1/chat/completions", openai_chat_body("gpt-4.1"))
+        .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"]["type"], "authentication_error");
     assert_eq!(body["error"]["code"], "invalid_api_key");
@@ -907,7 +986,9 @@ async fn fallback_to_second_candidate() {
     h.connect("openai", &mock).await;
     h.connect("openai", &mock).await;
 
-    let (status, body) = h.post("/v1/chat/completions", openai_chat_body("gpt-4.1")).await;
+    let (status, body) = h
+        .post("/v1/chat/completions", openai_chat_body("gpt-4.1"))
+        .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["choices"][0]["message"]["content"], "from backup");
     assert_eq!(mock.hits(), 2, "first attempt 503, second attempt served");
@@ -946,7 +1027,9 @@ async fn fallback_records_every_attempt_under_one_request_id() {
         let (code, value) = h.get(&format!("/api/usage/{request_id}")).await;
         if code == StatusCode::OK
             && value["data"]["request"]["request_id"] == request_id.as_str()
-            && value["data"]["attempts"].as_array().is_some_and(|a| a.len() == 2)
+            && value["data"]["attempts"]
+                .as_array()
+                .is_some_and(|a| a.len() == 2)
         {
             detail = value;
             break;
@@ -954,17 +1037,35 @@ async fn fallback_records_every_attempt_under_one_request_id() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let data = &detail["data"];
-    assert_eq!(data["request"]["request_id"], request_id.as_str(), "{detail}");
+    assert_eq!(
+        data["request"]["request_id"],
+        request_id.as_str(),
+        "{detail}"
+    );
     assert_eq!(data["request"]["status"], 200, "{detail}");
-    assert_eq!(data["request"]["key_id"], Value::Null, "anonymous request: {detail}");
+    assert_eq!(
+        data["request"]["key_id"],
+        Value::Null,
+        "anonymous request: {detail}"
+    );
 
     let attempts = data["attempts"].as_array().expect("attempts array");
-    assert_eq!(attempts.len(), 2, "one row per send, retries included: {detail}");
+    assert_eq!(
+        attempts.len(),
+        2,
+        "one row per send, retries included: {detail}"
+    );
     assert_eq!(attempts[0]["attempt"], 1, "1-based in dispatch order");
     assert_eq!(attempts[0]["provider"], "openai");
-    assert_eq!(attempts[0]["status"], 503, "the failing attempt keeps its status");
+    assert_eq!(
+        attempts[0]["status"], 503,
+        "the failing attempt keeps its status"
+    );
     assert!(
-        attempts[0]["error"].as_str().unwrap_or_default().contains("503"),
+        attempts[0]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("503"),
         "the client-visible message is stored: {detail}"
     );
     assert_eq!(attempts[0]["key_id"], Value::Null);
@@ -985,7 +1086,9 @@ async fn fallback_records_every_attempt_under_one_request_id() {
     assert_eq!(row["model"], "gpt-4.1");
 
     // An id nobody has seen is a 404, not an empty view.
-    let (code, _) = h.get("/api/usage/00000000-0000-4000-8000-000000000000").await;
+    let (code, _) = h
+        .get("/api/usage/00000000-0000-4000-8000-000000000000")
+        .await;
     assert_eq!(code, StatusCode::NOT_FOUND);
 
     // The static admin routes still win over the new `{request_id}` parameter.
@@ -1025,7 +1128,10 @@ async fn metrics_expose_requests_attempts_and_latency() {
         "prometheus text format: {content_type}"
     );
 
-    assert!(text.contains("# TYPE rrouter_requests_total counter"), "{text}");
+    assert!(
+        text.contains("# TYPE rrouter_requests_total counter"),
+        "{text}"
+    );
     assert!(
         metric_value(
             &text,
@@ -1034,21 +1140,35 @@ async fn metrics_expose_requests_attempts_and_latency() {
         "the finished request is counted: {text}"
     );
     assert!(
-        metric_value(&text, r#"rrouter_attempts_total{provider="openai",status="503"}"#) >= 1,
+        metric_value(
+            &text,
+            r#"rrouter_attempts_total{provider="openai",status="503"}"#
+        ) >= 1,
         "the fallback attempt is counted: {text}"
     );
     assert!(
-        metric_value(&text, r#"rrouter_attempts_total{provider="openai",status="200"}"#) >= 1,
+        metric_value(
+            &text,
+            r#"rrouter_attempts_total{provider="openai",status="200"}"#
+        ) >= 1,
         "{text}"
     );
     assert!(
-        metric_value(&text, r#"rrouter_request_duration_seconds_bucket{le="+Inf"}"#) >= 1,
+        metric_value(
+            &text,
+            r#"rrouter_request_duration_seconds_bucket{le="+Inf"}"#
+        ) >= 1,
         "latency histogram is filled: {text}"
     );
-    assert!(text.contains("rrouter_request_duration_seconds_count"), "{text}");
+    assert!(
+        text.contains("rrouter_request_duration_seconds_count"),
+        "{text}"
+    );
     // Every connection the store knows about is exposed, closed or not.
     let (_, connections) = h.get("/api/connections").await;
-    let id = connections["data"][0]["id"].as_str().expect("connection id");
+    let id = connections["data"][0]["id"]
+        .as_str()
+        .expect("connection id");
     assert!(
         text.contains(&format!(r#"rrouter_breaker_open{{connection="{id}"}} 0"#)),
         "known connections are gauges: {text}"
@@ -1096,8 +1216,14 @@ async fn error_and_stream_responses_carry_the_request_id() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers.get("content-type").and_then(|v| v.to_str().ok()), Some("text/event-stream"));
-    assert!(headers.get("x-request-id").is_some(), "streams carry the id too");
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("text/event-stream")
+    );
+    assert!(
+        headers.get("x-request-id").is_some(),
+        "streams carry the id too"
+    );
 }
 
 #[tokio::test]
@@ -1109,8 +1235,14 @@ async fn connections_never_leak_tokens() {
     let (status, body) = h.get("/api/connections").await;
     assert_eq!(status, StatusCode::OK);
     let raw = body.to_string();
-    assert!(!raw.contains("SECRET-ACCESS-TOKEN"), "leaked access token: {raw}");
-    assert!(!raw.contains("SECRET-REFRESH-TOKEN"), "leaked refresh token: {raw}");
+    assert!(
+        !raw.contains("SECRET-ACCESS-TOKEN"),
+        "leaked access token: {raw}"
+    );
+    assert!(
+        !raw.contains("SECRET-REFRESH-TOKEN"),
+        "leaked refresh token: {raw}"
+    );
     assert!(!raw.contains("test-key"), "leaked api key: {raw}");
     let first = &body["data"][0];
     assert_eq!(first["has_access_token"], true);
@@ -1129,7 +1261,14 @@ async fn ui_panels_lists_builtins_and_extensions() {
         .iter()
         .filter_map(|p| p["id"].as_str())
         .collect();
-    for builtin in ["connections", "keys", "aliases", "combos", "usage", "status"] {
+    for builtin in [
+        "connections",
+        "keys",
+        "aliases",
+        "combos",
+        "usage",
+        "status",
+    ] {
         assert!(ids.contains(&builtin), "missing builtin {builtin}: {ids:?}");
     }
 
@@ -1183,7 +1322,12 @@ async fn ext_static_rejects_traversal() {
         let router = router.clone();
         async move {
             let res = router
-                .oneshot(Request::builder().uri(uri).body(Body::empty()).expect("request"))
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
                 .await
                 .expect("oneshot");
             res.status()
@@ -1193,7 +1337,10 @@ async fn ext_static_rejects_traversal() {
     assert_eq!(fetch("/ext/js/panel.js").await, StatusCode::OK);
     assert_eq!(fetch("/ext/../Cargo.toml").await, StatusCode::NOT_FOUND);
     assert_eq!(fetch("/ext/%2e%2e/Cargo.toml").await, StatusCode::NOT_FOUND);
-    assert_eq!(fetch("/ext/js/../../Cargo.toml").await, StatusCode::NOT_FOUND);
+    assert_eq!(
+        fetch("/ext/js/../../Cargo.toml").await,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -1207,7 +1354,10 @@ async fn admin_api_never_reports_paths_or_keys() {
     let raw = body.to_string();
     assert!(!raw.contains(&plaintext), "system leaked a key: {raw}");
     assert!(!raw.contains("data_dir"), "system leaked a path: {raw}");
-    assert!(!raw.contains("master_key\":\"file"), "system leaked key source as a value");
+    assert!(
+        !raw.contains("master_key\":\"file"),
+        "system leaked key source as a value"
+    );
     assert_eq!(body["counts"]["api_keys"], 1);
     assert_eq!(body["require_api_key"], false);
 }
@@ -1222,20 +1372,31 @@ async fn unsupported_and_error_shapes() {
     h.connect("groq", &mock).await;
 
     let (status, body) = h
-        .post("/v1/messages/count_tokens", json!({"model": "openai/gpt-4.1"}))
+        .post(
+            "/v1/messages/count_tokens",
+            json!({"model": "openai/gpt-4.1"}),
+        )
         .await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
     assert_eq!(body["type"], "error", "anthropic envelope: {body}");
-    assert!(body["error"]["message"].as_str().is_some_and(|m| m.contains("not supported")));
+    assert!(body["error"]["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("not supported")));
 
     // groq has neither endpoint; openai has a Responses URL, so it would forward.
-    let (status, body) = h.post("/v1/responses/compact", json!({"model": "groq/llama-3.3-70b"})).await;
+    let (status, body) = h
+        .post(
+            "/v1/responses/compact",
+            json!({"model": "groq/llama-3.3-70b"}),
+        )
+        .await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
     assert!(body.get("type").is_none(), "openai shape: {body}");
-    assert!(body["error"]["message"].as_str().is_some_and(|m| m.contains("not supported")));
+    assert!(body["error"]["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("not supported")));
     assert_eq!(mock.hits(), 0, "nothing is sent upstream");
 }
-
 
 // ---- OAuth sign-in endpoints -------------------------------------------------------
 
@@ -1256,7 +1417,10 @@ async fn oauth_start_rejects_an_unknown_provider() {
     let h = harness(false);
     let (status, body) = h.post("/api/oauth/notreal/start", Value::Null).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    assert!(body["error"]["message"].as_str().unwrap_or("").contains("unknown provider"));
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or("")
+        .contains("unknown provider"));
 }
 
 #[tokio::test]
@@ -1264,17 +1428,25 @@ async fn oauth_start_rejects_a_provider_without_a_login_flow() {
     let h = harness(false);
     let (status, body) = h.post("/api/oauth/openai/start", Value::Null).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body["error"]["message"].as_str().unwrap_or("").contains("no OAuth sign-in"));
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or("")
+        .contains("no OAuth sign-in"));
 }
 
 #[tokio::test]
 async fn oauth_complete_requires_an_id_and_rejects_unknown_ids() {
     let h = harness(false);
-    let (status, body) = h.post("/api/oauth/github/complete", serde_json::json!({})).await;
+    let (status, body) = h
+        .post("/api/oauth/github/complete", serde_json::json!({}))
+        .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
     let (status, body) = h
-        .post("/api/oauth/github/complete", serde_json::json!({"id": "does-not-exist"}))
+        .post(
+            "/api/oauth/github/complete",
+            serde_json::json!({"id": "does-not-exist"}),
+        )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
@@ -1324,7 +1496,10 @@ async fn count_tokens_is_forwarded_to_anthropic() {
     assert_eq!(body["input_tokens"], 42);
     assert_eq!(mock.paths(), vec!["/v1/messages/count_tokens"]);
     let seen = mock.seen();
-    assert_eq!(seen[0]["model"], "sonnet-4-5", "the provider gets the bare id");
+    assert_eq!(
+        seen[0]["model"], "sonnet-4-5",
+        "the provider gets the bare id"
+    );
     assert_eq!(seen[0]["messages"][0]["content"], "hello");
 }
 
@@ -1366,7 +1541,10 @@ async fn count_tokens_on_a_provider_without_the_endpoint_is_501() {
         .await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "body: {body}");
     assert_eq!(mock.hits(), 0, "nothing is sent upstream");
-    assert!(body["error"]["message"].as_str().unwrap_or_default().contains("count_tokens"));
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("count_tokens"));
 }
 
 /// Time to first output is measured at the first content event, not at the response
@@ -1405,7 +1583,15 @@ async fn streaming_records_time_to_first_output() {
 
     let mut row = None;
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(&UsageQuery { limit: 5, ..Default::default() }).await {
+        if let Ok(rows) = h
+            .state
+            .store
+            .recent_usage(&UsageQuery {
+                limit: 5,
+                ..Default::default()
+            })
+            .await
+        {
             if let Some(first) = rows.first() {
                 row = Some(first.clone());
                 break;
@@ -1415,11 +1601,28 @@ async fn streaming_records_time_to_first_output() {
     }
     let row = row.expect("usage row recorded");
     assert!(row.streamed);
-    assert!(row.ttft_ms >= 40, "ttft {} should include the upstream pause", row.ttft_ms);
-    assert!(row.ttft_ms <= row.latency_ms, "ttft {} > latency {}", row.ttft_ms, row.latency_ms);
+    assert!(
+        row.ttft_ms >= 40,
+        "ttft {} should include the upstream pause",
+        row.ttft_ms
+    );
+    assert!(
+        row.ttft_ms <= row.latency_ms,
+        "ttft {} > latency {}",
+        row.ttft_ms,
+        row.latency_ms
+    );
     // A streamed request is joinable to its attempt log by the same id.
-    let request_id = row.request_id.expect("streamed usage rows carry the request id");
-    assert!(h.state.store.usage_by_request(request_id).await.expect("lookup").is_some());
+    let request_id = row
+        .request_id
+        .expect("streamed usage rows carry the request id");
+    assert!(h
+        .state
+        .store
+        .usage_by_request(request_id)
+        .await
+        .expect("lookup")
+        .is_some());
 }
 
 // ------------------------------------------------------ virtual-key governance
@@ -1478,7 +1681,8 @@ async fn allowed_models_allows_exact_ref_and_glob_and_rejects_others() {
     h.connect("openai", &mock).await;
     let (key, id) = h.create_key().await;
 
-    h.patch_key(&id, json!({"allowed_models": ["openai/gpt-4.1"]})).await;
+    h.patch_key(&id, json!({"allowed_models": ["openai/gpt-4.1"]}))
+        .await;
     let (status, _, body) = h.chat(Some(&key), "openai/gpt-4.1").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["choices"][0]["message"]["content"], "one");
@@ -1489,7 +1693,8 @@ async fn allowed_models_allows_exact_ref_and_glob_and_rejects_others() {
     assert_eq!(mock.hits(), 1, "a refused model must not be dispatched");
 
     // The glob form covers the whole provider.
-    h.patch_key(&id, json!({"allowed_models": ["openai/*"]})).await;
+    h.patch_key(&id, json!({"allowed_models": ["openai/*"]}))
+        .await;
     let (status, _, body) = h.chat(Some(&key), "openai/gpt-4o").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["choices"][0]["message"]["content"], "two");
@@ -1606,7 +1811,15 @@ async fn usage_rows_carry_the_key_id() {
 
     let mut row = None;
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(&UsageQuery { limit: 5, ..Default::default() }).await {
+        if let Ok(rows) = h
+            .state
+            .store
+            .recent_usage(&UsageQuery {
+                limit: 5,
+                ..Default::default()
+            })
+            .await
+        {
             if let Some(found) = rows.iter().find(|r| r.key_id == Some(uuid)) {
                 row = Some(found.clone());
                 break;
@@ -1622,7 +1835,10 @@ async fn usage_rows_carry_the_key_id() {
     let (status, body) = h.get("/api/usage").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"][0]["key_id"], id.as_str());
-    assert_eq!(body["data"][0]["request_id"], row.request_id.expect("id").to_string().as_str());
+    assert_eq!(
+        body["data"][0]["request_id"],
+        row.request_id.expect("id").to_string().as_str()
+    );
 
     // The attempts of that request are attributed to the same key, so a per-key log can
     // show what the key's fallbacks cost.
@@ -1630,13 +1846,21 @@ async fn usage_rows_carry_the_key_id() {
     let mut attempts = Value::Null;
     for _ in 0..100 {
         let (code, value) = h.get(&format!("/api/usage/{request_id}")).await;
-        if code == StatusCode::OK && value["data"]["attempts"].as_array().is_some_and(|a| !a.is_empty()) {
+        if code == StatusCode::OK
+            && value["data"]["attempts"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        {
             attempts = value["data"]["attempts"].clone();
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(attempts[0]["key_id"], id.as_str(), "attempt rows carry the key: {attempts}");
+    assert_eq!(
+        attempts[0]["key_id"],
+        id.as_str(),
+        "attempt rows carry the key: {attempts}"
+    );
     assert_eq!(attempts[0]["status"], 200, "{attempts}");
 }
 
@@ -1673,7 +1897,10 @@ async fn key_rows_match_the_governance_contract() {
     assert_eq!(status, StatusCode::OK);
     let created = body["data"][0].clone();
     assert_eq!(created["is_active"], true);
-    assert_eq!(created["scope"], "inference", "a new key may spend, not administer");
+    assert_eq!(
+        created["scope"], "inference",
+        "a new key may spend, not administer"
+    );
     assert_eq!(created["rpm"], 0);
     assert_eq!(created["tpm"], 0);
     assert_eq!(created["budget_tokens"], 0);
@@ -1726,7 +1953,10 @@ async fn key_rows_match_the_governance_contract() {
         "scan_output": true,
     });
     let patched = h.patch_key(&id, json!({"guardrails": policy})).await;
-    assert_eq!(patched["guardrails"], policy, "the stored policy is returned");
+    assert_eq!(
+        patched["guardrails"], policy,
+        "the stored policy is returned"
+    );
     let (_, body) = h.get("/api/keys").await;
     assert_eq!(
         body["data"][0]["guardrails"], policy,
@@ -1734,17 +1964,26 @@ async fn key_rows_match_the_governance_contract() {
     );
     let cleared = h.patch_key(&id, json!({"guardrails": null})).await;
     assert_eq!(cleared["guardrails"], Value::Null);
-    assert_eq!(cleared["rpm"], 60, "clearing the policy left the rest alone");
+    assert_eq!(
+        cleared["rpm"], 60,
+        "clearing the policy left the rest alone"
+    );
 
     // A policy the gateway cannot enforce is a client error, not a silent no-op: a
     // misspelled field and a term list past the cap are both refused.
     for (body, expected) in [
-        (json!({"guardrails": {"blocked_terms": ["x"]}}), "unknown field"),
+        (
+            json!({"guardrails": {"blocked_terms": ["x"]}}),
+            "unknown field",
+        ),
         (
             json!({"guardrails": {"blocked": vec!["x"; 201]}}),
             "at most 200 terms",
         ),
-        (json!({"guardrails": {"blocked": [""]}}), "must not be empty"),
+        (
+            json!({"guardrails": {"blocked": [""]}}),
+            "must not be empty",
+        ),
     ] {
         let (status, _, value) = h
             .call_full(
@@ -1795,7 +2034,8 @@ async fn guardrails_refuse_an_oversized_prompt_naming_both_counts() {
     let h = harness(false);
     h.connect("openai", &mock).await;
     let (key, id) = h.create_key().await;
-    h.patch_key(&id, json!({"guardrails": {"max_prompt_chars": 10}})).await;
+    h.patch_key(&id, json!({"guardrails": {"max_prompt_chars": 10}}))
+        .await;
 
     let long = "x".repeat(40);
     let (status, _, body) = h
@@ -1840,12 +2080,11 @@ async fn guardrails_block_a_term_case_insensitively_and_pass_clean_prompts() {
     h.connect("openai", &mock).await;
     h.connect("claude", &mock).await;
     let (key, id) = h.create_key().await;
-    h.patch_key(&id, json!({"guardrails": {"blocked": ["Secret"]}})).await;
+    h.patch_key(&id, json!({"guardrails": {"blocked": ["Secret"]}}))
+        .await;
     let auth = format!("Bearer {key}");
 
-    let blocked = |messages: Value| {
-        json!({"model": "gpt-4.1", "messages": messages})
-    };
+    let blocked = |messages: Value| json!({"model": "gpt-4.1", "messages": messages});
     // The policy's spelling is `Secret`; the prompt says SECRET.
     let (status, _, body) = h
         .post_headers(
@@ -1930,7 +2169,11 @@ async fn guardrails_refuse_a_non_streaming_response_that_leaks_a_term() {
         !body.to_string().contains("sk-live-9-abc"),
         "the offending text was never returned: {body}"
     );
-    assert_eq!(mock.hits(), 1, "the upstream did answer; the client did not");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the upstream did answer; the client did not"
+    );
 
     let request_id: uuid::Uuid = headers
         .get("x-request-id")
@@ -1945,7 +2188,10 @@ async fn guardrails_refuse_a_non_streaming_response_that_leaks_a_term() {
         row.error.as_deref().is_some_and(|e| e.contains("sk-live")),
         "the row names the term for the operator: {row:?}"
     );
-    assert_eq!(row.key_id.map(|k| k.to_string()).as_deref(), Some(id.as_str()));
+    assert_eq!(
+        row.key_id.map(|k| k.to_string()).as_deref(),
+        Some(id.as_str())
+    );
 
     let (_, _, text) = h.get_raw("/metrics").await;
     assert!(
@@ -1984,7 +2230,11 @@ async fn guardrails_refuse_a_response_served_from_the_cache() {
         !body.to_string().contains("sk-live-9-abc"),
         "the cached body was not served: {body}"
     );
-    assert_eq!(mock.hits(), 1, "the refusal came from the cache, not a retry");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the refusal came from the cache, not a retry"
+    );
 }
 
 /// A streaming response is stopped at the delta that carries the term: the client keeps
@@ -1998,10 +2248,22 @@ async fn guardrails_stop_a_stream_at_the_first_blocked_delta() {
         )
     };
     let mock = Mock::start(vec![MockReply::Sse(vec![
-        SseStep { wire: delta("clean text ", json!(null)), await_gate: None },
-        SseStep { wire: delta("leaked SECRET here", json!(null)), await_gate: None },
-        SseStep { wire: delta("AFTER THE HIT", json!("stop")), await_gate: None },
-        SseStep { wire: "data: [DONE]\n\n".to_string(), await_gate: None },
+        SseStep {
+            wire: delta("clean text ", json!(null)),
+            await_gate: None,
+        },
+        SseStep {
+            wire: delta("leaked SECRET here", json!(null)),
+            await_gate: None,
+        },
+        SseStep {
+            wire: delta("AFTER THE HIT", json!("stop")),
+            await_gate: None,
+        },
+        SseStep {
+            wire: "data: [DONE]\n\n".to_string(),
+            await_gate: None,
+        },
     ])])
     .await;
     let h = harness(false);
@@ -2029,7 +2291,11 @@ async fn guardrails_stop_a_stream_at_the_first_blocked_delta() {
         )
         .await
         .expect("oneshot");
-    assert_eq!(res.status(), StatusCode::OK, "the refusal arrives as a frame");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the refusal arrives as a frame"
+    );
     let request_id: uuid::Uuid = res
         .headers()
         .get("x-request-id")
@@ -2041,16 +2307,27 @@ async fn guardrails_stop_a_stream_at_the_first_blocked_delta() {
     let mut stream = res.into_body().into_data_stream();
 
     let mut seen = next_frame(&mut stream).await;
-    assert!(seen.contains("clean text"), "the clean delta was forwarded: {seen}");
+    assert!(
+        seen.contains("clean text"),
+        "the clean delta was forwarded: {seen}"
+    );
     seen.push_str(&next_frame(&mut stream).await);
-    assert!(seen.contains("output_blocked"), "one terminal error frame: {seen}");
-    assert!(!seen.contains("SECRET"), "the offending delta never left: {seen}");
+    assert!(
+        seen.contains("output_blocked"),
+        "one terminal error frame: {seen}"
+    );
+    assert!(
+        !seen.contains("SECRET"),
+        "the offending delta never left: {seen}"
+    );
 
     // Nothing after the hit: the encoder stops and the upstream is dropped.
-    while let Some(Ok(chunk)) =
-        tokio::time::timeout(Duration::from_secs(5), futures_util::StreamExt::next(&mut stream))
-            .await
-            .expect("the stream ends promptly")
+    while let Some(Ok(chunk)) = tokio::time::timeout(
+        Duration::from_secs(5),
+        futures_util::StreamExt::next(&mut stream),
+    )
+    .await
+    .expect("the stream ends promptly")
     {
         let text = String::from_utf8_lossy(&chunk).into_owned();
         assert!(text.is_empty(), "nothing after the refusal: {text}");
@@ -2081,7 +2358,10 @@ async fn a_key_without_guardrails_is_unaffected() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["choices"][0]["message"]["content"], "your secret is 1234");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "your secret is 1234"
+    );
     assert_eq!(mock.hits(), 1);
 }
 
@@ -2122,19 +2402,35 @@ async fn admin_token_gates_the_admin_api() {
     assert_eq!(body["error"]["type"], "authentication_error");
 
     let bearer = format!("Bearer {TEST_ADMIN_TOKEN}");
-    let (status, _, body) = h.call_full(get_with("/api/system", &[("authorization", &bearer)])).await;
-    assert_eq!(status, StatusCode::OK, "Authorization: Bearer must work: {body}");
     let (status, _, body) = h
-        .call_full(get_with("/api/system", &[("x-admin-token", TEST_ADMIN_TOKEN)]))
+        .call_full(get_with("/api/system", &[("authorization", &bearer)]))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Authorization: Bearer must work: {body}"
+    );
+    let (status, _, body) = h
+        .call_full(get_with(
+            "/api/system",
+            &[("x-admin-token", TEST_ADMIN_TOKEN)],
+        ))
         .await;
     assert_eq!(status, StatusCode::OK, "x-admin-token must work: {body}");
 
     // Neither a wrong token nor a model key authorises an admin call.
-    let (status, _, _) = h.call_full(get_with("/api/system", &[("authorization", "Bearer nope")])).await;
+    let (status, _, _) = h
+        .call_full(get_with("/api/system", &[("authorization", "Bearer nope")]))
+        .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let (status, _, _) =
-        h.call_full(get_with("/api/system", &[("x-api-key", TEST_ADMIN_TOKEN)])).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "x-api-key is not the admin channel");
+    let (status, _, _) = h
+        .call_full(get_with("/api/system", &[("x-api-key", TEST_ADMIN_TOKEN)]))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "x-api-key is not the admin channel"
+    );
 
     // The socket address no longer decides anything while a token is configured.
     let res = h
@@ -2143,7 +2439,11 @@ async fn admin_token_gates_the_admin_api() {
         .oneshot(as_peer(get_with("/api/system", &[]), remote_peer()))
         .await
         .expect("oneshot");
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "remote peer without the token");
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "remote peer without the token"
+    );
     let res = h
         .router
         .clone()
@@ -2202,7 +2502,11 @@ async fn an_admin_scoped_key_authorises_the_admin_api() {
             remote_peer(),
         ))
         .await;
-    assert_eq!(status, StatusCode::OK, "an admin key authorises a remote peer: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an admin key authorises a remote peer: {body}"
+    );
 
     // `x-admin-token` is the admin-side spelling of the same credential, and a scraper
     // shares the rule.
@@ -2215,7 +2519,11 @@ async fn an_admin_scoped_key_authorises_the_admin_api() {
         ))
         .await
         .expect("oneshot");
-    assert_eq!(res.status(), StatusCode::OK, "an admin key may scrape metrics");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "an admin key may scrape metrics"
+    );
 
     // A configured token does not lock scoped keys out: both are admin credentials.
     // (With a token set, the API itself needs the token, so the key is prepared in the
@@ -2246,12 +2554,19 @@ async fn an_admin_scoped_key_authorises_the_admin_api() {
         .router
         .clone()
         .oneshot(as_peer(
-            get_with("/api/system", &[("authorization", &format!("Bearer {ops_plain}"))]),
+            get_with(
+                "/api/system",
+                &[("authorization", &format!("Bearer {ops_plain}"))],
+            ),
             remote_peer(),
         ))
         .await
         .expect("oneshot");
-    assert_eq!(res.status(), StatusCode::OK, "next to a token, an admin key still works");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "next to a token, an admin key still works"
+    );
 
     // Only a live key: revoking it takes the authority away with it.
     tokened
@@ -2259,7 +2574,10 @@ async fn an_admin_scoped_key_authorises_the_admin_api() {
         .store
         .update_api_key(
             ops.id,
-            &rrouter_store::ApiKeyPatch { is_active: Some(false), ..Default::default() },
+            &rrouter_store::ApiKeyPatch {
+                is_active: Some(false),
+                ..Default::default()
+            },
         )
         .await
         .expect("disable")
@@ -2268,12 +2586,19 @@ async fn an_admin_scoped_key_authorises_the_admin_api() {
         .router
         .clone()
         .oneshot(as_peer(
-            get_with("/api/system", &[("authorization", &format!("Bearer {ops_plain}"))]),
+            get_with(
+                "/api/system",
+                &[("authorization", &format!("Bearer {ops_plain}"))],
+            ),
             remote_peer(),
         ))
         .await
         .expect("oneshot");
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "a disabled admin key is no credential");
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "a disabled admin key is no credential"
+    );
 }
 
 /// An inference key is not an admin credential: a remote peer is refused with
@@ -2304,15 +2629,13 @@ async fn an_inference_key_cannot_administer() {
     let mut cfg = config(false);
     cfg.admin_token = Some(TEST_ADMIN_TOKEN.into());
     let tokened = harness_with(cfg);
-    let (plain, _) = tokened
-        .state
-        .store
-        .create_api_key(None)
-        .await
-        .expect("key");
+    let (plain, _) = tokened.state.store.create_api_key(None).await.expect("key");
     let (status, _, body) = tokened
         .call_full(as_peer(
-            get_with("/api/system", &[("authorization", &format!("Bearer {plain}"))]),
+            get_with(
+                "/api/system",
+                &[("authorization", &format!("Bearer {plain}"))],
+            ),
             remote_peer(),
         ))
         .await;
@@ -2338,7 +2661,10 @@ async fn an_admin_key_cannot_call_the_proxy() {
     assert!(
         h.state
             .store
-            .recent_usage(&UsageQuery { limit: 10, ..Default::default() })
+            .recent_usage(&UsageQuery {
+                limit: 10,
+                ..Default::default()
+            })
             .await
             .expect("usage")
             .is_empty(),
@@ -2380,7 +2706,10 @@ async fn scope_patch_validates_the_spelling() {
         "names the two scopes: {message}"
     );
     let (_, listed) = h.get("/api/keys").await;
-    assert_eq!(listed["data"][0]["scope"], "inference", "the refusal changed nothing");
+    assert_eq!(
+        listed["data"][0]["scope"], "inference",
+        "the refusal changed nothing"
+    );
 }
 
 /// One streaming chat request; the caller drives (or drops) the body.
@@ -2427,14 +2756,29 @@ async fn concurrency_cap_refuses_a_second_request_while_the_first_streams() {
     };
     let mock = Mock::start(vec![
         MockReply::Sse(vec![
-            SseStep { wire: delta("A", json!(null)), await_gate: None },
-            SseStep { wire: delta("B", json!("stop")), await_gate: Some(first_gate.clone()) },
-            SseStep { wire: "data: [DONE]\n\n".to_string(), await_gate: None },
+            SseStep {
+                wire: delta("A", json!(null)),
+                await_gate: None,
+            },
+            SseStep {
+                wire: delta("B", json!("stop")),
+                await_gate: Some(first_gate.clone()),
+            },
+            SseStep {
+                wire: "data: [DONE]\n\n".to_string(),
+                await_gate: None,
+            },
         ]),
         openai_reply("after the stream"),
         MockReply::Sse(vec![
-            SseStep { wire: delta("C", json!(null)), await_gate: None },
-            SseStep { wire: delta("D", json!("stop")), await_gate: Some(second_gate.clone()) },
+            SseStep {
+                wire: delta("C", json!(null)),
+                await_gate: None,
+            },
+            SseStep {
+                wire: delta("D", json!("stop")),
+                await_gate: Some(second_gate.clone()),
+            },
         ]),
         openai_reply("after the drop"),
     ])
@@ -2458,7 +2802,11 @@ async fn concurrency_cap_refuses_a_second_request_while_the_first_streams() {
     assert_eq!(mock.hits(), 1, "the refused request is never dispatched");
     // The cap is on `/v1/*`, not only on completions.
     let (status, _) = h.get("/v1/models").await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "the catalog read is capped too");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the catalog read is capped too"
+    );
 
     // Ending the stream returns the slot.
     first_gate.notify_one();
@@ -2541,7 +2889,9 @@ async fn embeddings_record_usage_and_relay_malformed_bodies_unchanged() {
     let res = h
         .router
         .clone()
-        .oneshot(request(json!({"model": "openai/text-embedding-3-small", "input": "hello"})))
+        .oneshot(request(
+            json!({"model": "openai/text-embedding-3-small", "input": "hello"}),
+        ))
         .await
         .expect("oneshot");
     assert_eq!(res.status(), StatusCode::OK);
@@ -2551,7 +2901,15 @@ async fn embeddings_record_usage_and_relay_malformed_bodies_unchanged() {
 
     let mut row = None;
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(&UsageQuery { limit: 5, ..Default::default() }).await {
+        if let Ok(rows) = h
+            .state
+            .store
+            .recent_usage(&UsageQuery {
+                limit: 5,
+                ..Default::default()
+            })
+            .await
+        {
             if let Some(found) = rows.iter().find(|r| r.key_id == Some(uuid)) {
                 row = Some(found.clone());
                 break;
@@ -2568,14 +2926,24 @@ async fn embeddings_record_usage_and_relay_malformed_bodies_unchanged() {
     let res = h
         .router
         .clone()
-        .oneshot(request(json!({"model": "openai/text-embedding-3-small", "input": "hello"})))
+        .oneshot(request(
+            json!({"model": "openai/text-embedding-3-small", "input": "hello"}),
+        ))
         .await
         .expect("oneshot");
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = res.into_body().collect().await.expect("body").to_bytes();
     assert_eq!(String::from_utf8_lossy(&bytes), "{\"data\": [not json");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let rows = h.state.store.recent_usage(&UsageQuery { limit: 10, ..Default::default() }).await.expect("usage");
+    let rows = h
+        .state
+        .store
+        .recent_usage(&UsageQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("usage");
     assert_eq!(rows.len(), 1, "the unparseable body adds no row: {rows:?}");
 }
 
@@ -2614,13 +2982,29 @@ async fn passthrough_endpoints_record_usage_only_when_reported() {
 
     let deadline = Instant::now() + Duration::from_secs(1);
     while Instant::now() < deadline
-        && h.state.store.recent_usage(&UsageQuery { limit: 10, ..Default::default() }).await.expect("usage").is_empty()
+        && h.state
+            .store
+            .recent_usage(&UsageQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .expect("usage")
+            .is_empty()
     {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     // Give the (unwritten) count_tokens row a chance to appear before asserting absence.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let rows = h.state.store.recent_usage(&UsageQuery { limit: 10, ..Default::default() }).await.expect("usage");
+    let rows = h
+        .state
+        .store
+        .recent_usage(&UsageQuery {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("usage");
     assert_eq!(rows.len(), 1, "count_tokens reported no usage: {rows:?}");
     assert_eq!(rows[0].endpoint.as_deref(), Some("/v1/responses/compact"));
     assert_eq!(rows[0].input_tokens, 11);
@@ -2724,7 +3108,10 @@ async fn images_passthrough_relays_the_provider_json() {
 
     assert_eq!(mock.paths(), vec!["/v1/images/generations"]);
     let seen = mock.seen();
-    assert_eq!(seen[0]["model"], "gpt-image-1", "the provider gets the bare id");
+    assert_eq!(
+        seen[0]["model"], "gpt-image-1",
+        "the provider gets the bare id"
+    );
     assert_eq!(seen[0]["prompt"], "a cat");
 
     let row = wait_for_usage(&h, uuid, "openai/gpt-image-1").await;
@@ -2764,7 +3151,11 @@ async fn images_fall_back_to_the_next_capable_connection() {
     // The preferred account is tried, its 500 is retried once on the same account,
     // and only then does the next capable one serve the request.
     assert_eq!(failing.hits(), 2, "the preferred account was tried first");
-    assert_eq!(healthy.hits(), 1, "the next capable account served the request");
+    assert_eq!(
+        healthy.hits(),
+        1,
+        "the next capable account served the request"
+    );
 }
 
 /// A provider that does not document an endpoint answers `501` naming it, and is never
@@ -2816,7 +3207,11 @@ async fn endpoints_a_provider_lacks_answer_501_without_a_call() {
         "{body}"
     );
 
-    assert_eq!(mock.hits(), 0, "nothing is sent to a provider without the endpoint");
+    assert_eq!(
+        mock.hits(),
+        0,
+        "nothing is sent to a provider without the endpoint"
+    );
 }
 
 /// Speech synthesis streams the clip back with the provider's own content type.
@@ -2940,7 +3335,10 @@ async fn transcription_relays_the_multipart_body_and_the_json_reply() {
     let wire = mock.wire();
     assert_eq!(wire.len(), 1);
     assert_eq!(wire[0].0, "/v1/audio/transcriptions");
-    assert_eq!(wire[0].1, content_type, "the boundary reaches the provider intact");
+    assert_eq!(
+        wire[0].1, content_type,
+        "the boundary reaches the provider intact"
+    );
     assert_eq!(wire[0].2, body, "the form is forwarded byte for byte");
 }
 
@@ -3102,17 +3500,26 @@ async fn key_model_mapping_rewrites_the_routed_model() {
     assert_eq!(status, StatusCode::OK, "{body}");
 
     let (status, body) = h
-        .post_with("/v1/messages", anthropic_body("default"), &[("x-api-key", &key)])
+        .post_with(
+            "/v1/messages",
+            anthropic_body("default"),
+            &[("x-api-key", &key)],
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        mock.seen()[0]["model"], "claude-haiku-4-5-20251001",
+        mock.seen()[0]["model"],
+        "claude-haiku-4-5-20251001",
         "the mapped target is what the provider receives"
     );
 
     // An unmapped model passes through unchanged.
     let (status, body) = h
-        .post_with("/v1/messages", anthropic_body("claude/sonnet-4-5"), &[("x-api-key", &key)])
+        .post_with(
+            "/v1/messages",
+            anthropic_body("claude/sonnet-4-5"),
+            &[("x-api-key", &key)],
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(mock.seen()[1]["model"], "sonnet-4-5");
@@ -3129,7 +3536,9 @@ async fn key_model_mapping_rewrites_the_routed_model() {
     assert_eq!(mock.seen()[2]["model"], "claude-haiku-4-5-20251001");
 
     // The same model name from a key without the mapping is not rewritten.
-    let (status, body) = h.post("/v1/messages", anthropic_body("claude/sonnet-4-5")).await;
+    let (status, body) = h
+        .post("/v1/messages", anthropic_body("claude/sonnet-4-5"))
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(mock.seen()[3]["model"], "sonnet-4-5");
 }
@@ -3142,10 +3551,22 @@ async fn key_model_endpoint_validates_and_replaces_atomically() {
     let (_, id) = h.create_key().await;
 
     for (body, why) in [
-        (json!({"models": [{"from": "", "to": "claude/x"}]}), "empty from"),
-        (json!({"models": [{"from": "a", "to": "gpt-5"}]}), "to without a provider"),
-        (json!({"models": [{"from": "a", "to": "not-a-provider/m"}]}), "unregistered provider"),
-        (json!({"models": [{"from": "a", "to": "claude/"}]}), "empty model id"),
+        (
+            json!({"models": [{"from": "", "to": "claude/x"}]}),
+            "empty from",
+        ),
+        (
+            json!({"models": [{"from": "a", "to": "gpt-5"}]}),
+            "to without a provider",
+        ),
+        (
+            json!({"models": [{"from": "a", "to": "not-a-provider/m"}]}),
+            "unregistered provider",
+        ),
+        (
+            json!({"models": [{"from": "a", "to": "claude/"}]}),
+            "empty model id",
+        ),
         (
             json!({"models": [
                 {"from": "a", "to": "claude/x"},
@@ -3161,7 +3582,11 @@ async fn key_model_endpoint_validates_and_replaces_atomically() {
     // Nothing was written by any of the rejected requests.
     let (status, value) = h.get(&format!("/api/keys/{id}/models")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(value["data"], json!([]), "a rejected PUT must not partially apply");
+    assert_eq!(
+        value["data"],
+        json!([]),
+        "a rejected PUT must not partially apply"
+    );
 
     let (status, value) = h
         .put_models(
@@ -3195,11 +3620,17 @@ async fn key_model_endpoint_validates_and_replaces_atomically() {
 
     // A second PUT replaces rather than merges; an empty list clears.
     let (status, _) = h
-        .put_models(&id, json!({"models": [{"from": "only", "to": "openai/gpt-5"}]}))
+        .put_models(
+            &id,
+            json!({"models": [{"from": "only", "to": "openai/gpt-5"}]}),
+        )
         .await;
     assert_eq!(status, StatusCode::OK);
     let (_, value) = h.get(&format!("/api/keys/{id}/models")).await;
-    assert_eq!(value["data"], json!([{"from": "only", "to": "openai/gpt-5"}]));
+    assert_eq!(
+        value["data"],
+        json!([{"from": "only", "to": "openai/gpt-5"}])
+    );
     let (status, _) = h.put_models(&id, json!({"models": []})).await;
     assert_eq!(status, StatusCode::OK);
     let (_, value) = h.get(&format!("/api/keys/{id}/models")).await;
@@ -3228,13 +3659,22 @@ async fn successful_attempts_record_latency_samples() {
 
     let mut samples = std::collections::HashMap::new();
     for _ in 0..100 {
-        samples = h.state.store.connection_latencies().await.expect("latencies");
+        samples = h
+            .state
+            .store
+            .connection_latencies()
+            .await
+            .expect("latencies");
         if !samples.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(samples.len(), 1, "the one connection that served has a sample");
+    assert_eq!(
+        samples.len(),
+        1,
+        "the one connection that served has a sample"
+    );
 }
 
 /// The configured strategy reaches the proxy: with weights 3:1 two separate upstreams
@@ -3261,8 +3701,16 @@ async fn weighted_strategy_is_applied_by_the_proxy() {
     let h = harness_with(cfg);
     let heavy_id = h.connect("openai", &heavy).await;
     let light_id = h.connect("openai", &light).await;
-    h.state.store.set_connection_weight(heavy_id, 3).await.expect("heavy weight");
-    h.state.store.set_connection_weight(light_id, 1).await.expect("light weight");
+    h.state
+        .store
+        .set_connection_weight(heavy_id, 3)
+        .await
+        .expect("heavy weight");
+    h.state
+        .store
+        .set_connection_weight(light_id, 1)
+        .await
+        .expect("light weight");
 
     for _ in 0..4 {
         let (status, body) = h
@@ -3299,8 +3747,16 @@ async fn least_latency_strategy_is_applied_by_the_proxy() {
     let h = harness_with(cfg);
     let fast_id = h.connect("openai", &fast).await;
     let slow_id = h.connect("openai", &slow).await;
-    h.state.store.record_connection_latency(fast_id, 20).await.expect("fast");
-    h.state.store.record_connection_latency(slow_id, 4_000).await.expect("slow");
+    h.state
+        .store
+        .record_connection_latency(fast_id, 20)
+        .await
+        .expect("fast");
+    h.state
+        .store
+        .record_connection_latency(slow_id, 4_000)
+        .await
+        .expect("slow");
 
     for _ in 0..2 {
         let (status, body) = h
@@ -3329,9 +3785,44 @@ async fn failed_attempts_do_not_record_latency_samples() {
     // Give any (incorrectly) spawned sample time to land before asserting absence.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        h.state.store.connection_latencies().await.expect("latencies").is_empty(),
+        h.state
+            .store
+            .connection_latencies()
+            .await
+            .expect("latencies")
+            .is_empty(),
         "a failed attempt must not update the EWMA"
     );
+
+    // The dashboard learns about the failure from one terminal usage row: status and
+    // client-facing error text, with no tokens. Give the writer task a moment to land.
+    let mut rows = Vec::new();
+    for _ in 0..20 {
+        rows = h
+            .state
+            .store
+            .recent_usage(&UsageQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .expect("usage rows");
+        if !rows.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        rows.len(),
+        1,
+        "one terminal row for the failed request: {rows:?}"
+    );
+    assert_eq!(rows[0].status, 500);
+    assert!(
+        rows[0].error.is_some(),
+        "failure row carries the reason: {rows:?}"
+    );
+    assert_eq!(rows[0].input_tokens + rows[0].output_tokens, 0);
 }
 
 // ------------------------------------------------------- cost accounting (phase 6)
@@ -3374,7 +3865,15 @@ async fn seed_usage(
 /// `model` — accounting is asynchronous, so an assertion must not race it.
 async fn wait_for_usage(h: &Harness, key: uuid::Uuid, model: &str) -> UsageRecord {
     for _ in 0..100 {
-        if let Ok(rows) = h.state.store.recent_usage(&UsageQuery { limit: 50, ..Default::default() }).await {
+        if let Ok(rows) = h
+            .state
+            .store
+            .recent_usage(&UsageQuery {
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+        {
             if let Some(row) = rows
                 .into_iter()
                 .find(|r| r.key_id == Some(key) && r.model == model)
@@ -3426,7 +3925,10 @@ async fn priced_requests_record_micro_usd_and_unpriced_models_record_zero() {
 
     let (status, body) = h.get("/api/usage?limit=10").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["data"][0]["cost_micros"], 130, "the log row carries its cost");
+    assert_eq!(
+        body["data"][0]["cost_micros"], 130,
+        "the log row carries its cost"
+    );
 
     let (status, body) = h.get("/api/keys").await;
     assert_eq!(status, StatusCode::OK);
@@ -3439,7 +3941,11 @@ async fn priced_requests_record_micro_usd_and_unpriced_models_record_zero() {
     let unpriced = wait_for_usage(&h, uuid, "gpt-4.1-mini").await;
     assert_eq!(unpriced.cost_micros, 0);
     assert_eq!(
-        h.state.store.api_key_cost_spend(uuid, None).await.expect("spend"),
+        h.state
+            .store
+            .api_key_cost_spend(uuid, None)
+            .await
+            .expect("spend"),
         130,
         "an unpriced row adds nothing to the spend"
     );
@@ -3481,25 +3987,49 @@ async fn usage_api_pages_backwards_without_overlap() {
 
     let (status, first) = h.get("/api/usage?limit=2").await;
     assert_eq!(status, StatusCode::OK);
-    let first_models: Vec<&str> =
-        first["data"].as_array().expect("rows").iter().map(|r| r["model"].as_str().unwrap()).collect();
+    let first_models: Vec<&str> = first["data"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| r["model"].as_str().unwrap())
+        .collect();
     assert_eq!(first_models, vec!["m4", "m3"], "newest first");
     assert_eq!(first["next_before"], 200, "oldest returned row's ts");
     let before_id = first["next_before_id"].as_i64().expect("pair cursor id");
 
-    let (status, second) =
-        h.get(&format!("/api/usage?limit=2&before=200&before_id={before_id}")).await;
+    let (status, second) = h
+        .get(&format!(
+            "/api/usage?limit=2&before=200&before_id={before_id}"
+        ))
+        .await;
     assert_eq!(status, StatusCode::OK);
-    let second_models: Vec<&str> =
-        second["data"].as_array().expect("rows").iter().map(|r| r["model"].as_str().unwrap()).collect();
-    assert_eq!(second_models, vec!["m2", "m1"], "disjoint from page one, tie not dropped");
-    assert_eq!(second["next_before"], 100, "a full page still points at its oldest row");
+    let second_models: Vec<&str> = second["data"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| r["model"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        second_models,
+        vec!["m2", "m1"],
+        "disjoint from page one, tie not dropped"
+    );
+    assert_eq!(
+        second["next_before"], 100,
+        "a full page still points at its oldest row"
+    );
     let before_id = second["next_before_id"].as_i64().expect("pair cursor id");
 
-    let (status, last) =
-        h.get(&format!("/api/usage?limit=2&before=100&before_id={before_id}")).await;
+    let (status, last) = h
+        .get(&format!(
+            "/api/usage?limit=2&before=100&before_id={before_id}"
+        ))
+        .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(last["data"].as_array().expect("rows").is_empty(), "nothing older: {last}");
+    assert!(
+        last["data"].as_array().expect("rows").is_empty(),
+        "nothing older: {last}"
+    );
     assert!(last["next_before"].is_null(), "an empty page ends the walk");
 }
 
@@ -3568,7 +4098,11 @@ async fn usage_api_filters_compose_with_the_cursor() {
             ))
             .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(models(&next), vec![expected], "next page stays filtered: {next}");
+        assert_eq!(
+            models(&next),
+            vec![expected],
+            "next page stays filtered: {next}"
+        );
         seen.extend(models(&next));
         page = next;
     }
@@ -3577,27 +4111,50 @@ async fn usage_api_filters_compose_with_the_cursor() {
     let before = page["next_before"].as_i64().expect("cursor ts");
     let before_id = page["next_before_id"].as_i64().expect("cursor id");
     let (_, last) = h
-        .get(&format!("/api/usage?status=error&limit=1&before={before}&before_id={before_id}"))
+        .get(&format!(
+            "/api/usage?status=error&limit=1&before={before}&before_id={before_id}"
+        ))
         .await;
     assert!(models(&last).is_empty(), "nothing older: {last}");
     assert!(last["next_before"].is_null());
 
     // `2xx` is success with no error text; `hours` still composes with it.
     let (_, ok) = h.get("/api/usage?status=2xx&limit=10").await;
-    assert_eq!(models(&ok), vec!["m5", "m1"], "m3 is 2xx but carries error text");
+    assert_eq!(
+        models(&ok),
+        vec!["m5", "m1"],
+        "m3 is 2xx but carries error text"
+    );
 
     // Key and model-ref filters; a ref matches its bare stored id.
-    let (_, by_key) = h.get(&format!("/api/usage?key_id={key}&status=error&limit=10")).await;
+    let (_, by_key) = h
+        .get(&format!("/api/usage?key_id={key}&status=error&limit=10"))
+        .await;
     assert_eq!(models(&by_key), vec!["m4", "m3", "m2"]);
-    let (_, by_ref) = h.get("/api/usage?provider=openai&model=openai/m2&limit=10").await;
+    let (_, by_ref) = h
+        .get("/api/usage?provider=openai&model=openai/m2&limit=10")
+        .await;
     assert_eq!(models(&by_ref), vec!["m2"], "a ref matches its bare id");
-    let (_, anon) = h.get(&format!("/api/usage?key_id={}&limit=10", uuid::Uuid::new_v4())).await;
-    assert!(models(&anon).is_empty(), "an unknown key has no rows: {anon}");
+    let (_, anon) = h
+        .get(&format!(
+            "/api/usage?key_id={}&limit=10",
+            uuid::Uuid::new_v4()
+        ))
+        .await;
+    assert!(
+        models(&anon).is_empty(),
+        "an unknown key has no rows: {anon}"
+    );
 
     // Malformed filters are client errors, not empty pages.
     let (status, body) = h.get("/api/usage?key_id=not-a-uuid").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert!(body["error"]["message"].as_str().is_some_and(|m| m.ends_with("key_id must be a uuid")), "body: {body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.ends_with("key_id must be a uuid")),
+        "body: {body}"
+    );
     let (status, body) = h.get("/api/usage?status=ok").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
 }
@@ -3686,7 +4243,11 @@ async fn usage_export_csv_has_the_contract_header_and_escapes_cells() {
     tricky.cost_micros = 1_234_567;
     tricky.status = 500;
     for row in [plain, tricky] {
-        h.state.store.record_usage(&row).await.expect("seed export row");
+        h.state
+            .store
+            .record_usage(&row)
+            .await
+            .expect("seed export row");
     }
 
     let (status, headers, body) = h.get_raw("/api/usage/export.csv").await;
@@ -3704,15 +4265,32 @@ async fn usage_export_csv_has_the_contract_header_and_escapes_cells() {
         .and_then(|rest| rest.strip_suffix(".csv\""))
         .unwrap_or_else(|| panic!("filename shape: {disposition}"));
     assert_eq!(name.len(), 8, "YYYYMMDD: {disposition}");
-    assert!(name.chars().all(|c| c.is_ascii_digit()), "YYYYMMDD: {disposition}");
+    assert!(
+        name.chars().all(|c| c.is_ascii_digit()),
+        "YYYYMMDD: {disposition}"
+    );
 
     let rows = parse_csv(&body);
     assert_eq!(
         rows[0],
         vec![
-            "ts", "iso_utc", "provider", "model", "request_id", "key_id", "endpoint",
-            "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-            "latency_ms", "ttft_ms", "status", "streamed", "cost_micros", "cost_usd",
+            "ts",
+            "iso_utc",
+            "provider",
+            "model",
+            "request_id",
+            "key_id",
+            "endpoint",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "latency_ms",
+            "ttft_ms",
+            "status",
+            "streamed",
+            "cost_micros",
+            "cost_usd",
         ],
         "header is a contract"
     );
@@ -3785,11 +4363,18 @@ async fn usage_export_csv_applies_the_list_filters() {
     old_err.status = 502;
     old_err.provider = "anthropic".to_string();
     for row in [recent_ok, recent_err, old_err] {
-        h.state.store.record_usage(&row).await.expect("seed export row");
+        h.state
+            .store
+            .record_usage(&row)
+            .await
+            .expect("seed export row");
     }
 
     let models = |body: &str| -> Vec<String> {
-        csv_column(&parse_csv(body), 3).into_iter().map(str::to_string).collect()
+        csv_column(&parse_csv(body), 3)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     };
     let (status, _, all) = h.get_raw("/api/usage/export.csv").await;
     assert_eq!(status, StatusCode::OK);
@@ -3801,9 +4386,15 @@ async fn usage_export_csv_applies_the_list_filters() {
 
     let (status, _, last_hour) = h.get_raw("/api/usage/export.csv?hours=1").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models(&last_hour), vec!["recent-ok", "recent-err"], "hours bounds the range");
+    assert_eq!(
+        models(&last_hour),
+        vec!["recent-ok", "recent-err"],
+        "hours bounds the range"
+    );
 
-    let (status, _, bounded) = h.get_raw("/api/usage/export.csv?hours=1&status=error").await;
+    let (status, _, bounded) = h
+        .get_raw("/api/usage/export.csv?hours=1&status=error")
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models(&bounded), vec!["recent-err"]);
 
@@ -3811,11 +4402,14 @@ async fn usage_export_csv_applies_the_list_filters() {
     let (status, _, by_provider) = h.get_raw("/api/usage/export.csv?provider=anthropic").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models(&by_provider), vec!["old-err"]);
-    let (status, _, by_key) = h.get_raw(&format!("/api/usage/export.csv?key_id={key}")).await;
+    let (status, _, by_key) = h
+        .get_raw(&format!("/api/usage/export.csv?key_id={key}"))
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models(&by_key), vec!["recent-err"]);
-    let (status, _, by_model) =
-        h.get_raw("/api/usage/export.csv?model=recent-ok&status=2xx").await;
+    let (status, _, by_model) = h
+        .get_raw("/api/usage/export.csv?model=recent-ok&status=2xx")
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models(&by_model), vec!["recent-ok"]);
 
@@ -3836,11 +4430,18 @@ async fn usage_export_csv_applies_the_list_filters() {
 async fn usage_export_csv_is_behind_the_admin_gate() {
     let h = harness(false);
     let (status, _, body) = h.get_raw("/api/usage/export.csv").await;
-    assert_eq!(status, StatusCode::OK, "in-process calls count as loopback: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "in-process calls count as loopback: {body}"
+    );
     let res = h
         .router
         .clone()
-        .oneshot(as_peer(get_with("/api/usage/export.csv", &[]), remote_peer()))
+        .oneshot(as_peer(
+            get_with("/api/usage/export.csv", &[]),
+            remote_peer(),
+        ))
         .await
         .expect("oneshot");
     assert_eq!(res.status(), StatusCode::FORBIDDEN, "no token, remote peer");
@@ -3851,15 +4452,25 @@ async fn usage_export_csv_is_behind_the_admin_gate() {
     let res = gated
         .router
         .clone()
-        .oneshot(as_peer(get_with("/api/usage/export.csv", &[]), remote_peer()))
+        .oneshot(as_peer(
+            get_with("/api/usage/export.csv", &[]),
+            remote_peer(),
+        ))
         .await
         .expect("oneshot");
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "a token replaces the loopback rule");
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "a token replaces the loopback rule"
+    );
     let res = gated
         .router
         .clone()
         .oneshot(as_peer(
-            get_with("/api/usage/export.csv", &[("x-admin-token", TEST_ADMIN_TOKEN)]),
+            get_with(
+                "/api/usage/export.csv",
+                &[("x-admin-token", TEST_ADMIN_TOKEN)],
+            ),
             remote_peer(),
         ))
         .await
@@ -3878,7 +4489,11 @@ async fn usage_export_csv_walks_past_the_page_boundary() {
     for i in 0..1005 {
         let mut row = export_row(1_000 + i);
         row.model = format!("m{i:04}");
-        h.state.store.record_usage(&row).await.expect("seed export row");
+        h.state
+            .store
+            .record_usage(&row)
+            .await
+            .expect("seed export row");
     }
 
     let res = h
@@ -3911,11 +4526,17 @@ async fn usage_export_csv_walks_past_the_page_boundary() {
     let rows = parse_csv(&text);
     assert_eq!(rows.len(), 1006, "header + 1005 rows over two pages");
 
-    let ts: Vec<i64> = csv_column(&rows, 0).iter().map(|t| t.parse().expect("ts")).collect();
+    let ts: Vec<i64> = csv_column(&rows, 0)
+        .iter()
+        .map(|t| t.parse().expect("ts"))
+        .collect();
     assert_eq!(ts.len(), 1005);
     assert_eq!(ts[0], 2004, "newest first");
     assert_eq!(ts[1004], 1000);
-    assert!(ts.windows(2).all(|w| w[0] > w[1]), "descending across the page boundary");
+    assert!(
+        ts.windows(2).all(|w| w[0] > w[1]),
+        "descending across the page boundary"
+    );
     let models: std::collections::HashSet<&str> = csv_column(&rows, 3).into_iter().collect();
     assert_eq!(models.len(), 1005, "no row repeated");
 }
@@ -3948,9 +4569,16 @@ async fn usd_budget_below_durable_spend_answers_429_naming_dollars() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
     assert_eq!(body["error"]["code"], "budget_exhausted");
     let message = body["error"]["message"].as_str().expect("message");
-    assert!(message.contains("$2.0000"), "names what was spent: {message}");
+    assert!(
+        message.contains("$2.0000"),
+        "names what was spent: {message}"
+    );
     assert!(message.contains("$1.0000"), "names the budget: {message}");
-    assert_eq!(mock.hits(), 0, "an over-budget key is refused before dispatch");
+    assert_eq!(
+        mock.hits(),
+        0,
+        "an over-budget key is refused before dispatch"
+    );
 
     // An integer field: `null` is a type error, `0` is the unlimited value.
     let (status, _, body) = h
@@ -4010,9 +4638,17 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
         })
         .await
         .expect("seed last month");
-    h.patch_key(&id, json!({"budget_tokens": 100, "budget_window": "monthly"})).await;
+    h.patch_key(
+        &id,
+        json!({"budget_tokens": 100, "budget_window": "monthly"}),
+    )
+    .await;
     let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
-    assert_eq!(status, StatusCode::OK, "last month's spend must not count: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "last month's spend must not count: {body}"
+    );
     assert_eq!(mock.hits(), 1);
 
     // Inside the window: the same budget refuses the next request.
@@ -4043,7 +4679,11 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
     let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
     assert_eq!(body["error"]["code"], "budget_exhausted");
-    assert_eq!(mock.hits(), 1, "an exhausted key is refused before dispatch");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "an exhausted key is refused before dispatch"
+    );
 
     // The list reports only the in-window spend.
     let (_, listed) = h.get("/api/keys").await;
@@ -4062,9 +4702,21 @@ async fn monthly_usd_window_ignores_last_months_spend() {
     h.connect("openai", &mock).await;
     let (key, id) = h.create_key().await;
     let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
-    seed_usage(&h.state.store, Some(uuid), "openai", "gpt-4.1", 2_000_000, month_start - 1).await;
+    seed_usage(
+        &h.state.store,
+        Some(uuid),
+        "openai",
+        "gpt-4.1",
+        2_000_000,
+        month_start - 1,
+    )
+    .await;
 
-    h.patch_key(&id, json!({"budget_micros": 1_000_000, "budget_window": "monthly"})).await;
+    h.patch_key(
+        &id,
+        json!({"budget_micros": 1_000_000, "budget_window": "monthly"}),
+    )
+    .await;
     let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(mock.hits(), 1);
@@ -4102,7 +4754,10 @@ async fn budget_window_patch_validates_the_spelling() {
         "names the allowed values: {message}"
     );
     let (_, listed) = h.get("/api/keys").await;
-    assert_eq!(listed["data"][0]["budget_window"], "monthly", "refusal changed nothing");
+    assert_eq!(
+        listed["data"][0]["budget_window"], "monthly",
+        "refusal changed nothing"
+    );
 }
 
 /// Summary and series aggregate the cost column server-side, like the tokens.
@@ -4129,7 +4784,9 @@ async fn summary_and_series_sum_cost_per_group_and_bucket() {
     assert_eq!(total, 3_500, "both rows fall in one bucket: {body}");
 
     // The per-model breakdown carries the same column.
-    let (status, body) = h.get("/api/usage/series?hours=1&bucket=hour&by=model").await;
+    let (status, body) = h
+        .get("/api/usage/series?hours=1&bucket=hour&by=model")
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"][0]["model"], "gpt-4.1");
     assert_eq!(body["data"][0]["cost_micros"], 3_500);
@@ -4178,7 +4835,11 @@ async fn connection_patch_sets_priority_and_weight_and_the_plan_follows() {
             .cloned()
             .expect("connection row")
     };
-    assert_eq!(by_id(heavy_id)["weight"], 3, "GET exposes the weight the plan uses");
+    assert_eq!(
+        by_id(heavy_id)["weight"],
+        3,
+        "GET exposes the weight the plan uses"
+    );
     assert_eq!(by_id(light_id)["weight"], 1);
     assert_eq!(by_id(heavy_id)["priority"], 0);
 
@@ -4208,18 +4869,24 @@ async fn connection_patch_sets_priority_and_weight_and_the_plan_follows() {
 /// the second response is the first one byte-for-byte under a new request id.
 #[tokio::test]
 async fn identical_non_streaming_requests_hit_the_cache() {
-    let mock = Mock::start(vec![openai_reply("cached answer"), openai_reply("second answer")]).await;
+    let mock = Mock::start(vec![
+        openai_reply("cached answer"),
+        openai_reply("second answer"),
+    ])
+    .await;
     let h = harness_with(cached_config(300, 100));
     h.connect("openai", &mock).await;
 
-    let (status, headers, first) =
-        h.post_headers("/v1/chat/completions", openai_chat_body("gpt-4.1"), &[]).await;
+    let (status, headers, first) = h
+        .post_headers("/v1/chat/completions", openai_chat_body("gpt-4.1"), &[])
+        .await;
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(headers["x-rrouter-cache"], "miss");
     assert_eq!(mock.hits(), 1);
 
-    let (status, headers, second) =
-        h.post_headers("/v1/chat/completions", openai_chat_body("gpt-4.1"), &[]).await;
+    let (status, headers, second) = h
+        .post_headers("/v1/chat/completions", openai_chat_body("gpt-4.1"), &[])
+        .await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(headers["x-rrouter-cache"], "hit");
     assert_eq!(second, first, "a hit is the stored response body");
@@ -4325,8 +4992,9 @@ async fn reassembled_stream_upstream_still_caches_for_a_non_streaming_client() {
     h.connect("codex", &mock).await;
 
     let body = openai_chat_body("codex/gpt-5.6-luna");
-    let (status, headers, first) =
-        h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    let (status, headers, first) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(headers["x-rrouter-cache"], "miss");
     assert_eq!(first["choices"][0]["message"]["content"], "Hello");
@@ -4335,7 +5003,11 @@ async fn reassembled_stream_upstream_still_caches_for_a_non_streaming_client() {
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(headers["x-rrouter-cache"], "hit");
     assert_eq!(second, first);
-    assert_eq!(mock.hits(), 1, "the second client request never reached codex");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the second client request never reached codex"
+    );
 }
 
 /// A cache entry belongs to one canonical request: a different temperature or model is
@@ -4354,19 +5026,25 @@ async fn cache_key_covers_temperature_and_model() {
 
     let mut body = openai_chat_body("gpt-4.1");
     body["temperature"] = json!(0);
-    let (_, headers, first) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    let (_, headers, first) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
     assert_eq!(headers["x-rrouter-cache"], "miss");
     assert_eq!(first["choices"][0]["message"]["content"], "temp0");
 
     // Same body again: no upstream call.
-    let (_, headers, repeat) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    let (_, headers, repeat) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
     assert_eq!(headers["x-rrouter-cache"], "hit");
     assert_eq!(repeat["choices"][0]["message"]["content"], "temp0");
     assert_eq!(mock.hits(), 1);
 
     // Same prompt, different sampling: a miss.
     body["temperature"] = json!(0.7);
-    let (_, headers, sampled) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    let (_, headers, sampled) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
     assert_eq!(headers["x-rrouter-cache"], "miss");
     assert_eq!(sampled["choices"][0]["message"]["content"], "temp0.7");
     assert_eq!(mock.hits(), 2);
@@ -4410,13 +5088,27 @@ async fn streamed_requests_never_use_the_cache() {
     let mut body = openai_chat_body("gpt-4.1");
     body["stream"] = json!(true);
     for _ in 0..2 {
-        let (status, headers, _) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+        let (status, headers, _) = h
+            .post_headers("/v1/chat/completions", body.clone(), &[])
+            .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(headers.get("x-rrouter-cache").is_none(), "streams carry no cache marker");
+        assert!(
+            headers.get("x-rrouter-cache").is_none(),
+            "streams carry no cache marker"
+        );
     }
-    assert_eq!(mock.hits(), 2, "both streamed requests reached the upstream");
+    assert_eq!(
+        mock.hits(),
+        2,
+        "both streamed requests reached the upstream"
+    );
     assert!(
-        h.state.store.cache_entries().await.expect("entries").is_empty(),
+        h.state
+            .store
+            .cache_entries()
+            .await
+            .expect("entries")
+            .is_empty(),
         "a stream is never stored"
     );
 }
@@ -4430,7 +5122,9 @@ async fn bypass_forces_a_miss_without_touching_the_entry() {
     h.connect("openai", &mock).await;
     let body = openai_chat_body("gpt-4.1");
 
-    let (_, headers, first) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    let (_, headers, first) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
     assert_eq!(headers["x-rrouter-cache"], "miss");
     assert_eq!(first["choices"][0]["message"]["content"], "stored");
     assert_eq!(mock.hits(), 1);
@@ -4466,7 +5160,9 @@ async fn expired_cache_entry_is_not_served() {
     h.connect("openai", &mock).await;
     let body = openai_chat_body("gpt-4.1");
 
-    let (_, _, first) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    let (_, _, first) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
     assert_eq!(first["choices"][0]["message"]["content"], "stale");
     let entries = h.state.store.cache_entries().await.expect("entries");
     assert_eq!(entries.len(), 1);
@@ -4478,7 +5174,10 @@ async fn expired_cache_entry_is_not_served() {
         .cache_put(&key, &first.to_string(), 1_000, 2_000, 100)
         .await
         .expect("seed expired row");
-    assert!(2_000 < rrouter_gateway::now_unix(), "the seeded expiry is in the past");
+    assert!(
+        2_000 < rrouter_gateway::now_unix(),
+        "the seeded expiry is in the past"
+    );
 
     let (_, headers, second) = h.post_headers("/v1/chat/completions", body, &[]).await;
     assert_eq!(headers["x-rrouter-cache"], "miss");
@@ -4504,12 +5203,20 @@ async fn cache_is_off_by_default() {
     let body = openai_chat_body("gpt-4.1");
 
     for _ in 0..2 {
-        let (status, headers, _) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+        let (status, headers, _) = h
+            .post_headers("/v1/chat/completions", body.clone(), &[])
+            .await;
         assert_eq!(status, StatusCode::OK);
         assert!(headers.get("x-rrouter-cache").is_none());
     }
     assert_eq!(mock.hits(), 2);
-    assert!(h.state.store.cache_entries().await.expect("entries").is_empty());
+    assert!(h
+        .state
+        .store
+        .cache_entries()
+        .await
+        .expect("entries")
+        .is_empty());
 }
 
 /// The table never grows past `RROUTER_CACHE_MAX_ENTRIES`: the oldest entry is dropped,
@@ -4527,12 +5234,16 @@ async fn cache_eviction_keeps_at_most_max_entries() {
 
     let mut body = openai_chat_body("gpt-4.1");
     body["temperature"] = json!(0);
-    let (_, headers, first) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    let (_, headers, first) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
     assert_eq!(headers["x-rrouter-cache"], "miss");
     assert_eq!(first["choices"][0]["message"]["content"], "first");
 
     body["temperature"] = json!(0.2);
-    let (_, headers, second) = h.post_headers("/v1/chat/completions", body.clone(), &[]).await;
+    let (_, headers, second) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
     assert_eq!(headers["x-rrouter-cache"], "miss");
     assert_eq!(second["choices"][0]["message"]["content"], "second");
     assert_eq!(
@@ -4557,7 +5268,10 @@ fn assert_base_security_headers(headers: &axum::http::HeaderMap) {
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
         ("referrer-policy", "no-referrer"),
-        ("permissions-policy", "camera=(), microphone=(), geolocation=()"),
+        (
+            "permissions-policy",
+            "camera=(), microphone=(), geolocation=()",
+        ),
     ];
     for (name, value) in expected {
         assert_eq!(
@@ -4569,7 +5283,10 @@ fn assert_base_security_headers(headers: &axum::http::HeaderMap) {
 }
 
 fn header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> &'a str {
-    headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default()
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
 }
 
 /// The dashboard is a document: it gets the base set plus a CSP that keeps the SPA
@@ -4579,7 +5296,10 @@ fn header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> &'a str {
 async fn html_responses_carry_base_headers_and_the_dashboard_csp() {
     let h = harness(false);
     let (status, headers, body) = h.get_raw("/app/").await;
-    assert!(header(&headers, "content-type").starts_with("text/html"), "{headers:?}");
+    assert!(
+        header(&headers, "content-type").starts_with("text/html"),
+        "{headers:?}"
+    );
     assert_eq!(status, StatusCode::OK, "dashboard shell: {body}");
 
     assert_base_security_headers(&headers);
@@ -4610,12 +5330,18 @@ async fn json_and_proxied_responses_carry_base_headers_without_csp() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_base_security_headers(&headers);
-    assert!(headers.get("content-security-policy").is_none(), "no CSP on JSON: {headers:?}");
+    assert!(
+        headers.get("content-security-policy").is_none(),
+        "no CSP on JSON: {headers:?}"
+    );
 
     let (status, headers, body) = h.chat(None, "gpt-4.1").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_base_security_headers(&headers);
-    assert!(headers.get("content-security-policy").is_none(), "no CSP on JSON: {headers:?}");
+    assert!(
+        headers.get("content-security-policy").is_none(),
+        "no CSP on JSON: {headers:?}"
+    );
 }
 
 /// A scraper still gets the Prometheus exposition, with the base set added.
@@ -4628,9 +5354,15 @@ async fn metrics_keeps_prometheus_text_and_gains_base_headers() {
         header(&headers, "content-type").starts_with("text/plain; version=0.0.4"),
         "{headers:?}"
     );
-    assert!(text.contains("# TYPE rrouter_requests_total counter"), "{text}");
+    assert!(
+        text.contains("# TYPE rrouter_requests_total counter"),
+        "{text}"
+    );
     assert_base_security_headers(&headers);
-    assert!(headers.get("content-security-policy").is_none(), "{headers:?}");
+    assert!(
+        headers.get("content-security-policy").is_none(),
+        "{headers:?}"
+    );
 }
 
 /// Insert-only: a value set by a handler (or an upstream hop) wins, and content-type
@@ -4667,13 +5399,21 @@ async fn hardening_never_overwrites_a_header_already_set() {
         .await
         .expect("oneshot");
     let headers = res.headers().clone();
-    assert_eq!(header(&headers, "x-frame-options"), "SAMEORIGIN", "{headers:?}");
+    assert_eq!(
+        header(&headers, "x-frame-options"),
+        "SAMEORIGIN",
+        "{headers:?}"
+    );
     assert_eq!(
         header(&headers, "referrer-policy"),
         "strict-origin-when-cross-origin",
         "{headers:?}"
     );
-    assert_eq!(header(&headers, "content-security-policy"), "default-src 'none'", "{headers:?}");
+    assert_eq!(
+        header(&headers, "content-security-policy"),
+        "default-src 'none'",
+        "{headers:?}"
+    );
     assert_eq!(
         header(&headers, "content-disposition"),
         "attachment; filename=export.csv",
@@ -4702,7 +5442,9 @@ async fn template_call(
         .uri(uri)
         .header("content-type", "application/json");
     let req = match body {
-        Some(value) => builder.body(Body::from(value.to_string())).expect("request"),
+        Some(value) => builder
+            .body(Body::from(value.to_string()))
+            .expect("request"),
         None => builder.body(Body::empty()).expect("request"),
     };
     h.call(req).await
@@ -4713,7 +5455,10 @@ async fn templates_crud_round_trip() {
     let h = harness(false);
 
     let (status, body) = h
-        .post("/api/templates", json!({"name": "support", "body": "You are support."}))
+        .post(
+            "/api/templates",
+            json!({"name": "support", "body": "You are support."}),
+        )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let id = body["id"].as_str().expect("id").to_string();
@@ -4736,7 +5481,10 @@ async fn templates_crud_round_trip() {
 
     // A second template with the same name is a conflict with its own code.
     let (status, body) = h
-        .post("/api/templates", json!({"name": "support", "body": "different"}))
+        .post(
+            "/api/templates",
+            json!({"name": "support", "body": "different"}),
+        )
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"]["code"], "template_exists");
@@ -4776,7 +5524,9 @@ async fn templates_crud_round_trip() {
     assert_eq!(versions[1]["body"], "You are support.");
 
     // Renaming onto a name that is taken is a conflict, not a bad request.
-    let (status, other) = h.post("/api/templates", json!({"name": "taken", "body": "x"})).await;
+    let (status, other) = h
+        .post("/api/templates", json!({"name": "taken", "body": "x"}))
+        .await;
     assert_eq!(status, StatusCode::CREATED, "{other}");
     let (status, body) = template_call(
         &h,
@@ -4809,11 +5559,17 @@ async fn templates_reject_invalid_payloads() {
     let (status, body) = h.post("/api/templates", json!({"body": "no name"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let (status, _) = h
-        .post("/api/templates", json!({"name": "n".repeat(101), "body": "x"}))
+        .post(
+            "/api/templates",
+            json!({"name": "n".repeat(101), "body": "x"}),
+        )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "101-character name");
     let (status, _) = h
-        .post("/api/templates", json!({"name": "big", "body": "x".repeat(100_001)}))
+        .post(
+            "/api/templates",
+            json!({"name": "big", "body": "x".repeat(100_001)}),
+        )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body over 100k characters");
 
@@ -4826,7 +5582,10 @@ async fn templates_reject_invalid_payloads() {
 
     // The 100k boundary itself is accepted.
     let (status, _) = h
-        .post("/api/templates", json!({"name": "max", "body": "x".repeat(100_000)}))
+        .post(
+            "/api/templates",
+            json!({"name": "max", "body": "x".repeat(100_000)}),
+        )
         .await;
     assert_eq!(status, StatusCode::CREATED);
 }
@@ -4835,14 +5594,22 @@ async fn templates_reject_invalid_payloads() {
 #[tokio::test]
 async fn templates_require_the_admin_gate() {
     let h = harness(false);
-    for uri in ["/api/templates", "/api/templates/abc", "/api/templates/abc/versions"] {
+    for uri in [
+        "/api/templates",
+        "/api/templates/abc",
+        "/api/templates/abc/versions",
+    ] {
         let res = h
             .router
             .clone()
             .oneshot(as_peer(get_with(uri, &[]), remote_peer()))
             .await
             .expect("oneshot");
-        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri} from a remote peer");
+        assert_eq!(
+            res.status(),
+            StatusCode::FORBIDDEN,
+            "{uri} from a remote peer"
+        );
     }
     let req = as_peer(
         Request::builder()
@@ -4854,7 +5621,11 @@ async fn templates_require_the_admin_gate() {
         remote_peer(),
     );
     let res = h.router.clone().oneshot(req).await.expect("oneshot");
-    assert_eq!(res.status(), StatusCode::FORBIDDEN, "POST from a remote peer");
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "POST from a remote peer"
+    );
 
     // A configured token replaces the loopback rule: remote peers need it.
     let mut cfg = config(false);
@@ -4876,7 +5647,11 @@ async fn templates_require_the_admin_gate() {
         ))
         .await
         .expect("oneshot");
-    assert_eq!(res.status(), StatusCode::OK, "remote peer with the admin token");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "remote peer with the admin token"
+    );
 }
 
 // ---------------------------------------------------------------- account quotas
@@ -4917,7 +5692,8 @@ async fn account_quota_skips_an_exhausted_account_for_a_healthier_one() {
     let h = harness(false);
     let exhausted = h.connect("openai", &dead).await;
     let healthy = h.connect("openai", &live).await;
-    h.patch_connection(&healthy.to_string(), json!({"priority": 1})).await;
+    h.patch_connection(&healthy.to_string(), json!({"priority": 1}))
+        .await;
     h.state
         .store
         .set_account_quota(&AccountQuota {
@@ -4929,9 +5705,15 @@ async fn account_quota_skips_an_exhausted_account_for_a_healthier_one() {
         })
         .await
         .expect("quota");
-    h.state.store.record_usage(&quota_usage(exhausted)).await.expect("usage row");
+    h.state
+        .store
+        .record_usage(&quota_usage(exhausted))
+        .await
+        .expect("usage row");
 
-    let (status, body) = h.post("/v1/chat/completions", openai_chat_body("gpt-4.1")).await;
+    let (status, body) = h
+        .post("/v1/chat/completions", openai_chat_body("gpt-4.1"))
+        .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(dead.hits(), 0, "an exhausted account is never tried");
     assert_eq!(live.hits(), 1, "the healthy account serves the request");
@@ -4955,7 +5737,11 @@ async fn account_quota_returns_429_when_every_account_is_exhausted() {
         })
         .await
         .expect("quota");
-    h.state.store.record_usage(&quota_usage(connection)).await.expect("usage row");
+    h.state
+        .store
+        .record_usage(&quota_usage(connection))
+        .await
+        .expect("usage row");
 
     let (status, headers, body) = h
         .post_headers("/v1/chat/completions", openai_chat_body("gpt-4.1"), &[])
@@ -4998,7 +5784,10 @@ async fn account_quota_api_lists_updates_and_clears() {
     assert_eq!(body["quota"]["window"], "weekly");
     assert_eq!(body["quota"]["max_requests"], 2);
     assert_eq!(body["quota"]["max_cost_micros"], 500);
-    assert_eq!(body["quota"]["max_tokens"], 0, "omitted fields keep their value");
+    assert_eq!(
+        body["quota"]["max_tokens"], 0,
+        "omitted fields keep their value"
+    );
 
     // A partial update keeps the window and the other limits.
     let (status, body) = h.put(&uri, json!({"max_requests": 3})).await;
@@ -5007,12 +5796,25 @@ async fn account_quota_api_lists_updates_and_clears() {
     assert_eq!(body["quota"]["max_requests"], 3);
     assert_eq!(body["quota"]["max_cost_micros"], 500);
 
-    assert_eq!(h.put(&uri, json!({"window": "fortnight"})).await.0, StatusCode::BAD_REQUEST);
-    assert_eq!(h.put(&uri, json!({"max_tokens": -1})).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        h.put(&uri, json!({"window": "fortnight"})).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.put(&uri, json!({"max_tokens": -1})).await.0,
+        StatusCode::BAD_REQUEST
+    );
     let missing = format!("/api/accounts/quotas/{}", uuid::Uuid::new_v4());
-    assert_eq!(h.put(&missing, json!({"max_requests": 1})).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        h.put(&missing, json!({"max_requests": 1})).await.0,
+        StatusCode::NOT_FOUND
+    );
 
-    h.state.store.record_usage(&quota_usage(connection)).await.expect("usage row");
+    h.state
+        .store
+        .record_usage(&quota_usage(connection))
+        .await
+        .expect("usage row");
     let (_, body) = h.get("/api/accounts/quotas").await;
     assert_eq!(body["quotas"][0]["requests"], 1);
     assert_eq!(body["quotas"][0]["tokens"], 2);
@@ -5052,12 +5854,22 @@ async fn token_saver_compresses_tool_results_and_can_be_bypassed() {
     h.connect("openai", &mock).await;
 
     let (status, _) = h
-        .post_with("/v1/chat/completions", grep_tool_body(), &[("x-rrouter-rtk", "on")])
+        .post_with(
+            "/v1/chat/completions",
+            grep_tool_body(),
+            &[("x-rrouter-rtk", "on")],
+        )
         .await;
     assert_eq!(status, StatusCode::OK);
     let sent = mock.seen();
-    let tool = sent[0]["messages"][1]["content"].as_str().expect("tool content");
-    assert!(tool.contains("40 matches in 1 files"), "compressed: {}", &tool[..tool.len().min(120)]);
+    let tool = sent[0]["messages"][1]["content"]
+        .as_str()
+        .expect("tool content");
+    assert!(
+        tool.contains("40 matches in 1 files"),
+        "compressed: {}",
+        &tool[..tool.len().min(120)]
+    );
     assert!(tool.len() < 1600, "the 40-match dump shrank");
 
     let (status, _) = h
@@ -5069,8 +5881,13 @@ async fn token_saver_compresses_tool_results_and_can_be_bypassed() {
         .await;
     assert_eq!(status, StatusCode::OK);
     let sent = mock.seen();
-    let tool = sent[1]["messages"][1]["content"].as_str().expect("tool content");
-    assert!(tool.starts_with("src/main.rs:1:"), "bypass kept the raw dump");
+    let tool = sent[1]["messages"][1]["content"]
+        .as_str()
+        .expect("tool content");
+    assert!(
+        tool.starts_with("src/main.rs:1:"),
+        "bypass kept the raw dump"
+    );
 }
 
 /// An OpenAI-compatible provider that ignores `stream:true` still produces a usable SSE
@@ -5093,7 +5910,12 @@ async fn json_reply_to_a_stream_request_is_converted_to_sse() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()["content-type"], "text/event-stream");
     let text = String::from_utf8(
-        res.into_body().collect().await.expect("body").to_bytes().to_vec(),
+        res.into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes()
+            .to_vec(),
     )
     .expect("utf8");
     assert!(text.contains("converted text"), "{text}");

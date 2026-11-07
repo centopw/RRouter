@@ -26,13 +26,22 @@ pub fn rtk() -> bool {
 }
 
 pub fn defaults() -> Value {
-    json!({ "brand_name": "RRouter", "rtk": true })
+    json!({ "brand_name": "RRouter", "rtk": true, "system_logs": false })
 }
 
 /// Load the stored switch once at startup (and after a settings write).
 pub async fn prime(state: &Arc<AppState>) -> Result<()> {
     let stored = load(state).await?;
-    RTK.store(stored.get("rtk").and_then(Value::as_bool).unwrap_or(true), Ordering::Relaxed);
+    RTK.store(
+        stored.get("rtk").and_then(Value::as_bool).unwrap_or(true),
+        Ordering::Relaxed,
+    );
+    crate::syslog::set_enabled(
+        stored
+            .get("system_logs")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    );
     Ok(())
 }
 
@@ -64,6 +73,9 @@ pub async fn merge(state: &Arc<AppState>, patch: Value) -> Result<Value> {
     }
     if let Some(rtk) = current.get("rtk").and_then(Value::as_bool) {
         RTK.store(rtk, Ordering::Relaxed);
+    }
+    if let Some(logs) = current.get("system_logs").and_then(Value::as_bool) {
+        crate::syslog::set_enabled(logs);
     }
     let merged = Value::Object(current);
     write_blob(state, &merged).await?;
@@ -122,7 +134,9 @@ async fn read_blob(state: &Arc<AppState>) -> Result<Option<Value>> {
     tokio::task::spawn_blocking(move || {
         let conn = open(&state)?;
         let raw: Option<String> = conn
-            .query_row("SELECT value FROM settings WHERE key = 'ui'", [], |row| row.get(0))
+            .query_row("SELECT value FROM settings WHERE key = 'ui'", [], |row| {
+                row.get(0)
+            })
             .optional()
             .map_err(|e| Error::Store(format!("read settings: {e}")))?;
         Ok(raw.and_then(|r| serde_json::from_str(&r).ok()))

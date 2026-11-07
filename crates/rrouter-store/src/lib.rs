@@ -20,13 +20,15 @@
 //! stored as SHA-256 hex only. Usage rows never hold prompt or response text.
 //!
 
-mod crypto;
 mod audit;
+mod crypto;
 mod migrations;
 mod store;
 mod users;
 
+pub use audit::AuditEvent;
 pub use crypto::KEY_FILE_NAME;
+pub use rrouter_auth::{CredentialStore, Credentials};
 pub use store::{
     cache_key, window_reset, window_start, AccountQuota, AccountQuotaState, AccountUsage, ApiKey,
     ApiKeyPatch, AttemptRecord, BudgetWindow, CacheEntry, Combo, Connection, ExhaustedAccounts,
@@ -34,9 +36,7 @@ pub use store::{
     PromptTemplateVersion, PruneReport, StatusFilter, Store, UsageBucket, UsageModelBucket,
     UsageQuery, UsageRecord, UsageSummary, API_KEY_PREFIX,
 };
-pub use audit::AuditEvent;
 pub use users::{
     hash_password, hash_secret, normalize_email, random_recovery_codes, random_setup_code,
     random_token, verify_password, Invite, SessionInfo, User, UserRole,
 };
-pub use rrouter_auth::{CredentialStore, Credentials};

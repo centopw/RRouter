@@ -200,10 +200,7 @@ const CLAUDE_HEADERS: &[(&str, &str)] = &[
     ("user-agent", "claude-cli/2.1.318 (external, cli)"),
 ];
 
-const CODEX_HEADERS: &[(&str, &str)] = &[
-    ("originator", "codex_cli_rs"),
-    ("version", "0.159.0"),
-];
+const CODEX_HEADERS: &[(&str, &str)] = &[("originator", "codex_cli_rs"), ("version", "0.159.0")];
 
 const GITHUB_HEADERS: &[(&str, &str)] = &[
     ("copilot-integration-id", "vscode-chat"),

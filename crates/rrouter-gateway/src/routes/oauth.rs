@@ -42,10 +42,7 @@ pub async fn providers() -> Response {
 }
 
 /// `POST /api/oauth/{provider}/start`
-pub async fn start(
-    State(state): State<Arc<AppState>>,
-    Path(provider): Path<String>,
-) -> Response {
+pub async fn start(State(state): State<Arc<AppState>>, Path(provider): Path<String>) -> Response {
     let Some(spec) = rrouter_auth::get(&provider) else {
         return admin_error(&Error::NotFound(format!("unknown provider {provider}")));
     };
@@ -102,7 +99,9 @@ pub async fn complete(
     let mut warning = None;
     if spec.id == "github" && creds.copilot_token.is_none() {
         if let Err(e) = derive_copilot(&state, &mut creds).await {
-            warning = Some(format!("signed in, but the Copilot token could not be derived: {e}"));
+            warning = Some(format!(
+                "signed in, but the Copilot token could not be derived: {e}"
+            ));
         }
     }
     let name = signed_in
@@ -159,8 +158,13 @@ async fn derive_copilot(
         fn load<'a>(
             &'a self,
             _id: uuid::Uuid,
-        ) -> Pin<Box<dyn std::future::Future<Output = rrouter_core::Result<rrouter_auth::Credentials>> + Send + 'a>>
-        {
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<Output = rrouter_core::Result<rrouter_auth::Credentials>>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(async move {
                 self.0
                     .clone()
@@ -171,8 +175,13 @@ async fn derive_copilot(
             &'a self,
             _id: uuid::Uuid,
             patch: rrouter_auth::Credentials,
-        ) -> Pin<Box<dyn std::future::Future<Output = rrouter_core::Result<rrouter_auth::Credentials>> + Send + 'a>>
-        {
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<Output = rrouter_core::Result<rrouter_auth::Credentials>>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(async move { Ok(patch) })
         }
     }

@@ -75,7 +75,8 @@ impl Store {
                 let rows = stmt
                     .query_map(params![kind, limit, before], row_to_event)
                     .map_err(migrations::db_err)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>().map_err(migrations::db_err)?
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(migrations::db_err)?
             }
             None => {
                 let mut stmt = conn
@@ -87,7 +88,8 @@ impl Store {
                 let rows = stmt
                     .query_map(params![kind, limit], row_to_event)
                     .map_err(migrations::db_err)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>().map_err(migrations::db_err)?
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(migrations::db_err)?
             }
         };
         Ok(rows)

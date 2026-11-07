@@ -20,12 +20,16 @@ pub mod proxy;
 pub mod routes;
 pub mod settings;
 pub mod state;
+pub mod syslog;
 pub mod ui;
 
 use std::sync::Arc;
 
 use axum::extract::Request;
-use axum::http::header::{ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, AUTHORIZATION, VARY};
+use axum::http::header::{
+    ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+    ACCESS_CONTROL_MAX_AGE, AUTHORIZATION, VARY,
+};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -66,7 +70,10 @@ pub fn auth_header(headers: &HeaderMap) -> Option<String> {
 pub fn app(state: Arc<AppState>) -> Router {
     spawn_model_sync(&state);
     let api = Router::new()
-        .route("/connections", get(routes::connections::list).post(routes::connections::create))
+        .route(
+            "/connections",
+            get(routes::connections::list).post(routes::connections::create),
+        )
         .route(
             "/connections/{id}",
             patch(routes::connections::update).delete(routes::connections::remove),
@@ -101,7 +108,9 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/models/test", post(routes::models::test))
         .route(
             "/combos",
-            get(routes::combos::list).post(routes::combos::create).delete(routes::combos::remove),
+            get(routes::combos::list)
+                .post(routes::combos::create)
+                .delete(routes::combos::remove),
         )
         .route(
             "/templates",
@@ -140,15 +149,24 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/usage/summary", get(routes::usage::summary))
         .route("/usage/series", get(routes::usage::series))
         .route("/system", get(routes::system::system))
-        .route("/settings", get(routes::settings::get_settings).put(routes::settings::put_settings))
+        .route(
+            "/system/logs",
+            get(routes::system_logs::list)
+                .put(routes::system_logs::update)
+                .delete(routes::system_logs::clear),
+        )
+        .route(
+            "/settings",
+            get(routes::settings::get_settings).put(routes::settings::put_settings),
+        )
         .route("/oauth/providers", get(routes::oauth::providers))
         .route("/oauth/{provider}/start", post(routes::oauth::start))
-        .route(
-            "/oauth/{provider}/status/{id}",
-            get(routes::oauth::status),
-        )
+        .route("/oauth/{provider}/status/{id}", get(routes::oauth::status))
         .route("/oauth/{provider}/complete", post(routes::oauth::complete))
-        .route("/oauth/{provider}/{id}", axum::routing::delete(routes::oauth::cancel))
+        .route(
+            "/oauth/{provider}/{id}",
+            axum::routing::delete(routes::oauth::cancel),
+        )
         .route("/ui/panels", get(ui::panels))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -167,7 +185,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/api/auth/logout", post(routes::auth::logout))
         .route("/api/auth/recover", post(routes::auth::recover))
         .route("/api/auth/invites/{token}", get(routes::auth::invite))
-        .route("/api/auth/me", get(routes::auth::me).put(routes::auth::update_me))
+        .route(
+            "/api/auth/me",
+            get(routes::auth::me).put(routes::auth::update_me),
+        )
         .route(
             "/api/auth/me/sessions/revoke-others",
             post(routes::auth::revoke_other_sessions),
@@ -250,7 +271,9 @@ async fn cors(
     } else {
         next.run(req).await
     };
-    let Some(origin) = origin else { return response };
+    let Some(origin) = origin else {
+        return response;
+    };
     let Some(allow) = state.config.cors_origin_for(&origin) else {
         return response;
     };
@@ -269,10 +292,7 @@ async fn cors(
             "content-type, authorization, x-api-key, x-admin-token, anthropic-version, anthropic-beta",
         ),
     );
-    headers.insert(
-        ACCESS_CONTROL_MAX_AGE,
-        HeaderValue::from_static("600"),
-    );
+    headers.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
     response
 }
 
@@ -299,7 +319,10 @@ async fn admin_gate(
     next: Next,
 ) -> Response {
     let dialect = state::dialect_of(req.uri());
-    let safe_method = matches!(req.method(), &axum::http::Method::GET | &axum::http::Method::HEAD | &axum::http::Method::OPTIONS);
+    let safe_method = matches!(
+        req.method(),
+        &axum::http::Method::GET | &axum::http::Method::HEAD | &axum::http::Method::OPTIONS
+    );
     let presented = admin_credential(req.headers());
     if let Some(expected) = state.config.admin_token.as_deref() {
         if presented
@@ -419,9 +442,15 @@ pub(crate) fn overloaded_response(inbound: rrouter_core::Dialect) -> Response {
         }
         _ => serde_json::json!({"error": obj}),
     };
-    let mut resp = (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response();
-    resp.headers_mut()
-        .insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+    let mut resp = (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(body),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        HeaderValue::from_static("1"),
+    );
     resp
 }
 
@@ -465,7 +494,10 @@ fn admin_required(dialect: rrouter_core::Dialect) -> Response {
 fn admin_forbidden(dialect: rrouter_core::Dialect, code: &'static str, message: &str) -> Response {
     error::error_response(
         dialect,
-        &rrouter_core::Error::Forbidden { code, message: message.to_string() },
+        &rrouter_core::Error::Forbidden {
+            code,
+            message: message.to_string(),
+        },
     )
 }
 
@@ -490,7 +522,9 @@ fn admin_unauthorized(dialect: rrouter_core::Dialect) -> Response {
         Some("admin_unauthorized"),
     );
     let body = match dialect {
-        rrouter_core::Dialect::AnthropicMessages => serde_json::json!({"type": "error", "error": obj}),
+        rrouter_core::Dialect::AnthropicMessages => {
+            serde_json::json!({"type": "error", "error": obj})
+        }
         _ => serde_json::json!({"error": obj}),
     };
     (axum::http::StatusCode::UNAUTHORIZED, axum::Json(body)).into_response()

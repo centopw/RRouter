@@ -86,7 +86,9 @@ mod tests {
 
     #[test]
     fn endpoint_validation_requires_https_except_localhost_opt_in() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         std::env::remove_var("RROUTER_ALLOW_INSECURE_OAUTH");
         assert!(valid_endpoint("https://oauth.example.test/token"));
         assert!(!valid_endpoint("http://oauth.example.test/token"));

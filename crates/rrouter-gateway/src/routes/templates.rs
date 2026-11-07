@@ -133,7 +133,11 @@ pub async fn update(
     let Some(text) = body_field(&value) else {
         return admin_error(&Error::BadRequest("body is required".into()));
     };
-    match state.store.update_template(&id, name.as_deref(), &text).await {
+    match state
+        .store
+        .update_template(&id, name.as_deref(), &text)
+        .await
+    {
         Ok(row) => ok_json(template_view(&row)),
         // A missing id is a 404 whatever name was requested; only a write against an
         // existing row can be telling us the new name is taken.
@@ -172,7 +176,10 @@ pub async fn versions(State(state): State<Arc<AppState>>, Path(id): Path<String>
 /// The body verbatim: leading and trailing whitespace is part of a prompt, so this
 /// deliberately does not trim the way [`super::models::str_field`] trims a name.
 fn body_field(value: &Value) -> Option<String> {
-    value.get("body").and_then(Value::as_str).map(str::to_string)
+    value
+        .get("body")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// `name` is optional on update, but present-and-empty is an error rather than "keep the

@@ -72,7 +72,9 @@ impl Capabilities {
     /// Layer a stored capability object over these values. Only keys present as booleans
     /// change; everything else falls through to the row underneath.
     pub fn overlay(&mut self, caps: &Value) {
-        let Some(object) = caps.as_object() else { return };
+        let Some(object) = caps.as_object() else {
+            return;
+        };
         for (key, flag) in object {
             let Some(flag) = flag.as_bool() else { continue };
             match key.as_str() {
@@ -280,7 +282,9 @@ fn rates(value: &Value) -> Option<Cost> {
     }
     let rate = |key: &str| value.get(key).and_then(Value::as_f64);
     let (input, output) = (rate("input"), rate("output"));
-    if input.is_none() && output.is_none() && rate("cache_read").is_none()
+    if input.is_none()
+        && output.is_none()
+        && rate("cache_read").is_none()
         && rate("cache_write").is_none()
     {
         return None;
@@ -337,9 +341,10 @@ pub async fn cost_micros(
         .and_then(|rest| rest.strip_prefix('/'))
         .unwrap_or(model);
     let rows = match store.model_costs(bare, &[provider, vendor]).await {
-        Ok(rows) if rows.is_empty() && bare != model => {
-            store.model_costs(model, &[provider, vendor]).await.unwrap_or_default()
-        }
+        Ok(rows) if rows.is_empty() && bare != model => store
+            .model_costs(model, &[provider, vendor])
+            .await
+            .unwrap_or_default(),
         Ok(rows) => rows,
         Err(e) => {
             // Accounting must never fail a request; an unknown price is 0, not a panic.
@@ -375,9 +380,7 @@ pub async fn list(state: &AppState) -> Result<Vec<ModelItem>> {
         .list_models()
         .await?
         .into_iter()
-        .filter(|row| {
-            row.source == SOURCE_CUSTOM || rrouter_auth::get(&row.provider).is_some()
-        })
+        .filter(|row| row.source == SOURCE_CUSTOM || rrouter_auth::get(&row.provider).is_some())
         .collect();
     let disabled: BTreeSet<String> = store.disabled_models().await?.into_iter().collect();
     let active_providers: BTreeSet<String> = store
@@ -387,7 +390,12 @@ pub async fn list(state: &AppState) -> Result<Vec<ModelItem>> {
         .filter(|conn| conn.is_active)
         .map(|conn| conn.provider)
         .collect();
-    Ok(merge(state.catalog.all(), &rows, &disabled, &active_providers))
+    Ok(merge(
+        state.catalog.all(),
+        &rows,
+        &disabled,
+        &active_providers,
+    ))
 }
 
 /// One merged item, for the `POST /api/models/custom` echo.
@@ -396,7 +404,10 @@ pub async fn item(state: &AppState, provider: &str, id: &str) -> Result<Option<M
     // echoed even while its provider is disconnected, which is exactly when a custom model
     // is most useful — it documents what will be callable once the account is added.
     let rows = state.store.list_models().await?;
-    let Some(row) = rows.iter().find(|r| r.provider == provider && r.model == id) else {
+    let Some(row) = rows
+        .iter()
+        .find(|r| r.provider == provider && r.model == id)
+    else {
         return Ok(None);
     };
     let mut item = ModelItem::new(provider, id, &row.source);
@@ -464,7 +475,8 @@ pub fn parse_models_dev(document: &Value) -> Vec<ModelRow> {
             .into_iter()
             .filter(|id| rrouter_auth::get(id).is_some())
             .collect();
-        if rrouter_auth::get(models_dev_id).is_some() && !targets.contains(&models_dev_id.as_str()) {
+        if rrouter_auth::get(models_dev_id).is_some() && !targets.contains(&models_dev_id.as_str())
+        {
             targets.push(models_dev_id.as_str());
         }
         if targets.is_empty() {
@@ -526,7 +538,9 @@ fn caps_from_models_dev(entry: &Value) -> Value {
         caps.insert("deprecated".into(), Value::Bool(flag));
     }
     let modalities = entry.get("modalities");
-    let input = modalities.and_then(|m| m.get("input")).and_then(Value::as_array);
+    let input = modalities
+        .and_then(|m| m.get("input"))
+        .and_then(Value::as_array);
     if let Some(input) = input {
         let listed = |name: &str| input.iter().any(|value| value.as_str() == Some(name));
         for (key, name) in [
@@ -538,7 +552,9 @@ fn caps_from_models_dev(entry: &Value) -> Value {
             caps.insert(key.into(), Value::Bool(listed(name)));
         }
     }
-    let output = modalities.and_then(|m| m.get("output")).and_then(Value::as_array);
+    let output = modalities
+        .and_then(|m| m.get("output"))
+        .and_then(Value::as_array);
     if let Some(output) = output {
         let listed = |name: &str| output.iter().any(|value| value.as_str() == Some(name));
         for (key, name) in [("image_output", "image"), ("audio_output", "audio")] {
@@ -692,10 +708,22 @@ mod tests {
             models_url("https://api.openai.com/v1/chat/completions"),
             "https://api.openai.com/v1/models"
         );
-        assert_eq!(models_url("https://api.anthropic.com/v1/messages"), "https://api.anthropic.com/v1/models");
-        assert_eq!(models_url("https://api.githubcopilot.com/chat/completions"), "https://api.githubcopilot.com/v1/models");
-        assert_eq!(models_url("http://127.0.0.1:9/"), "http://127.0.0.1:9/v1/models");
-        assert_eq!(models_url("https://api.groq.com/openai/v1"), "https://api.groq.com/openai/v1/models");
+        assert_eq!(
+            models_url("https://api.anthropic.com/v1/messages"),
+            "https://api.anthropic.com/v1/models"
+        );
+        assert_eq!(
+            models_url("https://api.githubcopilot.com/chat/completions"),
+            "https://api.githubcopilot.com/v1/models"
+        );
+        assert_eq!(
+            models_url("http://127.0.0.1:9/"),
+            "http://127.0.0.1:9/v1/models"
+        );
+        assert_eq!(
+            models_url("https://api.groq.com/openai/v1"),
+            "https://api.groq.com/openai/v1/models"
+        );
     }
 
     #[test]
@@ -753,7 +781,10 @@ mod tests {
         let cost = rates(&json!({"input": 2.5, "output": 0.0})).expect("price");
         // 7 × 2.5 = 17.5 micro-USD; half a micro-dollar rounds away from zero.
         assert_eq!(
-            cost.micros(rrouter_core::Usage { input_tokens: 7, ..Default::default() }),
+            cost.micros(rrouter_core::Usage {
+                input_tokens: 7,
+                ..Default::default()
+            }),
             18
         );
         // Nothing priced is nothing spent, never a negative row.
@@ -778,7 +809,10 @@ mod tests {
             source: source.to_string(),
             updated_at: 0,
         };
-        let usage = rrouter_core::Usage { input_tokens: 1_000, ..Default::default() };
+        let usage = rrouter_core::Usage {
+            input_tokens: 1_000,
+            ..Default::default()
+        };
         store
             .upsert_model(&row(
                 "openai",
@@ -788,7 +822,10 @@ mod tests {
             ))
             .await
             .expect("synced row");
-        assert_eq!(cost_micros(&store, "openai", "gpt-priced", usage).await, 1_000);
+        assert_eq!(
+            cost_micros(&store, "openai", "gpt-priced", usage).await,
+            1_000
+        );
         assert_eq!(
             cost_micros(&store, "codex", "gpt-priced", usage).await,
             1_000,
@@ -805,7 +842,10 @@ mod tests {
             ))
             .await
             .expect("custom row");
-        assert_eq!(cost_micros(&store, "openai", "gpt-priced", usage).await, 4_000);
+        assert_eq!(
+            cost_micros(&store, "openai", "gpt-priced", usage).await,
+            4_000
+        );
 
         // No row at all: 0, never a guessed rate.
         assert_eq!(cost_micros(&store, "openai", "unpriced", usage).await, 0);
@@ -830,12 +870,19 @@ mod tests {
             })
             .await
             .expect("row");
-        let usage = rrouter_core::Usage { input_tokens: 8, output_tokens: 4, ..Default::default() };
+        let usage = rrouter_core::Usage {
+            input_tokens: 8,
+            output_tokens: 4,
+            ..Default::default()
+        };
         assert_eq!(
             cost_micros(&store, "claude", "claude/claude-haiku-4-5", usage).await,
             28,
             "8 in at $1/M + 4 out at $5/M"
         );
-        assert_eq!(cost_micros(&store, "claude", "claude-haiku-4-5", usage).await, 28);
+        assert_eq!(
+            cost_micros(&store, "claude", "claude-haiku-4-5", usage).await,
+            28
+        );
     }
 }

@@ -83,7 +83,12 @@ impl RetryPolicy {
     ///
     /// `fraction` is the jitter source in `[0, 1]`. Production passes
     /// [`clock_fraction`]; tests pass a fixed value, which keeps the curve exact.
-    pub fn delay(&self, retry_index: usize, retry_after: Option<Duration>, fraction: f64) -> Duration {
+    pub fn delay(
+        &self,
+        retry_index: usize,
+        retry_after: Option<Duration>,
+        fraction: f64,
+    ) -> Duration {
         // `2^n` saturates well before it can overflow the duration multiply.
         let doublings = 1u32 << retry_index.min(16);
         let capped = self.base.saturating_mul(doublings).min(self.max);
@@ -101,7 +106,8 @@ impl RetryPolicy {
 
     /// Absolute deadline of the caller's headers budget, when one was granted.
     pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.budget.and_then(|budget| Instant::now().checked_add(budget))
+        self.budget
+            .and_then(|budget| Instant::now().checked_add(budget))
     }
 }
 
@@ -162,7 +168,10 @@ impl Dispatcher {
     /// Override the per-candidate retry policy (default [`RetryPolicy::default`]).
     /// `attempts` is clamped to [`MAX_RETRY_ATTEMPTS`].
     pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
-        self.retry = RetryPolicy { attempts: retry.attempts.min(MAX_RETRY_ATTEMPTS), ..retry };
+        self.retry = RetryPolicy {
+            attempts: retry.attempts.min(MAX_RETRY_ATTEMPTS),
+            ..retry
+        };
         self
     }
 
@@ -190,7 +199,10 @@ impl Dispatcher {
         let deadline = self.retry.deadline();
         let mut order = self.attempt_order(plan).await;
         if order.is_empty() {
-            return Err(no_route(plan, "every candidate is blocked by its circuit breaker"));
+            return Err(no_route(
+                plan,
+                "every candidate is blocked by its circuit breaker",
+            ));
         }
 
         let mut last: Option<Error> = None;
@@ -208,7 +220,10 @@ impl Dispatcher {
                         // Disarm before settling so `Drop` cannot double-report.
                         claim.disarm();
                         self.breaker.record_success(candidate.connection);
-                        return Ok(AttemptOutcome { candidate, result: Ok(resp) });
+                        return Ok(AttemptOutcome {
+                            candidate,
+                            result: Ok(resp),
+                        });
                     }
                     Err(err) if !err.is_retryable_upstream() => {
                         // A non-retryable error (bad client request, translation failure) says
@@ -216,12 +231,20 @@ impl Dispatcher {
                         // probe keeps it eligible instead of counting a client 400 toward a trip.
                         claim.disarm();
                         self.breaker.record_success(candidate.connection);
-                        return Ok(AttemptOutcome { candidate, result: Err(err) });
+                        return Ok(AttemptOutcome {
+                            candidate,
+                            result: Err(err),
+                        });
                     }
                     Err(err) => {
-                        if let Some(wait) =
-                            retry_wait(&self.retry, &err, retries, sends, self.max_attempts, deadline)
-                        {
+                        if let Some(wait) = retry_wait(
+                            &self.retry,
+                            &err,
+                            retries,
+                            sends,
+                            self.max_attempts,
+                            deadline,
+                        ) {
                             tracing::debug!(
                                 connection = %candidate.connection,
                                 retry = retries + 1,
@@ -299,7 +322,11 @@ impl Dispatcher {
             skipped.sort_by_key(|(_, wait)| *wait);
             let (idx, wait) = skipped[0];
             tokio::time::sleep(wait.min(MAX_SKIP_WAIT)).await;
-            if self.breaker.check(plan.candidates[idx].connection).is_none() {
+            if self
+                .breaker
+                .check(plan.candidates[idx].connection)
+                .is_none()
+            {
                 eligible.push_back(idx);
             }
         }
@@ -335,16 +362,22 @@ impl Drop for ProbeClaim {
 }
 
 pub(crate) fn no_route(plan: &Plan, detail: &str) -> Error {
-    Error::NoRoute { model: plan.model.clone(), detail: detail.to_string() }
+    Error::NoRoute {
+        model: plan.model.clone(),
+        detail: detail.to_string(),
+    }
 }
-
 
 /// May a retry sleep this long without running past the caller's deadline?
 ///
 /// No deadline means the caller enforces its own (tests and probes pass `None`).
 fn within_budget(deadline: Option<Instant>, wait: Duration) -> bool {
-    let Some(deadline) = deadline else { return true };
-    Instant::now().checked_add(wait).is_some_and(|at| at <= deadline)
+    let Some(deadline) = deadline else {
+        return true;
+    };
+    Instant::now()
+        .checked_add(wait)
+        .is_some_and(|at| at <= deadline)
 }
 
 /// The one retry decision both [`Dispatcher::run`] and
@@ -383,12 +416,17 @@ pub(crate) fn status_of(err: &Error) -> u16 {
 
 /// `Retry-After` from an upstream error payload, when the upstream sent one.
 pub(crate) fn retry_after(err: &Error) -> Option<Duration> {
-    let Error::Upstream { payload, .. } = err else { return None };
+    let Error::Upstream { payload, .. } = err else {
+        return None;
+    };
     let value = payload.as_ref()?.get("retry_after")?;
     if let Some(secs) = value.as_f64() {
         return Duration::try_from_secs_f64(secs.max(0.0)).ok();
     }
-    value.as_str().and_then(|s| s.trim().parse::<u64>().ok()).map(Duration::from_secs)
+    value
+        .as_str()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
 }
 
 #[cfg(test)]
@@ -408,12 +446,19 @@ mod tests {
 
         // A starts while closed: no slot taken.
         assert_eq!(breaker.claim(conn), Ok(ProbeTicket::None));
-        let a_guard = ProbeClaim { breaker: Arc::clone(&breaker), conn, ticket: ProbeTicket::None };
+        let a_guard = ProbeClaim {
+            breaker: Arc::clone(&breaker),
+            conn,
+            ticket: ProbeTicket::None,
+        };
 
         // Meanwhile B trips the account and takes the single half-open probe.
         breaker.record_failure(conn, 500, None);
         let later = Instant::now() + Duration::from_secs(31);
-        assert!(matches!(breaker.claim_at(conn, later), Ok(ProbeTicket::Probe { .. })), "B holds the only probe");
+        assert!(
+            matches!(breaker.claim_at(conn, later), Ok(ProbeTicket::Probe { .. })),
+            "B holds the only probe"
+        );
 
         // A is now cancelled.
         drop(a_guard);
@@ -432,8 +477,15 @@ mod tests {
         let conn = Uuid::new_v4();
         breaker.record_failure(conn, 500, None);
         assert!(matches!(breaker.claim(conn), Ok(ProbeTicket::Probe { .. })));
-        drop(ProbeClaim { breaker: Arc::clone(&breaker), conn, ticket: ProbeTicket::Probe { epoch: 1 } });
-        assert!(matches!(breaker.claim(conn), Ok(ProbeTicket::Probe { .. })), "the slot was returned");
+        drop(ProbeClaim {
+            breaker: Arc::clone(&breaker),
+            conn,
+            ticket: ProbeTicket::Probe { epoch: 1 },
+        });
+        assert!(
+            matches!(breaker.claim(conn), Ok(ProbeTicket::Probe { .. })),
+            "the slot was returned"
+        );
     }
 
     /// A stale guard must not free a probe belonging to a *newer* half-open episode.
@@ -448,13 +500,18 @@ mod tests {
         // Episode N: trip, then claim the probe past the window.
         breaker.record_failure(conn, 500, None);
         let later = Instant::now() + Duration::from_secs(31);
-        let Ok(old_ticket) = breaker.claim_at(conn, later) else { panic!("probe N must be taken") };
+        let Ok(old_ticket) = breaker.claim_at(conn, later) else {
+            panic!("probe N must be taken")
+        };
 
         // The account trips again, opening a new window, which then elapses.
         breaker.record_failure(conn, 500, None);
         let later2 = later + Duration::from_secs(31);
         assert!(
-            matches!(breaker.claim_at(conn, later2), Ok(ProbeTicket::Probe { .. })),
+            matches!(
+                breaker.claim_at(conn, later2),
+                Ok(ProbeTicket::Probe { .. })
+            ),
             "probe N+1 taken"
         );
 

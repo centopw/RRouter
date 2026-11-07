@@ -62,7 +62,11 @@ pub async fn update(
                 "user_updated",
                 Some(&user.email),
                 &crate::auth::client_ip(&headers, None),
-                &format!("role {} · {}", user.role.as_str(), if user.disabled { "disabled" } else { "enabled" }),
+                &format!(
+                    "role {} · {}",
+                    user.role.as_str(),
+                    if user.disabled { "disabled" } else { "enabled" }
+                ),
             )
             .await;
             tracing::info!(email = %user.email, role = user.role.as_str(), disabled = user.disabled, "user updated");

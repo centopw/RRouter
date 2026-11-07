@@ -53,7 +53,10 @@ impl From<&Connection> for ConnectionView {
             is_active: c.is_active,
             base_url_override: creds.base_url_override.clone(),
             has_access_token: creds.access_token.as_deref().is_some_and(|t| !t.is_empty()),
-            has_refresh_token: creds.refresh_token.as_deref().is_some_and(|t| !t.is_empty()),
+            has_refresh_token: creds
+                .refresh_token
+                .as_deref()
+                .is_some_and(|t| !t.is_empty()),
             has_api_key: creds.api_key.as_deref().is_some_and(|t| !t.is_empty()),
             expires_at: creds.expires_at,
             backoff_level: c.backoff_level,
@@ -69,7 +72,10 @@ pub async fn list(
     State(state): State<Arc<AppState>>,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Response {
-    let provider = query.iter().find(|(k, _)| k == "provider").map(|(_, v)| v.as_str());
+    let provider = query
+        .iter()
+        .find(|(k, _)| k == "provider")
+        .map(|(_, v)| v.as_str());
     match state.store.list_connections(provider).await {
         Ok(conns) => {
             let data: Vec<ConnectionView> = conns.iter().map(ConnectionView::from).collect();
@@ -120,8 +126,14 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
             // List this provider's own models now, so the registry is useful immediately.
             super::models::spawn_initial_fetch(Arc::clone(&state), created.id);
             match state.store.get_connection(created.id).await {
-                Ok(Some(c)) => (StatusCode::CREATED, axum::Json(ConnectionView::from(&c))).into_response(),
-                Ok(None) => (StatusCode::CREATED, axum::Json(ConnectionView::from(&created))).into_response(),
+                Ok(Some(c)) => {
+                    (StatusCode::CREATED, axum::Json(ConnectionView::from(&c))).into_response()
+                }
+                Ok(None) => (
+                    StatusCode::CREATED,
+                    axum::Json(ConnectionView::from(&created)),
+                )
+                    .into_response(),
                 Err(e) => admin_error(&e),
             }
         }
@@ -184,7 +196,10 @@ pub async fn test(State(state): State<Arc<AppState>>, Path(id): Path<String>) ->
         return admin_error(&Error::NotFound(format!("connection {uuid}")));
     };
     let Some(spec) = rrouter_auth::get(&conn.provider) else {
-        return admin_error(&Error::BadRequest(format!("unknown provider {}", conn.provider)));
+        return admin_error(&Error::BadRequest(format!(
+            "unknown provider {}",
+            conn.provider
+        )));
     };
     let started = std::time::Instant::now();
     let result = probe(&state, spec, conn).await;
@@ -210,7 +225,10 @@ async fn probe(
     spec: &'static rrouter_auth::ProviderSpec,
     conn: Connection,
 ) -> Result<u16, Error> {
-    let creds = state.refresher.fresh(state.store.as_ref(), spec, conn.id).await?;
+    let creds = state
+        .refresher
+        .fresh(state.store.as_ref(), spec, conn.id)
+        .await?;
     // The probe must name a model the provider actually serves: sending a
     // placeholder like "ping" makes every provider answer 400 model_not_found,
     // which reads as a broken credential. Use the provider's cheapest known model.
@@ -222,8 +240,11 @@ async fn probe(
     req.max_tokens = Some(16);
     // The probe speaks the provider's own dialect at its own endpoint. Building the
     // body for Chat and posting it to a Responses URL (codex) is a guaranteed 400.
-    let (url, dialect) =
-        crate::proxy::endpoint_for(spec, creds.base_url_override.as_deref(), spec.default_dialect);
+    let (url, dialect) = crate::proxy::endpoint_for(
+        spec,
+        creds.base_url_override.as_deref(),
+        spec.default_dialect,
+    );
     let body = rrouter_translate::build_request(dialect, &req, spec.stream_only)?;
 
     let mut headers = axum::http::HeaderMap::new();
@@ -272,19 +293,23 @@ async fn probe(
         let mut stream = resp.bytes_stream();
         match stream.next().await {
             Some(Ok(chunk)) if !chunk.is_empty() => {}
-            Some(Ok(_)) => return Err(Error::Upstream {
-                provider: conn.provider.clone(),
-                status,
-                body: "stream closed before the first chunk".into(),
-                payload: None,
-            }),
+            Some(Ok(_)) => {
+                return Err(Error::Upstream {
+                    provider: conn.provider.clone(),
+                    status,
+                    body: "stream closed before the first chunk".into(),
+                    payload: None,
+                })
+            }
             Some(Err(e)) => return Err(Error::Transport(e.to_string())),
-            None => return Err(Error::Upstream {
-                provider: conn.provider.clone(),
-                status,
-                body: "empty stream".into(),
-                payload: None,
-            }),
+            None => {
+                return Err(Error::Upstream {
+                    provider: conn.provider.clone(),
+                    status,
+                    body: "empty stream".into(),
+                    payload: None,
+                })
+            }
         }
     }
     Ok(status)
@@ -338,11 +363,15 @@ async fn probe_model(state: &AppState, spec: &rrouter_auth::ProviderSpec) -> Str
             let Some(input) = row.cost.as_ref().and_then(|cost| cost.get("input")) else {
                 continue;
             };
-            let Some(input) = input.as_f64() else { continue };
+            let Some(input) = input.as_f64() else {
+                continue;
+            };
             let key = u8::from(row.provider == spec.id);
             let replace = match best {
                 None => true,
-                Some((best_key, best_rate)) => key > best_key || (key == best_key && input < best_rate),
+                Some((best_key, best_rate)) => {
+                    key > best_key || (key == best_key && input < best_rate)
+                }
             };
             if replace {
                 best = Some((key, input));
@@ -352,7 +381,9 @@ async fn probe_model(state: &AppState, spec: &rrouter_auth::ProviderSpec) -> Str
     };
     let mut ids: Vec<String> = candidates.into_iter().collect();
     order_probe_candidates(&mut ids, rate);
-    ids.into_iter().next().unwrap_or_else(|| spec.id.to_string())
+    ids.into_iter()
+        .next()
+        .unwrap_or_else(|| spec.id.to_string())
 }
 
 /// Probe order: cheapest known price, then the smaller family, then the newest version,
@@ -420,7 +451,10 @@ async fn apply_patch(state: &AppState, id: Uuid, value: Value) -> Result<(), Err
         // Re-enabling also clears backoff: the operator just asked for this account
         // to be used, so the breaker must not keep skipping it.
         if active && conn.backoff_level > 0 {
-            state.store.update_connection_status(id, 0, None, None).await?;
+            state
+                .store
+                .update_connection_status(id, 0, None, None)
+                .await?;
         }
     }
     if let Some(error) = value.get("last_error").and_then(Value::as_str) {
@@ -562,7 +596,10 @@ mod tests {
                 .find(|m| m.provider == spec.id)
                 .map(|m| m.id)
                 .expect("catalog has a model for every routed provider");
-            assert_ne!(model, "ping", "{id} must not probe with a placeholder model");
+            assert_ne!(
+                model, "ping",
+                "{id} must not probe with a placeholder model"
+            );
             assert!(!model.is_empty(), "{id} produced an empty probe model");
             assert!(
                 catalog.is_known(&model),

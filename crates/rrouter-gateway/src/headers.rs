@@ -25,7 +25,10 @@ const BASE: [(&str, &str); 4] = [
     ("x-content-type-options", "nosniff"),
     ("x-frame-options", "DENY"),
     ("referrer-policy", "no-referrer"),
-    ("permissions-policy", "camera=(), microphone=(), geolocation=()"),
+    (
+        "permissions-policy",
+        "camera=(), microphone=(), geolocation=()",
+    ),
 ];
 
 const CSP_HEADER: &str = "content-security-policy";

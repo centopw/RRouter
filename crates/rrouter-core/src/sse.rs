@@ -28,7 +28,9 @@ pub struct SseCodec {
 
 impl SseCodec {
     pub fn new() -> Self {
-        Self { buf: BytesMut::with_capacity(8 * 1024) }
+        Self {
+            buf: BytesMut::with_capacity(8 * 1024),
+        }
     }
 
     pub fn push(&mut self, chunk: &[u8]) {
@@ -91,7 +93,10 @@ fn parse_frame(raw: &[u8]) -> Option<SseFrame> {
     let mut event = None;
     let mut data = String::new();
     let mut has_data = false;
-    for line in text.split_inclusive(['\n']).map(|l| l.trim_end_matches(['\r', '\n'])) {
+    for line in text
+        .split_inclusive(['\n'])
+        .map(|l| l.trim_end_matches(['\r', '\n']))
+    {
         if let Some(rest) = line.strip_prefix("event:") {
             event = Some(rest.trim_start().to_string());
         } else if let Some(rest) = line.strip_prefix("data:") {

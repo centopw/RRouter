@@ -180,10 +180,7 @@ impl Refresher {
                 body.insert("refresh_token".into(), refresh_token.into());
                 body.insert("client_id".into(), spec.client_id.into());
                 if provider_id == "codex" {
-                    body.insert(
-                        "scope".into(),
-                        "openid profile email offline_access".into(),
-                    );
+                    body.insert("scope".into(), "openid profile email offline_access".into());
                 }
                 req.json(&serde_json::Value::Object(body))
             }
@@ -360,7 +357,10 @@ mod tests {
     }
 
     impl CredentialStore for FakeStore {
-        fn load(&self, _id: Uuid) -> Pin<Box<dyn Future<Output = Result<Credentials>> + Send + '_>> {
+        fn load(
+            &self,
+            _id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Result<Credentials>> + Send + '_>> {
             self.loads.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move { Ok(self.snapshot()) })
         }
@@ -447,8 +447,7 @@ mod tests {
             .respond_with(move |req: &wiremock::Request| {
                 hits_for_handler.fetch_add(1, Ordering::SeqCst);
                 // Single-use refresh token: the rotated value is what proves dedup.
-                let body: serde_json::Value =
-                    serde_json::from_slice(&req.body).unwrap_or_default();
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
                 assert_eq!(body["refresh_token"], "rt-old");
                 wiremock::ResponseTemplate::new(200)
                     // Hold the winner in the endpoint so late arrivals must queue on the
@@ -486,8 +485,15 @@ mod tests {
             tokens.push(c.access_token.expect("access token"));
         }
 
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "token endpoint must be hit once");
-        assert!(tokens.iter().all(|t| t == "at-new"), "all callers get the new token");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "token endpoint must be hit once"
+        );
+        assert!(
+            tokens.iter().all(|t| t == "at-new"),
+            "all callers get the new token"
+        );
         assert_eq!(store.merges.load(Ordering::SeqCst), 1, "one persist");
         assert_eq!(store.snapshot().refresh_token.as_deref(), Some("rt-new"));
     }
@@ -511,11 +517,17 @@ mod tests {
         let spec = claude_spec("claude", mock_url(&server), RefreshBody::Json);
         let id = Uuid::new_v4();
 
-        let first = refresher.fresh(store.as_ref(), &spec, id).await.expect("first");
+        let first = refresher
+            .fresh(store.as_ref(), &spec, id)
+            .await
+            .expect("first");
         assert_eq!(first.access_token.as_deref(), Some("at-new"));
 
         // Second caller entering after the first completed: fresh now, zero network.
-        let second = refresher.fresh(store.as_ref(), &spec, id).await.expect("second");
+        let second = refresher
+            .fresh(store.as_ref(), &spec, id)
+            .await
+            .expect("second");
         assert_eq!(second.access_token.as_deref(), Some("at-new"));
         assert_eq!(store.merges.load(Ordering::SeqCst), 1);
 
@@ -558,7 +570,11 @@ mod tests {
         });
         let refresher = Refresher::new(client());
         let c = refresher
-            .fresh(store.as_ref(), registry::get("openai").expect("openai"), Uuid::new_v4())
+            .fresh(
+                store.as_ref(),
+                registry::get("openai").expect("openai"),
+                Uuid::new_v4(),
+            )
             .await
             .expect("fresh");
         assert_eq!(c.api_key.as_deref(), Some("sk-static"));
@@ -569,8 +585,14 @@ mod tests {
     async fn github_copilot_token_is_rederived_on_expiry() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::header("authorization", "Bearer gh-token"))
-            .and(wiremock::matchers::header("editor-version", GITHUB_EDITOR_VERSION))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer gh-token",
+            ))
+            .and(wiremock::matchers::header(
+                "editor-version",
+                GITHUB_EDITOR_VERSION,
+            ))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "token": "copilot-new",
@@ -597,7 +619,10 @@ mod tests {
         let id = Uuid::new_v4();
         let refresher = Refresher::new(client());
 
-        let c = refresher.fresh(store.as_ref(), provider, id).await.expect("fresh");
+        let c = refresher
+            .fresh(store.as_ref(), provider, id)
+            .await
+            .expect("fresh");
         assert_eq!(c.copilot_token.as_deref(), Some("copilot-new"));
         assert!(c.copilot_expires_at.is_some_and(|at| at > now_unix()));
         assert_eq!(
@@ -607,7 +632,10 @@ mod tests {
         );
 
         // Copilot token now inside the lead window: no second derivation.
-        let again = refresher.fresh(store.as_ref(), provider, id).await.expect("fresh");
+        let again = refresher
+            .fresh(store.as_ref(), provider, id)
+            .await
+            .expect("fresh");
         assert_eq!(again.copilot_token.as_deref(), Some("copilot-new"));
         assert_eq!(store.merges.load(Ordering::SeqCst), 1);
     }

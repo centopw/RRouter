@@ -68,7 +68,9 @@ pub fn recency(id: &str) -> (Vec<u64>, Vec<u64>) {
 /// the most expensive model's minimum output. Lower is cheaper.
 pub fn probe_class(id: &str) -> u8 {
     let id = id.to_ascii_lowercase();
-    let cheap = ["haiku", "flash", "mini", "lite", "nano", "instant", "8b", "oss"];
+    let cheap = [
+        "haiku", "flash", "mini", "lite", "nano", "instant", "8b", "oss",
+    ];
     let heavy = ["opus", "pro", "ultra", "max"];
     if cheap.iter().any(|needle| id.contains(needle)) {
         0
@@ -364,7 +366,10 @@ impl Catalog {
     fn from_map(by_model: HashMap<String, Vec<ModelInfo>>) -> Self {
         let mut by_core: HashMap<String, Vec<String>> = HashMap::new();
         for id in by_model.keys() {
-            by_core.entry(core_of(id).to_string()).or_default().push(id.clone());
+            by_core
+                .entry(core_of(id).to_string())
+                .or_default()
+                .push(id.clone());
         }
         for ids in by_core.values_mut() {
             ids.sort();
@@ -445,7 +450,10 @@ mod tests {
             ]
         );
         // A date suffix breaks a tie without outranking a generation bump.
-        assert_eq!(recency("claude-3-5-sonnet-20241022"), (vec![3, 5], vec![20_241_022]));
+        assert_eq!(
+            recency("claude-3-5-sonnet-20241022"),
+            (vec![3, 5], vec![20_241_022])
+        );
     }
 
     #[test]
@@ -470,7 +478,10 @@ mod tests {
         for (provider, models) in BUILTIN {
             assert!(models.len() >= 4, "{provider} has {}", models.len());
         }
-        assert_eq!(catalog.all().len(), BUILTIN.iter().map(|(_, m)| m.len()).sum::<usize>());
+        assert_eq!(
+            catalog.all().len(),
+            BUILTIN.iter().map(|(_, m)| m.len()).sum::<usize>()
+        );
     }
 
     #[test]
@@ -495,7 +506,10 @@ mod tests {
         let emb = catalog.resolve("text-embedding-3-large");
         assert_eq!(emb.len(), 1);
         assert_eq!(emb[0].provider, "openai");
-        assert!(catalog.resolve("text-embedding-004").iter().all(|m| m.provider == "gemini"));
+        assert!(catalog
+            .resolve("text-embedding-004")
+            .iter()
+            .all(|m| m.provider == "gemini"));
     }
 
     #[test]

@@ -200,19 +200,21 @@ impl Config {
             }),
         };
         let host = match var("RROUTER_HOST") {
-            None => DEFAULT_HOST.parse().unwrap_or(std::net::Ipv4Addr::LOCALHOST.into()),
+            None => DEFAULT_HOST
+                .parse()
+                .unwrap_or(std::net::Ipv4Addr::LOCALHOST.into()),
             Some(raw) => raw.parse::<IpAddr>().unwrap_or_else(|_| {
                 problems.push(format!("RROUTER_HOST={raw:?} is not an IP address"));
                 std::net::Ipv4Addr::LOCALHOST.into()
             }),
         };
-        let data_dir = PathBuf::from(var("RROUTER_DATA_DIR").unwrap_or_else(|| DEFAULT_DATA_DIR.into()));
+        let data_dir =
+            PathBuf::from(var("RROUTER_DATA_DIR").unwrap_or_else(|| DEFAULT_DATA_DIR.into()));
         let master_key = var("RROUTER_MASTER_KEY").filter(|s| !s.is_empty());
         if let Some(key) = &master_key {
             if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
-                problems.push(
-                    "RROUTER_MASTER_KEY must be 64 hex characters (32 bytes)".to_string(),
-                );
+                problems
+                    .push("RROUTER_MASTER_KEY must be 64 hex characters (32 bytes)".to_string());
             }
         }
         let require_api_key = match var("RROUTER_REQUIRE_API_KEY") {
@@ -222,12 +224,20 @@ impl Config {
                 false
             }),
         };
-        let request_timeout_secs =
-            secs_var("RROUTER_REQUEST_TIMEOUT_SECS", DEFAULT_REQUEST_TIMEOUT_SECS, &mut problems);
-        let connect_timeout_secs =
-            secs_var("RROUTER_CONNECT_TIMEOUT_SECS", DEFAULT_CONNECT_TIMEOUT_SECS, &mut problems);
+        let request_timeout_secs = secs_var(
+            "RROUTER_REQUEST_TIMEOUT_SECS",
+            DEFAULT_REQUEST_TIMEOUT_SECS,
+            &mut problems,
+        );
+        let connect_timeout_secs = secs_var(
+            "RROUTER_CONNECT_TIMEOUT_SECS",
+            DEFAULT_CONNECT_TIMEOUT_SECS,
+            &mut problems,
+        );
         let log_filter = var("RUST_LOG").unwrap_or_else(|| DEFAULT_LOG.into());
-        let static_dir = var("RROUTER_STATIC_DIR").filter(|s| !s.is_empty()).map(PathBuf::from);
+        let static_dir = var("RROUTER_STATIC_DIR")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
         let cors_origins: Vec<String> = var("RROUTER_CORS_ORIGINS")
             .map(|raw| {
                 raw.split(',')
@@ -246,7 +256,9 @@ impl Config {
         let allow_remote_admin = match var("RROUTER_ALLOW_REMOTE_ADMIN") {
             None => false,
             Some(raw) => parse_bool(&raw).unwrap_or_else(|| {
-                problems.push(format!("RROUTER_ALLOW_REMOTE_ADMIN={raw:?} is not a boolean"));
+                problems.push(format!(
+                    "RROUTER_ALLOW_REMOTE_ADMIN={raw:?} is not a boolean"
+                ));
                 false
             }),
         };
@@ -254,8 +266,11 @@ impl Config {
         // reverse proxy the peer is always the proxy, so loopback proves nothing.
         let admin_token = var("RROUTER_ADMIN_TOKEN").filter(|s| !s.is_empty());
         let max_concurrency = usize_var("RROUTER_MAX_CONCURRENCY", 0, &mut problems);
-        let max_attempts =
-            clamp_attempts(usize_var("RROUTER_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS, &mut problems));
+        let max_attempts = clamp_attempts(usize_var(
+            "RROUTER_MAX_ATTEMPTS",
+            DEFAULT_MAX_ATTEMPTS,
+            &mut problems,
+        ));
         // Retries are clamped, never refused: an operator writing 99 wants "retry hard",
         // and garbage still stops startup like every other numeric knob.
         let retry_attempts = clamped_var(
@@ -296,9 +311,7 @@ impl Config {
             Some(raw) => match CacheMode::parse(&raw) {
                 Some(mode) => mode,
                 None => {
-                    problems.push(format!(
-                        "RROUTER_CACHE={raw:?} is not one of off, sqlite"
-                    ));
+                    problems.push(format!("RROUTER_CACHE={raw:?} is not one of off, sqlite"));
                     CacheMode::Off
                 }
             },
@@ -470,7 +483,9 @@ fn log_format_setting(raw: Option<String>, problems: &mut Vec<String>) -> LogFor
     match raw {
         None => LogFormat::Text,
         Some(raw) => LogFormat::parse(&raw).unwrap_or_else(|| {
-            problems.push(format!("RROUTER_LOG_FORMAT={raw:?} is not one of text, json"));
+            problems.push(format!(
+                "RROUTER_LOG_FORMAT={raw:?} is not one of text, json"
+            ));
             LogFormat::Text
         }),
     }
@@ -515,17 +530,31 @@ impl Serialize for Redacted<'_> {
         st.serialize_field("port", &c.port)?;
         st.serialize_field("data_dir", &c.data_dir.to_string_lossy())?;
         st.serialize_field("db_path", &c.db_path().to_string_lossy())?;
-        st.serialize_field("master_key", &if c.master_key.is_some() { "env" } else { "file" })?;
+        st.serialize_field(
+            "master_key",
+            &if c.master_key.is_some() {
+                "env"
+            } else {
+                "file"
+            },
+        )?;
         st.serialize_field("require_api_key", &c.require_api_key)?;
         st.serialize_field("request_timeout_secs", &c.request_timeout_secs)?;
         st.serialize_field("connect_timeout_secs", &c.connect_timeout_secs)?;
-        st.serialize_field("static_dir", &c.static_dir.as_ref().map(|p| p.to_string_lossy()))?;
+        st.serialize_field(
+            "static_dir",
+            &c.static_dir.as_ref().map(|p| p.to_string_lossy()),
+        )?;
         st.serialize_field("cors_origins", &c.cors_origins)?;
         st.serialize_field("allow_remote_admin", &c.allow_remote_admin)?;
         st.serialize_field("log_filter", &c.log_filter)?;
         st.serialize_field(
             "admin_token",
-            &if c.admin_token.is_some() { "set" } else { "unset" },
+            &if c.admin_token.is_some() {
+                "set"
+            } else {
+                "unset"
+            },
         )?;
         st.serialize_field("max_concurrency", &c.max_concurrency)?;
         st.serialize_field("max_attempts", &c.max_attempts)?;
@@ -589,7 +618,10 @@ mod tests {
     fn strategy_names_parse_and_unknown_values_are_refused() {
         assert_eq!(Strategy::parse("priority"), Some(Strategy::Priority));
         assert_eq!(Strategy::parse(" Weighted "), Some(Strategy::Weighted));
-        assert_eq!(Strategy::parse("least_latency"), Some(Strategy::LeastLatency));
+        assert_eq!(
+            Strategy::parse("least_latency"),
+            Some(Strategy::LeastLatency)
+        );
         assert_eq!(Strategy::parse("CHEAPEST"), Some(Strategy::Cheapest));
         assert_eq!(Strategy::parse("least-latency"), None);
         assert_eq!(Strategy::parse(""), None);
@@ -597,12 +629,25 @@ mod tests {
         // so it must list every one of them.
         let mut problems = Vec::new();
         assert_eq!(strategy_setting(None, &mut problems), Strategy::Priority);
-        assert_eq!(strategy_setting(Some("cheapest".into()), &mut problems), Strategy::Cheapest);
-        assert!(problems.is_empty(), "valid settings must not report problems");
-        assert_eq!(strategy_setting(Some("round_robin".into()), &mut problems), Strategy::Priority);
+        assert_eq!(
+            strategy_setting(Some("cheapest".into()), &mut problems),
+            Strategy::Cheapest
+        );
+        assert!(
+            problems.is_empty(),
+            "valid settings must not report problems"
+        );
+        assert_eq!(
+            strategy_setting(Some("round_robin".into()), &mut problems),
+            Strategy::Priority
+        );
         assert_eq!(problems.len(), 1);
         for name in ["priority", "weighted", "least_latency", "cheapest"] {
-            assert!(problems[0].contains(name), "{name} missing from {:?}", problems[0]);
+            assert!(
+                problems[0].contains(name),
+                "{name} missing from {:?}",
+                problems[0]
+            );
         }
     }
 
@@ -621,7 +666,11 @@ mod tests {
     /// operator intent, so an oversized number must not take the gateway down.
     #[test]
     fn cache_numbers_are_clamped_into_the_supported_range() {
-        assert_eq!(clamp_cache_ttl(0), 1, "zero would make every entry expire at once");
+        assert_eq!(
+            clamp_cache_ttl(0),
+            1,
+            "zero would make every entry expire at once"
+        );
         assert_eq!(clamp_cache_ttl(300), 300);
         assert_eq!(clamp_cache_ttl(86_400), 86_400);
         assert_eq!(clamp_cache_ttl(usize::MAX), MAX_CACHE_TTL_SECS);
@@ -652,21 +701,40 @@ mod tests {
             clamped_var(name, default, 0, max, problems)
         };
 
-        for name in ["RROUTER_RETRY_ATTEMPTS", "RROUTER_RETRY_BASE_MS", "RROUTER_RETRY_MAX_MS"] {
+        for name in [
+            "RROUTER_RETRY_ATTEMPTS",
+            "RROUTER_RETRY_BASE_MS",
+            "RROUTER_RETRY_MAX_MS",
+        ] {
             std::env::remove_var(name);
         }
         let mut problems = Vec::new();
         assert_eq!(
-            read("RROUTER_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS, &mut problems),
+            read(
+                "RROUTER_RETRY_ATTEMPTS",
+                DEFAULT_RETRY_ATTEMPTS,
+                MAX_RETRY_ATTEMPTS,
+                &mut problems
+            ),
             1,
             "one retry per candidate is the default"
         );
         assert_eq!(
-            read("RROUTER_RETRY_BASE_MS", DEFAULT_RETRY_BASE_MS, MAX_RETRY_BASE_MS, &mut problems),
+            read(
+                "RROUTER_RETRY_BASE_MS",
+                DEFAULT_RETRY_BASE_MS,
+                MAX_RETRY_BASE_MS,
+                &mut problems
+            ),
             200
         );
         assert_eq!(
-            read("RROUTER_RETRY_MAX_MS", DEFAULT_RETRY_MAX_MS, MAX_RETRY_MAX_MS, &mut problems),
+            read(
+                "RROUTER_RETRY_MAX_MS",
+                DEFAULT_RETRY_MAX_MS,
+                MAX_RETRY_MAX_MS,
+                &mut problems
+            ),
             5_000
         );
         assert!(problems.is_empty());
@@ -676,15 +744,30 @@ mod tests {
         std::env::set_var("RROUTER_RETRY_MAX_MS", "50");
         let mut problems = Vec::new();
         assert_eq!(
-            read("RROUTER_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS, &mut problems),
+            read(
+                "RROUTER_RETRY_ATTEMPTS",
+                DEFAULT_RETRY_ATTEMPTS,
+                MAX_RETRY_ATTEMPTS,
+                &mut problems
+            ),
             2
         );
         assert_eq!(
-            read("RROUTER_RETRY_BASE_MS", DEFAULT_RETRY_BASE_MS, MAX_RETRY_BASE_MS, &mut problems),
+            read(
+                "RROUTER_RETRY_BASE_MS",
+                DEFAULT_RETRY_BASE_MS,
+                MAX_RETRY_BASE_MS,
+                &mut problems
+            ),
             1
         );
         assert_eq!(
-            read("RROUTER_RETRY_MAX_MS", DEFAULT_RETRY_MAX_MS, MAX_RETRY_MAX_MS, &mut problems),
+            read(
+                "RROUTER_RETRY_MAX_MS",
+                DEFAULT_RETRY_MAX_MS,
+                MAX_RETRY_MAX_MS,
+                &mut problems
+            ),
             50
         );
         assert!(problems.is_empty());
@@ -694,16 +777,31 @@ mod tests {
         std::env::set_var("RROUTER_RETRY_MAX_MS", "0");
         let mut problems = Vec::new();
         assert_eq!(
-            read("RROUTER_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS, &mut problems),
+            read(
+                "RROUTER_RETRY_ATTEMPTS",
+                DEFAULT_RETRY_ATTEMPTS,
+                MAX_RETRY_ATTEMPTS,
+                &mut problems
+            ),
             0,
             "zero retries is a legitimate off switch"
         );
         assert_eq!(
-            read("RROUTER_RETRY_BASE_MS", DEFAULT_RETRY_BASE_MS, MAX_RETRY_BASE_MS, &mut problems),
+            read(
+                "RROUTER_RETRY_BASE_MS",
+                DEFAULT_RETRY_BASE_MS,
+                MAX_RETRY_BASE_MS,
+                &mut problems
+            ),
             0
         );
         assert_eq!(
-            read("RROUTER_RETRY_MAX_MS", DEFAULT_RETRY_MAX_MS, MAX_RETRY_MAX_MS, &mut problems),
+            read(
+                "RROUTER_RETRY_MAX_MS",
+                DEFAULT_RETRY_MAX_MS,
+                MAX_RETRY_MAX_MS,
+                &mut problems
+            ),
             0
         );
         assert!(problems.is_empty());
@@ -713,39 +811,80 @@ mod tests {
         std::env::set_var("RROUTER_RETRY_MAX_MS", "999999");
         let mut problems = Vec::new();
         assert_eq!(
-            read("RROUTER_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS, &mut problems),
+            read(
+                "RROUTER_RETRY_ATTEMPTS",
+                DEFAULT_RETRY_ATTEMPTS,
+                MAX_RETRY_ATTEMPTS,
+                &mut problems
+            ),
             MAX_RETRY_ATTEMPTS
         );
         assert_eq!(
-            read("RROUTER_RETRY_BASE_MS", DEFAULT_RETRY_BASE_MS, MAX_RETRY_BASE_MS, &mut problems),
+            read(
+                "RROUTER_RETRY_BASE_MS",
+                DEFAULT_RETRY_BASE_MS,
+                MAX_RETRY_BASE_MS,
+                &mut problems
+            ),
             MAX_RETRY_BASE_MS
         );
         assert_eq!(
-            read("RROUTER_RETRY_MAX_MS", DEFAULT_RETRY_MAX_MS, MAX_RETRY_MAX_MS, &mut problems),
+            read(
+                "RROUTER_RETRY_MAX_MS",
+                DEFAULT_RETRY_MAX_MS,
+                MAX_RETRY_MAX_MS,
+                &mut problems
+            ),
             MAX_RETRY_MAX_MS
         );
-        assert!(problems.is_empty(), "an oversized bound is clamped, not refused");
+        assert!(
+            problems.is_empty(),
+            "an oversized bound is clamped, not refused"
+        );
 
         std::env::set_var("RROUTER_RETRY_ATTEMPTS", "many");
         std::env::set_var("RROUTER_RETRY_BASE_MS", "-1");
         std::env::set_var("RROUTER_RETRY_MAX_MS", "5s");
         let mut problems = Vec::new();
         assert_eq!(
-            read("RROUTER_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS, &mut problems),
+            read(
+                "RROUTER_RETRY_ATTEMPTS",
+                DEFAULT_RETRY_ATTEMPTS,
+                MAX_RETRY_ATTEMPTS,
+                &mut problems
+            ),
             DEFAULT_RETRY_ATTEMPTS,
             "garbage falls back to the default"
         );
         assert_eq!(
-            read("RROUTER_RETRY_BASE_MS", DEFAULT_RETRY_BASE_MS, MAX_RETRY_BASE_MS, &mut problems),
+            read(
+                "RROUTER_RETRY_BASE_MS",
+                DEFAULT_RETRY_BASE_MS,
+                MAX_RETRY_BASE_MS,
+                &mut problems
+            ),
             DEFAULT_RETRY_BASE_MS
         );
         assert_eq!(
-            read("RROUTER_RETRY_MAX_MS", DEFAULT_RETRY_MAX_MS, MAX_RETRY_MAX_MS, &mut problems),
+            read(
+                "RROUTER_RETRY_MAX_MS",
+                DEFAULT_RETRY_MAX_MS,
+                MAX_RETRY_MAX_MS,
+                &mut problems
+            ),
             DEFAULT_RETRY_MAX_MS
         );
-        assert_eq!(problems.len(), 3, "each bad value must fail startup: {problems:?}");
+        assert_eq!(
+            problems.len(),
+            3,
+            "each bad value must fail startup: {problems:?}"
+        );
 
-        for name in ["RROUTER_RETRY_ATTEMPTS", "RROUTER_RETRY_BASE_MS", "RROUTER_RETRY_MAX_MS"] {
+        for name in [
+            "RROUTER_RETRY_ATTEMPTS",
+            "RROUTER_RETRY_BASE_MS",
+            "RROUTER_RETRY_MAX_MS",
+        ] {
             std::env::remove_var(name);
         }
     }
@@ -779,11 +918,18 @@ mod tests {
         std::env::set_var(USAGE_RETENTION_VAR, "99999");
         let mut problems = Vec::new();
         assert_eq!(read(&mut problems), MAX_USAGE_RETENTION_DAYS);
-        assert!(problems.is_empty(), "an oversized bound is clamped, not refused");
+        assert!(
+            problems.is_empty(),
+            "an oversized bound is clamped, not refused"
+        );
 
         std::env::set_var(USAGE_RETENTION_VAR, "-1");
         let mut problems = Vec::new();
-        assert_eq!(read(&mut problems), 0, "a bad value falls back to the default");
+        assert_eq!(
+            read(&mut problems),
+            0,
+            "a bad value falls back to the default"
+        );
         assert_eq!(problems.len(), 1, "garbage must fail startup: {problems:?}");
 
         std::env::remove_var(USAGE_RETENTION_VAR);
@@ -813,7 +959,10 @@ mod tests {
         cfg.cache_max_entries = 5;
         let json = serde_json::to_string(&cfg.redacted()).expect("serialize");
         assert!(json.contains("\"admin_token\":\"set\""));
-        assert!(!json.contains(token), "the token itself must never be printed: {json}");
+        assert!(
+            !json.contains(token),
+            "the token itself must never be printed: {json}"
+        );
         assert!(json.contains("\"max_concurrency\":7"));
         assert!(json.contains("\"max_attempts\":2"));
         assert!(json.contains("\"shutdown_grace_secs\":0"));
@@ -827,8 +976,14 @@ mod tests {
     fn cors_allows_configured_and_loopback_origins_only() {
         let mut cfg = base();
         cfg.cors_origins = vec!["https://console.example".into()];
-        assert_eq!(cfg.cors_origin_for("https://console.example"), Some("https://console.example".into()));
-        assert_eq!(cfg.cors_origin_for("http://localhost:3000"), Some("http://localhost:3000".into()));
+        assert_eq!(
+            cfg.cors_origin_for("https://console.example"),
+            Some("https://console.example".into())
+        );
+        assert_eq!(
+            cfg.cors_origin_for("http://localhost:3000"),
+            Some("http://localhost:3000".into())
+        );
         assert_eq!(cfg.cors_origin_for("https://evil.example"), None);
         cfg.cors_origins = vec!["*".into()];
         // A stored wildcard must never grant a foreign origin: an admin API that is
@@ -842,7 +997,11 @@ mod tests {
         assert_eq!(LogFormat::parse(" JSON "), Some(LogFormat::Json));
         assert_eq!(LogFormat::parse("pretty"), None);
         assert_eq!(LogFormat::parse(""), None);
-        assert_eq!(LogFormat::default(), LogFormat::Text, "text stays the default");
+        assert_eq!(
+            LogFormat::default(),
+            LogFormat::Text,
+            "text stays the default"
+        );
         assert_eq!(LogFormat::Json.as_str(), "json");
     }
 
@@ -850,13 +1009,23 @@ mod tests {
     fn log_settings_default_and_refuse_garbage() {
         let mut problems = Vec::new();
         assert_eq!(log_format_setting(None, &mut problems), LogFormat::Text);
-        assert!(access_log_setting(None, &mut problems), "the access line is on by default");
+        assert!(
+            access_log_setting(None, &mut problems),
+            "the access line is on by default"
+        );
         assert!(problems.is_empty());
-        assert_eq!(log_format_setting(Some("json".into()), &mut problems), LogFormat::Json);
+        assert_eq!(
+            log_format_setting(Some("json".into()), &mut problems),
+            LogFormat::Json
+        );
         assert!(!access_log_setting(Some("false".into()), &mut problems));
         assert!(problems.is_empty());
         log_format_setting(Some("yaml".into()), &mut problems);
         access_log_setting(Some("maybe".into()), &mut problems);
-        assert_eq!(problems.len(), 2, "both bad values must fail startup: {problems:?}");
+        assert_eq!(
+            problems.len(),
+            2,
+            "both bad values must fail startup: {problems:?}"
+        );
     }
 }

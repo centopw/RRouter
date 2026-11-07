@@ -331,7 +331,10 @@ impl AppState {
             Ok(()) => Ok(()),
             Err(Cap::Rpm { limit }) => Err(Error::Limited {
                 code: "rate_limited",
-                message: format!("api key {} is limited to {limit} requests per minute", key.id),
+                message: format!(
+                    "api key {} is limited to {limit} requests per minute",
+                    key.id
+                ),
                 retry_after_secs: 1,
             }),
             Err(Cap::Tpm { limit, used }) => Err(Error::Limited {
@@ -579,7 +582,10 @@ impl KeyCounters {
 
     /// Drop a deleted key's windows so a recreated id cannot inherit traffic.
     pub fn forget(&self, id: Uuid) {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
     }
 }
 
@@ -620,7 +626,9 @@ mod tests {
         assert_eq!(concurrency_for(3).expect("cap").available_permits(), 3);
         // A huge value must clamp instead of panicking at startup.
         assert_eq!(
-            concurrency_for(usize::MAX).expect("cap").available_permits(),
+            concurrency_for(usize::MAX)
+                .expect("cap")
+                .available_permits(),
             tokio::sync::Semaphore::MAX_PERMITS
         );
     }
@@ -648,7 +656,10 @@ mod tests {
         counters.record_tokens(id, 40);
         assert_eq!(
             counters.try_admit(id, 0, 100),
-            Err(Cap::Tpm { limit: 100, used: 120 })
+            Err(Cap::Tpm {
+                limit: 100,
+                used: 120
+            })
         );
         // A different key is unaffected.
         assert_eq!(counters.try_admit(Uuid::new_v4(), 0, 100), Ok(()));

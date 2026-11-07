@@ -6,7 +6,7 @@ use serde_json::{json, Map, Value};
 use rrouter_core::sse::{render_openai, SseCodec, SseFrame};
 use rrouter_core::{
     ChatRequest, ChatResponse, Dialect, FinishReason, Message, Part, Result, Role, StreamEvent,
-    ToolDef, ToolChoice, Usage,
+    ToolChoice, ToolDef, Usage,
 };
 
 use crate::{
@@ -96,7 +96,11 @@ fn parse_input(body: &Value) -> Result<Vec<Message>> {
                         let signature = req_str(item, "encrypted_content")
                             .or_else(|| req_str(item, "id"))
                             .map(str::to_owned);
-                        push_part(&mut out, Role::Assistant, Part::Reasoning { text, signature });
+                        push_part(
+                            &mut out,
+                            Role::Assistant,
+                            Part::Reasoning { text, signature },
+                        );
                     }
                     "message" => {
                         let role = match req_str(item, "role") {
@@ -143,7 +147,10 @@ fn parse_input(body: &Value) -> Result<Vec<Message>> {
                         }
                     }
                     other => {
-                        return Err(parse_err(D, &format!("input[{i}] has unsupported type `{other}`")))
+                        return Err(parse_err(
+                            D,
+                            &format!("input[{i}] has unsupported type `{other}`"),
+                        ))
                     }
                 }
             }
@@ -160,7 +167,11 @@ fn req_system_extend(out: &mut Vec<Message>, text: String) {
     if text.is_empty() {
         return;
     }
-    if let Some(Message { role: Role::System, parts }) = out.last_mut() {
+    if let Some(Message {
+        role: Role::System,
+        parts,
+    }) = out.last_mut()
+    {
         if let Some(Part::Text(t)) = parts.first_mut() {
             t.push_str("\n\n");
             t.push_str(&text);
@@ -189,7 +200,10 @@ fn push_part(out: &mut Vec<Message>, role: Role, part: Part) {
             return;
         }
     }
-    out.push(Message { role, parts: vec![part] });
+    out.push(Message {
+        role,
+        parts: vec![part],
+    });
 }
 
 /// A tool result and a function call never share a message in Responses.
@@ -214,11 +228,16 @@ fn parse_tools(body: &Value) -> (Vec<ToolDef>, Option<Vec<Value>>) {
             raw.push(item.clone());
             continue;
         }
-        let Some(name) = req_str(item, "name") else { continue };
+        let Some(name) = req_str(item, "name") else {
+            continue;
+        };
         out.push(ToolDef {
             name: name.to_owned(),
             description: req_str(item, "description").map(str::to_owned),
-            parameters: item.get("parameters").map(tool_schema).unwrap_or_else(|| tool_schema(&Value::Null)),
+            parameters: item
+                .get("parameters")
+                .map(tool_schema)
+                .unwrap_or_else(|| tool_schema(&Value::Null)),
             strict: item.get("strict").and_then(Value::as_bool).unwrap_or(false),
         });
     }
@@ -272,7 +291,11 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
         }
         for part in &msg.parts {
             match part {
-                Part::ToolUse { id, name, input: args } => input.push(json!({
+                Part::ToolUse {
+                    id,
+                    name,
+                    input: args,
+                } => input.push(json!({
                     "type": "function_call",
                     "call_id": id,
                     "name": name,
@@ -284,7 +307,11 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
                             .to_owned(),
                     },
                 })),
-                Part::ToolResult { tool_use_id, content, is_error } => input.push(json!({
+                Part::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => input.push(json!({
                     "type": "function_call_output",
                     "call_id": tool_use_id,
                     "output": if *is_error { format!("error: {content}") } else { content.clone() },
@@ -354,7 +381,11 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
 }
 
 fn content_out(parts: &[Part], role: Role) -> Result<Vec<Value>> {
-    let text_kind = if role == Role::Assistant { "output_text" } else { "input_text" };
+    let text_kind = if role == Role::Assistant {
+        "output_text"
+    } else {
+        "input_text"
+    };
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         match part {
@@ -380,11 +411,21 @@ pub fn parse_response(body: &Value) -> Result<ChatResponse> {
     let model = req_str(body, "model").unwrap_or_default().to_owned();
     let mut parts = Vec::new();
     let mut saw_message = false;
-    for item in body.get("output").and_then(Value::as_array).into_iter().flatten() {
+    for item in body
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         match req_str(item, "type") {
             Some("message") => {
                 saw_message = true;
-                for b in item.get("content").and_then(Value::as_array).into_iter().flatten() {
+                for b in item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
                     match req_str(b, "type") {
                         Some("output_text") | Some("text") => {
                             if let Some(t) = req_str(b, "text") {
@@ -409,7 +450,10 @@ pub fn parse_response(body: &Value) -> Result<ChatResponse> {
                     })
                     .unwrap_or_else(|| json!({}));
                 parts.push(Part::ToolUse {
-                    id: req_str(item, "call_id").or_else(|| req_str(item, "id")).unwrap_or_default().to_owned(),
+                    id: req_str(item, "call_id")
+                        .or_else(|| req_str(item, "id"))
+                        .unwrap_or_default()
+                        .to_owned(),
                     name: req_str(item, "name").unwrap_or_default().to_owned(),
                     input: args,
                 });
@@ -438,7 +482,8 @@ pub fn parse_response(body: &Value) -> Result<ChatResponse> {
 
     let finish_reason = finish_from_responses(
         req_str(body, "status"),
-        body.pointer("/incomplete_details/reason").and_then(Value::as_str),
+        body.pointer("/incomplete_details/reason")
+            .and_then(Value::as_str),
     );
     let finish_reason = if finish_reason == FinishReason::Stop
         && parts.iter().any(|p| matches!(p, Part::ToolUse { .. }))
@@ -448,7 +493,13 @@ pub fn parse_response(body: &Value) -> Result<ChatResponse> {
         finish_reason
     };
 
-    Ok(ChatResponse { id, model, parts, finish_reason, usage: usage_from_responses(body.get("usage")) })
+    Ok(ChatResponse {
+        id,
+        model,
+        parts,
+        finish_reason,
+        usage: usage_from_responses(body.get("usage")),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -479,7 +530,10 @@ pub fn build_response(resp: &ChatResponse) -> Result<Value> {
             Part::Text(t) => {
                 text.get_or_insert_with(String::new).push_str(t);
             }
-            Part::Reasoning { text: reasoning, signature } => {
+            Part::Reasoning {
+                text: reasoning,
+                signature,
+            } => {
                 flush_text(&mut output, &mut text, &mut seq);
                 let mut item = json!({
                     "type": "reasoning",
@@ -554,7 +608,10 @@ pub struct ResponsesDecoder {
 
 impl ResponsesDecoder {
     pub fn new(model: &str) -> Self {
-        Self { model: model.to_owned(), ..Self::default() }
+        Self {
+            model: model.to_owned(),
+            ..Self::default()
+        }
     }
 
     pub fn push(&mut self, chunk: &[u8], out: &mut Vec<StreamEvent>) -> Result<()> {
@@ -578,7 +635,9 @@ impl ResponsesDecoder {
             self.emit_done(out);
             return;
         }
-        let Ok(v) = serde_json::from_str::<Value>(&frame.data) else { return };
+        let Ok(v) = serde_json::from_str::<Value>(&frame.data) else {
+            return;
+        };
         let event = frame
             .event
             .as_deref()
@@ -592,7 +651,10 @@ impl ResponsesDecoder {
                     let model = req_str(inner, "model")
                         .map(str::to_owned)
                         .unwrap_or_else(|| self.model.clone());
-                    out.push(StreamEvent::Start { id: self.id.clone(), model });
+                    out.push(StreamEvent::Start {
+                        id: self.id.clone(),
+                        model,
+                    });
                     self.sent_start = true;
                 }
                 if event == "response.output_item.added" {
@@ -628,7 +690,9 @@ impl ResponsesDecoder {
                 let inner = v.get("response").unwrap_or(&v);
                 self.finish = Some(finish_from_responses(
                     Some("incomplete"),
-                    inner.pointer("/incomplete_details/reason").and_then(Value::as_str),
+                    inner
+                        .pointer("/incomplete_details/reason")
+                        .and_then(Value::as_str),
                 ));
                 if let Some(u) = inner.get("usage").filter(|u| u.is_object()) {
                     self.usage = Some(usage_from_responses(Some(u)));
@@ -681,7 +745,9 @@ impl ResponsesDecoder {
     }
 
     fn ensure_started(&mut self, slot: usize, out: &mut Vec<StreamEvent>) {
-        let Some((_, pending)) = self.items.get_mut(slot) else { return };
+        let Some((_, pending)) = self.items.get_mut(slot) else {
+            return;
+        };
         if pending.started {
             return;
         }
@@ -699,7 +765,10 @@ impl ResponsesDecoder {
         }
         if !self.sent_start {
             self.sent_start = true;
-            out.push(StreamEvent::Start { id: self.id.clone(), model: self.model.clone() });
+            out.push(StreamEvent::Start {
+                id: self.id.clone(),
+                model: self.model.clone(),
+            });
         }
         self.done = true;
         let reason = self.finish.unwrap_or(if self.tool_count > 0 {
@@ -707,7 +776,10 @@ impl ResponsesDecoder {
         } else {
             FinishReason::Stop
         });
-        out.push(StreamEvent::Done { reason, usage: self.usage });
+        out.push(StreamEvent::Done {
+            reason,
+            usage: self.usage,
+        });
     }
 }
 
@@ -751,7 +823,11 @@ impl Open {
 
 impl ResponsesEncoder {
     pub fn new(model: &str) -> Self {
-        Self { model: model.to_owned(), open: None, ..Self::default() }
+        Self {
+            model: model.to_owned(),
+            open: None,
+            ..Self::default()
+        }
     }
 
     pub fn encode(&mut self, ev: &StreamEvent) -> bytes::Bytes {
@@ -797,10 +873,18 @@ impl ResponsesEncoder {
                 if self.tools[slot].is_some() {
                     return bytes::Bytes::from(out);
                 }
-                let item = OutItem { id: id.clone(), seq: self.seq, output_index: self.next_output_index };
+                let item = OutItem {
+                    id: id.clone(),
+                    seq: self.seq,
+                    output_index: self.next_output_index,
+                };
                 self.seq += 1;
                 self.next_output_index += 1;
-                self.tools[slot] = Some(OutItem { id: id.clone(), seq: item.seq, output_index: item.output_index });
+                self.tools[slot] = Some(OutItem {
+                    id: id.clone(),
+                    seq: item.seq,
+                    output_index: item.output_index,
+                });
                 let frame = self.envelope(
                     "response.output_item.added",
                     item.seq,
@@ -816,9 +900,15 @@ impl ResponsesEncoder {
                         },
                     }),
                 );
-                out.push_str(&render_openai(&frame.to_string(), Some("response.output_item.added")));
+                out.push_str(&render_openai(
+                    &frame.to_string(),
+                    Some("response.output_item.added"),
+                ));
             }
-            StreamEvent::ToolCallArgsDelta { index, partial_json } => {
+            StreamEvent::ToolCallArgsDelta {
+                index,
+                partial_json,
+            } => {
                 let Some(item) = self.tools.get(*index as usize).and_then(Option::as_ref) else {
                     return bytes::Bytes::from(out);
                 };
@@ -850,7 +940,10 @@ impl ResponsesEncoder {
                                 },
                             }),
                         );
-                        out.push_str(&render_openai(&frame.to_string(), Some("response.output_item.done")));
+                        out.push_str(&render_openai(
+                            &frame.to_string(),
+                            Some("response.output_item.done"),
+                        ));
                     }
                 }
                 let (status, incomplete) = match reason {
@@ -871,8 +964,13 @@ impl ResponsesEncoder {
                 if let Some(u) = usage {
                     response["usage"] = u;
                 }
-                let event = if status == "completed" { "response.completed" } else { "response.incomplete" };
-                let frame = json!({"type": event, "sequence_number": self.seq, "response": response});
+                let event = if status == "completed" {
+                    "response.completed"
+                } else {
+                    "response.incomplete"
+                };
+                let frame =
+                    json!({"type": event, "sequence_number": self.seq, "response": response});
                 out.push_str(&render_openai(&frame.to_string(), Some(event)));
                 self.done = true;
             }
@@ -888,7 +986,8 @@ impl ResponsesEncoder {
             "status": "in_progress",
             "output": [],
         });
-        let frame = json!({"type": "response.created", "sequence_number": self.seq, "response": response});
+        let frame =
+            json!({"type": "response.created", "sequence_number": self.seq, "response": response});
         self.seq += 1;
         out.push_str(&render_openai(&frame.to_string(), Some("response.created")));
     }
@@ -899,10 +998,18 @@ impl ResponsesEncoder {
             return;
         }
         self.close_item(out);
-        let idx = if output_index == 0 { self.next_output_index } else { output_index };
+        let idx = if output_index == 0 {
+            self.next_output_index
+        } else {
+            output_index
+        };
         self.next_output_index = self.next_output_index.max(idx + 1);
         let id = format!("{item_type}_{}", self.seq);
-        let item = OutItem { id: id.clone(), seq: self.seq, output_index: idx };
+        let item = OutItem {
+            id: id.clone(),
+            seq: self.seq,
+            output_index: idx,
+        };
         self.seq += 1;
         let wire = match kind {
             Open::Text => json!({
@@ -915,11 +1022,16 @@ impl ResponsesEncoder {
             item.seq,
             json!({"output_index": item.output_index, "item": wire}),
         );
-        out.push_str(&render_openai(&frame.to_string(), Some("response.output_item.added")));
+        out.push_str(&render_openai(
+            &frame.to_string(),
+            Some("response.output_item.added"),
+        ));
         self.open = Some(kind);
         self.open_item = Some(item);
         if kind == Open::Text {
-            let Some(item) = self.open_item.as_ref() else { return };
+            let Some(item) = self.open_item.as_ref() else {
+                return;
+            };
             let frame = self.envelope(
                 "response.content_part.added",
                 self.seq,
@@ -931,7 +1043,10 @@ impl ResponsesEncoder {
                 }),
             );
             self.seq += 1;
-            out.push_str(&render_openai(&frame.to_string(), Some("response.content_part.added")));
+            out.push_str(&render_openai(
+                &frame.to_string(),
+                Some("response.content_part.added"),
+            ));
         }
     }
 
@@ -954,7 +1069,10 @@ impl ResponsesEncoder {
                 item.seq,
                 json!({"output_index": item.output_index, "item": wire}),
             );
-            out.push_str(&render_openai(&frame.to_string(), Some("response.output_item.done")));
+            out.push_str(&render_openai(
+                &frame.to_string(),
+                Some("response.output_item.done"),
+            ));
         }
     }
 
@@ -1011,8 +1129,14 @@ mod tests {
         let same = build_request(Dialect::OpenAiResponses, &req, false).unwrap();
         let tools = same["tools"].as_array().expect("tools");
         assert_eq!(tools.len(), 3);
-        assert_eq!(tools[1], json!({"type": "web_search", "external_web_access": true}));
-        assert_eq!(tools[2], json!({"type": "file_search", "vector_store_ids": ["vs_1"]}));
+        assert_eq!(
+            tools[1],
+            json!({"type": "web_search", "external_web_access": true})
+        );
+        assert_eq!(
+            tools[2],
+            json!({"type": "file_search", "vector_store_ids": ["vs_1"]})
+        );
 
         // Different dialect: nothing the target cannot express is smuggled through.
         let chat = build_request(Dialect::OpenAiChat, &req, false).unwrap();
@@ -1055,17 +1179,30 @@ mod tests {
             .iter()
             .flat_map(|m| &m.parts)
             .find_map(|p| match p {
-                Part::ToolUse { id, name, input } => Some((id.clone(), name.clone(), input.clone())),
+                Part::ToolUse { id, name, input } => {
+                    Some((id.clone(), name.clone(), input.clone()))
+                }
                 _ => None,
             })
             .expect("function_call item");
-        assert_eq!(call, ("call_1".into(), "get_weather".into(), json!({"city": "Hanoi"})));
+        assert_eq!(
+            call,
+            (
+                "call_1".into(),
+                "get_weather".into(),
+                json!({"city": "Hanoi"})
+            )
+        );
         let result = req
             .messages
             .iter()
             .flat_map(|m| &m.parts)
             .find_map(|p| match p {
-                Part::ToolResult { tool_use_id, content, .. } => Some((tool_use_id.clone(), content.clone())),
+                Part::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => Some((tool_use_id.clone(), content.clone())),
                 _ => None,
             })
             .expect("function_call_output item");
@@ -1080,7 +1217,10 @@ mod tests {
             .iter()
             .map(|i| i.get("type").and_then(Value::as_str).unwrap_or("message"))
             .collect();
-        assert_eq!(kinds, vec!["message", "function_call", "function_call_output"]);
+        assert_eq!(
+            kinds,
+            vec!["message", "function_call", "function_call_output"]
+        );
         assert!(built["input"][1]["arguments"].is_string());
     }
 
@@ -1097,9 +1237,23 @@ mod tests {
             "usage": {"input_tokens": 20, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 8}},
         });
         let resp = parse_response(&body).unwrap();
-        assert_eq!(resp.parts[0], Part::Reasoning { text: "thought".into(), signature: Some("enc-9".into()) });
+        assert_eq!(
+            resp.parts[0],
+            Part::Reasoning {
+                text: "thought".into(),
+                signature: Some("enc-9".into())
+            }
+        );
         assert_eq!(resp.parts[1], Part::Text("done".into()));
-        assert_eq!(resp.usage, Usage { input_tokens: 20, output_tokens: 5, cache_read_tokens: 8, cache_write_tokens: 0 });
+        assert_eq!(
+            resp.usage,
+            Usage {
+                input_tokens: 20,
+                output_tokens: 5,
+                cache_read_tokens: 8,
+                cache_write_tokens: 0
+            }
+        );
         assert_eq!(resp.finish_reason, FinishReason::Stop);
 
         let out = build_response(&resp).unwrap();
@@ -1116,7 +1270,10 @@ mod tests {
             "incomplete_details": {"reason": "max_output_tokens"},
             "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "partial"}]}],
         });
-        assert_eq!(parse_response(&body).unwrap().finish_reason, FinishReason::Length);
+        assert_eq!(
+            parse_response(&body).unwrap().finish_reason,
+            FinishReason::Length
+        );
         let out = build_response(&parse_response(&body).unwrap()).unwrap();
         assert_eq!(out["status"], "incomplete");
         assert_eq!(out["incomplete_details"]["reason"], "max_output_tokens");
@@ -1160,14 +1317,26 @@ mod tests {
             })
             .collect();
         assert_eq!(json, "{\"x\":7}");
-        assert!(events.contains(&StreamEvent::ToolCallStart { index: 0, id: "call_9".into(), name: "f".into() }));
-        let done: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Done { .. })).collect();
+        assert!(events.contains(&StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call_9".into(),
+            name: "f".into()
+        }));
+        let done: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Done { .. }))
+            .collect();
         assert_eq!(done.len(), 1);
         assert_eq!(
             *done[0],
             StreamEvent::Done {
                 reason: FinishReason::ToolCalls,
-                usage: Some(Usage { input_tokens: 4, output_tokens: 9, cache_read_tokens: 1, cache_write_tokens: 0 }),
+                usage: Some(Usage {
+                    input_tokens: 4,
+                    output_tokens: 9,
+                    cache_read_tokens: 1,
+                    cache_write_tokens: 0
+                }),
             }
         );
     }
@@ -1177,13 +1346,28 @@ mod tests {
         let mut enc = StreamEncoder::new(D, "");
         let mut wire = String::new();
         for ev in [
-            StreamEvent::Start { id: "resp_3".into(), model: "".into() },
+            StreamEvent::Start {
+                id: "resp_3".into(),
+                model: "".into(),
+            },
             StreamEvent::TextDelta("hi".into()),
-            StreamEvent::ToolCallStart { index: 0, id: "call_1".into(), name: "f".into() },
-            StreamEvent::ToolCallArgsDelta { index: 0, partial_json: "{}".into() },
+            StreamEvent::ToolCallStart {
+                index: 0,
+                id: "call_1".into(),
+                name: "f".into(),
+            },
+            StreamEvent::ToolCallArgsDelta {
+                index: 0,
+                partial_json: "{}".into(),
+            },
             StreamEvent::Done {
                 reason: FinishReason::Stop,
-                usage: Some(Usage { input_tokens: 2, output_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0 }),
+                usage: Some(Usage {
+                    input_tokens: 2,
+                    output_tokens: 3,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                }),
             },
         ] {
             wire.push_str(std::str::from_utf8(&enc.encode(&ev).unwrap()).unwrap());

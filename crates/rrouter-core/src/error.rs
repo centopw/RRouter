@@ -88,7 +88,9 @@ impl Error {
     /// `Retry-After` value in seconds, when the error knows how long the client must wait.
     pub fn retry_after_secs(&self) -> Option<u64> {
         match self {
-            Self::Limited { retry_after_secs, .. } => Some(*retry_after_secs),
+            Self::Limited {
+                retry_after_secs, ..
+            } => Some(*retry_after_secs),
             _ => None,
         }
     }
@@ -100,7 +102,10 @@ impl Error {
     pub fn is_retryable_upstream(&self) -> bool {
         match self {
             Self::Upstream { status, .. } => {
-                matches!(status, 401 | 403 | 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 529)
+                matches!(
+                    status,
+                    401 | 403 | 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 529
+                )
             }
             Self::Transport(_) | Self::Timeout(_) | Self::Unauthorized(_) => true,
             _ => false,

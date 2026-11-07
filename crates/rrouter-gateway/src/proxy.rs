@@ -58,6 +58,7 @@ pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response
         Ok(b) => b,
         Err(e) => {
             return trace.fail(
+                &state,
                 started,
                 inbound,
                 &Error::BadRequest(format!("request body could not be read: {e}")),
@@ -66,7 +67,7 @@ pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response
     };
     match handle(&state, inbound, &parts.headers, &raw, &trace, permit).await {
         Ok(resp) => trace.respond(started, resp),
-        Err(e) => trace.fail(started, inbound, &e),
+        Err(e) => trace.fail(&state, started, inbound, &e),
     }
 }
 
@@ -77,13 +78,16 @@ pub async fn embeddings(State(state): State<Arc<AppState>>, req: Request) -> Res
     // Held for this whole scope: a non-streaming response releases it when it is built.
     let _permit = match state.try_slot() {
         Slot::Granted(permit) => permit,
-        Slot::Full => return trace.respond(started, overloaded_response(Dialect::OpenAiEmbeddings)),
+        Slot::Full => {
+            return trace.respond(started, overloaded_response(Dialect::OpenAiEmbeddings))
+        }
     };
     let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
             return trace.fail(
+                &state,
                 started,
                 Dialect::OpenAiEmbeddings,
                 &Error::BadRequest(format!("request body could not be read: {e}")),
@@ -93,7 +97,7 @@ pub async fn embeddings(State(state): State<Arc<AppState>>, req: Request) -> Res
     match embeddings_inner(&state, &parts.headers, &raw, &trace).await {
         // Non-streaming: the permit dies with this scope, after the body is built.
         Ok(resp) => trace.respond(started, resp),
-        Err(e) => trace.fail(started, Dialect::OpenAiEmbeddings, &e),
+        Err(e) => trace.fail(&state, started, Dialect::OpenAiEmbeddings, &e),
     }
 }
 
@@ -170,9 +174,11 @@ async fn special(state: &Arc<AppState>, req: Request, kind: Special) -> Response
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return trace.fail(
+            return trace.fail_at(
+                state,
                 started,
                 kind.dialect(),
+                kind.endpoint(),
                 &Error::BadRequest(format!("request body could not be read: {e}")),
             );
         }
@@ -180,7 +186,7 @@ async fn special(state: &Arc<AppState>, req: Request, kind: Special) -> Response
     match special_inner(state, &parts.headers, &raw, kind, &trace).await {
         // Non-streaming: the permit dies with this scope, after the body is built.
         Ok(resp) => trace.respond(started, resp),
-        Err(e) => trace.fail(started, kind.dialect(), &e),
+        Err(e) => trace.fail_at(state, started, kind.dialect(), kind.endpoint(), &e),
     }
 }
 
@@ -229,9 +235,7 @@ async fn special_inner(
     let candidates: Vec<Candidate> = plan
         .candidates
         .iter()
-        .filter(|c| {
-            rrouter_auth::get(&c.provider).is_some_and(|spec| kind.base(spec).is_some())
-        })
+        .filter(|c| rrouter_auth::get(&c.provider).is_some_and(|spec| kind.base(spec).is_some()))
         .cloned()
         .collect();
     if candidates.is_empty() {
@@ -242,7 +246,9 @@ async fn special_inner(
     let started = Instant::now();
     let outcome = state
         .dispatcher
-        .run(&plan, |c| trace.time(state, c, |c| send_special(state, &body, kind, c)))
+        .run(&plan, |c| {
+            trace.time(state, c, |c| send_special(state, &body, kind, c))
+        })
         .await?;
     let value = outcome.result?;
     // These endpoints are not chat requests, so a body without usage is not a zero-cost
@@ -280,8 +286,12 @@ fn reported_usage(value: &Value) -> Option<Usage> {
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
     };
-    let input = count("input_tokens").or_else(|| count("prompt_tokens")).unwrap_or(0);
-    let output = count("output_tokens").or_else(|| count("completion_tokens")).unwrap_or(0);
+    let input = count("input_tokens")
+        .or_else(|| count("prompt_tokens"))
+        .unwrap_or(0);
+    let output = count("output_tokens")
+        .or_else(|| count("completion_tokens"))
+        .unwrap_or(0);
     let cache_read = usage
         .pointer("/input_tokens_details/cached_tokens")
         .and_then(Value::as_u64)
@@ -419,9 +429,11 @@ async fn passthrough(state: &Arc<AppState>, req: Request, kind: Pass) -> Respons
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return trace.fail(
+            return trace.fail_at(
+                state,
                 started,
                 kind.dialect(),
+                kind.endpoint(),
                 &Error::BadRequest(format!("request body could not be read: {e}")),
             );
         }
@@ -429,7 +441,7 @@ async fn passthrough(state: &Arc<AppState>, req: Request, kind: Pass) -> Respons
     match passthrough_inner(state, &parts.headers, &raw, kind, &trace).await {
         // Audio streams: the slot has to outlive this handler and die with the body.
         Ok(resp) => trace.respond(started, hold_slot(resp, permit)),
-        Err(e) => trace.fail(started, kind.dialect(), &e),
+        Err(e) => trace.fail_at(state, started, kind.dialect(), kind.endpoint(), &e),
     }
 }
 
@@ -521,7 +533,6 @@ async fn passthrough_inner(
     }
 }
 
-
 /// Token Saver: compress noisy tool results in a canonical request. Headers may force
 /// it on or off per request (`x-rrouter-rtk: on|off`); otherwise the stored setting wins.
 /// Guardrails run before this, so a blocked phrase cannot hide inside a dropped middle.
@@ -587,10 +598,7 @@ fn supported(plan: Plan, kind: Pass) -> Option<Plan> {
     if candidates.is_empty() {
         return None;
     }
-    Some(Plan {
-        candidates,
-        ..plan
-    })
+    Some(Plan { candidates, ..plan })
 }
 
 /// An upstream audio body and the content type that describes it, relayed untouched.
@@ -656,11 +664,7 @@ async fn send_json(
 }
 
 /// One speech attempt: headers are enough to commit, the body streams to the client.
-async fn send_speech(
-    state: &Arc<AppState>,
-    body: &Value,
-    candidate: Candidate,
-) -> Result<Audio> {
+async fn send_speech(state: &Arc<AppState>, body: &Value, candidate: Candidate) -> Result<Audio> {
     let (url, headers) = prepare_pass(state, Pass::Speech, &candidate).await?;
     let mut wire = body.clone();
     wire["model"] = Value::String(candidate.model.clone());
@@ -798,9 +802,7 @@ async fn transcriptions_inner(
     let outcome = state
         .dispatcher
         .run(&plan, |c| {
-            trace.time(state, c, |c| {
-                send_multipart(state, raw, content_type, c)
-            })
+            trace.time(state, c, |c| send_multipart(state, raw, content_type, c))
         })
         .await?;
     let (status, value) = outcome.result?;
@@ -958,7 +960,9 @@ async fn handle(
     let mut body: Value = serde_json::from_slice(raw)?;
     let mut canonical = rrouter_translate::parse_request(inbound, &body)?;
     // This key's model mapping is one hop that runs before alias/combo resolution.
-    let model = state.mapped_model(caller.key_id(), &canonical.model).await?;
+    let model = state
+        .mapped_model(caller.key_id(), &canonical.model)
+        .await?;
     trace.set_model(&model);
     // Guardrails run on the canonical text after authentication and before any
     // governance bookkeeping or dispatch: a refused prompt costs no provider call, no
@@ -1114,7 +1118,10 @@ async fn handle(
                 trace,
             )
             .await?;
-            (candidate, rrouter_translate::build_response(inbound, &resp)?)
+            (
+                candidate,
+                rrouter_translate::build_response(inbound, &resp)?,
+            )
         };
 
         // Serialize once: the bytes stored are exactly the bytes the client receives,
@@ -1237,7 +1244,8 @@ async fn complete_traced(
             state.config.strategy,
         )
         .await?;
-    let upstream_stream = plan.stream || canonical.stream || plan.candidates.iter().any(stream_only);
+    let upstream_stream =
+        plan.stream || canonical.stream || plan.candidates.iter().any(stream_only);
     let attempt = Attempt {
         state,
         inbound,
@@ -1248,7 +1256,10 @@ async fn complete_traced(
     };
 
     if !upstream_stream {
-        let outcome = state.dispatcher.run(&plan, |c| attempt.send_once(c)).await?;
+        let outcome = state
+            .dispatcher
+            .run(&plan, |c| attempt.send_once(c))
+            .await?;
         let candidate = outcome.candidate.clone();
         let resp = outcome.result?;
         let recorded = Recorded {
@@ -1318,16 +1329,19 @@ async fn reassemble(open: &StreamRoute, bytes: ByteStream) -> Result<rrouter_cor
     let mut stream = bytes;
 
     let absorb = |events: Vec<StreamEvent>,
-                      text: &mut String,
-                      reasoning: &mut String,
-                      tools: &mut Vec<(u32, String, String, String)>,
-                      usage: &mut Usage,
-                      finish: &mut rrouter_core::FinishReason,
-                      id: &mut String,
-                      model: &mut String| {
+                  text: &mut String,
+                  reasoning: &mut String,
+                  tools: &mut Vec<(u32, String, String, String)>,
+                  usage: &mut Usage,
+                  finish: &mut rrouter_core::FinishReason,
+                  id: &mut String,
+                  model: &mut String| {
         for ev in events {
             match ev {
-                StreamEvent::Start { id: sid, model: smodel } => {
+                StreamEvent::Start {
+                    id: sid,
+                    model: smodel,
+                } => {
                     if !sid.is_empty() {
                         *id = sid;
                     }
@@ -1340,7 +1354,10 @@ async fn reassemble(open: &StreamRoute, bytes: ByteStream) -> Result<rrouter_cor
                 StreamEvent::ToolCallStart { index, id, name } => {
                     tools.push((index, id, name, String::new()))
                 }
-                StreamEvent::ToolCallArgsDelta { index, partial_json } => {
+                StreamEvent::ToolCallArgsDelta {
+                    index,
+                    partial_json,
+                } => {
                     if let Some(slot) = tools.iter_mut().find(|t| t.0 == index) {
                         slot.3.push_str(&partial_json);
                     }
@@ -1359,18 +1376,34 @@ async fn reassemble(open: &StreamRoute, bytes: ByteStream) -> Result<rrouter_cor
         let chunk = chunk?;
         let events = decoder.push(&chunk)?;
         absorb(
-            events, &mut text, &mut reasoning, &mut tools, &mut usage, &mut finish, &mut id,
+            events,
+            &mut text,
+            &mut reasoning,
+            &mut tools,
+            &mut usage,
+            &mut finish,
+            &mut id,
             &mut model,
         );
     }
     let events = decoder.finish()?;
     absorb(
-        events, &mut text, &mut reasoning, &mut tools, &mut usage, &mut finish, &mut id, &mut model,
+        events,
+        &mut text,
+        &mut reasoning,
+        &mut tools,
+        &mut usage,
+        &mut finish,
+        &mut id,
+        &mut model,
     );
 
     let mut parts: Vec<rrouter_core::Part> = Vec::with_capacity(tools.len() + 2);
     if !reasoning.is_empty() {
-        parts.push(rrouter_core::Part::Reasoning { text: reasoning, signature: None });
+        parts.push(rrouter_core::Part::Reasoning {
+            text: reasoning,
+            signature: None,
+        });
     }
     if !text.is_empty() {
         parts.push(rrouter_core::Part::Text(text));
@@ -1382,7 +1415,13 @@ async fn reassemble(open: &StreamRoute, bytes: ByteStream) -> Result<rrouter_cor
             input: serde_json::from_str(&args).unwrap_or(serde_json::Value::Null),
         });
     }
-    Ok(rrouter_core::ChatResponse { id, model, parts, finish_reason: finish, usage })
+    Ok(rrouter_core::ChatResponse {
+        id,
+        model,
+        parts,
+        finish_reason: finish,
+        usage,
+    })
 }
 
 /// Stable per-conversation key for account selection.
@@ -1499,7 +1538,11 @@ fn native_url(spec: &ProviderSpec, inbound: Dialect) -> Option<&'static str> {
 /// where this account's traffic goes (self-hosted gateway, regional endpoint, mock). The
 /// native endpoint's path is grafted onto the override's origin, so a provider that speaks
 /// the inbound dialect keeps being talked to in that dialect.
-fn endpoint(spec: &ProviderSpec, override_url: Option<&str>, inbound: Dialect) -> (String, Dialect) {
+fn endpoint(
+    spec: &ProviderSpec,
+    override_url: Option<&str>,
+    inbound: Dialect,
+) -> (String, Dialect) {
     let (native, dialect) = match native_url(spec, inbound) {
         Some(url) => (url, inbound),
         None => (spec.base_url, spec.default_dialect),
@@ -1514,9 +1557,10 @@ fn endpoint(spec: &ProviderSpec, override_url: Option<&str>, inbound: Dialect) -
 /// Keep the native endpoint's path but move it to the override's origin, so tests and
 /// self-hosted gateways can redirect a provider without lying about its dialect.
 fn rewrite_base(native: &str, override_base: &str) -> String {
-    let (Ok(native_url), Ok(over)) =
-        (reqwest::Url::parse(native), reqwest::Url::parse(override_base))
-    else {
+    let (Ok(native_url), Ok(over)) = (
+        reqwest::Url::parse(native),
+        reqwest::Url::parse(override_base),
+    ) else {
         return override_base.to_string();
     };
     let mut out = over;
@@ -1525,10 +1569,7 @@ fn rewrite_base(native: &str, override_base: &str) -> String {
 }
 
 /// A body the provider can take unmodified because it already speaks that dialect.
-fn request_headers(
-    spec: &ProviderSpec,
-    creds: &Credentials,
-) -> Result<axum::http::HeaderMap> {
+fn request_headers(spec: &ProviderSpec, creds: &Credentials) -> Result<axum::http::HeaderMap> {
     let mut headers = axum::http::HeaderMap::new();
     for (name, value) in rrouter_auth::build_headers(spec, creds)? {
         if let (Ok(name), Ok(value)) = (
@@ -1635,8 +1676,10 @@ fn cache_bypassed(headers: &HeaderMap) -> bool {
 /// bytes the client receives are the same string.
 fn json_text_response(body: String) -> Response {
     let mut resp = Response::new(Body::from(body));
-    resp.headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     resp
 }
 
@@ -1917,8 +1960,8 @@ fn json_chat_as_sse(body: &Value, model: &str) -> Bytes {
 /// the attempt log, and the labels the request-level metrics need.
 ///
 /// One trace is shared by every fallback attempt of one client request, so the rows it
-/// writes can be read back in dispatch order under a single id — and, when every
-/// candidate fails, the attempts are the only record that the request existed.
+/// writes can be read back in dispatch order under a single id. A final failure also
+/// writes one terminal usage row, so the dashboard can show the client-facing reason.
 struct RequestTrace {
     request_id: Uuid,
     /// Next attempt number; also gives the label of the last one.
@@ -1967,7 +2010,10 @@ impl RequestTrace {
 
     /// Number this attempt (1-based, dispatch order) and start its stopwatch.
     fn next_attempt(&self) -> (u32, Instant) {
-        (self.attempts.fetch_add(1, Ordering::Relaxed) + 1, Instant::now())
+        (
+            self.attempts.fetch_add(1, Ordering::Relaxed) + 1,
+            Instant::now(),
+        )
     }
 
     /// Record one finished attempt: its row, its counter, and the last-tried provider.
@@ -2017,7 +2063,12 @@ impl RequestTrace {
     ///
     /// The candidate is owned so the send can consume it while the row still knows
     /// which provider and model it belonged to.
-    async fn time<T, F, Fut>(&self, state: &Arc<AppState>, candidate: Candidate, send: F) -> Result<T>
+    async fn time<T, F, Fut>(
+        &self,
+        state: &Arc<AppState>,
+        candidate: Candidate,
+        send: F,
+    ) -> Result<T>
     where
         F: FnOnce(Candidate) -> Fut,
         Fut: Future<Output = Result<T>>,
@@ -2053,12 +2104,31 @@ impl RequestTrace {
 
     /// Log a failed request once, under its id, then answer with the error response.
     ///
-    /// Failed requests write no usage row, so this warn is their only log line. Attempts
-    /// are not logged per attempt; the attempts table and metrics carry those.
-    fn fail(&self, started: Instant, inbound: Dialect, err: &Error) -> Response {
-        let (provider, model) = {
+    /// A failure writes one terminal usage row with zero tokens so the dashboard can
+    /// show *why* a request never arrived; per-candidate detail lives in `attempts`.
+    fn fail(
+        &self,
+        state: &Arc<AppState>,
+        started: Instant,
+        inbound: Dialect,
+        err: &Error,
+    ) -> Response {
+        self.fail_at(state, started, inbound, endpoint_of(inbound), err)
+    }
+
+    /// [`Self::fail`] for endpoints that are not a canonical dialect endpoint
+    /// (`count_tokens`, `compact`, passthroughs).
+    fn fail_at(
+        &self,
+        state: &Arc<AppState>,
+        started: Instant,
+        inbound: Dialect,
+        endpoint: &'static str,
+        err: &Error,
+    ) -> Response {
+        let (provider, model, key) = {
             let labels = self.labels();
-            (labels.provider.clone(), labels.model.clone())
+            (labels.provider.clone(), labels.model.clone(), labels.key)
         };
         tracing::warn!(
             request_id = %self.request_id,
@@ -2068,6 +2138,35 @@ impl RequestTrace {
             error = %err,
             "request failed"
         );
+        let rec = UsageRecord {
+            id: None,
+            ts: crate::now_unix(),
+            request_id: Some(self.request_id),
+            provider,
+            model,
+            connection_id: None,
+            endpoint: Some(endpoint.to_string()),
+            key_id: key,
+            cost_micros: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+            ttft_ms: 0,
+            status: err.status(),
+            streamed: false,
+            error: Some(err.to_string()),
+        };
+        let store = Arc::clone(&state.store);
+        let access_log = state.config.access_log;
+        tokio::spawn(async move {
+            match store.record_usage(&rec).await {
+                Err(e) => tracing::warn!(error = %e, "failure record failed"),
+                Ok(()) if access_log => access_line(&rec),
+                Ok(()) => {}
+            }
+        });
         self.respond(started, error_response(inbound, err))
     }
 
@@ -2092,7 +2191,10 @@ fn attempt_status(e: &Error) -> u16 {
 fn spawn_latency(state: &AppState, connection: Uuid, latency_ms: u32) {
     let store = Arc::clone(&state.store);
     tokio::spawn(async move {
-        if let Err(e) = store.record_connection_latency(connection, latency_ms).await {
+        if let Err(e) = store
+            .record_connection_latency(connection, latency_ms)
+            .await
+        {
             tracing::warn!(error = %e, "latency sample failed");
         }
     });
@@ -2107,7 +2209,6 @@ fn spawn_attempt(state: &AppState, rec: AttemptRecord) {
         }
     });
 }
-
 
 ///
 /// Polling is strictly one-chunk-at-a-time, so a client frame is produced as soon as
@@ -2262,9 +2363,7 @@ impl Stream for Wire {
                     this.finished = true;
                     return match this.decoder.finish() {
                         Ok(events) => Poll::Ready(this.drain_events(events)),
-                        Err(e) => {
-                            Poll::Ready(Some(Bytes::from(error_frame(this.inbound, &e))))
-                        }
+                        Err(e) => Poll::Ready(Some(Bytes::from(error_frame(this.inbound, &e)))),
                     };
                 }
             }
@@ -2366,14 +2465,23 @@ fn stream_response(
     bytes: ByteStream,
     guardrails: Option<Guardrails>,
 ) -> Response {
-    let wire = Wire::new(inbound, open.upstream, &open.client_model, bytes, guardrails);
+    let wire = Wire::new(
+        inbound,
+        open.upstream,
+        &open.client_model,
+        bytes,
+        guardrails,
+    );
     let stream = ResponseStream {
         inner: wire,
         pending: Some(pending),
     };
     let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
     headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
@@ -2568,14 +2676,23 @@ async fn embeddings_inner(
     let candidate = plan
         .candidates
         .first()
-        .ok_or_else(|| Error::NoRoute { model: model.clone(), detail: "no candidates".into() })?
+        .ok_or_else(|| Error::NoRoute {
+            model: model.clone(),
+            detail: "no candidates".into(),
+        })?
         .clone();
     let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
         model: model.clone(),
         detail: format!("unknown provider {}", candidate.provider),
     })?;
-    if !matches!(spec.default_dialect, Dialect::OpenAiChat | Dialect::OpenAiEmbeddings) {
-        return Ok(not_implemented(Dialect::OpenAiEmbeddings, "embeddings for this provider"));
+    if !matches!(
+        spec.default_dialect,
+        Dialect::OpenAiChat | Dialect::OpenAiEmbeddings
+    ) {
+        return Ok(not_implemented(
+            Dialect::OpenAiEmbeddings,
+            "embeddings for this provider",
+        ));
     }
     let creds = state
         .refresher
@@ -2600,7 +2717,14 @@ async fn embeddings_inner(
         .await;
     let resp = match sent {
         Ok(resp) => {
-            trace.attempted(state, &candidate, number, started, resp.status().as_u16(), None);
+            trace.attempted(
+                state,
+                &candidate,
+                number,
+                started,
+                resp.status().as_u16(),
+                None,
+            );
             resp
         }
         Err(e) => {
@@ -2710,7 +2834,10 @@ mod tests {
 
     impl std::io::Write for Capture {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(buf);
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -2758,8 +2885,8 @@ mod tests {
             access_line(&sample_row(Some(request_id), None));
         });
         let text = String::from_utf8(captured.0.lock().unwrap().clone()).expect("utf8");
-        let line: Value = serde_json::from_str(text.lines().next().expect("one line"))
-            .expect("json line");
+        let line: Value =
+            serde_json::from_str(text.lines().next().expect("one line")).expect("json line");
         let fields = &line["fields"];
         assert_eq!(line["level"], "INFO");
         assert_eq!(fields["message"], "request");
@@ -2770,7 +2897,10 @@ mod tests {
         assert_eq!(fields["latency_ms"], 42);
         assert_eq!(fields["ttft_ms"], 7);
         assert_eq!(fields["endpoint"], "/v1/chat/completions");
-        assert!(fields.get("key_id").is_none(), "no key, no key_id: {fields}");
+        assert!(
+            fields.get("key_id").is_none(),
+            "no key, no key_id: {fields}"
+        );
         assert!(!text.contains("input_tokens"), "no token material: {text}");
     }
 }

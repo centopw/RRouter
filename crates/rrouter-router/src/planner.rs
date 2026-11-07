@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rrouter_core::{Dialect, Error, Result};
-use uuid::Uuid;
 use rrouter_store::{Connection, Store};
+use uuid::Uuid;
 
 use crate::candidate::{Candidate, Plan};
 use crate::catalog::Catalog;
@@ -108,7 +108,9 @@ impl Default for Planner {
 
 impl Planner {
     pub fn new() -> Self {
-        Self { cursor: AtomicU64::new(0) }
+        Self {
+            cursor: AtomicU64::new(0),
+        }
     }
 
     /// Build the ordered candidate list for `model`.
@@ -194,8 +196,11 @@ impl Planner {
             if disabled.contains(model_id) {
                 continue;
             }
-            let mut matching: Vec<&Connection> =
-                active.iter().copied().filter(|c| c.provider == provider).collect();
+            let mut matching: Vec<&Connection> = active
+                .iter()
+                .copied()
+                .filter(|c| c.provider == provider)
+                .collect();
             if matching.is_empty() {
                 continue;
             }
@@ -260,7 +265,11 @@ impl Planner {
             }
         }
 
-        Ok(Plan { model: model.to_string(), candidates, stream })
+        Ok(Plan {
+            model: model.to_string(),
+            candidates,
+            stream,
+        })
     }
 
     fn next_offset(&self) -> u64 {
@@ -289,15 +298,17 @@ impl Planner {
         let combo_name = current.strip_prefix(COMBO_PREFIX).unwrap_or(&current);
         if let Some(combo) = store.get_combo(combo_name).await? {
             let mut out = Vec::with_capacity(combo.models.len());
-            let mut inner_aliases: HashMap<&str, &str> =
-                HashMap::with_capacity(aliases.len());
+            let mut inner_aliases: HashMap<&str, &str> = HashMap::with_capacity(aliases.len());
             for a in aliases {
                 inner_aliases.insert(a.alias.as_str(), a.target.as_str());
             }
             for entry in &combo.models {
                 // Resolve one alias hop inside combo entries too; combos are
                 // operator-authored and routinely mix aliases with raw ids.
-                let resolved = inner_aliases.get(entry.as_str()).copied().unwrap_or(entry.as_str());
+                let resolved = inner_aliases
+                    .get(entry.as_str())
+                    .copied()
+                    .unwrap_or(entry.as_str());
                 out.extend(self.expand_entry(catalog, resolved));
             }
             return Ok(out);
@@ -323,7 +334,10 @@ impl Planner {
         // 4. Everything the catalog says serves this id.
         let hits = catalog.resolve(entry);
         if !hits.is_empty() {
-            return hits.into_iter().map(|m| (m.provider, m.id, false)).collect();
+            return hits
+                .into_iter()
+                .map(|m| (m.provider, m.id, false))
+                .collect();
         }
 
         // Unknown bare id (or a self-referential alias): no provider declares it,
@@ -364,11 +378,7 @@ fn weighted_order(group: &mut [&Connection], offset: u64) {
     if len < 2 {
         return;
     }
-    let gcd = group
-        .iter()
-        .map(|c| c.weight)
-        .fold(0u32, gcd_u32)
-        .max(1);
+    let gcd = group.iter().map(|c| c.weight).fold(0u32, gcd_u32).max(1);
     let weights: Vec<i64> = group
         .iter()
         .map(|c| i64::from(c.weight.max(1) / gcd))
@@ -411,7 +421,11 @@ fn weighted_order(group: &mut [&Connection], offset: u64) {
 }
 
 fn gcd_u32(a: u32, b: u32) -> u32 {
-    if b == 0 { a } else { gcd_u32(b, a % b) }
+    if b == 0 {
+        a
+    } else {
+        gcd_u32(b, a % b)
+    }
 }
 
 /// Order one equal-priority group by measured latency: known connections first,
@@ -443,8 +457,7 @@ async fn cheapest_order(store: &Store, candidates: Vec<Candidate>) -> Vec<Candid
     let prices: Vec<Option<f64>> = {
         // One registry read per distinct pair, per plan: no cache, so a price the
         // operator just edited decides the next route.
-        let mut seen: HashMap<(&str, &str), Option<f64>> =
-            HashMap::with_capacity(candidates.len());
+        let mut seen: HashMap<(&str, &str), Option<f64>> = HashMap::with_capacity(candidates.len());
         let mut aligned = Vec::with_capacity(candidates.len());
         for candidate in &candidates {
             let key = (candidate.provider.as_str(), candidate.model.as_str());
@@ -498,9 +511,10 @@ async fn target_price(store: &Store, provider: &str, model: &str) -> Option<f64>
         .and_then(|rest| rest.strip_prefix('/'))
         .unwrap_or(model);
     let rows = match store.model_costs(bare, &[provider, vendor]).await {
-        Ok(rows) if rows.is_empty() && bare != model => {
-            store.model_costs(model, &[provider, vendor]).await.unwrap_or_default()
-        }
+        Ok(rows) if rows.is_empty() && bare != model => store
+            .model_costs(model, &[provider, vendor])
+            .await
+            .unwrap_or_default(),
         Ok(rows) => rows,
         Err(e) => {
             tracing::debug!(error = %e, provider, model, "price lookup failed; treating as unpriced");
@@ -534,7 +548,9 @@ fn published_price(value: &serde_json::Value) -> Option<f64> {
     }
     let rate = |key: &str| value.get(key).and_then(serde_json::Value::as_f64);
     let (input, output) = (rate("input"), rate("output"));
-    if input.is_none() && output.is_none() && rate("cache_read").is_none()
+    if input.is_none()
+        && output.is_none()
+        && rate("cache_read").is_none()
         && rate("cache_write").is_none()
     {
         return None;

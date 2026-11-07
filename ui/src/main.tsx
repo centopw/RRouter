@@ -52,6 +52,7 @@ function page(load: () => Promise<{ default: ComponentType }>) {
 // Route-level chunks: the shell and Activity land first, the rest on demand.
 const Activity = page(() => import("./pages/activity"));
 const Health = page(() => import("./pages/health"));
+const SystemLogs = page(() => import("./pages/system-logs"));
 const Keys = page(() => import("./pages/keys"));
 const Aliases = page(() => import("./pages/aliases"));
 const Combos = page(() => import("./pages/combos"));
@@ -157,6 +158,7 @@ const router = createBrowserRouter(
             { path: "aliases", element: <Aliases /> },
             { path: "combos", element: <Combos /> },
             { path: "health", element: <Health /> },
+            { path: "system-logs", element: <SystemLogs /> },
             { path: "*", element: <NotFound /> },
           ],
         },

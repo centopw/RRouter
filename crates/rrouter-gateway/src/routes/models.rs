@@ -32,12 +32,16 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
     }
     if let Ok(aliases) = state.store.list_aliases().await {
         for alias in aliases {
-            entries.entry(alias.alias).or_insert_with(|| "rrouter".to_string());
+            entries
+                .entry(alias.alias)
+                .or_insert_with(|| "rrouter".to_string());
         }
     }
     if let Ok(combos) = state.store.list_combos().await {
         for combo in combos {
-            entries.entry(combo.name).or_insert_with(|| "rrouter".to_string());
+            entries
+                .entry(combo.name)
+                .or_insert_with(|| "rrouter".to_string());
         }
     }
 
@@ -85,15 +89,28 @@ async fn routable_owner(state: &AppState, reference: &str) -> rrouter_core::Resu
         _ => (None, reference),
     };
     let items = models_registry::list(state).await?;
-    if let Some(item) = items.iter().find(|item| {
-        item.enabled && item.id == bare && provider.is_none_or(|p| item.provider == p)
-    }) {
+    if let Some(item) = items
+        .iter()
+        .find(|item| item.enabled && item.id == bare && provider.is_none_or(|p| item.provider == p))
+    {
         return Ok(Some(item.provider.clone()));
     }
-    if state.store.list_aliases().await?.iter().any(|a| a.alias == reference) {
+    if state
+        .store
+        .list_aliases()
+        .await?
+        .iter()
+        .any(|a| a.alias == reference)
+    {
         return Ok(Some("rrouter".to_string()));
     }
-    if state.store.list_combos().await?.iter().any(|c| c.name == reference) {
+    if state
+        .store
+        .list_combos()
+        .await?
+        .iter()
+        .any(|c| c.name == reference)
+    {
         return Ok(Some("rrouter".to_string()));
     }
     Ok(None)
@@ -106,8 +123,12 @@ async fn routable_owner(state: &AppState, reference: &str) -> rrouter_core::Resu
 /// the catalog rows remain.
 pub fn spawn_initial_fetch(state: Arc<AppState>, id: Uuid) {
     tokio::spawn(async move {
-        let Ok(Some(conn)) = state.store.get_connection(id).await else { return };
-        let Some(spec) = rrouter_auth::get(&conn.provider) else { return };
+        let Ok(Some(conn)) = state.store.get_connection(id).await else {
+            return;
+        };
+        let Some(spec) = rrouter_auth::get(&conn.provider) else {
+            return;
+        };
         if !models_registry::can_list(spec.id) {
             return;
         }
@@ -156,7 +177,10 @@ async fn upsert_alias(state: &AppState, body: Body) -> Response {
 }
 
 /// `DELETE /api/aliases?alias=x` (or `{alias}` in the body).
-pub async fn delete_alias(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
+pub async fn delete_alias(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+) -> Response {
     let alias = match alias_from_request(req).await {
         Ok(a) => a,
         Err(resp) => return *resp,
@@ -269,7 +293,10 @@ pub async fn fetch(State(state): State<Arc<AppState>>, body: Body) -> Response {
         Err(e) => return admin_error(&e),
     };
     let Some(spec) = rrouter_auth::get(&conn.provider) else {
-        return admin_error(&Error::BadRequest(format!("unknown provider {}", conn.provider)));
+        return admin_error(&Error::BadRequest(format!(
+            "unknown provider {}",
+            conn.provider
+        )));
     };
     if !models_registry::can_list(spec.id) {
         // Contract: 400 plus an explanation the UI can show next to the disabled button.
@@ -289,7 +316,10 @@ async fn fetch_upstream(
     spec: &'static ProviderSpec,
     conn: &Connection,
 ) -> rrouter_core::Result<Value> {
-    let creds = state.refresher.fresh(state.store.as_ref(), spec, conn.id).await?;
+    let creds = state
+        .refresher
+        .fresh(state.store.as_ref(), spec, conn.id)
+        .await?;
     let base = creds.base_url_override.as_deref().unwrap_or(spec.base_url);
     let mut url = models_registry::models_url(base);
     // Anthropic's list paginates (default 20). Asking for the maximum page once avoids a
@@ -309,7 +339,13 @@ async fn fetch_upstream(
         .map_err(transport_error)?;
     let status = response.status().as_u16();
     if !response.status().is_success() {
-        let body: String = response.text().await.unwrap_or_default().chars().take(512).collect();
+        let body: String = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(512)
+            .collect();
         return Err(Error::Upstream {
             provider: conn.provider.clone(),
             status,
@@ -364,7 +400,8 @@ pub async fn custom(State(state): State<Arc<AppState>>, body: Body) -> Response 
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    let (Some(provider), Some(id)) = (str_field(&value, "provider"), str_field(&value, "id")) else {
+    let (Some(provider), Some(id)) = (str_field(&value, "provider"), str_field(&value, "id"))
+    else {
         return admin_error(&Error::BadRequest("provider and id are required".into()));
     };
     let row = ModelRow {
@@ -383,7 +420,9 @@ pub async fn custom(State(state): State<Arc<AppState>>, body: Body) -> Response 
     }
     match models_registry::item(&state, &provider, &id).await {
         Ok(Some(item)) => ok_json(item),
-        Ok(None) => admin_error(&Error::Store(format!("custom row {provider}/{id} vanished"))),
+        Ok(None) => admin_error(&Error::Store(format!(
+            "custom row {provider}/{id} vanished"
+        ))),
         Err(e) => admin_error(&e),
     }
 }
@@ -577,7 +616,10 @@ mod tests {
 
     #[test]
     fn query_params_decode() {
-        assert_eq!(query_param("a=1&model=claude%2Fsonnet-4-5", "model").as_deref(), Some("claude/sonnet-4-5"));
+        assert_eq!(
+            query_param("a=1&model=claude%2Fsonnet-4-5", "model").as_deref(),
+            Some("claude/sonnet-4-5")
+        );
         assert_eq!(query_param("alias=", "alias").as_deref(), Some(""));
         assert_eq!(query_param("x=1", "alias"), None);
     }

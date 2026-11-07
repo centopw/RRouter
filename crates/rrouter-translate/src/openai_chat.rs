@@ -9,9 +9,10 @@ use rrouter_core::{
 };
 
 use crate::{
-    arguments_to_string, arguments_value, capture_extra, finish_from_openai, merge_extra, openai_tool_choice_value,
-    opt_f64, opt_u32, parse_arguments, parse_err, parse_openai_tool_choice, parse_stop, req_str,
-    req_str_field, tool_schema, usage_from_openai, usage_to_openai,
+    arguments_to_string, arguments_value, capture_extra, finish_from_openai, merge_extra,
+    openai_tool_choice_value, opt_f64, opt_u32, parse_arguments, parse_err,
+    parse_openai_tool_choice, parse_stop, req_str, req_str_field, tool_schema, usage_from_openai,
+    usage_to_openai,
 };
 
 const D: Dialect = Dialect::OpenAiChat;
@@ -38,8 +39,7 @@ pub fn parse_request(body: &Value) -> Result<ChatRequest> {
     let model = req_str_field(body, "model", D)?;
     let mut req = ChatRequest::new(model);
     req.stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    req.max_tokens =
-        opt_u32(body, "max_tokens").or_else(|| opt_u32(body, "max_completion_tokens"));
+    req.max_tokens = opt_u32(body, "max_tokens").or_else(|| opt_u32(body, "max_completion_tokens"));
     req.temperature = opt_f64(body, "temperature");
     req.top_p = opt_f64(body, "top_p");
     req.stop = body.get("stop").map(parse_stop).unwrap_or_default();
@@ -79,16 +79,32 @@ fn parse_messages(body: &Value) -> Result<(Option<String>, Vec<Message>)> {
                 system.push(text);
                 // Keep non-text parts (rare) as a system message rather than losing them.
                 if parts.iter().any(|p| !matches!(p, Part::Text(_))) {
-                    out.push(Message { role: Role::System, parts });
+                    out.push(Message {
+                        role: Role::System,
+                        parts,
+                    });
                 }
             }
-            "user" => out.push(Message { role: Role::User, parts }),
-            "assistant" => out.push(Message { role: Role::Assistant, parts }),
-            "tool" | "function" => out.push(Message { role: Role::Tool, parts }),
+            "user" => out.push(Message {
+                role: Role::User,
+                parts,
+            }),
+            "assistant" => out.push(Message {
+                role: Role::Assistant,
+                parts,
+            }),
+            "tool" | "function" => out.push(Message {
+                role: Role::Tool,
+                parts,
+            }),
             other => return Err(parse_err(D, &format!("unknown role `{other}`"))),
         }
     }
-    let system = if system.is_empty() { None } else { Some(system.join("\n\n")) };
+    let system = if system.is_empty() {
+        None
+    } else {
+        Some(system.join("\n\n"))
+    };
     Ok((system, out))
 }
 
@@ -131,7 +147,12 @@ fn parse_parts(msg: &Value, index: usize) -> Result<Vec<Part>> {
             }
         }
         Some(Value::Null) | None => {}
-        Some(_) => return Err(parse_err(D, &format!("messages[{index}].content must be string or array"))),
+        Some(_) => {
+            return Err(parse_err(
+                D,
+                &format!("messages[{index}].content must be string or array"),
+            ))
+        }
     }
 
     // A [OI] `role:"tool"` message carries the result in `content` + tool_call_id.
@@ -148,14 +169,21 @@ fn parse_parts(msg: &Value, index: usize) -> Result<Vec<Part>> {
             })
             .collect::<Vec<_>>()
             .join("");
-        return Ok(vec![Part::ToolResult { tool_use_id: id, content: text, is_error: false }]);
+        return Ok(vec![Part::ToolResult {
+            tool_use_id: id,
+            content: text,
+            is_error: false,
+        }]);
     }
 
     if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
         for call in calls {
             let id = req_str(call, "id").unwrap_or_default().to_owned();
             let func = call.get("function");
-            let name = func.and_then(|f| req_str(f, "name")).unwrap_or_default().to_owned();
+            let name = func
+                .and_then(|f| req_str(f, "name"))
+                .unwrap_or_default()
+                .to_owned();
             let args = func
                 .and_then(|f| f.get("arguments"))
                 .map(arguments_to_string)
@@ -163,12 +191,19 @@ fn parse_parts(msg: &Value, index: usize) -> Result<Vec<Part>> {
             if name.is_empty() && id.is_empty() {
                 continue;
             }
-            parts.push(Part::ToolUse { id, name, input: parse_arguments(&args) });
+            parts.push(Part::ToolUse {
+                id,
+                name,
+                input: parse_arguments(&args),
+            });
         }
     }
     if let Some(text) = req_str(msg, "reasoning_content") {
         if !text.is_empty() {
-            parts.push(Part::Reasoning { text: text.to_owned(), signature: None });
+            parts.push(Part::Reasoning {
+                text: text.to_owned(),
+                signature: None,
+            });
         }
     }
     Ok(parts)
@@ -208,11 +243,16 @@ fn parse_tools(body: &Value) -> (Vec<ToolDef>, Option<Vec<Value>>) {
             continue;
         }
         let func = item.get("function").unwrap_or(item);
-        let Some(name) = req_str(func, "name") else { continue };
+        let Some(name) = req_str(func, "name") else {
+            continue;
+        };
         out.push(ToolDef {
             name: name.to_owned(),
             description: req_str(func, "description").map(str::to_owned),
-            parameters: func.get("parameters").map(tool_schema).unwrap_or_else(|| tool_schema(&Value::Null)),
+            parameters: func
+                .get("parameters")
+                .map(tool_schema)
+                .unwrap_or_else(|| tool_schema(&Value::Null)),
             strict: func.get("strict").and_then(Value::as_bool).unwrap_or(false),
         });
     }
@@ -327,9 +367,15 @@ fn messages_out(msg: &Message) -> Result<Vec<Value>> {
                 "type": "function",
                 "function": {"name": name, "arguments": arguments_value(input)?},
             })),
-            Part::ToolResult { tool_use_id, content, is_error } => {
+            Part::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 if msg.role == Role::Tool {
-                    tool_content.get_or_insert_with(String::new).push_str(content);
+                    tool_content
+                        .get_or_insert_with(String::new)
+                        .push_str(content);
                 } else {
                     tool_msgs.push(json!({
                         "role": "tool",
@@ -371,7 +417,10 @@ fn messages_out(msg: &Message) -> Result<Vec<Value>> {
     if texts.is_empty() && calls.is_empty() {
         out.insert("content".into(), Value::Null);
     } else if texts.len() == 1 && texts[0].get("type") == Some(&Value::from("text")) {
-        out.insert("content".into(), texts[0].get("text").cloned().unwrap_or(Value::Null));
+        out.insert(
+            "content".into(),
+            texts[0].get("text").cloned().unwrap_or(Value::Null),
+        );
     } else if !texts.is_empty() {
         out.insert("content".into(), Value::Array(texts));
     }
@@ -398,7 +447,9 @@ pub fn parse_response(body: &Value) -> Result<ChatResponse> {
         .and_then(Value::as_array)
         .and_then(|c| c.first())
         .ok_or_else(|| parse_err(D, "response has no choices"))?;
-    let msg = choice.get("message").ok_or_else(|| parse_err(D, "choice has no message"))?;
+    let msg = choice
+        .get("message")
+        .ok_or_else(|| parse_err(D, "choice has no message"))?;
 
     let mut parts = Vec::new();
     if let Some(text) = msg.get("content") {
@@ -407,21 +458,32 @@ pub fn parse_response(body: &Value) -> Result<ChatResponse> {
             parts.push(Part::Text(text));
         }
     }
-    if let Some(reasoning) = req_str(msg, "reasoning_content").or_else(|| req_str(msg, "reasoning")) {
+    if let Some(reasoning) = req_str(msg, "reasoning_content").or_else(|| req_str(msg, "reasoning"))
+    {
         if !reasoning.is_empty() {
-            parts.push(Part::Reasoning { text: reasoning.to_owned(), signature: None });
+            parts.push(Part::Reasoning {
+                text: reasoning.to_owned(),
+                signature: None,
+            });
         }
     }
     if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
         for call in calls {
             let id = req_str(call, "id").unwrap_or_default().to_owned();
             let func = call.get("function");
-            let name = func.and_then(|f| req_str(f, "name")).unwrap_or_default().to_owned();
+            let name = func
+                .and_then(|f| req_str(f, "name"))
+                .unwrap_or_default()
+                .to_owned();
             let args = func
                 .and_then(|f| f.get("arguments"))
                 .map(arguments_to_string)
                 .unwrap_or_default();
-            parts.push(Part::ToolUse { id, name, input: parse_arguments(&args) });
+            parts.push(Part::ToolUse {
+                id,
+                name,
+                input: parse_arguments(&args),
+            });
         }
     }
 
@@ -456,7 +518,14 @@ pub fn build_response(resp: &ChatResponse) -> Result<Value> {
     }
     let mut message = Map::new();
     message.insert("role".into(), Value::from("assistant"));
-    message.insert("content".into(), if content.is_empty() { Value::Null } else { Value::from(content) });
+    message.insert(
+        "content".into(),
+        if content.is_empty() {
+            Value::Null
+        } else {
+            Value::from(content)
+        },
+    );
     if !calls.is_empty() {
         message.insert("tool_calls".into(), Value::Array(calls));
     }
@@ -503,7 +572,10 @@ pub struct OpenAiChatDecoder {
 
 impl OpenAiChatDecoder {
     pub fn new(model: &str) -> Self {
-        Self { model: model.to_owned(), ..Self::default() }
+        Self {
+            model: model.to_owned(),
+            ..Self::default()
+        }
     }
 
     pub fn push(&mut self, chunk: &[u8], out: &mut Vec<StreamEvent>) -> Result<()> {
@@ -537,8 +609,13 @@ impl OpenAiChatDecoder {
         if !self.sent_start {
             self.sent_start = true;
             self.id = req_str(v, "id").unwrap_or_default().to_owned();
-            let model = req_str(v, "model").map(str::to_owned).unwrap_or_else(|| self.model.clone());
-            out.push(StreamEvent::Start { id: self.id.clone(), model });
+            let model = req_str(v, "model")
+                .map(str::to_owned)
+                .unwrap_or_else(|| self.model.clone());
+            out.push(StreamEvent::Start {
+                id: self.id.clone(),
+                model,
+            });
         }
         if let Some(usage) = v.get("usage") {
             if !usage.is_null() {
@@ -555,7 +632,9 @@ impl OpenAiChatDecoder {
                         out.push(StreamEvent::TextDelta(text.to_owned()));
                     }
                 }
-                if let Some(r) = req_str(delta, "reasoning_content").or_else(|| req_str(delta, "reasoning")) {
+                if let Some(r) =
+                    req_str(delta, "reasoning_content").or_else(|| req_str(delta, "reasoning"))
+                {
                     if !r.is_empty() {
                         out.push(StreamEvent::ReasoningDelta(r.to_owned()));
                     }
@@ -592,7 +671,10 @@ impl OpenAiChatDecoder {
                             });
                         }
                         if !args.is_empty() {
-                            out.push(StreamEvent::ToolCallArgsDelta { index, partial_json: args });
+                            out.push(StreamEvent::ToolCallArgsDelta {
+                                index,
+                                partial_json: args,
+                            });
                         }
                     }
                 }
@@ -611,7 +693,10 @@ impl OpenAiChatDecoder {
         // Some upstreams close the stream without any frame being parsed at all.
         if !self.sent_start {
             self.sent_start = true;
-            out.push(StreamEvent::Start { id: self.id.clone(), model: self.model.clone() });
+            out.push(StreamEvent::Start {
+                id: self.id.clone(),
+                model: self.model.clone(),
+            });
         }
         self.done = true;
         let reason = self.finish.unwrap_or_else(|| {
@@ -621,7 +706,10 @@ impl OpenAiChatDecoder {
                 FinishReason::Stop
             }
         });
-        out.push(StreamEvent::Done { reason, usage: self.usage });
+        out.push(StreamEvent::Done {
+            reason,
+            usage: self.usage,
+        });
     }
 }
 
@@ -640,7 +728,11 @@ pub struct OpenAiChatEncoder {
 
 impl OpenAiChatEncoder {
     pub fn new(model: &str) -> Self {
-        Self { model: model.to_owned(), created: 1, ..Self::default() }
+        Self {
+            model: model.to_owned(),
+            created: 1,
+            ..Self::default()
+        }
     }
 
     pub fn encode(&mut self, ev: &StreamEvent) -> bytes::Bytes {
@@ -680,7 +772,10 @@ impl OpenAiChatEncoder {
                     }]}),
                 );
             }
-            StreamEvent::ToolCallArgsDelta { index, partial_json } => {
+            StreamEvent::ToolCallArgsDelta {
+                index,
+                partial_json,
+            } => {
                 self.delta(
                     &mut frames,
                     json!({"tool_calls": [{
@@ -790,7 +885,10 @@ mod tests {
         // And back out: arguments must be a JSON *string*, not an object.
         let built = build_request(D, &req, false).unwrap();
         let args = &built["messages"][0]["tool_calls"][0]["function"]["arguments"];
-        assert!(args.is_string(), "arguments must serialize as a string: {args}");
+        assert!(
+            args.is_string(),
+            "arguments must serialize as a string: {args}"
+        );
         assert_eq!(args.as_str().unwrap(), "{\"city\":\"Hanoi\"}");
     }
 
@@ -806,7 +904,11 @@ mod tests {
         let req = parse_request(D, &body).unwrap();
         assert_eq!(
             req.messages[1].parts,
-            vec![Part::ToolResult { tool_use_id: "call_a".into(), content: "21C".into(), is_error: false }]
+            vec![Part::ToolResult {
+                tool_use_id: "call_a".into(),
+                content: "21C".into(),
+                is_error: false
+            }]
         );
         let built = build_request(D, &req, false).unwrap();
         assert_eq!(built["messages"][1]["role"], "tool");
@@ -825,7 +927,11 @@ mod tests {
         });
         let req = parse_request(D, &body).unwrap();
         assert_eq!(req.system.as_deref(), Some("one\n\ntwo"));
-        assert_eq!(req.messages.len(), 1, "system messages are not kept in messages");
+        assert_eq!(
+            req.messages.len(),
+            1,
+            "system messages are not kept in messages"
+        );
         let built = build_request(D, &req, false).unwrap();
         assert_eq!(built["messages"][0]["role"], "system");
         assert_eq!(built["messages"][0]["content"], "one\n\ntwo");
@@ -841,7 +947,15 @@ mod tests {
         });
         let resp = parse_response(&body).unwrap();
         assert_eq!(resp.finish_reason, FinishReason::Length);
-        assert_eq!(resp.usage, Usage { input_tokens: 11, output_tokens: 7, cache_read_tokens: 3, cache_write_tokens: 0 });
+        assert_eq!(
+            resp.usage,
+            Usage {
+                input_tokens: 11,
+                output_tokens: 7,
+                cache_read_tokens: 3,
+                cache_write_tokens: 0
+            }
+        );
         let back = build_response(&resp).unwrap();
         assert_eq!(back["usage"]["prompt_tokens"], 11);
         assert_eq!(back["usage"]["completion_tokens"], 7);
@@ -851,9 +965,18 @@ mod tests {
     #[test]
     fn stream_tool_call_fragments_concatenate_by_index() {
         let chunks = [
-            frame(None, r#"{"id":"c1","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#),
-            frame(None, r#"{"id":"c1","model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"rust\"}"}}]}}]}"#),
-            frame(None, r#"{"id":"c1","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}"#),
+            frame(
+                None,
+                r#"{"id":"c1","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#,
+            ),
+            frame(
+                None,
+                r#"{"id":"c1","model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"rust\"}"}}]}}]}"#,
+            ),
+            frame(
+                None,
+                r#"{"id":"c1","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}"#,
+            ),
         ];
         let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
         let events = drain(&mut OpenAiChatDecoder::new("gpt-4o"), &refs);
@@ -864,9 +987,15 @@ mod tests {
             match ev {
                 StreamEvent::ToolCallStart { id, name, index } => {
                     starts += 1;
-                    assert_eq!((*index, id.as_str(), name.as_str()), (0, "call_a", "lookup"));
+                    assert_eq!(
+                        (*index, id.as_str(), name.as_str()),
+                        (0, "call_a", "lookup")
+                    );
                 }
-                StreamEvent::ToolCallArgsDelta { index, partial_json } => {
+                StreamEvent::ToolCallArgsDelta {
+                    index,
+                    partial_json,
+                } => {
                     assert_eq!(*index, 0);
                     args.push_str(partial_json);
                 }
@@ -888,9 +1017,15 @@ mod tests {
         let mut enc = StreamEncoder::new(D, "gpt-4o");
         let mut wire = String::new();
         for ev in [
-            StreamEvent::Start { id: "c9".into(), model: "gpt-4o".into() },
+            StreamEvent::Start {
+                id: "c9".into(),
+                model: "gpt-4o".into(),
+            },
             StreamEvent::TextDelta("hi".into()),
-            StreamEvent::Done { reason: FinishReason::Stop, usage: Some(Usage::default()) },
+            StreamEvent::Done {
+                reason: FinishReason::Stop,
+                usage: Some(Usage::default()),
+            },
             StreamEvent::TextDelta("late".into()),
         ] {
             let bytes = enc.encode(&ev).unwrap();

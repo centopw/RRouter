@@ -87,7 +87,11 @@ impl Breaker {
 
     pub fn with_policy(failures: u32, open_for: Duration, probes: u8) -> Self {
         Self {
-            policy: Policy { failures: failures.max(1), open_for, probes: probes.max(1) },
+            policy: Policy {
+                failures: failures.max(1),
+                open_for,
+                probes: probes.max(1),
+            },
             entries: Mutex::new(HashMap::new()),
         }
     }
@@ -169,14 +173,18 @@ impl Breaker {
     /// disconnect): the account is neither proven healthy nor proven broken, so
     /// the slot is returned and the state otherwise left alone.
     pub fn release_probe(&self, conn: Uuid, ticket: ProbeTicket) {
-        let ProbeTicket::Probe { epoch } = ticket else { return };
+        let ProbeTicket::Probe { epoch } = ticket else {
+            return;
+        };
         let mut map = self.lock();
         if let Some(entry) = map.get_mut(&conn) {
             // Only the episode that granted this ticket may be rolled back: a stale
             // guard must never free a probe belonging to a newer half-open window.
             if entry.epoch == epoch {
                 if let BreakerState::HalfOpen { probes } = entry.state {
-                    entry.state = BreakerState::HalfOpen { probes: probes.saturating_sub(1) };
+                    entry.state = BreakerState::HalfOpen {
+                        probes: probes.saturating_sub(1),
+                    };
                 }
             }
         }
@@ -221,7 +229,9 @@ impl Breaker {
             || status == 403
             || entry.consecutive_failures >= self.policy.failures;
         if tripped || was_half_open {
-            entry.state = BreakerState::Open { until: now + open_for };
+            entry.state = BreakerState::Open {
+                until: now + open_for,
+            };
         }
     }
 
@@ -240,7 +250,9 @@ impl Breaker {
         match map.get(&conn) {
             None => BreakerState::Closed,
             Some(e) => match e.state {
-                BreakerState::Open { until } if now >= until => BreakerState::HalfOpen { probes: 0 },
+                BreakerState::Open { until } if now >= until => {
+                    BreakerState::HalfOpen { probes: 0 }
+                }
                 other => other,
             },
         }

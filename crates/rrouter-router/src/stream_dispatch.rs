@@ -50,7 +50,10 @@ impl Dispatcher {
         let deadline = self.retry.deadline();
         let mut order = self.attempt_order(plan).await;
         if order.is_empty() {
-            return Err(no_route(plan, "every candidate is blocked by its circuit breaker"));
+            return Err(no_route(
+                plan,
+                "every candidate is blocked by its circuit breaker",
+            ));
         }
 
         let mut last: Option<Error> = None;
@@ -133,7 +136,12 @@ struct Committed {
 
 impl Committed {
     fn new(inner: ByteStream, breaker: std::sync::Arc<Breaker>, conn: uuid::Uuid) -> Self {
-        Self { inner, breaker, conn, settled: false }
+        Self {
+            inner,
+            breaker,
+            conn,
+            settled: false,
+        }
     }
 
     fn settle_success(&mut self) {
@@ -167,7 +175,8 @@ impl Stream for Committed {
                 this.settled = true;
                 // Mid-stream: the commit point has passed, so record the failure
                 // and surface it. The gateway emits one error event and stops.
-                this.breaker.record_failure(this.conn, status_of(&err), retry_after(&err));
+                this.breaker
+                    .record_failure(this.conn, status_of(&err), retry_after(&err));
                 Poll::Ready(Some(Err(err)))
             }
             Poll::Ready(None) => {

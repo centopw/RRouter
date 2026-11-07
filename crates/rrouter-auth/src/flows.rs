@@ -38,7 +38,10 @@ const POLL_TIMEOUT: Duration = Duration::from_secs(30);
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Challenge {
     /// Open `authorize_url`, then call `complete` with the login id.
-    Pkce { authorize_url: String, redirect_uri: String },
+    Pkce {
+        authorize_url: String,
+        redirect_uri: String,
+    },
     /// Show `user_code`, open `verification_uri`, then call `complete`.
     DeviceCode {
         user_code: String,
@@ -59,7 +62,6 @@ pub struct SignedIn {
     /// Human label when the provider reports one (email/login).
     pub account_label: Option<String>,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingState {
@@ -131,12 +133,9 @@ impl OAuthFlows {
         spec: &'static ProviderSpec,
         p: PkceFlow,
     ) -> Result<(String, Challenge)> {
-        let server = LoopbackServer::bind(
-            p.fixed_port.unwrap_or(0),
-            p.callback_path,
-            p.redirect_host,
-        )
-        .await?;
+        let server =
+            LoopbackServer::bind(p.fixed_port.unwrap_or(0), p.callback_path, p.redirect_host)
+                .await?;
         let redirect_uri = server.redirect_uri();
         let verifier = pkce::generate_verifier();
         let challenge = pkce::challenge_for(&verifier);
@@ -196,7 +195,13 @@ impl OAuthFlows {
                 task: Some(task),
             },
         );
-        Ok((id, Challenge::Pkce { authorize_url, redirect_uri }))
+        Ok((
+            id,
+            Challenge::Pkce {
+                authorize_url,
+                redirect_uri,
+            },
+        ))
     }
 
     async fn start_device(
@@ -222,14 +227,13 @@ impl OAuthFlows {
                 payload: serde_json::from_str(&body).ok(),
             });
         }
-        let grant: DeviceCodeResponse = serde_json::from_str(&body).map_err(|e| {
-            Error::Upstream {
+        let grant: DeviceCodeResponse =
+            serde_json::from_str(&body).map_err(|e| Error::Upstream {
                 provider: spec.id.to_string(),
                 status: status.as_u16(),
                 body: format!("unparsable device-code response: {e}"),
                 payload: None,
-            }
-        })?;
+            })?;
         let interval = Duration::from_secs(grant.interval.max(1));
         let id = uuid::Uuid::new_v4().to_string();
         self.insert(
@@ -262,7 +266,8 @@ impl OAuthFlows {
     /// Whether this login is still waiting.
     pub fn is_pending(&self, id: &str) -> bool {
         let map = self.lock();
-        map.get(id).is_some_and(|p| p.status == PendingState::Waiting && !p.expired())
+        map.get(id)
+            .is_some_and(|p| p.status == PendingState::Waiting && !p.expired())
     }
 
     /// Finish a sign-in. Idempotent: a second call returns the stored outcome
@@ -280,7 +285,9 @@ impl OAuthFlows {
             if p.expired() {
                 drop(map);
                 self.lock().remove(id);
-                return Err(Error::Timeout("this sign-in expired; start a new one".into()));
+                return Err(Error::Timeout(
+                    "this sign-in expired; start a new one".into(),
+                ));
             }
             if p.status == PendingState::Finished {
                 return replay(&p.outcome);
@@ -296,8 +303,8 @@ impl OAuthFlows {
                 let p = map.get(id).ok_or_else(|| Error::NotFound(id.to_string()))?;
                 (p.provider, p.profile_url)
             };
-            let outcome = Self::poll_device(http, provider, flow, profile_url, &device_code, interval)
-                .await;
+            let outcome =
+                Self::poll_device(http, provider, flow, profile_url, &device_code, interval).await;
             if let Ok(done) = &outcome {
                 self.finish(id, Ok(done.clone()));
             } else if let Err(e) = &outcome {
@@ -397,7 +404,8 @@ impl OAuthFlows {
                     .iter()
                     .map(|(k, v)| ((*k).to_string(), serde_json::Value::String(v.clone())))
                     .collect();
-                http.post(p.token_url).json(&serde_json::Value::Object(object))
+                http.post(p.token_url)
+                    .json(&serde_json::Value::Object(object))
             }
             RefreshBody::Form => http.post(p.token_url).form(&params),
         };
@@ -480,7 +488,10 @@ impl OAuthFlows {
                         .get("refresh_token")
                         .and_then(Value::as_str)
                         .map(str::to_string),
-                    id_token: value.get("id_token").and_then(Value::as_str).map(str::to_string),
+                    id_token: value
+                        .get("id_token")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     expires_in: value
                         .get("expires_in")
                         .and_then(Value::as_u64)
@@ -509,7 +520,9 @@ impl OAuthFlows {
                 // The provider asks us to back off; RFC 8628 §3.5 says +5 s.
                 Some("slow_down") => wait += Duration::from_secs(5),
                 Some("expired_token") => {
-                    return Err(Error::Timeout("the device code expired; start again".into()))
+                    return Err(Error::Timeout(
+                        "the device code expired; start again".into(),
+                    ))
                 }
                 Some("access_denied") => {
                     return Err(Error::Unauthorized("the sign-in was denied".into()))
@@ -534,8 +547,6 @@ impl OAuthFlows {
         }
     }
 }
-
-
 
 /// Everything one authorization-code exchange needs, grouped so the call site stays
 /// readable and the function does not grow an argument per provider quirk.
@@ -659,7 +670,11 @@ async fn profile_label(
         "claude" => value
             .pointer("/account/email_address")
             .or_else(|| value.get("email")),
-        "codex" | "github" => value.get(if provider == "codex" { "email" } else { "login" }),
+        "codex" | "github" => value.get(if provider == "codex" {
+            "email"
+        } else {
+            "login"
+        }),
         _ => None,
     };
     candidate
@@ -693,7 +708,7 @@ fn truncate(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{DeviceFlow, LoginFlow, ProviderKind, RefreshBody, PkceFlow as P};
+    use crate::registry::{DeviceFlow, LoginFlow, PkceFlow as P, ProviderKind, RefreshBody};
     use axum::extract::State;
     use axum::routing::post;
     use axum::{Json, Router};
@@ -703,7 +718,6 @@ mod tests {
     fn spec(login: LoginFlow) -> &'static ProviderSpec {
         spec_with_profile_id("mock", login, None)
     }
-
 
     fn spec_with_profile_id(
         id: &'static str,
@@ -740,7 +754,8 @@ mod tests {
         let LoginFlow::Pkce(claude) = crate::registry::CLAUDE_LOGIN else {
             panic!("claude is a PKCE flow");
         };
-        let params = authorization_params(&claude, "code", "http://localhost:1/callback", "v", "st");
+        let params =
+            authorization_params(&claude, "code", "http://localhost:1/callback", "v", "st");
         assert!(
             params.iter().any(|(k, v)| *k == "state" && v == "st"),
             "claude must echo state: {params:?}"
@@ -749,7 +764,13 @@ mod tests {
         let LoginFlow::Pkce(codex) = crate::registry::CODEX_LOGIN else {
             panic!("codex is a PKCE flow");
         };
-        let params = authorization_params(&codex, "code", "http://127.0.0.1:1455/auth/callback", "v", "st");
+        let params = authorization_params(
+            &codex,
+            "code",
+            "http://127.0.0.1:1455/auth/callback",
+            "v",
+            "st",
+        );
         assert!(
             !params.iter().any(|(k, _)| *k == "state"),
             "codex must not send state: {params:?}"
@@ -800,7 +821,9 @@ mod tests {
             .route("/device", post(device_code))
             .route("/token", post(token))
             .with_state(state);
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{addr}"), hits)
@@ -816,10 +839,7 @@ mod tests {
         }))
     }
 
-    async fn token(
-        State((hits,)): State<(Arc<AtomicUsize>,)>,
-        body: String,
-    ) -> Json<Value> {
+    async fn token(State((hits,)): State<(Arc<AtomicUsize>,)>, body: String) -> Json<Value> {
         let n = hits.fetch_add(1, Ordering::SeqCst);
         if body.contains("device_code=DEV-1") {
             // First poll is pending, second succeeds: exercises the poll loop.
@@ -861,7 +881,11 @@ mod tests {
 
         let (id, challenge) = flows.start(&http, leaked).await.unwrap();
         match challenge {
-            Challenge::DeviceCode { user_code, interval, .. } => {
+            Challenge::DeviceCode {
+                user_code,
+                interval,
+                ..
+            } => {
                 assert_eq!(user_code, "ABCD-1234");
                 assert_eq!(interval, 1);
             }
@@ -870,14 +894,27 @@ mod tests {
         assert!(flows.is_pending(&id));
 
         let done = flows.complete(&http, &id).await.unwrap();
-        assert_eq!(done.credentials.access_token.as_deref(), Some("device-token"));
-        assert_eq!(done.credentials.refresh_token.as_deref(), Some("device-refresh"));
+        assert_eq!(
+            done.credentials.access_token.as_deref(),
+            Some("device-token")
+        );
+        assert_eq!(
+            done.credentials.refresh_token.as_deref(),
+            Some("device-refresh")
+        );
         assert!(done.credentials.expires_at.is_some());
-        assert_eq!(hits.load(Ordering::SeqCst), 2, "one pending poll, then success");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "one pending poll, then success"
+        );
 
         // Idempotent: a second complete replays the outcome, no extra exchange.
         let again = flows.complete(&http, &id).await.unwrap();
-        assert_eq!(again.credentials.access_token.as_deref(), Some("device-token"));
+        assert_eq!(
+            again.credentials.access_token.as_deref(),
+            Some("device-token")
+        );
         assert_eq!(hits.load(Ordering::SeqCst), 2, "no second exchange");
     }
 
@@ -895,7 +932,8 @@ mod tests {
         let profile_url = Box::leak(format!("{}/profile", profile.uri()).into_boxed_str());
         let flows = OAuthFlows::new();
         let http = reqwest::Client::new();
-        let leaked = spec_with_profile_id("claude",
+        let leaked = spec_with_profile_id(
+            "claude",
             LoginFlow::DeviceCode(DeviceFlow {
                 client_id: "cid",
                 device_code_url: Box::leak(format!("{base}/device").into_boxed_str()),
@@ -926,7 +964,8 @@ mod tests {
         let profile_url = Box::leak(format!("{}/profile", profile.uri()).into_boxed_str());
         let flows = OAuthFlows::new();
         let http = reqwest::Client::new();
-        let leaked = spec_with_profile_id("claude",
+        let leaked = spec_with_profile_id(
+            "claude",
             LoginFlow::DeviceCode(DeviceFlow {
                 client_id: "cid",
                 device_code_url: Box::leak(format!("{base}/device").into_boxed_str()),
@@ -954,7 +993,8 @@ mod tests {
             .mount(&profile)
             .await;
         let profile_url = Box::leak(format!("{}/profile", profile.uri()).into_boxed_str());
-        let leaked = spec_with_profile_id("claude",
+        let leaked = spec_with_profile_id(
+            "claude",
             LoginFlow::Pkce(P {
                 client_id: "cid",
                 authorize_url: Box::leak(format!("{base}/authorize").into_boxed_str()),
@@ -972,7 +1012,10 @@ mod tests {
 
         let (id, challenge) = flows.start(&http, leaked).await.unwrap();
         let (authorize_url, redirect_uri) = match challenge {
-            Challenge::Pkce { authorize_url, redirect_uri } => (authorize_url, redirect_uri),
+            Challenge::Pkce {
+                authorize_url,
+                redirect_uri,
+            } => (authorize_url, redirect_uri),
             other => panic!("expected pkce, got {other:?}"),
         };
         assert!(authorize_url.starts_with(&format!("{base}/authorize?")));
@@ -1000,7 +1043,9 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         s.write_all(
             format!("GET /callback?code=AUTHCODE&state={state} HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -1014,7 +1059,10 @@ mod tests {
 
         let done = complete.await.unwrap().unwrap();
         assert_eq!(done.credentials.access_token.as_deref(), Some("pkce-token"));
-        assert_eq!(done.credentials.refresh_token.as_deref(), Some("pkce-refresh"));
+        assert_eq!(
+            done.credentials.refresh_token.as_deref(),
+            Some("pkce-refresh")
+        );
         // The id-token email becomes the dashboard label.
         assert_eq!(done.account_label.as_deref(), Some("user@example.test"));
         assert_eq!(
@@ -1061,4 +1109,3 @@ mod tests {
         assert_eq!(label_from_jwt(&fake_jwt("x@y.z")).as_deref(), Some("x@y.z"));
     }
 }
-

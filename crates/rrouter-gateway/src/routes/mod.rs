@@ -11,6 +11,7 @@ pub mod oauth;
 pub mod quotas;
 pub mod settings;
 pub mod system;
+pub mod system_logs;
 pub mod templates;
 pub mod usage;
 pub mod users;

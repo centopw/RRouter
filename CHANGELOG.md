@@ -50,6 +50,13 @@ All notable changes. Dates are local; versions follow semver once tagged.
   shows each account's window usage with a quota editor. Usage is aggregated from the request
   log, so nothing counts, resets or repairs a counter.
 
+### Added
+- Logs now include failed requests: every terminal failure writes one zero-token usage row
+  with its HTTP status and client-facing error, and the request drawer lists each attempt's
+  upstream error. A new **System logs** page captures the gateway's own tracing events in
+  memory for debugging; it is off by default, never written to disk, and can be enabled or
+  cleared at runtime.
+
 ### Fixed
 - Codex rejects `temperature` and `top_p` instead of ignoring them, failing every
   Playground turn; the gateway strips those sampling controls for the codex provider on

@@ -11,7 +11,9 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use rrouter_store::{window_reset, window_start, AccountQuota, AccountUsage, BudgetWindow, Connection};
+use rrouter_store::{
+    window_reset, window_start, AccountQuota, AccountUsage, BudgetWindow, Connection,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -128,9 +130,7 @@ pub async fn update(
     };
     match state.store.get_connection(id).await {
         Ok(Some(_)) => {}
-        Ok(None) => {
-            return admin_error(&rrouter_core::Error::NotFound(format!("connection {id}")))
-        }
+        Ok(None) => return admin_error(&rrouter_core::Error::NotFound(format!("connection {id}"))),
         Err(e) => return admin_error(&e),
     }
 

@@ -121,8 +121,7 @@ fn parse_filters(query: &[(String, String)]) -> Result<Filters, Error> {
     let key_id = match text("key_id") {
         None => None,
         Some(raw) => Some(
-            Uuid::parse_str(raw)
-                .map_err(|_| Error::BadRequest("key_id must be a uuid".into()))?,
+            Uuid::parse_str(raw).map_err(|_| Error::BadRequest("key_id must be a uuid".into()))?,
         ),
     };
     let status = match text("status") {
@@ -148,7 +147,14 @@ fn parse_filters(query: &[(String, String)]) -> Result<Filters, Error> {
             (Some(m.to_string()), bare)
         }
     };
-    Ok(Filters { since, provider, model, bare_model, key_id, status })
+    Ok(Filters {
+        since,
+        provider,
+        model,
+        bare_model,
+        key_id,
+        status,
+    })
 }
 
 pub async fn list(
@@ -245,7 +251,11 @@ pub async fn export_csv(
             // The cursor is the last row's `(ts, id)`, so the next page starts strictly
             // after it even when rows share a timestamp. A row read back always has an
             // id; if one somehow does not, the next page would repeat this one — stop.
-            match page.last().filter(|_| full).and_then(|r| r.id.map(|id| (r.ts, id))) {
+            match page
+                .last()
+                .filter(|_| full)
+                .and_then(|r| r.id.map(|id| (r.ts, id)))
+            {
                 Some(next) => cursor = Some(next),
                 None => return,
             }
@@ -253,7 +263,10 @@ pub async fn export_csv(
     });
     let mut response = Response::new(Body::from_stream(ReceiverStream::new(rx)));
     let headers = response.headers_mut();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/csv; charset=utf-8"));
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
     headers.insert(CONTENT_DISPOSITION, attachment);
     response
 }
@@ -286,7 +299,10 @@ fn csv_row(out: &mut String, r: &UsageRecord) {
     out.push(',');
     push_cell(out, &r.model);
     out.push(',');
-    push_cell(out, &r.request_id.map(|id| id.to_string()).unwrap_or_default());
+    push_cell(
+        out,
+        &r.request_id.map(|id| id.to_string()).unwrap_or_default(),
+    );
     out.push(',');
     push_cell(out, &r.key_id.map(|id| id.to_string()).unwrap_or_default());
     out.push(',');
@@ -386,12 +402,7 @@ pub async fn series(
     State(state): State<Arc<AppState>>,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Response {
-    let param = |key: &str| {
-        query
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
-    };
+    let param = |key: &str| query.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
     let hours = param("hours")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(24)
@@ -427,7 +438,9 @@ pub async fn series(
                         })
                     })
                     .collect();
-                ok_json(json!({ "data": data, "hours": hours, "bucket_secs": bucket_secs, "by": "model" }))
+                ok_json(
+                    json!({ "data": data, "hours": hours, "bucket_secs": bucket_secs, "by": "model" }),
+                )
             }
             Err(e) => admin_error(&e),
         };

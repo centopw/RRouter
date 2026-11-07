@@ -189,8 +189,7 @@ fn row_to_invite(r: &Row<'_>) -> rusqlite::Result<Invite> {
     })
 }
 
-const USER_COLUMNS: &str =
-    "id, name, email, role, is_owner, disabled, created_at, last_sign_in_at";
+const USER_COLUMNS: &str = "id, name, email, role, is_owner, disabled, created_at, last_sign_in_at";
 
 impl Store {
     // ----- users ---------------------------------------------------------------------
@@ -211,7 +210,9 @@ impl Store {
                 "SELECT {USER_COLUMNS} FROM users ORDER BY is_owner DESC, created_at"
             ))
             .map_err(migrations::db_err)?;
-        let rows = stmt.query_map([], row_to_user).map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], row_to_user)
+            .map_err(migrations::db_err)?;
         rows.map(|r| r.map_err(migrations::db_err)).collect()
     }
 
@@ -310,7 +311,8 @@ impl Store {
         let Some(existing) = self.user(id).await? else {
             return Ok(None);
         };
-        if existing.is_owner && (role.is_some_and(|r| r != UserRole::Admin) || disabled == Some(true))
+        if existing.is_owner
+            && (role.is_some_and(|r| r != UserRole::Admin) || disabled == Some(true))
         {
             return Err(Error::Forbidden {
                 code: "owner_protected",
@@ -539,7 +541,10 @@ impl Store {
     /// Expired sessions are dead weight; the retention sweep calls this.
     pub async fn prune_sessions(&self, at: i64) -> Result<usize> {
         self.conn()
-            .execute("DELETE FROM user_sessions WHERE expires_at <= ?1", params![at])
+            .execute(
+                "DELETE FROM user_sessions WHERE expires_at <= ?1",
+                params![at],
+            )
             .map_err(migrations::db_err)
     }
 
@@ -627,7 +632,9 @@ impl Store {
                  FROM invites ORDER BY created_at DESC",
             )
             .map_err(migrations::db_err)?;
-        let rows = stmt.query_map([], row_to_invite).map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], row_to_invite)
+            .map_err(migrations::db_err)?;
         rows.map(|r| r.map_err(migrations::db_err)).collect()
     }
 }

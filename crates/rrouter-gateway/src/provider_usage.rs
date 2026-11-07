@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use rrouter_core::{Error, Result};
 use rrouter_store::Connection;
-use base64::Engine as _;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -96,23 +96,30 @@ pub async fn account(state: &AppState, conn: &Connection) -> AccountUsage {
 fn cache_get(id: Uuid) -> Option<AccountUsage> {
     let map = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let entry = map.get(&id)?;
-    let ttl = if entry.value.error.is_none() { SUCCESS_TTL } else { FAILURE_TTL };
+    let ttl = if entry.value.error.is_none() {
+        SUCCESS_TTL
+    } else {
+        FAILURE_TTL
+    };
     (entry.at.elapsed() < ttl).then(|| entry.value.clone())
 }
 
 fn cache_put(id: Uuid, value: AccountUsage) {
-    CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id, Cached { at: Instant::now(), value });
+    CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        id,
+        Cached {
+            at: Instant::now(),
+            value,
+        },
+    );
 }
 
 /// A dashboard sentence, not an upstream dump: the raw body belongs in the log.
 fn explain(error: &Error) -> String {
     match error {
-        Error::Upstream { status: 401 | 403, .. } => {
-            "the provider rejected this account's token; sign in again".to_string()
-        }
+        Error::Upstream {
+            status: 401 | 403, ..
+        } => "the provider rejected this account's token; sign in again".to_string(),
         Error::Upstream { status: 429, .. } => {
             "the provider is rate-limiting usage checks; retrying in a few minutes".to_string()
         }
@@ -130,7 +137,10 @@ struct Windows {
 
 async fn fetch(state: &AppState, conn: &Connection) -> Result<Windows> {
     let Some(spec) = rrouter_auth::get(&conn.provider) else {
-        return Err(Error::BadRequest(format!("unknown provider {}", conn.provider)));
+        return Err(Error::BadRequest(format!(
+            "unknown provider {}",
+            conn.provider
+        )));
     };
     // An API key has no plan: asking the OAuth usage endpoint would only produce a 401
     // that reads like a broken account.
@@ -173,7 +183,13 @@ async fn claude(state: &AppState, token: &str) -> Result<Windows> {
         .map_err(|e| Error::Transport(format!("claude usage: {e}")))?;
     let status = response.status().as_u16();
     if !response.status().is_success() {
-        let body: String = response.text().await.unwrap_or_default().chars().take(256).collect();
+        let body: String = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(256)
+            .collect();
         return Err(Error::Upstream {
             provider: "claude".into(),
             status,
@@ -264,7 +280,13 @@ async fn codex(
         .map_err(|e| Error::Transport(format!("codex usage: {e}")))?;
     let status = response.status().as_u16();
     if !response.status().is_success() {
-        let body: String = response.text().await.unwrap_or_default().chars().take(256).collect();
+        let body: String = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(256)
+            .collect();
         return Err(Error::Upstream {
             provider: "codex".into(),
             status,
@@ -300,14 +322,20 @@ fn codex_windows(body: &Value) -> Result<Windows> {
         };
         let seconds = window.get("limit_window_seconds").and_then(Value::as_i64);
         // Classify by the window itself; older payloads only carried positions.
-        let weekly = seconds.map(|s| s >= 2 * 24 * 3600).unwrap_or(alias == "weekly");
+        let weekly = seconds
+            .map(|s| s >= 2 * 24 * 3600)
+            .unwrap_or(alias == "weekly");
         let id = if weekly { "weekly" } else { "five_hour" };
         if windows.iter().any(|w: &UsageWindow| w.id == id) {
             continue;
         }
         windows.push(UsageWindow {
             id: id.to_string(),
-            label: if weekly { "Weekly".into() } else { "5 hour".into() },
+            label: if weekly {
+                "Weekly".into()
+            } else {
+                "5 hour".into()
+            },
             used_percent: used,
             window_seconds: seconds,
             resets_at: reset_at(window),
@@ -351,7 +379,13 @@ async fn github(
         .map_err(|e| Error::Transport(format!("copilot usage: {e}")))?;
     let status = response.status().as_u16();
     if !response.status().is_success() {
-        let body: String = response.text().await.unwrap_or_default().chars().take(256).collect();
+        let body: String = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(256)
+            .collect();
         return Err(Error::Upstream {
             provider: "github".into(),
             status,
@@ -391,14 +425,20 @@ fn github_windows(body: &Value) -> Result<Windows> {
             .or_else(|| {
                 let remaining = snapshot.get("remaining").and_then(Value::as_f64)?;
                 let entitlement = snapshot.get("entitlement").and_then(Value::as_f64)?;
-                (entitlement > 0.0).then(|| ((entitlement - remaining) / entitlement * 100.0).clamp(0.0, 100.0))
+                (entitlement > 0.0)
+                    .then(|| ((entitlement - remaining) / entitlement * 100.0).clamp(0.0, 100.0))
             });
         let Some(used) = used else { continue };
         let reset = body
             .get("quota_reset_date_utc")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339)
-            .or_else(|| snapshot.get("quota_reset_at").and_then(Value::as_str).and_then(parse_rfc3339));
+            .or_else(|| {
+                snapshot
+                    .get("quota_reset_at")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339)
+            });
         windows.push(UsageWindow {
             id: key.replace('_', "-"),
             label: label.to_string(),
@@ -408,7 +448,9 @@ fn github_windows(body: &Value) -> Result<Windows> {
         });
     }
     if windows.is_empty() {
-        return Err(Error::Store("copilot reports no finite quota windows".into()));
+        return Err(Error::Store(
+            "copilot reports no finite quota windows".into(),
+        ));
     }
     Ok(Windows {
         plan: body
@@ -433,7 +475,9 @@ fn percent_used(window: &Value) -> Option<f64> {
 /// `reset_time_ms` (ms), `reset_at`/`resetsAt` (seconds or RFC 3339).
 fn reset_at(window: &Value) -> Option<i64> {
     for key in ["reset_time_ms", "reset_at", "resetsAt"] {
-        let Some(value) = window.get(key) else { continue };
+        let Some(value) = window.get(key) else {
+            continue;
+        };
         if let Some(number) = value.as_i64() {
             return Some(if key == "reset_time_ms" || number >= 100_000_000_000 {
                 number / 1000
@@ -446,7 +490,11 @@ fn reset_at(window: &Value) -> Option<i64> {
                 return Some(stamp);
             }
             if let Ok(number) = text.parse::<i64>() {
-                return Some(if number >= 100_000_000_000 { number / 1000 } else { number });
+                return Some(if number >= 100_000_000_000 {
+                    number / 1000
+                } else {
+                    number
+                });
             }
         }
     }
@@ -454,7 +502,10 @@ fn reset_at(window: &Value) -> Option<i64> {
 }
 
 /// The ChatGPT account id lives in the OAuth id token (or an extra credential field).
-fn codex_account_id(id_token: Option<&str>, extra: &serde_json::Map<String, Value>) -> Option<String> {
+fn codex_account_id(
+    id_token: Option<&str>,
+    extra: &serde_json::Map<String, Value>,
+) -> Option<String> {
     for key in ["chatgpt_account_id", "account_id"] {
         if let Some(value) = extra.get(key).and_then(Value::as_str) {
             if !value.is_empty() {
@@ -486,9 +537,7 @@ fn parse_rfc3339(raw: &str) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    Some(
-        days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second,
-    )
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 /// Days since 1970-01-01 (H. Hinnant), duplicated from the store so this module does not
@@ -532,7 +581,10 @@ mod tests {
         });
         let windows = claude_windows(&body).expect("windows");
         let ids: Vec<&str> = windows.windows.iter().map(|w| w.id.as_str()).collect();
-        assert_eq!(ids, vec!["five_hour", "seven_day", "seven_day_sonnet", "extra"]);
+        assert_eq!(
+            ids,
+            vec!["five_hour", "seven_day", "seven_day_sonnet", "extra"]
+        );
         assert_eq!(windows.windows[0].used_percent, 6.0);
         assert_eq!(windows.windows[0].resets_at, Some(1_775_674_799));
         assert_eq!(windows.windows[3].window_seconds, None);
@@ -604,8 +656,17 @@ mod tests {
 
     #[test]
     fn reset_at_accepts_all_three_shapes() {
-        assert_eq!(reset_at(&json!({"reset_at": 1_775_000_000})), Some(1_775_000_000));
-        assert_eq!(reset_at(&json!({"reset_time_ms": 1_775_000_000_000i64})), Some(1_775_000_000));
-        assert_eq!(reset_at(&json!({"resetsAt": "2026-04-08T18:59:59Z"})), Some(1_775_674_799));
+        assert_eq!(
+            reset_at(&json!({"reset_at": 1_775_000_000})),
+            Some(1_775_000_000)
+        );
+        assert_eq!(
+            reset_at(&json!({"reset_time_ms": 1_775_000_000_000i64})),
+            Some(1_775_000_000)
+        );
+        assert_eq!(
+            reset_at(&json!({"resetsAt": "2026-04-08T18:59:59Z"})),
+            Some(1_775_674_799)
+        );
     }
 }

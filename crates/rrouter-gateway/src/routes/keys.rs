@@ -63,7 +63,11 @@ fn models_value(models: &[KeyModel]) -> Value {
 async fn view(state: &AppState, key: &ApiKey) -> Value {
     let since = window_start(key.budget_window, crate::now_unix());
     let spent = state.store.api_key_spend(key.id, since).await.unwrap_or(0);
-    let spent_micros = state.store.api_key_cost_spend(key.id, since).await.unwrap_or(0);
+    let spent_micros = state
+        .store
+        .api_key_cost_spend(key.id, since)
+        .await
+        .unwrap_or(0);
     let models = state.store.key_models(key.id).await.unwrap_or_default();
     row(key, spent, spent_micros, &models)
 }
@@ -103,8 +107,15 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
             let since = window_start(k.budget_window, now);
             row(
                 k,
-                spend.get(&since).and_then(|m| m.get(&k.id)).copied().unwrap_or(0),
-                cost.get(&since).and_then(|m| m.get(&k.id)).copied().unwrap_or(0),
+                spend
+                    .get(&since)
+                    .and_then(|m| m.get(&k.id))
+                    .copied()
+                    .unwrap_or(0),
+                cost.get(&since)
+                    .and_then(|m| m.get(&k.id))
+                    .copied()
+                    .unwrap_or(0),
                 models.get(&k.id).map(Vec::as_slice).unwrap_or_default(),
             )
         })
@@ -160,10 +171,7 @@ pub async fn update(
     }
 }
 
-pub async fn remove(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn remove(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let Ok(uuid) = uuid::Uuid::parse_str(&id) else {
         return admin_error(&Error::BadRequest("key id must be a uuid".into()));
     };
@@ -179,10 +187,7 @@ pub async fn remove(
 }
 
 /// `GET /api/keys/{id}/models` — the key's model mapping, in `from` order.
-pub async fn list_models(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn list_models(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let Ok(uuid) = uuid::Uuid::parse_str(&id) else {
         return admin_error(&Error::BadRequest("key id must be a uuid".into()));
     };
@@ -253,7 +258,10 @@ fn models_from(value: &Value) -> Result<Vec<KeyModel>, Error> {
         if out.iter().any(|m| m.from == from) {
             return Err(Error::BadRequest(format!("duplicate mapping for {from:?}")));
         }
-        out.push(KeyModel { from: from.to_string(), to: to.to_string() });
+        out.push(KeyModel {
+            from: from.to_string(),
+            to: to.to_string(),
+        });
     }
     Ok(out)
 }
@@ -272,16 +280,18 @@ fn patch_from(value: &Value) -> Result<ApiKeyPatch, Error> {
     for (name, raw) in object {
         match name.as_str() {
             "is_active" => {
-                patch.is_active = Some(raw.as_bool().ok_or_else(|| {
-                    Error::BadRequest("is_active must be a boolean".into())
-                })?);
+                patch.is_active = Some(
+                    raw.as_bool()
+                        .ok_or_else(|| Error::BadRequest("is_active must be a boolean".into()))?,
+                );
             }
             "rpm" => patch.rpm = Some(u32_field(raw, "rpm")?),
             "scope" => {
                 let raw = raw.as_str().unwrap_or_default();
-                patch.scope = Some(KeyScope::parse(raw).ok_or_else(|| {
-                    Error::BadRequest("scope must be inference or admin".into())
-                })?);
+                patch.scope =
+                    Some(KeyScope::parse(raw).ok_or_else(|| {
+                        Error::BadRequest("scope must be inference or admin".into())
+                    })?);
             }
             "budget_window" => {
                 let raw = raw.as_str().unwrap_or_default();
@@ -328,9 +338,10 @@ fn patch_from(value: &Value) -> Result<ApiKeyPatch, Error> {
                     Value::Null => None,
                     // `deny_unknown_fields` on the type is deliberate: a misspelled
                     // policy field must be a 400, not a silently unfiltered key.
-                    other => Some(serde_json::from_value(other.clone()).map_err(|e| {
-                        Error::BadRequest(format!("guardrails: {e}"))
-                    })?),
+                    other => Some(
+                        serde_json::from_value(other.clone())
+                            .map_err(|e| Error::BadRequest(format!("guardrails: {e}")))?,
+                    ),
                 });
             }
             // The dashboard sends the full row back on save; unknown fields are ignored
@@ -352,8 +363,7 @@ fn uint(value: &Value, name: &str) -> Result<u64, Error> {
 /// rather than a silent wrap to a much smaller limit.
 fn u32_field(value: &Value, name: &str) -> Result<u32, Error> {
     let raw = uint(value, name)?;
-    u32::try_from(raw)
-        .map_err(|_| Error::BadRequest(format!("{name} must fit in 32 bits")))
+    u32::try_from(raw).map_err(|_| Error::BadRequest(format!("{name} must fit in 32 bits")))
 }
 
 fn i64_field(value: &Value, name: &str) -> Result<i64, Error> {

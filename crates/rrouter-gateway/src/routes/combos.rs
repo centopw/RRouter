@@ -57,10 +57,7 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
 }
 
 /// `DELETE /api/combos?name=x` (or `{name}` in the body).
-pub async fn remove(
-    State(state): State<Arc<AppState>>,
-    req: axum::extract::Request,
-) -> Response {
+pub async fn remove(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
     let query = req.uri().query().unwrap_or("").to_string();
     let name = match super::models::query_param(&query, "name") {
         Some(name) if !name.is_empty() => name,

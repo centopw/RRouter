@@ -16,6 +16,7 @@ import {
   SidebarSimple,
   SignOut,
   Shuffle,
+  TerminalWindow,
   UsersThree,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -53,6 +54,7 @@ const NAV: NavItem[] = [
   { to: "/account", label: "My account", icon: glyph(UserCircle), group: "System" },
   { to: "/audit", label: "Audit", icon: glyph(ListMagnifyingGlass), group: "System" },
   { to: "/health", label: "Health", icon: glyph(Heartbeat), group: "System" },
+  { to: "/system-logs", label: "System logs", icon: glyph(TerminalWindow), group: "System" },
   { to: "/settings", label: "Settings", icon: glyph(GearSix), group: "System" },
 ];
 

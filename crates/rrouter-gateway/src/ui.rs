@@ -46,7 +46,10 @@ pub async fn panels(State(state): State<Arc<AppState>>) -> Response {
                 let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
                     continue;
                 };
-                if list.iter().any(|p| p.get("id").and_then(|v| v.as_str()) == Some(id)) {
+                if list
+                    .iter()
+                    .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(id))
+                {
                     continue;
                 }
                 let mut panel = entry.clone();
@@ -88,7 +91,11 @@ pub async fn app_asset(UrlPath(path): UrlPath<String>) -> Response {
         return embedded(asset);
     }
     // A missing *file* is a 404; a missing *route* is the SPA taking over.
-    if path.rsplit('/').next().is_some_and(|last| last.contains('.')) {
+    if path
+        .rsplit('/')
+        .next()
+        .is_some_and(|last| last.contains('.'))
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
     app_index().await
@@ -117,10 +124,7 @@ fn embedded(asset: &'static rrouter_ui::Asset) -> Response {
 fn builtin_missing() -> Response {
     (
         StatusCode::NOT_FOUND,
-        [(
-            header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )],
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         "no dashboard was built into this binary: run `npm run build` in ui/ and rebuild",
     )
         .into_response()
@@ -128,10 +132,7 @@ fn builtin_missing() -> Response {
 
 /// `/{*path}` for the three embedded assets, `/ext/*` for deployment-supplied files,
 /// and an SPA-style fallback to `index.html` for anything else.
-pub async fn asset(
-    State(state): State<Arc<AppState>>,
-    UrlPath(path): UrlPath<String>,
-) -> Response {
+pub async fn asset(State(state): State<Arc<AppState>>, UrlPath(path): UrlPath<String>) -> Response {
     match path.as_str() {
         "app.js" | "assets/app.js" => {
             return asset_response("text/javascript; charset=utf-8", APP_JS, "no-cache")
@@ -236,18 +237,33 @@ mod tests {
         assert!(sanitize("/etc/passwd").is_none());
         assert!(sanitize("a\\..\\b").is_none());
         assert!(sanitize("").is_none());
-        assert_eq!(sanitize("panels/acme.js"), Some(PathBuf::from("panels/acme.js")));
+        assert_eq!(
+            sanitize("panels/acme.js"),
+            Some(PathBuf::from("panels/acme.js"))
+        );
     }
 
     #[test]
     fn builtin_panel_ids_are_stable() {
         let ids: Vec<String> = builtin_panels()
             .as_array()
-            .map(|a| a.iter().filter_map(|p| p["id"].as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| p["id"].as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         assert_eq!(
             ids,
-            ["connections", "keys", "models", "aliases", "combos", "usage", "status"]
+            [
+                "connections",
+                "keys",
+                "models",
+                "aliases",
+                "combos",
+                "usage",
+                "status"
+            ]
         );
     }
 }

@@ -91,7 +91,10 @@ impl Cipher {
             .aead
             .encrypt(
                 Nonce::from_slice(&nonce),
-                Payload { msg: plaintext, aad: id },
+                Payload {
+                    msg: plaintext,
+                    aad: id,
+                },
             )
             .map_err(|_| Error::Store("credential encryption failed".to_string()))?;
         let mut out = Vec::with_capacity(NONCE_LEN + sealed.len());
@@ -137,7 +140,10 @@ mod tests {
         let a = c.seal(&id, plain).expect("seal");
         let b = c.seal(&id, plain).expect("seal");
         assert_eq!(c.open(&id, &a).expect("open"), plain);
-        assert_ne!(a, b, "two seals of the same plaintext must differ (random nonce)");
+        assert_ne!(
+            a, b,
+            "two seals of the same plaintext must differ (random nonce)"
+        );
         assert_eq!(a.len(), NONCE_LEN + plain.len() + TAG_LEN);
     }
 
@@ -170,10 +176,20 @@ mod tests {
             .open(&id, &blob)
             .is_err());
 
-        assert!(Cipher::from_hex("abcd").is_err(), "short hex key must be rejected");
-        assert!(Cipher::from_hex(&"zz".repeat(32)).is_err(), "non-hex must be rejected");
+        assert!(
+            Cipher::from_hex("abcd").is_err(),
+            "short hex key must be rejected"
+        );
+        assert!(
+            Cipher::from_hex(&"zz".repeat(32)).is_err(),
+            "non-hex must be rejected"
+        );
         let ok = Cipher::from_hex(&"ab".repeat(32)).expect("64-char hex");
-        assert_eq!(ok.open(&id, &ok.seal(&id, b"ok").expect("seal")).expect("open"), b"ok");
+        assert_eq!(
+            ok.open(&id, &ok.seal(&id, b"ok").expect("seal"))
+                .expect("open"),
+            b"ok"
+        );
     }
 
     #[test]

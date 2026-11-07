@@ -45,13 +45,13 @@ fn test_state() -> Arc<AppState> {
             retry_base_ms: 200,
             retry_max_ms: 5000,
             shutdown_grace_secs: 20,
-        strategy: Default::default(),
-        cache: Default::default(),
-        cache_ttl_secs: 300,
-        cache_max_entries: 1000,
-        usage_retention_days: 0,
-        log_format: rrouter_gateway::config::LogFormat::Text,
-        access_log: true,
+            strategy: Default::default(),
+            cache: Default::default(),
+            cache_ttl_secs: 300,
+            cache_max_entries: 1000,
+            usage_retention_days: 0,
+            log_format: rrouter_gateway::config::LogFormat::Text,
+            access_log: true,
         },
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
@@ -74,7 +74,12 @@ async fn providers_lists_only_registered_login_flows() {
         .await
         .expect("response");
     assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     let value: Value = serde_json::from_slice(&body).expect("json");
     let providers = value["data"].as_array().expect("provider list");
     assert_eq!(providers.len(), 3);

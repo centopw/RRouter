@@ -216,7 +216,9 @@ pub fn render(version: &str, open_connections: &[(String, bool)]) -> String {
         "rrouter_rtk_requests_total {}\n",
         RTK_REQUESTS.load(std::sync::atomic::Ordering::Relaxed)
     ));
-    out.push_str("# HELP rrouter_rtk_saved_bytes_total Context bytes removed by the Token Saver.\n");
+    out.push_str(
+        "# HELP rrouter_rtk_saved_bytes_total Context bytes removed by the Token Saver.\n",
+    );
     out.push_str("# TYPE rrouter_rtk_saved_bytes_total counter\n");
     out.push_str(&format!(
         "rrouter_rtk_saved_bytes_total {}\n",
@@ -228,7 +230,10 @@ pub fn render(version: &str, open_connections: &[(String, bool)]) -> String {
 
     out.push_str("# HELP rrouter_cache_misses_total Cache lookups that found no servable entry.\n");
     out.push_str("# TYPE rrouter_cache_misses_total counter\n");
-    out.push_str(&format!("rrouter_cache_misses_total {}\n", reg.cache_misses));
+    out.push_str(&format!(
+        "rrouter_cache_misses_total {}\n",
+        reg.cache_misses
+    ));
 
     out.push_str("# HELP rrouter_request_duration_seconds End-to-end request latency.\n");
     out.push_str("# TYPE rrouter_request_duration_seconds histogram\n");

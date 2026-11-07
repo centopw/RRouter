@@ -102,10 +102,19 @@ impl H {
         let status = res.status();
         let headers = res.headers().clone();
         let bytes = res.into_body().collect().await.expect("body").to_bytes();
-        (status, headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        (
+            status,
+            headers,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
-    async fn post(&self, uri: &str, body: Value, headers: &[(&str, &str)]) -> (StatusCode, HeaderMap, Value) {
+    async fn post(
+        &self,
+        uri: &str,
+        body: Value,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Value) {
         self.call(Method::POST, uri, Some(body), headers).await
     }
 
@@ -183,13 +192,18 @@ async fn fresh_instance_reports_setup_then_refuses_a_second_owner() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["code"], "setup_code_invalid");
-    assert!(!h.state.store.users_exist().await.expect("users"), "a bad code writes nothing");
+    assert!(
+        !h.state.store.users_exist().await.expect("users"),
+        "a bad code writes nothing"
+    );
 
     let (cookie, codes) = h.setup().await;
     assert_eq!(codes.len(), 10, "ten recovery codes, shown once");
     assert!(h.setup_code().is_empty(), "no code is minted after setup");
 
-    let (_, _, state) = h.call(Method::GET, "/api/auth/state", None, &auth_headers(&cookie)).await;
+    let (_, _, state) = h
+        .call(Method::GET, "/api/auth/state", None, &auth_headers(&cookie))
+        .await;
     assert_eq!(state["initialized"], true);
     assert_eq!(state["user"]["role"], "admin");
     assert_eq!(state["user"]["is_owner"], true);
@@ -234,7 +248,10 @@ async fn sign_in_is_generic_throttled_and_cookie_authenticates_admin_api() {
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(unknown["error"]["message"], body["error"]["message"], "same message");
+    assert_eq!(
+        unknown["error"]["message"], body["error"]["message"],
+        "same message"
+    );
 
     let (status, headers, body) = h
         .post(
@@ -248,13 +265,21 @@ async fn sign_in_is_generic_throttled_and_cookie_authenticates_admin_api() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "login: {body}");
-    assert_eq!(body["user"]["email"], "ada@example.com", "email is normalised");
+    assert_eq!(
+        body["user"]["email"], "ada@example.com",
+        "email is normalised"
+    );
     let cookie = cookie_of(&headers).expect("cookie");
-    let set_cookie = headers.get("set-cookie").and_then(|v| v.to_str().ok()).expect("header");
+    let set_cookie = headers
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .expect("header");
     assert!(set_cookie.contains("HttpOnly") && set_cookie.contains("Max-Age="));
 
     // The session authenticates the admin API even though RROUTER_ADMIN_TOKEN is set.
-    let (status, _, users) = h.call(Method::GET, "/api/users", None, &auth_headers(&cookie)).await;
+    let (status, _, users) = h
+        .call(Method::GET, "/api/users", None, &auth_headers(&cookie))
+        .await;
     assert_eq!(status, StatusCode::OK, "users: {users}");
 
     // A cookie-authenticated write without the CSRF header is refused.
@@ -263,14 +288,24 @@ async fn sign_in_is_generic_throttled_and_cookie_authenticates_admin_api() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["code"], "csrf_required");
-    let (status, _, body) = h.post("/api/keys", json!({"name": "x"}), &csrf(&cookie)).await;
+    let (status, _, body) = h
+        .post("/api/keys", json!({"name": "x"}), &csrf(&cookie))
+        .await;
     assert_eq!(status, StatusCode::OK, "with csrf: {body}");
 
     // Logout ends the session server-side.
-    let (status, _, _) = h.post("/api/auth/logout", Value::Null, &auth_headers(&cookie)).await;
+    let (status, _, _) = h
+        .post("/api/auth/logout", Value::Null, &auth_headers(&cookie))
+        .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _, _) = h.call(Method::GET, "/api/users", None, &auth_headers(&cookie)).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "the token gate refuses the dead cookie");
+    let (status, _, _) = h
+        .call(Method::GET, "/api/users", None, &auth_headers(&cookie))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the token gate refuses the dead cookie"
+    );
 
     // Five failures throttle for a minute, with Retry-After.
     for _ in 0..5 {
@@ -308,7 +343,12 @@ async fn invitation_signup_creates_a_member_without_admin_rights() {
     let token = body["token"].as_str().expect("token").to_string();
 
     let (status, _, meta) = h
-        .call(Method::GET, &format!("/api/auth/invites/{token}"), None, &[])
+        .call(
+            Method::GET,
+            &format!("/api/auth/invites/{token}"),
+            None,
+            &[],
+        )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(meta["email"], "grace@example.com");
@@ -324,19 +364,31 @@ async fn invitation_signup_creates_a_member_without_admin_rights() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "signup: {signed}");
     assert_eq!(signed["user"]["role"], "member");
-    assert_eq!(signed["recovery_codes"].as_array().expect("codes").len(), 10);
+    assert_eq!(
+        signed["recovery_codes"].as_array().expect("codes").len(),
+        10
+    );
     let member = cookie_of(&headers).expect("member cookie");
 
     // A member signs in but cannot administer; the refusal names the reason.
-    let (status, _, body) = h.call(Method::GET, "/api/users", None, &auth_headers(&member)).await;
+    let (status, _, body) = h
+        .call(Method::GET, "/api/users", None, &auth_headers(&member))
+        .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["code"], "role_required");
-    let (status, _, _) = h.call(Method::GET, "/api/auth/state", None, &auth_headers(&member)).await;
+    let (status, _, _) = h
+        .call(Method::GET, "/api/auth/state", None, &auth_headers(&member))
+        .await;
     assert_eq!(status, StatusCode::OK);
 
     // A used invitation is gone, not merely marked.
     let (status, _, _) = h
-        .call(Method::GET, &format!("/api/auth/invites/{token}"), None, &[])
+        .call(
+            Method::GET,
+            &format!("/api/auth/invites/{token}"),
+            None,
+            &[],
+        )
         .await;
     assert_eq!(status, StatusCode::GONE);
     let (status, _, body) = h
@@ -370,7 +422,10 @@ async fn owner_cannot_be_demoted_or_deleted_and_recovery_codes_work_once() {
             &[],
         )
         .await;
-    let member_id = signed["user"]["id"].as_str().expect("member id").to_string();
+    let member_id = signed["user"]["id"]
+        .as_str()
+        .expect("member id")
+        .to_string();
 
     let (status, _, body) = h
         .call(
@@ -417,8 +472,19 @@ async fn owner_cannot_be_demoted_or_deleted_and_recovery_codes_work_once() {
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "recover: {body}");
-    let (status, _, _) = h.call(Method::GET, "/api/users", None, &auth_headers(&owner_cookie)).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "old session is signed out");
+    let (status, _, _) = h
+        .call(
+            Method::GET,
+            "/api/users",
+            None,
+            &auth_headers(&owner_cookie),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "old session is signed out"
+    );
 
     let (status, _, _) = h
         .post(
@@ -451,7 +517,9 @@ async fn profile_sessions_and_audit_are_the_users_own() {
     let h = harness();
     let (cookie, _) = h.setup().await;
 
-    let (status, _, me) = h.call(Method::GET, "/api/auth/me", None, &auth_headers(&cookie)).await;
+    let (status, _, me) = h
+        .call(Method::GET, "/api/auth/me", None, &auth_headers(&cookie))
+        .await;
     assert_eq!(status, StatusCode::OK, "me: {me}");
     assert_eq!(me["sessions"].as_array().expect("sessions").len(), 1);
     assert_eq!(me["sessions"][0]["current"], true);
@@ -490,12 +558,27 @@ async fn profile_sessions_and_audit_are_the_users_own() {
         .await;
     assert_eq!(status, StatusCode::OK);
     let fresh = cookie_of(&headers).expect("rotated cookie");
-    let (status, _, _) = h.call(Method::GET, "/api/users", None, &auth_headers(&cookie)).await;
+    let (status, _, _) = h
+        .call(Method::GET, "/api/users", None, &auth_headers(&cookie))
+        .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "the old session ended");
-    let (status, _, users) = h.call(Method::GET, "/api/users", None, &auth_headers(&fresh)).await;
-    assert_eq!(status, StatusCode::OK, "the current tab stays signed in: {users}");
+    let (status, _, users) = h
+        .call(Method::GET, "/api/users", None, &auth_headers(&fresh))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the current tab stays signed in: {users}"
+    );
 
-    let (status, _, audit) = h.call(Method::GET, "/api/audit?limit=50", None, &auth_headers(&fresh)).await;
+    let (status, _, audit) = h
+        .call(
+            Method::GET,
+            "/api/audit?limit=50",
+            None,
+            &auth_headers(&fresh),
+        )
+        .await;
     assert_eq!(status, StatusCode::OK, "audit: {audit}");
     let kinds: Vec<&str> = audit["data"]
         .as_array()
@@ -503,12 +586,21 @@ async fn profile_sessions_and_audit_are_the_users_own() {
         .iter()
         .filter_map(|row| row["kind"].as_str())
         .collect();
-    for expected in ["setup", "profile_updated", "password_changed", "password_change_failed"] {
+    for expected in [
+        "setup",
+        "profile_updated",
+        "password_changed",
+        "password_change_failed",
+    ] {
         assert!(kinds.contains(&expected), "missing {expected} in {kinds:?}");
     }
 
     let (status, _, _) = h
-        .post("/api/auth/me/sessions/revoke-others", Value::Null, &csrf(&fresh))
+        .post(
+            "/api/auth/me/sessions/revoke-others",
+            Value::Null,
+            &csrf(&fresh),
+        )
         .await;
     assert_eq!(status, StatusCode::OK);
 
