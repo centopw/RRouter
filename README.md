@@ -163,7 +163,13 @@ A gateway key is not just a password: each one carries the limits an operator ne
 | `expires_at` | after that moment the key answers `403 api_key_expired` |
 
 Spend is read from the usage table (not a counter that drifts), every usage row records which
-key produced it, and the Keys page edits all of it. Enforcement applies whenever a key is
+key produced it, and the Keys page edits all of it.
+
+A key can also carry **guardrails**: a prompt-size cap, case-insensitive blocked phrases, and
+an output-scan switch. Input checks run before planning (system prompt plus message text); output
+checks inspect the response, and a streamed hit is cut with one error frame. Blocks answer `403`
+with `prompt_too_long`, `guardrail_blocked` or `output_blocked`, and are counted per stage in
+`/metrics`. Enforcement applies whenever a key is
 presented; with `RROUTER_REQUIRE_API_KEY=false` a request with no key is still anonymous, and
 an unknown placeholder key is ignored so local tools keep working. A *known* key that is
 inactive or expired is always rejected.
