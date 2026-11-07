@@ -121,8 +121,9 @@ accounts inside their circuit breaker. A 429 backs the account off exponentially
 `Retry-After`; a 5xx opens the breaker, and a half-open probe brings it back.
 
 `RROUTER_STRATEGY` chooses how equal-priority accounts are ordered: `priority` (default),
-`weighted` (smooth round-robin over each connection's weight) or `least_latency` (EWMA of
-successful attempts). Priority always wins across groups. A key can also map the model its
+`weighted` (smooth round-robin over each connection's weight), `least_latency` (EWMA of
+successful attempts) or `cheapest` (lowest catalog price for the model first, unknown prices
+last). Priority always wins across groups. A key can also map the model its
 client sends to another ref (`default → claude/claude-haiku-4-5-20251001`), which is how a
 team keeps a stable model name while the operator repoints it.
 
