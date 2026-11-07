@@ -16,6 +16,11 @@ logging, metrics) and 9router (dashboard, providers, combos, usage).
 | 8 | Caching | opt-in exact-match response cache with TTL and per-key bypass | LiteLLM caching |
 | 9 | Guardrails | prompt/response hooks (blocklists, max tokens per request, redaction) | LiteLLM guardrails |
 | 10 | Ops polish | structured JSON logs, OpenTelemetry export, quota reset schedules | production gateways |
+| 16 | Guardrails | per-key prompt-size cap, blocked phrases, response scanning (streams cut on hit) | Portkey guardrails |
+| 17 | Provider optimisation | `RROUTER_STRATEGY=cheapest` orders accounts by catalog price | Portkey/ LiteLLM router |
+| 18 | Prompt templates | named, versioned prompt bodies with a Templates page and Playground integration | Portkey prompts |
+| 19 | Scoped keys | inference vs admin keys (admin routes without sharing the global token) | Portkey RBAC |
+| 20 | Retries | per-candidate exponential backoff with jitter, capped by Retry-After and the send budget | Portkey retries |
 
 Status: phases 1–12 landed and verified live (key governance, observability, ops knobs,
 routing strategies, UX, cost accounting, protocol breadth, cache, budget windows, JSON
