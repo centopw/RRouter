@@ -4,6 +4,11 @@ All notable changes. Dates are local; versions follow semver once tagged.
 
 ## Unreleased
 
+### Added
+- Guardrails per key: prompt-size cap, case-insensitive blocked phrases, and response scanning
+  (streams are cut with one error frame). Blocks return 403 and are counted per stage.
+- `RROUTER_STRATEGY=cheapest` orders equal-priority accounts by the model's catalog price.
+
 ### Changed
 - The request detail opens as a dialog when a row is clicked (Activity and Logs) instead of
   occupying a column of the page; nothing is selected until you click, and Escape or the
