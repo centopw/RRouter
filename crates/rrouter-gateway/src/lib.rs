@@ -112,6 +112,11 @@ pub fn app(state: Arc<AppState>) -> Router {
                 .delete(routes::templates::remove),
         )
         .route("/templates/{id}/versions", get(routes::templates::versions))
+        .route("/accounts/quotas", get(routes::quotas::list))
+        .route(
+            "/accounts/quotas/{id}",
+            put(routes::quotas::update).delete(routes::quotas::remove),
+        )
         .route("/usage", get(routes::usage::list))
         .route("/usage/export.csv", get(routes::usage::export_csv))
         .route("/usage/{request_id}", get(routes::usage::detail))

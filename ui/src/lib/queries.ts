@@ -1,8 +1,11 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
+  clearAccountQuota,
+  getAccountQuotas,
   list,
   listPage,
+  updateAccountQuota,
   type Alias,
   type Combo,
   type Connection,
@@ -17,6 +20,7 @@ import {
   type Template,
   type TemplateVersion,
   type UpdateConnection,
+  type UpdateAccountQuota,
   type UpdateKey,
   type UsageBucket,
   type UsageDetail,
@@ -30,6 +34,7 @@ export const qk = {
   health: ["health"] as const,
   system: ["system"] as const,
   connections: ["connections"] as const,
+  accountQuotas: ["accounts", "quotas"] as const,
   keys: ["keys"] as const,
   keyModels: (id: string) => ["key-models", id] as const,
   models: ["models"] as const,
@@ -62,6 +67,27 @@ export function useSystem() {
 
 export function useConnections() {
   return useQuery({ queryKey: qk.connections, queryFn: () => list<Connection>("/api/connections") });
+}
+
+export function useAccountQuotas() {
+  return useQuery({ queryKey: qk.accountQuotas, queryFn: getAccountQuotas });
+}
+
+export function useUpdateAccountQuota() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: UpdateAccountQuota }) =>
+      updateAccountQuota(id, patch),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.accountQuotas }),
+  });
+}
+
+export function useClearAccountQuota() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: clearAccountQuota,
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.accountQuotas }),
+  });
 }
 
 export function useKeys() {

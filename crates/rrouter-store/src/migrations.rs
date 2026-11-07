@@ -8,12 +8,27 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 16;
+pub(crate) const SCHEMA_VERSION: i64 = 17;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
 ];
+
+/// V17: per-account quotas. Each upstream connection can carry one row of limits — requests,
+/// tokens, cost — measured over a `BudgetWindow` (`daily`/`weekly`/`monthly`, UTC calendar
+/// boundaries like the key budgets, or `total` for all time). `0` means unlimited; usage is
+/// aggregated from the `usage` table at read time, so there is nothing to reset or repair.
+const V17: &str = r#"
+CREATE TABLE IF NOT EXISTS account_quotas (
+  connection_id TEXT PRIMARY KEY,
+  window TEXT NOT NULL DEFAULT 'daily',
+  max_requests INTEGER NOT NULL DEFAULT 0,
+  max_tokens INTEGER NOT NULL DEFAULT 0,
+  max_cost_micros INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+"#;
 
 /// V16: key scope. `inference` (spend through `/v1/*`) or `admin` (administer the
 /// gateway). The default keeps every existing key exactly what it was: an inference

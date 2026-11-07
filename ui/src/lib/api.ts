@@ -129,6 +129,20 @@ export const api = {
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
 
+export async function getAccountQuotas(): Promise<AccountQuotaRow[]> {
+  const body = await api.get<{ quotas?: AccountQuotaRow[] }>("/api/accounts/quotas");
+  return body.quotas ?? [];
+}
+
+/** Send only what changes: omitted fields keep their stored value. */
+export function updateAccountQuota(id: string, patch: UpdateAccountQuota): Promise<{ quota: AccountQuotaRow }> {
+  return api.put<{ quota: AccountQuotaRow }>(`/api/accounts/quotas/${encodeURIComponent(id)}`, patch);
+}
+
+export function clearAccountQuota(id: string): Promise<void> {
+  return api.del<void>(`/api/accounts/quotas/${encodeURIComponent(id)}`);
+}
+
 // ---------------------------------------------------------------- shapes
 
 export type Health = { ok: boolean; version: string; uptime_secs: number };
@@ -168,6 +182,36 @@ export type Connection = {
   has_api_key: boolean;
   last_error: string | null;
 };
+
+/** The UTC calendar window a quota resets on; `total` (all time) is API-only. */
+export type AccountQuotaWindow = "daily" | "weekly" | "monthly";
+
+/**
+ * One upstream account's quota and the spend of its current window. `0` limits are
+ * unlimited; `resets_at` is unix **seconds** and null for an all-time quota.
+ */
+export type AccountQuotaRow = {
+  connection_id: string;
+  name: string | null;
+  provider: string;
+  is_active: boolean;
+  window: AccountQuotaWindow;
+  max_requests: number;
+  max_tokens: number;
+  max_cost_micros: number;
+  requests: number;
+  tokens: number;
+  cost_micros: number;
+  exhausted: boolean;
+  resets_at: number | null;
+};
+
+export type UpdateAccountQuota = Partial<{
+  window: AccountQuotaWindow;
+  max_requests: number;
+  max_tokens: number;
+  max_cost_micros: number;
+}>;
 
 /**
  * What a key is allowed to reach. `inference` keys call `/v1` and carry limits and

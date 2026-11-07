@@ -18,7 +18,7 @@ use http_body_util::BodyExt;
 use rrouter_auth::Credentials;
 use rrouter_gateway::{app, config::Config, AppState};
 use rrouter_router::{Breaker, Catalog, Dispatcher, Planner};
-use rrouter_store::{ModelRow, Store, UsageQuery, UsageRecord};
+use rrouter_store::{AccountQuota, BudgetWindow, ModelRow, Store, UsageQuery, UsageRecord};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -317,6 +317,33 @@ impl Harness {
         self.call(
             Request::builder()
                 .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+    }
+
+    /// `PUT` a JSON body; the response value is decoded like the other helpers.
+    async fn put(&self, uri: &str, body: Value) -> (StatusCode, Value) {
+        let (status, _, value) = self
+            .call_full(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await;
+        (status, value)
+    }
+
+    /// `DELETE`, keeping the response headers (204 carries an empty body).
+    async fn delete(&self, uri: &str) -> (StatusCode, axum::http::HeaderMap, Value) {
+        self.call_full(
+            Request::builder()
+                .method("DELETE")
                 .uri(uri)
                 .body(Body::empty())
                 .expect("request"),
@@ -4843,4 +4870,151 @@ async fn templates_require_the_admin_gate() {
         .await
         .expect("oneshot");
     assert_eq!(res.status(), StatusCode::OK, "remote peer with the admin token");
+}
+
+// ---------------------------------------------------------------- account quotas
+
+/// One usage row for an account, dated now, used to spend an account's quota.
+fn quota_usage(connection: uuid::Uuid) -> UsageRecord {
+    UsageRecord {
+        id: None,
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        request_id: Some(uuid::Uuid::new_v4()),
+        provider: "claude".to_string(),
+        model: "haiku".to_string(),
+        connection_id: Some(connection),
+        endpoint: Some("/v1/messages".to_string()),
+        key_id: None,
+        cost_micros: 0,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        latency_ms: 1,
+        ttft_ms: 0,
+        status: 200,
+        streamed: false,
+        error: None,
+    }
+}
+
+/// An exhausted account is skipped before dispatch: the request goes to the healthy
+/// account and the exhausted upstream never sees a byte.
+#[tokio::test]
+async fn account_quota_skips_an_exhausted_account_for_a_healthier_one() {
+    let dead = Mock::start(vec![openai_reply("from the exhausted account")]).await;
+    let live = Mock::start(vec![openai_reply("from the healthy account")]).await;
+    let h = harness(false);
+    let exhausted = h.connect("openai", &dead).await;
+    let healthy = h.connect("openai", &live).await;
+    h.patch_connection(&healthy.to_string(), json!({"priority": 1})).await;
+    h.state
+        .store
+        .set_account_quota(&AccountQuota {
+            connection_id: exhausted,
+            window: BudgetWindow::Daily,
+            max_requests: 1,
+            max_tokens: 0,
+            max_cost_micros: 0,
+        })
+        .await
+        .expect("quota");
+    h.state.store.record_usage(&quota_usage(exhausted)).await.expect("usage row");
+
+    let (status, body) = h.post("/v1/chat/completions", openai_chat_body("gpt-4.1")).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(dead.hits(), 0, "an exhausted account is never tried");
+    assert_eq!(live.hits(), 1, "the healthy account serves the request");
+}
+
+/// When every candidate is exhausted the request fails with `429 quota_exhausted`
+/// before any provider call, and the reset is advertised in `Retry-After`.
+#[tokio::test]
+async fn account_quota_returns_429_when_every_account_is_exhausted() {
+    let mock = Mock::start(vec![openai_reply("never sent")]).await;
+    let h = harness(false);
+    let connection = h.connect("openai", &mock).await;
+    h.state
+        .store
+        .set_account_quota(&AccountQuota {
+            connection_id: connection,
+            window: BudgetWindow::Daily,
+            max_requests: 1,
+            max_tokens: 0,
+            max_cost_micros: 0,
+        })
+        .await
+        .expect("quota");
+    h.state.store.record_usage(&quota_usage(connection)).await.expect("usage row");
+
+    let (status, headers, body) = h
+        .post_headers("/v1/chat/completions", openai_chat_body("gpt-4.1"), &[])
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(body["error"]["code"], "quota_exhausted");
+    assert!(
+        headers.get("retry-after").is_some(),
+        "the reset is advertised: {headers:?}"
+    );
+    assert_eq!(mock.hits(), 0, "nothing is dispatched");
+}
+
+/// `GET` lists every connection with its quota and window spend; `PUT` patches only the
+/// fields it carries and validates; `DELETE` returns the account to unlimited.
+#[tokio::test]
+async fn account_quota_api_lists_updates_and_clears() {
+    let mock = Mock::start(vec![]).await;
+    let h = harness(false);
+    let connection = h.connect("claude", &mock).await;
+
+    let (status, body) = h.get("/api/accounts/quotas").await;
+    assert_eq!(status, StatusCode::OK, "list: {body}");
+    let row = &body["quotas"][0];
+    assert_eq!(row["connection_id"], connection.to_string());
+    assert_eq!(row["provider"], "claude");
+    assert_eq!(row["window"], "daily");
+    assert_eq!(row["max_requests"], 0);
+    assert_eq!(row["requests"], 0);
+    assert_eq!(row["exhausted"], false);
+
+    let uri = format!("/api/accounts/quotas/{connection}");
+    let (status, body) = h
+        .put(
+            &uri,
+            json!({"window": "weekly", "max_requests": 2, "max_cost_micros": 500}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "put: {body}");
+    assert_eq!(body["quota"]["window"], "weekly");
+    assert_eq!(body["quota"]["max_requests"], 2);
+    assert_eq!(body["quota"]["max_cost_micros"], 500);
+    assert_eq!(body["quota"]["max_tokens"], 0, "omitted fields keep their value");
+
+    // A partial update keeps the window and the other limits.
+    let (status, body) = h.put(&uri, json!({"max_requests": 3})).await;
+    assert_eq!(status, StatusCode::OK, "partial put: {body}");
+    assert_eq!(body["quota"]["window"], "weekly");
+    assert_eq!(body["quota"]["max_requests"], 3);
+    assert_eq!(body["quota"]["max_cost_micros"], 500);
+
+    assert_eq!(h.put(&uri, json!({"window": "fortnight"})).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(h.put(&uri, json!({"max_tokens": -1})).await.0, StatusCode::BAD_REQUEST);
+    let missing = format!("/api/accounts/quotas/{}", uuid::Uuid::new_v4());
+    assert_eq!(h.put(&missing, json!({"max_requests": 1})).await.0, StatusCode::NOT_FOUND);
+
+    h.state.store.record_usage(&quota_usage(connection)).await.expect("usage row");
+    let (_, body) = h.get("/api/accounts/quotas").await;
+    assert_eq!(body["quotas"][0]["requests"], 1);
+    assert_eq!(body["quotas"][0]["tokens"], 2);
+
+    let (status, _, _) = h.delete(&uri).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, body) = h.get("/api/accounts/quotas").await;
+    assert_eq!(body["quotas"][0]["max_requests"], 0);
+    assert_eq!(body["quotas"][0]["window"], "daily");
+    let (status, _, _) = h.delete(&uri).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "delete is idempotent");
 }

@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
 use rrouter_store::{
-    cache_key, ApiKey, ApiKeyPatch, AttemptRecord, Credentials, Guardrails, KeyModel, KeyScope,
-    ModelRow, PruneReport, Store, StatusFilter, UsageQuery, UsageRecord, API_KEY_PREFIX,
-    KEY_FILE_NAME,
+    cache_key, window_start, AccountQuota, ApiKey, ApiKeyPatch, AttemptRecord, BudgetWindow,
+    Credentials, Guardrails, KeyModel, KeyScope, ModelRow, PruneReport, Store, StatusFilter,
+    UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -439,7 +439,7 @@ fn an_unknown_stored_scope_reads_as_inference() {
 /// v15 shipped no scope column; opening a v15 database adds it and every existing key
 /// becomes an inference key, which the admin gate refuses.
 #[test]
-fn v15_database_migrates_to_sixteen_with_the_scope_column() {
+fn v15_database_migrates_to_seventeen_with_the_scope_column() {
     let dir = TempDir::new("v15");
     let id = Uuid::new_v4();
     {
@@ -477,7 +477,7 @@ fn v15_database_migrates_to_sixteen_with_the_scope_column() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
     let columns: i64 = conn
         .query_row(
             "SELECT count(*) FROM pragma_table_info('api_keys') WHERE name = 'scope'",
@@ -648,7 +648,7 @@ fn model_costs_returns_published_rows_for_the_named_providers() {
 }
 
 #[test]
-fn v6_database_migrates_to_sixteen() {
+fn v6_database_migrates_to_seventeen() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
@@ -747,7 +747,7 @@ fn v6_database_migrates_to_sixteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
         ("idx_usage_request", "the usage row is looked up by request id"),
@@ -768,7 +768,7 @@ fn v6_database_migrates_to_sixteen() {
 /// connection defaults to weight 100 (the plain round-robin share), and the two new
 /// tables start empty.
 #[test]
-fn v8_database_migrates_to_sixteen() {
+fn v8_database_migrates_to_seventeen() {
     let dir = TempDir::new("v8");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -850,7 +850,7 @@ fn v8_database_migrates_to_sixteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
 
     let weight: i64 = conn
         .query_row("SELECT weight FROM connections", [], |r| r.get(0))
@@ -875,7 +875,7 @@ fn v8_database_migrates_to_sixteen() {
 /// A v9 database gains the money columns without touching existing rows: spend recorded
 /// before v10 stays at "unknown price", and every key stays unlimited.
 #[test]
-fn v9_database_migrates_to_sixteen() {
+fn v9_database_migrates_to_seventeen() {
     let dir = TempDir::new("v9");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -957,13 +957,13 @@ fn v9_database_migrates_to_sixteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
 }
 
 /// A v10 database gains the response cache in place: the migration only adds a table and
 /// its index, so every existing row is untouched and the version reaches 13.
 #[test]
-fn v10_database_migrates_to_sixteen() {
+fn v10_database_migrates_to_seventeen() {
     let dir = TempDir::new("v10");
     {
         // A real v10 database: the current schema with the v11 table and the v12 column
@@ -989,7 +989,7 @@ fn v10_database_migrates_to_sixteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
     for (kind, name) in [("table", "response_cache"), ("index", "idx_cache_expiry")] {
         let found: i64 = conn
             .query_row(
@@ -1687,7 +1687,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// A v11 database gains `budget_window` in place: an existing key reads as `total`
 /// (lifetime, unchanged behaviour), and the version reaches 14.
 #[test]
-fn v11_database_migrates_to_sixteen_with_total_windows() {
+fn v11_database_migrates_to_seventeen_with_total_windows() {
     let dir = TempDir::new("v11");
     let id = Uuid::new_v4();
     {
@@ -1724,13 +1724,13 @@ fn v11_database_migrates_to_sixteen_with_total_windows() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
 }
 
 /// v12 shipped no `attempts(ts)` index; the retention sweep deletes by `ts`, so opening
 /// a v12 database adds the index and bumps the marker.
 #[test]
-fn v12_database_migrates_to_sixteen_with_the_attempt_ts_index() {
+fn v12_database_migrates_to_seventeen_with_the_attempt_ts_index() {
     let dir = TempDir::new("v12");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -1749,7 +1749,7 @@ fn v12_database_migrates_to_sixteen_with_the_attempt_ts_index() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
     let indexes: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type = 'index' \
@@ -2061,7 +2061,7 @@ fn policy_with_term() -> Guardrails {
 /// v13 shipped no guardrails column; opening a v13 database adds it, and the key that
 /// existed before it keeps the only policy a pre-v14 key can have: none.
 #[test]
-fn v13_database_migrates_to_sixteen_with_the_guardrails_column() {
+fn v13_database_migrates_to_seventeen_with_the_guardrails_column() {
     let dir = TempDir::new("v13");
     let id = Uuid::new_v4();
     {
@@ -2094,7 +2094,7 @@ fn v13_database_migrates_to_sixteen_with_the_guardrails_column() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
     let columns: i64 = conn
         .query_row(
             "SELECT count(*) FROM pragma_table_info('api_keys') WHERE name = 'guardrails'",
@@ -2108,7 +2108,7 @@ fn v13_database_migrates_to_sixteen_with_the_guardrails_column() {
 /// v14 shipped no template tables; opening a v14 database adds them at v15, writable,
 /// and leaves everything a v14 database already held alone.
 #[test]
-fn v14_database_migrates_to_sixteen_with_the_template_tables() {
+fn v14_database_migrates_to_seventeen_with_the_template_tables() {
     let dir = TempDir::new("v14");
     let key = Uuid::new_v4();
     {
@@ -2151,7 +2151,7 @@ fn v14_database_migrates_to_sixteen_with_the_template_tables() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
     for table in ["prompt_templates", "prompt_template_versions"] {
         let n: i64 = conn
             .query_row(
@@ -2623,4 +2623,265 @@ fn template_duplicate_names_and_lengths_are_rejected() {
             "a rejected create writes nothing"
         );
     });
+}
+
+// ----- account quotas --------------------------------------------------------------
+
+/// A quota is written, read back, and removable; a stored window it does not know reads
+/// as all time — the strictest window, so a row from a newer build can only refuse more.
+#[test]
+fn account_quota_round_trips_and_unknown_windows_read_as_total() {
+    let dir = TempDir::new("quota-crud");
+    let store = dir.store();
+    rt().block_on(async {
+        let conn = store
+            .create_connection("claude", "oauth", creds("t"), Some("acct"))
+            .await
+            .expect("connection");
+        let quota = AccountQuota {
+            connection_id: conn.id,
+            window: BudgetWindow::Weekly,
+            max_requests: 10,
+            max_tokens: 1_000,
+            max_cost_micros: 2_000,
+        };
+        store.set_account_quota(&quota).await.expect("set");
+        assert_eq!(store.account_quotas().await.expect("read"), vec![quota.clone()]);
+
+        // Replacing the same account updates in place.
+        let replaced = AccountQuota { window: BudgetWindow::Monthly, ..quota };
+        store.set_account_quota(&replaced).await.expect("replace");
+        assert_eq!(store.account_quotas().await.expect("read").len(), 1);
+        assert_eq!(store.account_quotas().await.expect("read")[0].window, BudgetWindow::Monthly);
+
+        store.clear_account_quota(conn.id).await.expect("clear");
+        assert!(store.account_quotas().await.expect("read").is_empty());
+        store.clear_account_quota(conn.id).await.expect("clear is idempotent");
+    });
+
+    // A row written with an unknown window spelling reads as all time, not as unlimited.
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("raw");
+        conn.execute(
+            "INSERT INTO account_quotas \n             (connection_id, window, max_requests, max_tokens, max_cost_micros, updated_at) \n             VALUES (?1, 'fortnight', 1, 0, 0, 1)",
+            [Uuid::new_v4().to_string()],
+        )
+        .expect("insert unknown window");
+    }
+    let store = dir.store();
+    let quotas = rt().block_on(store.account_quotas()).expect("read");
+    assert_eq!(quotas[0].window, BudgetWindow::Total);
+}
+
+/// Spend inside the quota's own window exhausts it; rows before the window start and
+/// connections without a quota never do. The planner's skip set and the wait it
+/// advertises come from the same read.
+#[test]
+fn account_quota_exhausts_only_on_usage_inside_its_window() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        let daily = store
+            .create_connection("claude", "oauth", creds("d"), Some("daily"))
+            .await
+            .expect("daily");
+        let weekly = store
+            .create_connection("claude", "oauth", creds("w"), Some("weekly"))
+            .await
+            .expect("weekly");
+        let free = store
+            .create_connection("claude", "oauth", creds("f"), Some("free"))
+            .await
+            .expect("free");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let day_start = window_start(BudgetWindow::Daily, now).expect("daily start");
+        let week_start = window_start(BudgetWindow::Weekly, now).expect("weekly start");
+
+        store
+            .set_account_quota(&AccountQuota {
+                connection_id: daily.id,
+                window: BudgetWindow::Daily,
+                max_requests: 1,
+                max_tokens: 0,
+                max_cost_micros: 0,
+            })
+            .await
+            .expect("daily quota");
+        store
+            .set_account_quota(&AccountQuota {
+                connection_id: weekly.id,
+                window: BudgetWindow::Weekly,
+                max_requests: 1,
+                max_tokens: 0,
+                max_cost_micros: 0,
+            })
+            .await
+            .expect("weekly quota");
+
+        let rec = |connection: Uuid, ts: i64| UsageRecord {
+            id: None,
+            ts,
+            request_id: Some(Uuid::new_v4()),
+            provider: "claude".to_string(),
+            model: "haiku".to_string(),
+            connection_id: Some(connection),
+            endpoint: Some("/v1/messages".to_string()),
+            key_id: None,
+            cost_micros: 0,
+            input_tokens: 5,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        };
+
+        // Yesterday's rows are outside today's window but inside this week's.
+        store.record_usage(&rec(daily.id, day_start - 1)).await.expect("old daily row");
+        let states = store.account_quota_states().await.expect("states");
+        let daily_state = states.iter().find(|s| s.quota.connection_id == daily.id).expect("daily");
+        assert_eq!(daily_state.usage.requests, 0, "a row before the window start is not spend");
+        assert!(!daily_state.exhausted);
+
+        // One request inside the window reaches the limit.
+        store.record_usage(&rec(daily.id, day_start + 1)).await.expect("today row");
+        let states = store.account_quota_states().await.expect("states");
+        let daily_state = states.iter().find(|s| s.quota.connection_id == daily.id).expect("daily");
+        assert_eq!(daily_state.usage.requests, 1);
+        assert!(daily_state.exhausted, "1 request against a limit of 1");
+        assert!(daily_state.resets_at.is_some_and(|reset| reset > now), "a reset is advertised");
+
+        let exhausted = store.exhausted_accounts().await.expect("exhausted");
+        assert!(exhausted.connections.contains(&daily.id));
+        assert!(!exhausted.connections.contains(&weekly.id), "a row outside the week is no spend");
+        assert!(!exhausted.connections.contains(&free.id), "no quota is unlimited");
+        assert!(exhausted.retry_after_secs.is_some_and(|wait| wait > 0));
+
+        // A request inside the week exhausts the weekly account too.
+        store.record_usage(&rec(weekly.id, week_start + 1)).await.expect("week row");
+        let exhausted = store.exhausted_accounts().await.expect("exhausted");
+        assert!(exhausted.connections.contains(&weekly.id));
+    });
+}
+
+/// Tokens and cost are dimensions of their own: hitting either limit exhausts, and the
+/// stored byte counts come back as one token total.
+#[test]
+fn account_quota_enforces_token_and_cost_limits() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        let cost = store
+            .create_connection("claude", "oauth", creds("c"), Some("cost"))
+            .await
+            .expect("cost");
+        let tokens = store
+            .create_connection("claude", "oauth", creds("t"), Some("tokens"))
+            .await
+            .expect("tokens");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        store
+            .set_account_quota(&AccountQuota {
+                connection_id: cost.id,
+                window: BudgetWindow::Daily,
+                max_requests: 0,
+                max_tokens: 0,
+                max_cost_micros: 1_000,
+            })
+            .await
+            .expect("cost quota");
+        store
+            .set_account_quota(&AccountQuota {
+                connection_id: tokens.id,
+                window: BudgetWindow::Daily,
+                max_requests: 0,
+                max_tokens: 100,
+                max_cost_micros: 0,
+            })
+            .await
+            .expect("token quota");
+        let rec = |connection: Uuid, cost_micros: u64, input: u32, output: u32| UsageRecord {
+            id: None,
+            ts: now - 10,
+            request_id: Some(Uuid::new_v4()),
+            provider: "claude".to_string(),
+            model: "haiku".to_string(),
+            connection_id: Some(connection),
+            endpoint: Some("/v1/messages".to_string()),
+            key_id: None,
+            cost_micros,
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        };
+        store.record_usage(&rec(cost.id, 600, 1, 1)).await.expect("cost row 1");
+        store.record_usage(&rec(tokens.id, 0, 60, 40)).await.expect("token row");
+        let exhausted = store.exhausted_accounts().await.expect("exhausted");
+        assert!(!exhausted.connections.contains(&cost.id), "600 of 1000 micros is not spent up");
+        assert!(exhausted.connections.contains(&tokens.id), "100 tokens of 100");
+
+        // Crossing the cost limit exhausts too, and the sum is per-connection.
+        store.record_usage(&rec(cost.id, 600, 1, 1)).await.expect("cost row 2");
+        let exhausted = store.exhausted_accounts().await.expect("exhausted");
+        assert!(exhausted.connections.contains(&cost.id));
+        let costs = store.account_usage_by_connection(None).await.expect("costs");
+        assert_eq!(costs[&cost.id].cost_micros, 1_200);
+        assert_eq!(costs[&tokens.id].tokens, 100);
+    });
+}
+
+/// v16 had no quota table; opening a v16 database adds it without touching connections
+/// or usage, and the version lands on 17.
+#[test]
+fn v16_database_migrates_to_seventeen_with_account_quotas() {
+    let dir = TempDir::new("v16-quotas");
+    drop(Store::open(&dir.db(), None).expect("current schema"));
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("raw");
+        conn.execute_batch(
+            "DROP TABLE account_quotas; PRAGMA user_version = 16;",
+        )
+        .expect("rewind to v16");
+    }
+    let store = Store::open(&dir.db(), None).expect("open runs the v17 step");
+    assert!(rt().block_on(store.account_quotas()).expect("quota read").is_empty());
+    let connection = rt()
+        .block_on(store.create_connection("claude", "oauth", creds("t"), Some("acct")))
+        .expect("connection");
+    rt().block_on(store.set_account_quota(&AccountQuota {
+        connection_id: connection.id,
+        window: BudgetWindow::Daily,
+        max_requests: 5,
+        max_tokens: 0,
+        max_cost_micros: 0,
+    }))
+    .expect("quota write works after the migration");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 17);
+    let columns: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('account_quotas')",
+            [],
+            |r| r.get(0),
+        )
+        .expect("columns");
+    assert_eq!(columns, 6);
 }

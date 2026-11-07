@@ -11,12 +11,30 @@ import {
   Input,
   Modal,
   PageHeader,
+  Segmented,
   cx,
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { OAuthDialog } from "../components/oauth-dialog";
-import { qk, useConnections, useModelProviders, useOAuthProviders, useUpdateConnection } from "../lib/queries";
-import { api, type Connection, type ModelProvider, type OAuthProvider } from "../lib/api";
+import {
+  qk,
+  useAccountQuotas,
+  useClearAccountQuota,
+  useConnections,
+  useModelProviders,
+  useOAuthProviders,
+  useUpdateAccountQuota,
+  useUpdateConnection,
+} from "../lib/queries";
+import {
+  api,
+  type AccountQuotaRow,
+  type AccountQuotaWindow,
+  type Connection,
+  type ModelProvider,
+  type OAuthProvider,
+} from "../lib/api";
+import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
 
 type AddStep = "kind" | "provider" | "key";
 
@@ -33,6 +51,8 @@ export default function Providers() {
   const [authWindow, setAuthWindow] = useState<Window | null>(null);
   const [notice, setNotice] = useState<{ tone: "pos" | "neg"; text: string } | null>(null);
   const [routing, setRouting] = useState<Connection | null>(null);
+  const [quotaFor, setQuotaFor] = useState<AccountQuotaRow | null>(null);
+  const quotas = useAccountQuotas();
 
   const accounts = connections.data ?? [];
   const connectedIds = useMemo(() => new Set(accounts.map((a) => a.provider)), [accounts]);
@@ -86,6 +106,37 @@ export default function Providers() {
     ...p,
     display: providers.data?.find((x) => x.id === p.id)?.display ?? p.display,
   }));
+
+  const quotaColumns: Array<Column<AccountQuotaRow>> = [
+    {
+      key: "account",
+      title: "account",
+      render: (r) => (
+        <span className="flex min-w-0 items-center gap-2">
+          <Dot tone={r.exhausted ? "neg" : r.is_active ? "pos" : "muted"} />
+          <span className="font-medium">{displayOf(r.provider)}</span>
+          <span className="truncate text-muted">{r.name ?? <span className="text-faint">unnamed</span>}</span>
+          {r.exhausted ? <Badge tone="neg">over quota</Badge> : null}
+        </span>
+      ),
+    },
+    {
+      key: "window",
+      title: "window",
+      render: (r) => <span className="text-muted">{WINDOW_LABEL[r.window]}</span>,
+    },
+    { key: "usage", title: "usage", render: (r) => <QuotaUsage row={r} /> },
+    {
+      key: "quota",
+      title: "",
+      align: "right",
+      render: (r) => (
+        <Button onClick={() => setQuotaFor(r)} title="requests, tokens and spend this account may use per window">
+          quota
+        </Button>
+      ),
+    },
+  ];
 
   const columns: Array<Column<Connection>> = [
     {
@@ -231,6 +282,28 @@ export default function Providers() {
         </Card>
       )}
 
+      {!connections.isLoading && accounts.length > 0 ? (
+        <div className="mt-4">
+          <Card>
+            <CardHeader
+              title="Account quotas"
+              action={
+                <span className="text-[11px] text-faint">
+                  per account · UTC calendar windows · an exhausted account is skipped by the router
+                </span>
+              }
+            />
+            <DataTable
+              columns={quotaColumns}
+              rows={quotas.data}
+              rowKey={(r) => r.connection_id}
+              loading={quotas.isLoading}
+              empty="No accounts yet."
+            />
+          </Card>
+        </div>
+      ) : null}
+
       <AddProviderFlow
         open={adding}
         step={step}
@@ -258,6 +331,10 @@ export default function Providers() {
 
       {routing ? (
         <RoutingModal key={routing.id} connection={routing} onClose={() => setRouting(null)} />
+      ) : null}
+
+      {quotaFor ? (
+        <QuotaModal key={quotaFor.connection_id} row={quotaFor} onClose={() => setQuotaFor(null)} />
       ) : null}
 
       {signIn ? (
@@ -649,5 +726,207 @@ function TestButton({ id, onResult }: { id: string; onResult: (text: string, ton
     >
       {busy ? "testing…" : "test"}
     </Button>
+  );
+}
+
+/** Wire spelling to the phrase the row shows; the server stores `daily` and friends. */
+const WINDOW_LABEL: Record<AccountQuotaWindow, string> = {
+  daily: "daily",
+  weekly: "weekly",
+  monthly: "monthly",
+};
+
+const QUOTA_WINDOWS = [
+  { id: "daily" as const, label: "daily" },
+  { id: "weekly" as const, label: "weekly" },
+  { id: "monthly" as const, label: "monthly" },
+];
+
+/**
+ * What the account spent inside its window, against each limit it sets. A quota with
+ * no limit still shows the spend: "unlimited" is a permission, not an absence of data.
+ */
+function QuotaUsage({ row }: { row: AccountQuotaRow }) {
+  const parts: string[] = [];
+  if (row.max_requests > 0) {
+    parts.push(`requests ${compact(row.requests)}/${compact(row.max_requests)}`);
+  }
+  if (row.max_tokens > 0) {
+    parts.push(`tokens ${compact(row.tokens)}/${compact(row.max_tokens)}`);
+  }
+  if (row.max_cost_micros > 0) {
+    parts.push(`${usd(row.cost_micros)}/${usd(row.max_cost_micros)}`);
+  }
+  return (
+    <span className="text-muted">
+      {parts.length > 0
+        ? parts.join(" · ")
+        : `${usd(row.cost_micros)} · ${compact(row.tokens)} tokens · ${compact(row.requests)} requests`}
+      {row.exhausted && row.resets_at ? (
+        <span className="text-neg"> · resets {when(row.resets_at)}</span>
+      ) : null}
+    </span>
+  );
+}
+
+/**
+ * Limits for one account. Every field is optional: an empty field or 0 means unlimited,
+ * and save always sends the whole form so clearing a field clears the limit.
+ */
+function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => void }) {
+  const update = useUpdateAccountQuota();
+  const clear = useClearAccountQuota();
+  const [window, setWindow] = useState<AccountQuotaWindow>(row.window);
+  const [requests, setRequests] = useState(row.max_requests > 0 ? String(row.max_requests) : "");
+  const [tokens, setTokens] = useState(row.max_tokens > 0 ? String(row.max_tokens) : "");
+  const [cost, setCost] = useState(usdInput(row.max_cost_micros));
+  const [failure, setFailure] = useState<unknown>(null);
+
+  const countProblem = (value: string): string | null => {
+    const text = value.trim();
+    if (text === "") return null;
+    return /^\d+$/.test(text) && Number.isSafeInteger(Number(text)) ? null : "whole number only";
+  };
+  const costParsed = parseUsd(cost);
+  const requestsProblem = countProblem(requests);
+  const tokensProblem = countProblem(tokens);
+  const costProblem = "problem" in costParsed ? costParsed.problem : null;
+  const invalid = requestsProblem !== null || tokensProblem !== null || costProblem !== null;
+  const busy = update.isPending || clear.isPending;
+  const configured =
+    row.max_requests > 0 || row.max_tokens > 0 || row.max_cost_micros > 0 || row.window !== "daily";
+
+  const save = () => {
+    if (invalid || busy) return;
+    setFailure(null);
+    update.mutate(
+      {
+        id: row.connection_id,
+        patch: {
+          window,
+          max_requests: requests.trim() === "" ? 0 : Number(requests),
+          max_tokens: tokens.trim() === "" ? 0 : Number(tokens),
+          max_cost_micros: "micros" in costParsed ? costParsed.micros : 0,
+        },
+      },
+      { onSuccess: onClose, onError: setFailure },
+    );
+  };
+
+  return (
+    <Modal
+      title="Account quota"
+      open
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            cancel
+          </Button>
+          {configured ? (
+            <Button
+              variant="danger"
+              disabled={busy}
+              onClick={() => {
+                if (confirm(`Remove the quota for ${row.name ?? row.provider}? It becomes unlimited.`)) {
+                  setFailure(null);
+                  clear.mutate(row.connection_id, { onSuccess: onClose, onError: setFailure });
+                }
+              }}
+            >
+              clear
+            </Button>
+          ) : null}
+          <Button variant="primary" disabled={invalid || busy} onClick={save}>
+            {busy ? "saving…" : "save"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <p className="text-[12px] leading-relaxed text-muted">
+          Measured from the start of the current UTC window. The router skips an account
+          once a limit is reached and falls back to the next one.
+        </p>
+
+        <Field label="window">
+          <Segmented
+            options={QUOTA_WINDOWS}
+            value={window}
+            onChange={(v) => {
+              if (!busy) setWindow(v);
+            }}
+            ariaLabel="quota window"
+          />
+        </Field>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="flex min-w-0 flex-col gap-1">
+            <Field label="requests" hint="empty = unlimited">
+              <Input
+                type="number"
+                value={requests}
+                onChange={(v) => {
+                  setRequests(v);
+                  setFailure(null);
+                }}
+                ariaLabel="quota requests"
+                disabled={busy}
+              />
+            </Field>
+            {requestsProblem ? (
+              <span role="alert" className="text-[11px] text-neg">
+                {requestsProblem}
+              </span>
+            ) : null}
+          </div>
+          <div className="flex min-w-0 flex-col gap-1">
+            <Field label="tokens" hint="empty = unlimited">
+              <Input
+                type="number"
+                value={tokens}
+                onChange={(v) => {
+                  setTokens(v);
+                  setFailure(null);
+                }}
+                ariaLabel="quota tokens"
+                disabled={busy}
+              />
+            </Field>
+            {tokensProblem ? (
+              <span role="alert" className="text-[11px] text-neg">
+                {tokensProblem}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="flex min-w-0 flex-col gap-1">
+          <Field label="spend (USD)" hint="empty = unlimited">
+            <Input
+              value={cost}
+              onChange={(v) => {
+                setCost(v);
+                setFailure(null);
+              }}
+              ariaLabel="quota spend"
+              disabled={busy}
+            />
+          </Field>
+          {costProblem ? (
+            <span role="alert" className="text-[11px] text-neg">
+              {costProblem}
+            </span>
+          ) : null}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 text-[11px] text-faint">
+          <span>{row.name ?? row.provider}</span>
+          <span className="font-mono">{row.connection_id}</span>
+        </div>
+
+        {failure ? <ErrorNote error={failure} /> : null}
+      </div>
+    </Modal>
   );
 }

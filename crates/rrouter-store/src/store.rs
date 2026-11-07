@@ -289,6 +289,48 @@ pub enum BudgetWindow {
     Monthly,
 }
 
+/// Limits for one upstream account (a connection) over a [`BudgetWindow`]. The window
+/// shares the key budgets' UTC calendar boundaries, so `daily` means "since 00:00 UTC",
+/// and every `0` limit means unlimited — a quota row with three zeros still records the
+/// window the UI shows usage for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountQuota {
+    pub connection_id: Uuid,
+    pub window: BudgetWindow,
+    pub max_requests: u64,
+    pub max_tokens: u64,
+    pub max_cost_micros: u64,
+}
+
+/// What one account spent inside a window. `tokens` counts every billable token the
+/// usage row recorded (input, output and both cache directions), matching the key
+/// budgets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountUsage {
+    pub connection_id: Uuid,
+    pub requests: u64,
+    pub tokens: u64,
+    pub cost_micros: u64,
+}
+
+/// A quota row with the spend it is measured against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountQuotaState {
+    pub quota: AccountQuota,
+    pub usage: AccountUsage,
+    pub exhausted: bool,
+    /// End of the current window (unix seconds); `None` for an all-time quota.
+    pub resets_at: Option<i64>,
+}
+
+/// Accounts the planner must skip, plus the shortest wait until one of them is usable
+/// again — the `Retry-After` of the `429` when nobody else can serve the request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExhaustedAccounts {
+    pub connections: std::collections::HashSet<Uuid>,
+    pub retry_after_secs: Option<u64>,
+}
+
 impl BudgetWindow {
     /// The wire and column spelling.
     pub fn as_str(self) -> &'static str {
@@ -335,6 +377,26 @@ pub fn window_start(window: BudgetWindow, now: i64) -> Option<i64> {
         }
     };
     Some(first_day * DAY)
+}
+
+/// End of the window that starts at `start` (unix seconds), i.e. when a quota measured
+/// from that start resets. `None` for all time.
+pub fn window_reset(window: BudgetWindow, start: i64) -> Option<i64> {
+    const DAY: i64 = 86_400;
+    match window {
+        BudgetWindow::Total => None,
+        BudgetWindow::Daily => Some(start + DAY),
+        BudgetWindow::Weekly => Some(start + 7 * DAY),
+        BudgetWindow::Monthly => {
+            let (year, month, _) = civil_from_days(start.div_euclid(DAY));
+            let next_month = if month == 12 {
+                days_from_civil(year + 1, 1, 1)
+            } else {
+                days_from_civil(year, month + 1, 1)
+            };
+            Some(next_month * DAY)
+        }
+    }
 }
 
 /// Days since 1970-01-01 of a proleptic Gregorian date (H. Hinnant's algorithm).
@@ -695,7 +757,166 @@ impl Store {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    // ----- connections -------------------------------------------------------------
+    // ----- account quotas ----------------------------------------------------------
+
+    /// Create or replace one account's quota.
+    pub async fn set_account_quota(&self, quota: &AccountQuota) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO account_quotas \
+                 (connection_id, window, max_requests, max_tokens, max_cost_micros, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT(connection_id) DO UPDATE SET window = excluded.window, \
+                 max_requests = excluded.max_requests, max_tokens = excluded.max_tokens, \
+                 max_cost_micros = excluded.max_cost_micros, updated_at = excluded.updated_at",
+                params![
+                    quota.connection_id.to_string(),
+                    quota.window.as_str(),
+                    quota.max_requests.min(i64::MAX as u64) as i64,
+                    quota.max_tokens.min(i64::MAX as u64) as i64,
+                    quota.max_cost_micros.min(i64::MAX as u64) as i64,
+                    now(),
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Drop one account's quota; idempotent, and the id is not validated (a row for a
+    /// deleted connection may still exist and must be removable).
+    pub async fn clear_account_quota(&self, id: Uuid) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM account_quotas WHERE connection_id = ?1",
+                params![id.to_string()],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Every configured quota row. A row whose connection was deleted is still returned
+    /// here; callers join against `list_connections` and ignore the orphans.
+    pub async fn account_quotas(&self) -> Result<Vec<AccountQuota>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT connection_id, window, max_requests, max_tokens, max_cost_micros \
+                 FROM account_quotas ORDER BY connection_id",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(AccountQuota {
+                    connection_id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
+                    window: BudgetWindow::from_stored(&r.get::<_, String>(1)?),
+                    max_requests: r.get::<_, i64>(2)?.max(0) as u64,
+                    max_tokens: r.get::<_, i64>(3)?.max(0) as u64,
+                    max_cost_micros: r.get::<_, i64>(4)?.max(0) as u64,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        rows.map(|r| r.map_err(migrations::db_err)).collect()
+    }
+
+    /// Usage per connection since one window start, aggregated in a single query so a
+    /// caller that measures many quotas over the same window pays once.
+    pub async fn account_usage_by_connection(
+        &self,
+        since: Option<i64>,
+    ) -> Result<std::collections::HashMap<Uuid, AccountUsage>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT connection_id, count(*), sum(input_tokens + output_tokens + \
+                 cache_read_tokens + cache_write_tokens), sum(cost_micros) FROM usage \
+                 WHERE connection_id IS NOT NULL AND ts >= ?1 GROUP BY connection_id",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params![since.unwrap_or(i64::MIN)], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                ))
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (raw, requests, tokens, cost_micros) = row.map_err(migrations::db_err)?;
+            let Ok(id) = Uuid::parse_str(&raw) else {
+                continue;
+            };
+            out.insert(
+                id,
+                AccountUsage {
+                    connection_id: id,
+                    requests: requests.max(0) as u64,
+                    tokens: tokens.max(0) as u64,
+                    cost_micros: cost_micros.max(0) as u64,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Every quota row with the spend of its own window. Aggregates are grouped by
+    /// distinct window start (at most three), never one query per account.
+    pub async fn account_quota_states(&self) -> Result<Vec<AccountQuotaState>> {
+        let now = now();
+        let quotas = self.account_quotas().await?;
+        let mut spent: std::collections::HashMap<
+            Option<i64>,
+            std::collections::HashMap<Uuid, AccountUsage>,
+        > = std::collections::HashMap::new();
+        let mut states = Vec::with_capacity(quotas.len());
+        for quota in quotas {
+            let since = window_start(quota.window, now);
+            if let std::collections::hash_map::Entry::Vacant(slot) = spent.entry(since) {
+                slot.insert(self.account_usage_by_connection(since).await?);
+            }
+            let usage = spent
+                .get(&since)
+                .and_then(|m| m.get(&quota.connection_id))
+                .cloned()
+                .unwrap_or(AccountUsage {
+                    connection_id: quota.connection_id,
+                    ..AccountUsage::default()
+                });
+            let exhausted = (quota.max_requests > 0 && usage.requests >= quota.max_requests)
+                || (quota.max_tokens > 0 && usage.tokens >= quota.max_tokens)
+                || (quota.max_cost_micros > 0 && usage.cost_micros >= quota.max_cost_micros);
+            let resets_at = since.and_then(|start| window_reset(quota.window, start));
+            states.push(AccountQuotaState {
+                quota,
+                usage,
+                exhausted,
+                resets_at,
+            });
+        }
+        Ok(states)
+    }
+
+    /// Accounts over their quota right now, and the wait until the first one resets.
+    /// Empty (and query-free) when no account has a quota row.
+    pub async fn exhausted_accounts(&self) -> Result<ExhaustedAccounts> {
+        let now = now();
+        let mut out = ExhaustedAccounts::default();
+        for state in self.account_quota_states().await? {
+            if !state.exhausted {
+                continue;
+            }
+            out.connections.insert(state.quota.connection_id);
+            // An all-time quota never resets, so the wait is an operator-action hint.
+            let wait = state
+                .resets_at
+                .map(|reset| (reset - now).max(1) as u64)
+                .unwrap_or(60);
+            out.retry_after_secs = Some(out.retry_after_secs.map_or(wait, |s| s.min(wait)));
+        }
+        Ok(out)
+    }
 
     pub async fn create_connection(
         &self,

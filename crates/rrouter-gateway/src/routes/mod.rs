@@ -6,6 +6,7 @@ pub mod health;
 pub mod keys;
 pub mod models;
 pub mod oauth;
+pub mod quotas;
 pub mod settings;
 pub mod system;
 pub mod templates;

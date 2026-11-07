@@ -13,6 +13,14 @@ All notable changes. Dates are local; versions follow semver once tagged.
   headers deadline and the send budget. Streaming attempts retry only before the first byte.
 - Prompt templates with version history (`/api/templates`), and a Templates page plus Playground
   insert / save-as-template.
+- Key scopes: an admin key manages the gateway through `/api` and `/metrics` without loopback or
+  a shared admin token, and is refused on `/v1`; inference keys keep limits, budgets and
+  guardrails. The key editor sets the scope and the list badges admin keys.
+- Account quotas: each upstream account can cap requests, tokens and spend per UTC day, week or
+  month (`/api/accounts/quotas`); the router skips an exhausted account, returns
+  `429 quota_exhausted` with `Retry-After` when every candidate is spent, and the Providers page
+  shows each account's window usage with a quota editor. Usage is aggregated from the request
+  log, so nothing counts, resets or repairs a counter.
 
 ### Changed
 - The request detail opens as a dialog when a row is clicked (Activity and Logs) instead of

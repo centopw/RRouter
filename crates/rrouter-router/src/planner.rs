@@ -241,6 +241,25 @@ impl Planner {
             });
         }
 
+        // An account over its quota is not tried at all, so a healthy lower-priority
+        // account still serves the request. When every candidate is exhausted the
+        // request fails before any provider call, with the wait until the first reset.
+        let exhausted = store.exhausted_accounts().await?;
+        if !exhausted.connections.is_empty() {
+            let planned = candidates.len();
+            candidates.retain(|c| !exhausted.connections.contains(&c.connection));
+            if candidates.is_empty() && planned > 0 {
+                let wait = exhausted.retry_after_secs.unwrap_or(60);
+                return Err(Error::Limited {
+                    code: "quota_exhausted",
+                    message: format!(
+                        "every account for {model} is over its quota; the first resets in {wait}s",
+                    ),
+                    retry_after_secs: wait,
+                });
+            }
+        }
+
         Ok(Plan { model: model.to_string(), candidates, stream })
     }
 
