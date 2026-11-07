@@ -8,12 +8,19 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 15;
+pub(crate) const SCHEMA_VERSION: i64 = 16;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16,
 ];
+
+/// V16: key scope. `inference` (spend through `/v1/*`) or `admin` (administer the
+/// gateway). The default keeps every existing key exactly what it was: an inference
+/// key, which the admin gate refuses.
+const V16: &str = r#"
+ALTER TABLE api_keys ADD COLUMN scope TEXT NOT NULL DEFAULT 'inference';
+"#;
 
 /// V15: reusable prompt templates. `prompt_templates` holds the live name and latest
 /// body; `prompt_template_versions` is the append-only history, keyed by

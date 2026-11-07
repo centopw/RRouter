@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use axum::http::HeaderMap;
 use rrouter_core::{Dialect, Error, Result};
 use rrouter_router::Catalog;
-use rrouter_store::{ApiKey, Guardrails, Store};
+use rrouter_store::{ApiKey, Guardrails, KeyScope, Store};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -164,7 +164,12 @@ impl AppState {
     ///   — a client that has the right secret should never be told it is missing;
     /// - an unknown or missing key is anonymous when `require_api_key` is off, so dev
     ///   clients that send a placeholder token keep working;
-    /// - an unknown or missing key is a `401` when keys are required.
+    /// - an unknown or missing key is a `401` when keys are required;
+    /// - an `admin`-scoped key is refused with `403 key_scope`: it administers the
+    ///   gateway, it does not spend tokens, so it has no business on `/v1/*`.
+    ///
+    /// Scope is checked after activity and expiry, so a disabled or expired admin key
+    /// still gets the more specific refusal.
     pub async fn authenticate(&self, headers: &HeaderMap) -> Result<Caller> {
         let presented = crate::auth_header(headers);
         let key = match &presented {
@@ -198,7 +203,26 @@ impl AppState {
                 });
             }
         }
+        if key.scope == KeyScope::Admin {
+            return Err(Error::Forbidden {
+                code: "key_scope",
+                message: "admin keys cannot call /v1".to_string(),
+            });
+        }
         Ok(Caller::Key(key))
+    }
+
+    /// The key `presented` names, when it is usable right now: it exists, is active and
+    /// has not expired. `None` covers both "no such key" and "not a live credential",
+    /// because the admin gate has nothing different to say about them.
+    ///
+    /// Scope is deliberately not filtered here: the gate needs an inference key to
+    /// answer `403 admin_required` rather than plain `401`.
+    pub async fn live_api_key(&self, presented: &str) -> Result<Option<ApiKey>> {
+        let Some(key) = self.store.verify_api_key(presented).await? else {
+            return Ok(None);
+        };
+        Ok(key.is_live(crate::now_unix()).then_some(key))
     }
 
     /// Apply this key's model mapping to the client's model: one hop, before alias and

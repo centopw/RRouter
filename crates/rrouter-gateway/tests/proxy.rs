@@ -1639,6 +1639,7 @@ async fn key_rows_match_the_governance_contract() {
     assert_eq!(status, StatusCode::OK);
     let created = body["data"][0].clone();
     assert_eq!(created["is_active"], true);
+    assert_eq!(created["scope"], "inference", "a new key may spend, not administer");
     assert_eq!(created["rpm"], 0);
     assert_eq!(created["tpm"], 0);
     assert_eq!(created["budget_tokens"], 0);
@@ -1665,6 +1666,7 @@ async fn key_rows_match_the_governance_contract() {
         "name": "test",
         "created_at": patched["created_at"].clone(),
         "is_active": true,
+        "scope": "inference",
         "rpm": 60,
         "tpm": 90_000,
         "budget_tokens": 5_000_000,
@@ -2148,6 +2150,203 @@ async fn without_a_token_the_admin_api_stays_loopback_only() {
     // In-process requests carry no peer address and count as loopback.
     let (status, body) = h.get("/api/system").await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// An `admin`-scoped key is an admin credential on its own: a non-loopback peer gets in
+/// with it, on `/api/*` and `/metrics`, with or without a global token configured.
+#[tokio::test]
+async fn an_admin_scoped_key_authorises_the_admin_api() {
+    let h = harness(false);
+    let (key, id) = h.create_key().await;
+    let patched = h.patch_key(&id, json!({"scope": "admin"})).await;
+    assert_eq!(patched["scope"], "admin");
+
+    let bearer = format!("Bearer {key}");
+    let (status, _, body) = h
+        .call_full(as_peer(
+            get_with("/api/system", &[("authorization", &bearer)]),
+            remote_peer(),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "an admin key authorises a remote peer: {body}");
+
+    // `x-admin-token` is the admin-side spelling of the same credential, and a scraper
+    // shares the rule.
+    let res = h
+        .router
+        .clone()
+        .oneshot(as_peer(
+            get_with("/metrics", &[("x-admin-token", &key)]),
+            remote_peer(),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK, "an admin key may scrape metrics");
+
+    // A configured token does not lock scoped keys out: both are admin credentials.
+    // (With a token set, the API itself needs the token, so the key is prepared in the
+    // store — the PATCH path is covered by `scope_patch_validates_the_spelling`.)
+    let mut cfg = config(false);
+    cfg.admin_token = Some(TEST_ADMIN_TOKEN.into());
+    let tokened = harness_with(cfg);
+    let (ops_plain, ops) = tokened
+        .state
+        .store
+        .create_api_key(Some("ops"))
+        .await
+        .expect("key");
+    tokened
+        .state
+        .store
+        .update_api_key(
+            ops.id,
+            &rrouter_store::ApiKeyPatch {
+                scope: Some(rrouter_store::KeyScope::Admin),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("patch")
+        .expect("exists");
+    let res = tokened
+        .router
+        .clone()
+        .oneshot(as_peer(
+            get_with("/api/system", &[("authorization", &format!("Bearer {ops_plain}"))]),
+            remote_peer(),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK, "next to a token, an admin key still works");
+
+    // Only a live key: revoking it takes the authority away with it.
+    tokened
+        .state
+        .store
+        .update_api_key(
+            ops.id,
+            &rrouter_store::ApiKeyPatch { is_active: Some(false), ..Default::default() },
+        )
+        .await
+        .expect("disable")
+        .expect("exists");
+    let res = tokened
+        .router
+        .clone()
+        .oneshot(as_peer(
+            get_with("/api/system", &[("authorization", &format!("Bearer {ops_plain}"))]),
+            remote_peer(),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "a disabled admin key is no credential");
+}
+
+/// An inference key is not an admin credential: a remote peer is refused with
+/// `admin_required`, while a loopback peer still passes on the socket rule alone.
+#[tokio::test]
+async fn an_inference_key_cannot_administer() {
+    let h = harness(false);
+    let (key, _) = h.create_key().await;
+    let bearer = format!("Bearer {key}");
+
+    let (status, _, body) = h
+        .call_full(as_peer(
+            get_with("/api/system", &[("authorization", &bearer)]),
+            remote_peer(),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "admin_required");
+
+    // The socket rule comes first: a loopback peer passes whatever the key's scope.
+    let (status, _, body) = h
+        .call_full(get_with("/api/system", &[("authorization", &bearer)]))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // With a global token configured, the same inference key is still the wrong
+    // credential, and the refusal names the scope rather than the token.
+    let mut cfg = config(false);
+    cfg.admin_token = Some(TEST_ADMIN_TOKEN.into());
+    let tokened = harness_with(cfg);
+    let (plain, _) = tokened
+        .state
+        .store
+        .create_api_key(None)
+        .await
+        .expect("key");
+    let (status, _, body) = tokened
+        .call_full(as_peer(
+            get_with("/api/system", &[("authorization", &format!("Bearer {plain}"))]),
+            remote_peer(),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "admin_required");
+}
+
+/// An admin key administers the gateway; it does not spend tokens. The refusal happens
+/// before any dispatch and writes no usage row, and an inference key is unchanged.
+#[tokio::test]
+async fn an_admin_key_cannot_call_the_proxy() {
+    let mock = Mock::start(vec![openai_reply("reached")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (admin, id) = h.create_key().await;
+    h.patch_key(&id, json!({"scope": "admin"})).await;
+
+    let (status, _, body) = h.chat(Some(&admin), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "key_scope");
+    assert_eq!(body["error"]["message"], "admin keys cannot call /v1");
+    assert_eq!(mock.hits(), 0, "the refusal is before any dispatch");
+    assert!(
+        h.state
+            .store
+            .recent_usage(&UsageQuery { limit: 10, ..Default::default() })
+            .await
+            .expect("usage")
+            .is_empty(),
+        "a refused admin key writes no usage row"
+    );
+
+    // An inference key is exactly what it was before phase 19: same request, served.
+    let (inference, _) = h.create_key().await;
+    let (status, _, body) = h.chat(Some(&inference), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(mock.hits(), 1);
+}
+
+/// `scope` accepts the two spellings and refuses anything else with a 400 that names
+/// them; a refused patch leaves the stored scope untouched.
+#[tokio::test]
+async fn scope_patch_validates_the_spelling() {
+    let h = harness(false);
+    let (_, id) = h.create_key().await;
+    for scope in ["admin", "inference"] {
+        let patched = h.patch_key(&id, json!({"scope": scope})).await;
+        assert_eq!(patched["scope"], scope);
+    }
+
+    let (status, _, body) = h
+        .call_full(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/keys/{id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"scope": "superuser"}).to_string()))
+                .expect("request"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        message.ends_with("scope must be inference or admin"),
+        "names the two scopes: {message}"
+    );
+    let (_, listed) = h.get("/api/keys").await;
+    assert_eq!(listed["data"][0]["scope"], "inference", "the refusal changed nothing");
 }
 
 /// One streaming chat request; the caller drives (or drops) the body.

@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
 use rrouter_store::{
-    cache_key, ApiKey, ApiKeyPatch, AttemptRecord, Credentials, Guardrails, KeyModel, ModelRow,
-    PruneReport, Store, StatusFilter, UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
+    cache_key, ApiKey, ApiKeyPatch, AttemptRecord, Credentials, Guardrails, KeyModel, KeyScope,
+    ModelRow, PruneReport, Store, StatusFilter, UsageQuery, UsageRecord, API_KEY_PREFIX,
+    KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -361,6 +362,132 @@ fn api_key_limits_default_then_patch_merges_and_clears() {
     });
 }
 
+/// A key is an inference key until an operator says otherwise, and scope survives a
+/// patch round-trip without disturbing the other fields.
+#[test]
+fn api_key_scope_defaults_to_inference_and_patches_round_trip() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let (plain, key) = s.create_api_key(Some("dash")).await.expect("create");
+        assert_eq!(key.scope, KeyScope::Inference, "a new key may spend, not administer");
+        assert_eq!(s.verify_api_key(&plain).await.expect("verify").expect("known").scope, KeyScope::Inference);
+
+        let admin = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch { scope: Some(KeyScope::Admin), ..Default::default() },
+            )
+            .await
+            .expect("patch")
+            .expect("exists");
+        assert_eq!(admin.scope, KeyScope::Admin);
+        assert_eq!(admin.name.as_deref(), Some("dash"), "the scope patch touched nothing else");
+        // The stored row is what reads back, not just the in-memory merge.
+        assert_eq!(
+            s.verify_api_key(&plain).await.expect("verify").expect("known").scope,
+            KeyScope::Admin
+        );
+        assert_eq!(s.list_api_keys().await.expect("list"), vec![admin.clone()]);
+
+        // Scope is not a one-way door: revoking administration needs no new key.
+        let back = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch { scope: Some(KeyScope::Inference), ..Default::default() },
+            )
+            .await
+            .expect("patch")
+            .expect("exists");
+        assert_eq!(back.scope, KeyScope::Inference);
+        assert_eq!(back.rpm, 0, "and the rest of the row is still untouched");
+    });
+}
+
+/// An unrecognised scope must never widen authority: it reads as `inference`, and client
+/// input is strict, so a typo cannot silently create an administrator.
+#[test]
+fn an_unknown_stored_scope_reads_as_inference() {
+    assert_eq!(KeyScope::parse("root"), None, "client input is strict");
+    assert_eq!(
+        KeyScope::from_stored("root"),
+        KeyScope::Inference,
+        "a stored value from a newer build narrows to inference"
+    );
+    assert_eq!(KeyScope::parse("admin"), Some(KeyScope::Admin));
+
+    let dir = TempDir::new("scope");
+    let store = dir.store();
+    let (_, key) = rt()
+        .block_on(store.create_api_key(Some("legacy")))
+        .expect("create");
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        conn.execute(
+            "UPDATE api_keys SET scope = 'root' WHERE id = ?1",
+            [key.id.to_string()],
+        )
+        .expect("write an unknown scope");
+    }
+    let read = rt()
+        .block_on(store.get_api_key(key.id))
+        .expect("read")
+        .expect("exists");
+    assert_eq!(read.scope, KeyScope::Inference);
+}
+
+/// v15 shipped no scope column; opening a v15 database adds it and every existing key
+/// becomes an inference key, which the admin gate refuses.
+#[test]
+fn v15_database_migrates_to_sixteen_with_the_scope_column() {
+    let dir = TempDir::new("v15");
+    let id = Uuid::new_v4();
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        // Start from the current schema, then remove exactly what v16 adds.
+        drop(Store::open(&dir.db(), None).expect("current schema"));
+        conn.execute_batch("ALTER TABLE api_keys DROP COLUMN scope; PRAGMA user_version = 15;")
+            .expect("rewind to v15");
+        conn.execute(
+            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at) \
+             VALUES (?1, 'h', 'legacy', 1, 1)",
+            [id.to_string()],
+        )
+        .expect("legacy key");
+    }
+
+    let store = Store::open(&dir.db(), None).expect("open runs the v16 step");
+    let key = rt()
+        .block_on(store.get_api_key(id))
+        .expect("read")
+        .expect("legacy key survives");
+    assert_eq!(key.scope, KeyScope::Inference, "a v15 key may spend, not administer");
+    // The upgraded column is writable, not just a read-time default.
+    let patched = rt()
+        .block_on(store.update_api_key(
+            id,
+            &ApiKeyPatch { scope: Some(KeyScope::Admin), ..Default::default() },
+        ))
+        .expect("patch")
+        .expect("exists");
+    assert_eq!(patched.scope, KeyScope::Admin);
+    drop(store);
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 16);
+    let columns: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('api_keys') WHERE name = 'scope'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("column");
+    assert_eq!(columns, 1, "the scope column exists after the migration");
+}
+
 #[test]
 fn spent_tokens_sums_only_that_key() {
     let store = Store::open_in_memory().expect("mem");
@@ -521,7 +648,7 @@ fn model_costs_returns_published_rows_for_the_named_providers() {
 }
 
 #[test]
-fn v6_database_migrates_to_fifteen() {
+fn v6_database_migrates_to_sixteen() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
@@ -620,7 +747,7 @@ fn v6_database_migrates_to_fifteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
         ("idx_usage_request", "the usage row is looked up by request id"),
@@ -641,7 +768,7 @@ fn v6_database_migrates_to_fifteen() {
 /// connection defaults to weight 100 (the plain round-robin share), and the two new
 /// tables start empty.
 #[test]
-fn v8_database_migrates_to_fifteen() {
+fn v8_database_migrates_to_sixteen() {
     let dir = TempDir::new("v8");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -723,7 +850,7 @@ fn v8_database_migrates_to_fifteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
 
     let weight: i64 = conn
         .query_row("SELECT weight FROM connections", [], |r| r.get(0))
@@ -748,7 +875,7 @@ fn v8_database_migrates_to_fifteen() {
 /// A v9 database gains the money columns without touching existing rows: spend recorded
 /// before v10 stays at "unknown price", and every key stays unlimited.
 #[test]
-fn v9_database_migrates_to_fifteen() {
+fn v9_database_migrates_to_sixteen() {
     let dir = TempDir::new("v9");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -830,13 +957,13 @@ fn v9_database_migrates_to_fifteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
 }
 
 /// A v10 database gains the response cache in place: the migration only adds a table and
 /// its index, so every existing row is untouched and the version reaches 13.
 #[test]
-fn v10_database_migrates_to_fifteen() {
+fn v10_database_migrates_to_sixteen() {
     let dir = TempDir::new("v10");
     {
         // A real v10 database: the current schema with the v11 table and the v12 column
@@ -845,7 +972,8 @@ fn v10_database_migrates_to_fifteen() {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         conn.execute_batch(
             "DROP TABLE response_cache; ALTER TABLE api_keys DROP COLUMN budget_window; \
-             ALTER TABLE api_keys DROP COLUMN guardrails; PRAGMA user_version = 10;",
+             ALTER TABLE api_keys DROP COLUMN guardrails; \
+             ALTER TABLE api_keys DROP COLUMN scope; PRAGMA user_version = 10;",
         )
         .expect("rewind to v10");
     }
@@ -861,7 +989,7 @@ fn v10_database_migrates_to_fifteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
     for (kind, name) in [("table", "response_cache"), ("index", "idx_cache_expiry")] {
         let found: i64 = conn
             .query_row(
@@ -1559,7 +1687,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// A v11 database gains `budget_window` in place: an existing key reads as `total`
 /// (lifetime, unchanged behaviour), and the version reaches 14.
 #[test]
-fn v11_database_migrates_to_fifteen_with_total_windows() {
+fn v11_database_migrates_to_sixteen_with_total_windows() {
     let dir = TempDir::new("v11");
     let id = Uuid::new_v4();
     {
@@ -1570,7 +1698,8 @@ fn v11_database_migrates_to_fifteen_with_total_windows() {
         drop(Store::open(&dir.db(), None).expect("current schema"));
         conn.execute_batch(
             "ALTER TABLE api_keys DROP COLUMN budget_window; \
-             ALTER TABLE api_keys DROP COLUMN guardrails; PRAGMA user_version = 11;",
+             ALTER TABLE api_keys DROP COLUMN guardrails; \
+             ALTER TABLE api_keys DROP COLUMN scope; PRAGMA user_version = 11;",
         )
         .expect("rewind to v11");
         conn.execute(
@@ -1595,13 +1724,13 @@ fn v11_database_migrates_to_fifteen_with_total_windows() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
 }
 
 /// v12 shipped no `attempts(ts)` index; the retention sweep deletes by `ts`, so opening
 /// a v12 database adds the index and bumps the marker.
 #[test]
-fn v12_database_migrates_to_fifteen_with_the_attempt_ts_index() {
+fn v12_database_migrates_to_sixteen_with_the_attempt_ts_index() {
     let dir = TempDir::new("v12");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -1609,7 +1738,7 @@ fn v12_database_migrates_to_fifteen_with_the_attempt_ts_index() {
         drop(Store::open(&dir.db(), None).expect("current schema"));
         conn.execute_batch(
             "DROP INDEX idx_attempts_ts; ALTER TABLE api_keys DROP COLUMN guardrails; \
-             PRAGMA user_version = 12;",
+             ALTER TABLE api_keys DROP COLUMN scope; PRAGMA user_version = 12;",
         )
         .expect("rewind to v12");
     }
@@ -1620,7 +1749,7 @@ fn v12_database_migrates_to_fifteen_with_the_attempt_ts_index() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
     let indexes: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type = 'index' \
@@ -1932,15 +2061,18 @@ fn policy_with_term() -> Guardrails {
 /// v13 shipped no guardrails column; opening a v13 database adds it, and the key that
 /// existed before it keeps the only policy a pre-v14 key can have: none.
 #[test]
-fn v13_database_migrates_to_fifteen_with_the_guardrails_column() {
+fn v13_database_migrates_to_sixteen_with_the_guardrails_column() {
     let dir = TempDir::new("v13");
     let id = Uuid::new_v4();
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         // Start from the current schema, then remove exactly what v14 adds.
         drop(Store::open(&dir.db(), None).expect("current schema"));
-        conn.execute_batch("ALTER TABLE api_keys DROP COLUMN guardrails; PRAGMA user_version = 13;")
-            .expect("rewind to v13");
+        conn.execute_batch(
+            "ALTER TABLE api_keys DROP COLUMN guardrails; \
+             ALTER TABLE api_keys DROP COLUMN scope; PRAGMA user_version = 13;",
+        )
+        .expect("rewind to v13");
         conn.execute(
             "INSERT INTO api_keys (id, key_hash, name, is_active, created_at) \
              VALUES (?1, 'h', 'legacy', 1, 1)",
@@ -1962,7 +2094,7 @@ fn v13_database_migrates_to_fifteen_with_the_guardrails_column() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
     let columns: i64 = conn
         .query_row(
             "SELECT count(*) FROM pragma_table_info('api_keys') WHERE name = 'guardrails'",
@@ -1976,7 +2108,7 @@ fn v13_database_migrates_to_fifteen_with_the_guardrails_column() {
 /// v14 shipped no template tables; opening a v14 database adds them at v15, writable,
 /// and leaves everything a v14 database already held alone.
 #[test]
-fn v14_database_migrates_to_fifteen_with_the_template_tables() {
+fn v14_database_migrates_to_sixteen_with_the_template_tables() {
     let dir = TempDir::new("v14");
     let key = Uuid::new_v4();
     {
@@ -1985,7 +2117,7 @@ fn v14_database_migrates_to_fifteen_with_the_template_tables() {
         drop(Store::open(&dir.db(), None).expect("current schema"));
         conn.execute_batch(
             "DROP TABLE prompt_template_versions; DROP TABLE prompt_templates; \
-             PRAGMA user_version = 14;",
+             ALTER TABLE api_keys DROP COLUMN scope; PRAGMA user_version = 14;",
         )
         .expect("rewind to v14");
         conn.execute(
@@ -2019,7 +2151,7 @@ fn v14_database_migrates_to_fifteen_with_the_template_tables() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
     for table in ["prompt_templates", "prompt_template_versions"] {
         let n: i64 = conn
             .query_row(

@@ -4,6 +4,10 @@
 //! lifetime token budget, a model allowlist, and an expiry. `0` / `null` means
 //! unlimited, so a freshly created key behaves exactly as before the phase-1 schema.
 //!
+//! A key also has a `scope`: `inference` (spend through `/v1/*`, the default) or
+//! `admin` (administer this API and `/metrics`, refused by `/v1/*`). Scope is separate
+//! from the limits so administration never implies spend.
+//!
 //! A key also owns a model mapping (`/api/keys/{id}/models`): the client keeps a stable
 //! model name and the operator repoints it for that key alone. Validation is here, not
 //! in the store, because "resolves to a known provider" is a routing fact.
@@ -15,7 +19,7 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use rrouter_core::Error;
-use rrouter_store::{window_start, ApiKey, ApiKeyPatch, BudgetWindow, KeyModel};
+use rrouter_store::{window_start, ApiKey, ApiKeyPatch, BudgetWindow, KeyModel, KeyScope};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -31,6 +35,7 @@ fn row(key: &ApiKey, spent: u64, spent_micros: u64, models: &[KeyModel]) -> Valu
         "name": key.name,
         "created_at": key.created_at,
         "is_active": key.is_active,
+        "scope": key.scope.as_str(),
         "rpm": key.rpm,
         "tpm": key.tpm,
         "budget_tokens": key.budget_tokens,
@@ -128,10 +133,10 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
     }
 }
 
-/// `PATCH /api/keys/{id}` — any subset of `is_active`, `rpm`, `tpm`, `budget_tokens`,
-/// `budget_micros`, `budget_window` (`total`, `daily`, `weekly`, `monthly`),
-/// `allowed_models` (null clears), `expires_at` (null clears), `guardrails` (null
-/// clears; `{}` is the same as no policy). Returns the merged row.
+/// `PATCH /api/keys/{id}` — any subset of `is_active`, `scope` (`inference` or `admin`),
+/// `rpm`, `tpm`, `budget_tokens`, `budget_micros`, `budget_window` (`total`, `daily`,
+/// `weekly`, `monthly`), `allowed_models` (null clears), `expires_at` (null clears),
+/// `guardrails` (null clears; `{}` is the same as no policy). Returns the merged row.
 pub async fn update(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -272,6 +277,12 @@ fn patch_from(value: &Value) -> Result<ApiKeyPatch, Error> {
                 })?);
             }
             "rpm" => patch.rpm = Some(u32_field(raw, "rpm")?),
+            "scope" => {
+                let raw = raw.as_str().unwrap_or_default();
+                patch.scope = Some(KeyScope::parse(raw).ok_or_else(|| {
+                    Error::BadRequest("scope must be inference or admin".into())
+                })?);
+            }
             "budget_window" => {
                 let raw = raw.as_str().unwrap_or_default();
                 patch.budget_window = Some(BudgetWindow::parse(raw).ok_or_else(|| {

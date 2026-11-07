@@ -43,6 +43,45 @@ pub struct Connection {
     pub updated_at: i64,
 }
 
+/// What a key may do. An `Inference` key spends tokens through `/v1/*`; an `Admin`
+/// key manages the gateway through `/api/*` and `/metrics` and is refused by `/v1/*`.
+///
+/// Scope is a separate axis from the limits, so an operator can grant administration
+/// without also granting spend (and without sharing one global admin token).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyScope {
+    /// The default for every key, and for every key created before v16.
+    #[default]
+    Inference,
+    Admin,
+}
+
+impl KeyScope {
+    /// The wire and column spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inference => "inference",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// Strict parse for client input: anything but the two spellings is `None`.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "inference" => Some(Self::Inference),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+
+    /// Lenient read for a stored value. An unknown spelling reads as `Inference`, the
+    /// narrower scope: a row written by a newer build can never administer the gateway
+    /// on a build that does not understand its scope.
+    pub fn from_stored(raw: &str) -> Self {
+        Self::parse(raw).unwrap_or_default()
+    }
+}
+
 /// A gateway API key. Only the SHA-256 hex of the plaintext is persisted.
 ///
 /// The governance columns are the virtual-key contract: `0` means unlimited for the
@@ -54,6 +93,8 @@ pub struct ApiKey {
     pub key_hash: String,
     pub name: Option<String>,
     pub is_active: bool,
+    /// Whether this key may spend tokens (`Inference`) or administer the gateway (`Admin`).
+    pub scope: KeyScope,
     pub created_at: i64,
     /// Requests per minute allowed; 0 = unlimited.
     pub rpm: u32,
@@ -73,6 +114,17 @@ pub struct ApiKey {
     pub budget_window: BudgetWindow,
     /// Traffic policy; `None` = no checks at all for this key.
     pub guardrails: Option<Guardrails>,
+}
+
+impl ApiKey {
+    /// May this key be used as a credential at `now`? Active and unexpired — the two
+    /// facts every credential path checks, so the `/v1` and admin gates ask once.
+    ///
+    /// Scope is not part of this: which routes a live key may call is the gateway's
+    /// decision, not the store's.
+    pub fn is_live(&self, now: i64) -> bool {
+        self.is_active && self.expires_at.is_none_or(|expires_at| now < expires_at)
+    }
 }
 
 /// Policy checks applied to one key's traffic: a prompt-size cap, blocked substrings, and
@@ -170,6 +222,8 @@ impl Guardrails {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApiKeyPatch {
     pub is_active: Option<bool>,
+    /// `inference` (spend) or `admin` (administer). Not nullable: a key is always one.
+    pub scope: Option<KeyScope>,
     pub rpm: Option<u32>,
     pub tpm: Option<u32>,
     pub budget_tokens: Option<u64>,
@@ -191,6 +245,9 @@ impl ApiKeyPatch {
     pub fn apply(&self, key: &mut ApiKey) {
         if let Some(v) = self.is_active {
             key.is_active = v;
+        }
+        if let Some(v) = self.scope {
+            key.scope = v;
         }
         if let Some(v) = self.rpm {
             key.rpm = v;
@@ -932,11 +989,11 @@ impl Store {
     /// The key columns every read selects, in [`row_to_api_key`]'s order.
     const KEY_COLUMNS: &'static str =
         "id, key_hash, name, is_active, created_at, rpm, tpm, budget_tokens, allowed_models, \
-         expires_at, budget_micros, budget_window, guardrails";
+         expires_at, budget_micros, budget_window, guardrails, scope";
 
     /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
     ///
-    /// A new key is unlimited: no caps, no allowlist, no expiry.
+    /// A new key is an inference key with no limits, no allowlist and no expiry.
     pub async fn create_api_key(&self, name: Option<&str>) -> Result<(String, ApiKey)> {
         let plaintext = generate_api_key();
         let key_hash = hash_api_key(&plaintext);
@@ -956,6 +1013,7 @@ impl Store {
                 key_hash,
                 name: name.map(str::to_owned),
                 is_active: true,
+                scope: KeyScope::Inference,
                 created_at,
                 rpm: 0,
                 tpm: 0,
@@ -1054,7 +1112,7 @@ impl Store {
         conn.execute(
             "UPDATE api_keys SET is_active = ?2, rpm = ?3, tpm = ?4, budget_tokens = ?5, \
              allowed_models = ?6, expires_at = ?7, budget_micros = ?8, budget_window = ?9, \
-             guardrails = ?10 WHERE id = ?1",
+             guardrails = ?10, scope = ?11 WHERE id = ?1",
             params![
                 id.to_string(),
                 key.is_active as i64,
@@ -1066,6 +1124,7 @@ impl Store {
                 key.budget_micros,
                 key.budget_window.as_str(),
                 guardrails,
+                key.scope.as_str(),
             ],
         )
         .map_err(migrations::db_err)?;
@@ -2388,6 +2447,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         budget_micros: r.get(10)?,
         budget_window: BudgetWindow::from_stored(&r.get::<_, String>(11)?),
         guardrails,
+        scope: KeyScope::from_stored(&r.get::<_, String>(13)?),
     })
 }
 

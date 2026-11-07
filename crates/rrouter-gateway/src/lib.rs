@@ -232,47 +232,62 @@ async fn cors(
     response
 }
 
-/// Admin API gate: `RROUTER_ADMIN_TOKEN` when set, else loopback peers only unless
-/// `RROUTER_ALLOW_REMOTE_ADMIN=true`.
+/// Admin API gate. `/api/*` and `/metrics` are admitted when any of these holds:
 ///
-/// A configured token *replaces* the loopback rule instead of adding to it: behind a
-/// reverse proxy every peer is the proxy, so the socket address proves nothing about who
-/// is calling. `X-Forwarded-For` is deliberately never consulted — it is client-written.
+/// 1. a configured `RROUTER_ADMIN_TOKEN` is presented,
+/// 2. a live key with `scope=admin` is presented (`Authorization: Bearer …` or
+///    `x-admin-token`),
+/// 3. no token is configured and the peer is loopback (or `RROUTER_ALLOW_REMOTE_ADMIN`
+///    is on).
 ///
-/// A request without a peer address (in-process `oneshot` calls) is treated as
-/// loopback, which is what makes the integration tests exercise the same path.
+/// A configured token still *replaces* the loopback rule instead of adding to it: behind
+/// a reverse proxy every peer is the proxy, so the socket address proves nothing about
+/// who is calling. `X-Forwarded-For` is deliberately never consulted — it is
+/// client-written.
+///
+/// A live inference-scoped key is `403 admin_required`: naming the scope is more useful
+/// than `401`, because the caller holds a real key and only lacks the authority. A
+/// request without a peer address (in-process `oneshot` calls) counts as loopback, which
+/// is what makes the integration tests exercise the same path.
 async fn admin_gate(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: Request,
     next: Next,
 ) -> Response {
+    let dialect = state::dialect_of(req.uri());
+    let presented = admin_credential(req.headers());
     if let Some(expected) = state.config.admin_token.as_deref() {
-        let presented = admin_credential(req.headers());
-        let authorised = presented
+        if presented
             .as_deref()
-            .is_some_and(|presented| constant_time_eq(presented, expected));
-        if !authorised {
-            return admin_unauthorized(state::dialect_of(req.uri()));
+            .is_some_and(|presented| constant_time_eq(presented, expected))
+        {
+            return next.run(req).await;
         }
-        return next.run(req).await;
+    } else {
+        let peer_is_loopback = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip().is_loopback())
+            .unwrap_or(true);
+        if peer_is_loopback || state.config.allow_remote_admin {
+            return next.run(req).await;
+        }
     }
-    let peer_is_loopback = req
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip().is_loopback())
-        .unwrap_or(true);
-    if !peer_is_loopback && !state.config.allow_remote_admin {
-        let dialect = state::dialect_of(req.uri());
-        let mut resp = error::error_response(
-            dialect,
-            &rrouter_core::Error::Unauthorized(
-                "admin API is loopback-only (set RROUTER_ALLOW_REMOTE_ADMIN=true or RROUTER_ADMIN_TOKEN)".into(),
-            ),
-        );
-        *resp.status_mut() = axum::http::StatusCode::FORBIDDEN;
-        return resp;
+    // Only a credential that could be a gateway key is worth a database lookup: an
+    // arbitrary token can never match one.
+    let key = match presented.as_deref() {
+        Some(token) if token.starts_with(rrouter_store::API_KEY_PREFIX) => {
+            state.live_api_key(token).await
+        }
+        _ => Ok(None),
+    };
+    match key {
+        Ok(Some(key)) if key.scope == rrouter_store::KeyScope::Admin => next.run(req).await,
+        Ok(Some(_)) => admin_required(dialect),
+        Ok(None) if state.config.admin_token.is_some() => admin_unauthorized(dialect),
+        Ok(None) => admin_loopback_only(dialect),
+        Err(e) => error::error_response(dialect, &e),
     }
-    next.run(req).await
 }
 
 /// The admin credential: `Authorization: Bearer …` or `x-admin-token: …`.
@@ -357,6 +372,30 @@ async fn v1_model(
         state::Slot::Full => return overloaded_response(rrouter_core::Dialect::OpenAiChat),
     };
     routes::models::get_model(axum::extract::State(state), axum::extract::Path(id)).await
+}
+
+/// `403 admin_required`: a live key asked for admin surface with `scope=inference`.
+fn admin_required(dialect: rrouter_core::Dialect) -> Response {
+    error::error_response(
+        dialect,
+        &rrouter_core::Error::Forbidden {
+            code: "admin_required",
+            message: "admin API requires an admin-scoped key or RROUTER_ADMIN_TOKEN".into(),
+        },
+    )
+}
+
+/// `403` for a remote peer with no admin credential when no token is configured.
+fn admin_loopback_only(dialect: rrouter_core::Dialect) -> Response {
+    let mut resp = error::error_response(
+        dialect,
+        &rrouter_core::Error::Unauthorized(
+            "admin API is loopback-only (set RROUTER_ALLOW_REMOTE_ADMIN=true or RROUTER_ADMIN_TOKEN)"
+                .into(),
+        ),
+    );
+    *resp.status_mut() = axum::http::StatusCode::FORBIDDEN;
+    resp
 }
 
 /// `401 admin_unauthorized` in the inbound dialect's error shape.
