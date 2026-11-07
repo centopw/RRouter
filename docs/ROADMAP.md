@@ -21,8 +21,9 @@ Status: phases 1–12 landed and verified live (key governance, observability, o
 routing strategies, UX, cost accounting, protocol breadth, cache, budget windows, JSON
 logs + access line). Release 0.2.0 is published with all four binaries, and the installer
 was verified against it. 0.2.1 published cache, budget windows, the admin-token UI, JSON logs and the Logs page; 0.2.2
-adds CSV export and usage retention with a daily maintenance sweep. Phases 1–14 are shipped and
-verified live (installer, release binaries, multi-arch image).
+added CSV export and usage retention; 0.2.3 hardens every response with security headers and a
+CSP. Phases 1–15 are shipped; releases are verified live end to end (installer, release
+binaries, multi-arch image).
 
 ## Phase 1 — key governance (contract)
 
