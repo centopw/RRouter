@@ -396,7 +396,8 @@ export default function Playground() {
             rows={2}
             aria-label="message"
             placeholder={model ? `Message ${modelLabel}…` : "Choose a model in Parameters to start…"}
-            className="block max-h-[220px] w-full resize-none rounded-t-[16px] bg-transparent px-4 pt-3.5 text-[14px] leading-relaxed text-fg placeholder:text-faint focus:outline-none"
+            style={{ outline: "none" }}
+            className="block max-h-[220px] w-full resize-none rounded-t-[16px] bg-transparent px-4 pt-3.5 text-[14px] leading-relaxed text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none"
           />
           <div className="flex flex-wrap items-center gap-2 px-3 pb-2.5 pt-1">
             <div className="min-w-[160px] max-w-[240px] flex-1">
