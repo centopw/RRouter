@@ -97,8 +97,8 @@ export function useAccountSubscriptions() {
     queryFn: getAccountSubscriptions,
     // Provider usage endpoints are shared with the vendor's own client; a minute is
     // frequent enough for a dashboard and polite to the upstream.
-    refetchInterval: 60_000,
-    staleTime: 55_000,
+    refetchInterval: 300_000,
+    staleTime: 270_000,
   });
 }
 

@@ -195,7 +195,12 @@ pub async fn test(State(state): State<Arc<AppState>>, Path(id): Path<String>) ->
             "ok": false,
             "status": e.status(),
             "latency_ms": latency_ms,
-            "error": e.to_string(),
+            // A 429 here is the provider guarding its account, not a broken credential.
+            "error": if e.status() == 429 {
+                "the provider is rate-limiting this account; retry in a minute".to_string()
+            } else {
+                e.to_string()
+            },
         })),
     }
 }

@@ -17,8 +17,10 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-const SUCCESS_TTL: Duration = Duration::from_secs(60);
-const FAILURE_TTL: Duration = Duration::from_secs(300);
+// Anthropic rate-limits this endpoint aggressively (it is the one Claude Code itself
+// polls). Five minutes is the documented polite cadence; failures wait fifteen.
+const SUCCESS_TTL: Duration = Duration::from_secs(300);
+const FAILURE_TTL: Duration = Duration::from_secs(900);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One subscription window: percent consumed plus when it rolls over.
@@ -110,6 +112,9 @@ fn explain(error: &Error) -> String {
     match error {
         Error::Upstream { status: 401 | 403, .. } => {
             "the provider rejected this account's token; sign in again".to_string()
+        }
+        Error::Upstream { status: 429, .. } => {
+            "the provider is rate-limiting usage checks; retrying in a few minutes".to_string()
         }
         Error::Upstream { status, .. } => format!("the provider answered {status}"),
         Error::Unauthorized(message) => message.clone(),

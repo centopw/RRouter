@@ -302,7 +302,7 @@ export default function Providers() {
               title="Subscription limits"
               action={
                 <span className="text-[11px] text-faint">
-                  {subscriptions.isFetching ? "refreshing…" : "from your provider plan · refreshes every minute"}
+                  {subscriptions.isFetching ? "refreshing…" : "from your provider plan · refreshes every five minutes"}
                 </span>
               }
             />
