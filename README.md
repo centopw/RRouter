@@ -284,6 +284,7 @@ The operational guide — exposure, TLS proxy, backups, upgrades, failure modes 
 | `RROUTER_MAX_ATTEMPTS` | `4` | Upstream sends per request before giving up (1–8) |
 | `RROUTER_SHUTDOWN_GRACE_SECS` | `20` | How long a graceful shutdown waits for live streams |
 | `RROUTER_CORS_ORIGINS` | unset | Comma-separated allowlist; `*` is rejected |
+| `RROUTER_USAGE_RETENTION_DAYS` | `0` | Delete usage/attempts older than N days (0 keeps everything); expired cache rows are swept daily regardless |
 | `RROUTER_CACHE` | `off` | `sqlite` enables the opt-in exact-match response cache |
 | `RROUTER_CACHE_TTL_SECS` | `300` | Cache entry lifetime |
 | `RROUTER_CACHE_MAX_ENTRIES` | `1000` | Cache size bound (oldest evicted) |
