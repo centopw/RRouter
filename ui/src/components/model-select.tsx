@@ -52,6 +52,7 @@ export function ModelSelect({
           {items.map((m) => (
             <option key={m.ref} value={m.ref}>
               {m.id}
+              {m.deprecated ? " (deprecated)" : ""}
               {m.available ? "" : " · unavailable"}
             </option>
           ))}

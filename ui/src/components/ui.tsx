@@ -460,7 +460,13 @@ export function Select({
       if (document.getElementById(listId)?.contains(target)) return;
       close();
     };
-    const onScroll = () => close();
+    // Scrolling *inside* the menu must not dismiss it; only the page moving under the
+    // trigger invalidates the fixed position.
+    const onScroll = (event: Event) => {
+      const target = event.target as Node | null;
+      if (target && document.getElementById(listId)?.contains(target)) return;
+      close();
+    };
     const onResize = () => close();
     document.addEventListener("mousedown", onDown);
     window.addEventListener("scroll", onScroll, true);
@@ -588,7 +594,7 @@ export function Select({
                       className={cx(
                         "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px]",
                         index === active && "bg-[var(--color-selected)]",
-                        option.value === value ? "font-medium text-fg" : "text-ink-soft",
+                        option.value === value ? "font-medium text-fg" : "text-fg",
                         option.disabled && "cursor-not-allowed text-faint",
                       )}
                     >
