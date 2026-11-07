@@ -403,7 +403,12 @@ export function Select({
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const trigger = useRef<HTMLButtonElement>(null);
-  const [rect, setRect] = useState<{ left: number; top: number; width: number } | null>(null);
+  const [rect, setRect] = useState<{
+    left: number;
+    top?: number;
+    bottom?: number;
+    width: number;
+  } | null>(null);
   const listId = useId();
 
   const filtered = useMemo(() => {
@@ -420,10 +425,17 @@ export function Select({
   const place = () => {
     const box = trigger.current?.getBoundingClientRect();
     if (!box) return;
-    const height = Math.min(320, Math.max(120, options.length * 32 + 56));
-    const below = window.innerHeight - box.bottom;
-    const top = below > height + 12 ? box.bottom + 6 : Math.max(8, box.top - height - 6);
-    setRect({ left: box.left, top, width: box.width });
+    const estimated = Math.min(320, options.length * 30 + 52);
+    const opensBelow = window.innerHeight - box.bottom > estimated + 12;
+    setRect({
+      left: box.left,
+      // Anchor the menu by the edge nearest the trigger, so the real content height
+      // never leaves a gap: 6px under the trigger, or 6px above it.
+      ...(opensBelow
+        ? { top: box.bottom + 6 }
+        : { bottom: window.innerHeight - box.top + 6 }),
+      width: box.width,
+    });
   };
 
   const show = () => {
@@ -508,6 +520,7 @@ export function Select({
         className={cx(
           control,
           "flex items-center justify-between gap-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text",
+          open && "border-accent-text",
           className,
         )}
       >
@@ -522,11 +535,15 @@ export function Select({
               id={listId}
               role="listbox"
               aria-label={ariaLabel}
-              style={{ left: rect.left, top: rect.top, width: Math.max(rect.width, 200) }}
-              className="fixed z-[70] overflow-hidden rounded-[8px] border border-line bg-surface shadow-[0_12px_32px_rgba(16,18,20,0.16)]"
+              style={{
+                left: Math.min(rect.left, Math.max(8, window.innerWidth - Math.max(rect.width, 220) - 8)),
+                ...(rect.top !== undefined ? { top: rect.top } : { bottom: rect.bottom }),
+                width: Math.max(rect.width, 220),
+              }}
+              className="fixed z-[70] overflow-hidden rounded-[10px] border border-line-strong bg-surface shadow-[0_16px_40px_rgba(16,18,20,0.18)]"
             >
               {options.length > 4 ? (
-                <div className="flex items-center gap-2 border-b border-line px-2.5 py-2">
+                <div className="flex items-center gap-2 border-b border-line bg-surface px-2.5 py-2 focus-within:border-accent-text">
                   <MagnifyingGlass size={14} aria-hidden className="text-faint" />
                   <input
                     autoFocus
@@ -538,7 +555,8 @@ export function Select({
                     onKeyDown={onKeyDown}
                     placeholder="filter…"
                     aria-label={`filter ${ariaLabel}`}
-                    className="h-6 w-full bg-transparent text-[12.5px] text-fg placeholder:text-faint focus:outline-none"
+                    style={{ outline: "none" }}
+                    className="h-6 w-full bg-transparent text-[12.5px] text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none"
                   />
                   <X
                     size={13}
