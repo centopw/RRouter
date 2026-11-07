@@ -324,6 +324,48 @@ export function RequestDetail({
   );
 }
 
+/** The detail is an overlay: opened by a row click, it never reserves layout space. */
+export function RequestDetailDialog({
+  row,
+  onClose,
+  baseUrl,
+}: {
+  row: UsageEvent;
+  onClose: () => void;
+  baseUrl: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    ref.current?.focus();
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 pt-[8vh]"
+      role="presentation"
+      onClick={onClose}
+    >
+      <div
+        ref={ref}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label="request detail"
+        style={{ outline: "none" }}
+        className="w-full max-w-xl rounded-[var(--radius-card)] border border-line-strong bg-surface shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <RequestDetail row={row} onClose={onClose} baseUrl={baseUrl} />
+      </div>
+    </div>
+  );
+}
+
 function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
     <div className="flex items-center justify-between gap-3 py-2">

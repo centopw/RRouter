@@ -2,6 +2,13 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## Unreleased
+
+### Changed
+- The request detail opens as a dialog when a row is clicked (Activity and Logs) instead of
+  occupying a column of the page; nothing is selected until you click, and Escape or the
+  backdrop closes it.
+
 ## 0.2.3
 
 ### Security

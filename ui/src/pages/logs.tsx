@@ -10,7 +10,7 @@ import {
   type UsageFilters,
 } from "../lib/queries";
 import { download, type Model, type UsageEvent } from "../lib/api";
-import { cacheLabel, RequestDetail } from "./activity/request-log";
+import { cacheLabel, RequestDetailDialog } from "./activity/request-log";
 
 /** Incident review: every request newest first, filtered on the server, paged backwards on demand. */
 
@@ -230,8 +230,8 @@ export default function Logs() {
               )}
             </EmptyState>
           ) : (
-            <div className="flex flex-wrap items-start gap-3 pb-3">
-              <div className="min-w-0 flex-[999_1_620px]">
+            <div className="pb-3">
+              <div>
                 {usage.isError ? (
                   <div className="px-6 pt-3">
                     <ErrorNote error={usage.error} onRetry={() => void usage.refetch()} />
@@ -254,22 +254,17 @@ export default function Logs() {
                   )}
                 </div>
               </div>
-              <div className="min-w-0 flex-[1_1_320px] max-w-[400px] p-3 max-[1100px]:max-w-none max-[1100px]:flex-[1_1_100%]">
-                {selected ? (
-                  <RequestDetail row={selected} baseUrl={baseUrl} onClose={() => setSelectedId(null)} />
-                ) : (
-                  <aside
-                    aria-label="request detail"
-                    className="rounded-[var(--radius-card)] border border-line bg-[var(--color-surface)] px-5 py-6 text-[13px] text-faint"
-                  >
-                    Select a request to inspect its attempts, cost and routing.
-                  </aside>
-                )}
-              </div>
             </div>
           )}
         </div>
       </Card>
+      {selected ? (
+        <RequestDetailDialog
+          row={selected}
+          baseUrl={baseUrl}
+          onClose={() => setSelectedId(null)}
+        />
+      ) : null}
     </div>
   );
 }

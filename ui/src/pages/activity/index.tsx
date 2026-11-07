@@ -28,7 +28,7 @@ import {
 import { useKeys, useUsage, useUsageByModel, useUsageSeries, useUsageSummary } from "../../lib/queries";
 import type { UsageBucket, UsageEvent, UsageModelBucket, UsageSummaryRow } from "../../lib/api";
 import { ModelTable, type ModelRow } from "./model-table";
-import { RequestDetail, RequestLog } from "./request-log";
+import { RequestDetailDialog, RequestLog } from "./request-log";
 import { Onboarding } from "./onboarding";
 
 /** The one id the chart uses when the per-model split is unavailable. */
@@ -73,7 +73,6 @@ export default function Activity() {
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showAll, setShowAll] = useState(false);
-  const [closed, setClosed] = useState(false);
 
   const spec = rangeOf(rangeId);
   const now = Math.floor(Date.now() / 1000);
@@ -114,11 +113,8 @@ export default function Activity() {
       ),
     [events, errorsOnly, modelFilter, keyFilter],
   );
-  // Selection survives refetch by id; a filter that hides the row falls back to
-  // the first visible one. Closing the panel is an explicit "show nothing".
-  const selected = closed
-    ? null
-    : (filtered.find((e) => e.id !== null && e.id === selectedId) ?? filtered[0] ?? null);
+  // A request is opened by clicking a row; nothing is selected until then.
+  const selected = filtered.find((e) => e.id !== null && e.id === selectedId) ?? null;
   const logRows = useMemo(
     () => filtered.map((e) => ({ ...e, model: splitModel(e.provider, e.model).name })),
     [filtered],
@@ -182,7 +178,6 @@ export default function Activity() {
   const selectModel = (ref: string) => {
     setModelFilter((current) => (current === ref ? null : ref));
     setSelectedId(null);
-    setClosed(false);
   };
 
   return (
@@ -216,7 +211,6 @@ export default function Activity() {
                   setModelFilter(incidentRef);
                   setErrorsOnly(true);
                   setSelectedId(null);
-                  setClosed(false);
                 }}
               >
                 View failing requests
@@ -470,8 +464,7 @@ export default function Activity() {
                       onChange={(v) => {
                         setKeyFilter(v || null);
                         setSelectedId(null);
-                        setClosed(false);
-                      }}
+                            }}
                     >
                       <option value="">All keys</option>
                       {(keys.data ?? []).map((k) => (
@@ -548,41 +541,29 @@ export default function Activity() {
                     </div>
                   </div>
                 ) : (
-                  <div className="flex flex-wrap items-start gap-3 pb-3">
-                    <div className="min-w-0 flex-[999_1_620px]">
-                      <RequestLog
-                        rows={logRows}
-                        total={logRows.length}
-                        selectedId={selected?.id ?? null}
-                        onSelect={(row) => {
-                          if (row.id !== null) setSelectedId(row.id);
-                          setClosed(false);
-                        }}
-                        showAll={showAll}
-                        onToggleAll={() => setShowAll((v) => !v)}
-                        empty=""
-                      />
-                    </div>
-                    <div className="min-w-0 flex-[1_1_320px] max-w-[400px] p-3 max-[1100px]:max-w-none max-[1100px]:flex-[1_1_100%]">
-                      {selectedRow ? (
-                        <RequestDetail
-                          row={selectedRow}
-                          baseUrl={baseUrl}
-                          onClose={() => setClosed(true)}
-                        />
-                      ) : (
-                        <aside
-                          aria-label="request detail"
-                          className="rounded-[var(--radius-card)] border border-line bg-[var(--color-surface)] px-5 py-6 text-[13px] text-faint"
-                        >
-                          Select a request to inspect its tokens, latency and routing.
-                        </aside>
-                      )}
-                    </div>
+                  <div className="pb-3">
+                    <RequestLog
+                      rows={logRows}
+                      total={logRows.length}
+                      selectedId={selected?.id ?? null}
+                      onSelect={(row) => {
+                        if (row.id !== null) setSelectedId(row.id);
+                      }}
+                      showAll={showAll}
+                      onToggleAll={() => setShowAll((v) => !v)}
+                      empty=""
+                    />
                   </div>
                 )}
               </div>
             </Card>
+            {selectedRow ? (
+              <RequestDetailDialog
+                row={selectedRow}
+                baseUrl={baseUrl}
+                onClose={() => setSelectedId(null)}
+              />
+            ) : null}
           </>
         ) : null}
       </div>
