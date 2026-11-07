@@ -40,6 +40,7 @@ fn row(key: &ApiKey, spent: u64, spent_micros: u64, models: &[KeyModel]) -> Valu
         "spent_micros": spent_micros,
         "allowed_models": key.allowed_models,
         "expires_at": key.expires_at,
+        "guardrails": key.guardrails,
         "models": models_value(models),
     })
 }
@@ -129,7 +130,8 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
 
 /// `PATCH /api/keys/{id}` — any subset of `is_active`, `rpm`, `tpm`, `budget_tokens`,
 /// `budget_micros`, `budget_window` (`total`, `daily`, `weekly`, `monthly`),
-/// `allowed_models` (null clears), `expires_at` (null clears). Returns the merged row.
+/// `allowed_models` (null clears), `expires_at` (null clears), `guardrails` (null
+/// clears; `{}` is the same as no policy). Returns the merged row.
 pub async fn update(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -308,6 +310,16 @@ fn patch_from(value: &Value) -> Result<ApiKeyPatch, Error> {
                 patch.expires_at = Some(match raw {
                     Value::Null => None,
                     other => Some(i64_field(other, "expires_at")?),
+                });
+            }
+            "guardrails" => {
+                patch.guardrails = Some(match raw {
+                    Value::Null => None,
+                    // `deny_unknown_fields` on the type is deliberate: a misspelled
+                    // policy field must be a 400, not a silently unfiltered key.
+                    other => Some(serde_json::from_value(other.clone()).map_err(|e| {
+                        Error::BadRequest(format!("guardrails: {e}"))
+                    })?),
                 });
             }
             // The dashboard sends the full row back on save; unknown fields are ignored

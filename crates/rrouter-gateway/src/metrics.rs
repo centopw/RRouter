@@ -44,6 +44,27 @@ struct Registry {
     cache_hits: u64,
     /// Lookups that found nothing servable (absent, expired, or unreadable).
     cache_misses: u64,
+    /// Requests refused by a key's guardrails, split by the stage that caught them.
+    guardrail_input_blocks: u64,
+    guardrail_output_blocks: u64,
+}
+
+/// Which side of a request a guardrail refused. The metric labels this `stage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// The prompt (system text plus message text) was too long or contained a term.
+    Input,
+    /// The response text contained a blocked term; the client never saw it.
+    Output,
+}
+
+impl Stage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        }
+    }
 }
 
 /// Only poisoned by a panic while counting; the numbers are still readable, so recover.
@@ -85,6 +106,15 @@ pub fn cache_hit() {
 /// One exact-match cache lookup that found nothing servable and went upstream.
 pub fn cache_miss() {
     lock().cache_misses += 1;
+}
+
+/// One request a key's guardrails refused, at the stage that caught it.
+pub fn guardrail_blocked(stage: Stage) {
+    let mut reg = lock();
+    match stage {
+        Stage::Input => reg.guardrail_input_blocks += 1,
+        Stage::Output => reg.guardrail_output_blocks += 1,
+    }
 }
 
 /// Replace an unknown label payload with [`UNKNOWN`]; everything else is escaped at
@@ -154,6 +184,21 @@ pub fn render(version: &str, open_connections: &[(String, bool)]) -> String {
         let labels = format!("provider=\"{}\",status=\"{status}\"", escape(provider));
         out.push_str(&format!("rrouter_attempts_total{{{labels}}} {count}\n"));
     }
+
+    out.push_str("# HELP rrouter_guardrail_blocks_total Requests refused by an API key's guardrails, by stage.\n");
+    out.push_str("# TYPE rrouter_guardrail_blocks_total counter\n");
+    // Both stages are always exposed, so a scrape answers "how many" without a
+    // second query and a dashboard series does not appear only when it first fires.
+    out.push_str(&format!(
+        "rrouter_guardrail_blocks_total{{stage=\"{}\"}} {}\n",
+        Stage::Input.as_str(),
+        reg.guardrail_input_blocks
+    ));
+    out.push_str(&format!(
+        "rrouter_guardrail_blocks_total{{stage=\"{}\"}} {}\n",
+        Stage::Output.as_str(),
+        reg.guardrail_output_blocks
+    ));
 
     out.push_str("# HELP rrouter_cache_hits_total Non-streaming requests served from the exact-match cache.\n");
     out.push_str("# TYPE rrouter_cache_hits_total counter\n");

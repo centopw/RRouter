@@ -19,17 +19,18 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use rrouter_auth::{Credentials, ProviderSpec};
-use rrouter_core::{ChatRequest, ChatResponse, Dialect, Error, Result, StreamEvent, Usage};
+use rrouter_core::{ChatRequest, ChatResponse, Dialect, Error, Part, Result, StreamEvent, Usage};
 use rrouter_router::{Candidate, Plan};
-use rrouter_store::{AttemptRecord, UsageRecord};
+use rrouter_store::{AttemptRecord, Guardrails, UsageRecord};
 use serde_json::Value;
 use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 
 use crate::config::CacheMode;
 use crate::error::{error_frame, error_response, not_implemented};
+use crate::metrics::Stage;
 use crate::overloaded_response;
-use crate::state::{dialect_of, AppState, Caller, Slot};
+use crate::state::{check_prompt, dialect_of, prompt_text, AppState, Caller, Slot};
 
 /// Request body limit: a 100k-token request plus base64 images still fits.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -202,6 +203,15 @@ async fn special_inner(
     // routed ref both see the model this key actually asked for.
     let model = state.mapped_model(caller.key_id(), &requested).await?;
     trace.set_model(&model);
+    // These endpoints forward a provider-native body, so the prompt is read through the
+    // canonical parser — but only for a key that has a policy: a body these parsers do
+    // not model must keep streaming through untouched for every other key. Only the
+    // input side applies here: a count/compaction reply is provider-shaped JSON that
+    // never becomes a canonical response, so `scan_output` guards chat responses only.
+    if caller.guardrails().is_some() {
+        let canonical = rrouter_translate::parse_request(kind.dialect(), &body)?;
+        check_prompt(&caller, &prompt_text(&canonical))?;
+    }
     state.admit(&caller, &model).await?;
     let plan = state
         .planner
@@ -250,6 +260,8 @@ async fn special_inner(
                 started,
                 ttft: None,
                 streamed: false,
+                status: 200,
+                error: None,
             },
         );
     }
@@ -899,6 +911,8 @@ fn record_passthrough(
             started,
             ttft: None,
             streamed: false,
+            status: 200,
+            error: None,
         },
     );
 }
@@ -923,6 +937,10 @@ async fn handle(
     // This key's model mapping is one hop that runs before alias/combo resolution.
     let model = state.mapped_model(caller.key_id(), &canonical.model).await?;
     trace.set_model(&model);
+    // Guardrails run on the canonical text after authentication and before any
+    // governance bookkeeping or dispatch: a refused prompt costs no provider call, no
+    // rate-limit slot and no cache entry.
+    check_prompt(&caller, &prompt_text(&canonical))?;
     // Governance runs before planning: an inactive/expired key, a model outside the
     // allowlist, or an exhausted quota must not reach a provider.
     state.admit(&caller, &model).await?;
@@ -974,6 +992,29 @@ async fn handle(
     if let Some(key) = &cache {
         match state.store.cache_get(&key.hash, crate::now_unix()).await {
             Ok(Some(body)) => {
+                // A stored body is client-facing JSON: the text view for this path is
+                // the serialized response, so a response cached before this key's policy
+                // existed (or by another key) is still refused here rather than served.
+                if let Some(policy) = caller.output_guardrails() {
+                    guard_output(
+                        state,
+                        policy,
+                        &body,
+                        Recorded {
+                            candidate: &plan.candidates[0],
+                            model: &plan.model,
+                            endpoint: endpoint_of(inbound),
+                            usage: Usage::default(),
+                            key: key_id,
+                            request_id: trace.request_id,
+                            started,
+                            ttft: None,
+                            streamed: false,
+                            status: 200,
+                            error: None,
+                        },
+                    )?;
+                }
                 crate::metrics::cache_hit();
                 trace.set_provider(&plan.candidates[0].provider);
                 record_cache_hit(
@@ -1009,27 +1050,39 @@ async fn handle(
                 client_model: candidate.model.clone(),
             };
             let assembled = reassemble(&open, bytes).await?;
-            record_once(
-                state,
-                Recorded {
-                    candidate: &candidate,
-                    model: &plan.model,
-                    endpoint: endpoint_of(inbound),
-                    usage: assembled.usage,
-                    key: key_id,
-                    request_id: trace.request_id,
-                    started,
-                    ttft: None,
-                    streamed: false,
-                },
-            );
+            let recorded = Recorded {
+                candidate: &candidate,
+                model: &plan.model,
+                endpoint: endpoint_of(inbound),
+                usage: assembled.usage,
+                key: key_id,
+                request_id: trace.request_id,
+                started,
+                ttft: None,
+                streamed: false,
+                status: 200,
+                error: None,
+            };
+            // Scan before the row is written, so a refusal is logged as one 403 row
+            // instead of a 200 that the client never received.
+            if let Some(policy) = caller.output_guardrails() {
+                guard_output(state, policy, &response_text(&assembled), recorded)?;
+            }
+            record_once(state, recorded);
             (
                 candidate,
                 rrouter_translate::build_response(inbound, &assembled)?,
             )
         } else {
-            let (candidate, resp) =
-                complete_traced(state, inbound, &body, key_id, trace).await?;
+            let (candidate, resp) = complete_traced(
+                state,
+                inbound,
+                &body,
+                key_id,
+                caller.output_guardrails(),
+                trace,
+            )
+            .await?;
             (candidate, rrouter_translate::build_response(inbound, &resp)?)
         };
 
@@ -1089,6 +1142,7 @@ async fn handle(
         },
         open,
         bytes,
+        caller.output_guardrails().cloned(),
     ))
 }
 
@@ -1114,20 +1168,26 @@ pub async fn complete_for(
     key: Option<Uuid>,
 ) -> Result<rrouter_core::ChatResponse> {
     // A probe is still a request: it gets its own id, its attempt rows and its usage
-    // row, so nothing it does is invisible in the log.
+    // row, so nothing it does is invisible in the log. It carries no key's policy: the
+    // probe is the operator's own traffic, not a team's.
     let trace = RequestTrace::new(Uuid::new_v4());
-    complete_traced(state, inbound, body, key, &trace)
+    complete_traced(state, inbound, body, key, None, &trace)
         .await
         .map(|(_, resp)| resp)
 }
 
 /// Both the candidate that answered and its canonical response. The candidate is what
 /// lets the caller decide whether the answer may be cached under the key it planned.
+///
+/// `guardrails` is the paying key's output policy: scanning happens here, before the
+/// usage row is written, so a refusal is one `403` row and never a `200` that the
+/// client did not receive.
 async fn complete_traced(
     state: &Arc<AppState>,
     inbound: Dialect,
     body: &Value,
     key: Option<Uuid>,
+    guardrails: Option<&Guardrails>,
     trace: &RequestTrace,
 ) -> Result<(Candidate, rrouter_core::ChatResponse)> {
     trace.set_key(key);
@@ -1160,20 +1220,23 @@ async fn complete_traced(
         let outcome = state.dispatcher.run(&plan, |c| attempt.send_once(c)).await?;
         let candidate = outcome.candidate.clone();
         let resp = outcome.result?;
-        record_once(
-            state,
-            Recorded {
-                candidate: &candidate,
-                model: &plan.model,
-                endpoint: endpoint_of(inbound),
-                usage: resp.usage,
-                key,
-                request_id: trace.request_id,
-                started,
-                ttft: None,
-                streamed: false,
-            },
-        );
+        let recorded = Recorded {
+            candidate: &candidate,
+            model: &plan.model,
+            endpoint: endpoint_of(inbound),
+            usage: resp.usage,
+            key,
+            request_id: trace.request_id,
+            started,
+            ttft: None,
+            streamed: false,
+            status: 200,
+            error: None,
+        };
+        if let Some(policy) = guardrails {
+            guard_output(state, policy, &response_text(&resp), recorded)?;
+        }
+        record_once(state, recorded);
         return Ok((candidate, resp));
     }
 
@@ -1186,20 +1249,23 @@ async fn complete_traced(
         client_model: candidate.model.clone(),
     };
     let assembled = reassemble(&open, bytes).await?;
-    record_once(
-        state,
-        Recorded {
-            candidate: &candidate,
-            model: &plan.model,
-            endpoint: endpoint_of(inbound),
-            usage: assembled.usage,
-            key,
-            request_id: trace.request_id,
-            started,
-            ttft: None,
-            streamed: false,
-        },
-    );
+    let recorded = Recorded {
+        candidate: &candidate,
+        model: &plan.model,
+        endpoint: endpoint_of(inbound),
+        usage: assembled.usage,
+        key,
+        request_id: trace.request_id,
+        started,
+        ttft: None,
+        streamed: false,
+        status: 200,
+        error: None,
+    };
+    if let Some(policy) = guardrails {
+        guard_output(state, policy, &response_text(&assembled), recorded)?;
+    }
+    record_once(state, recorded);
     Ok((candidate, assembled))
 }
 
@@ -1968,10 +2034,21 @@ struct Wire {
     /// When the first model output (not the envelope) was decoded: the honest end of
     /// "time to first token".
     first_output: Option<Instant>,
+    /// The key's output policy, when the response text must be scanned.
+    guardrails: Option<Guardrails>,
+    /// The message the client was sent when a guardrail ended the stream. `Some` means
+    /// nothing else was forwarded and the usage row says `403`.
+    blocked: Option<String>,
 }
 
 impl Wire {
-    fn new(inbound: Dialect, upstream: Dialect, client_model: &str, incoming: ByteStream) -> Self {
+    fn new(
+        inbound: Dialect,
+        upstream: Dialect,
+        client_model: &str,
+        incoming: ByteStream,
+        guardrails: Option<Guardrails>,
+    ) -> Self {
         Self {
             incoming,
             decoder: rrouter_translate::StreamDecoder::new(upstream, client_model),
@@ -1982,7 +2059,27 @@ impl Wire {
             finished: false,
             failed: false,
             first_output: None,
+            guardrails,
+            blocked: None,
         }
+    }
+
+    /// Judge one text delta against the output policy.
+    ///
+    /// Matching is per delta, because a delta is all that exists at that instant: bytes
+    /// already written cannot be recalled, and buffering the whole response to catch a
+    /// term split across two frames would defeat streaming. On a hit the offending delta
+    /// is dropped whole — the conservative direction — and the caller emits one terminal
+    /// error frame and stops.
+    fn blocked_by(&self, event: &StreamEvent) -> Option<String> {
+        let policy = self.guardrails.as_ref()?;
+        let text = match event {
+            StreamEvent::TextDelta(text) | StreamEvent::ReasoningDelta(text) => text,
+            _ => return None,
+        };
+        policy
+            .hit(text)
+            .map(|term| format!("the response contains the blocked term {term:?}"))
     }
 
     fn drain_events(&mut self, events: Vec<StreamEvent>) -> Option<Bytes> {
@@ -1999,6 +2096,19 @@ impl Wire {
                 )
             {
                 self.first_output = Some(Instant::now());
+            }
+            if let Some(message) = self.blocked_by(&ev) {
+                // Everything still queued belongs to the response after the hit, so it is
+                // dropped instead of encoded. `failed` ends the stream after this frame.
+                crate::metrics::guardrail_blocked(Stage::Output);
+                self.blocked = Some(message.clone());
+                self.pending.clear();
+                self.failed = true;
+                let err = Error::Forbidden {
+                    code: "output_blocked",
+                    message,
+                };
+                return Some(join(out, Bytes::from(error_frame(self.inbound, &err))));
             }
             if let StreamEvent::Done { usage, .. } = &ev {
                 self.usage = Some(usage.unwrap_or_default());
@@ -2104,6 +2214,12 @@ impl ResponseStream {
             .inner
             .first_output
             .map(|at| at.saturating_duration_since(pending.started));
+        // A stream a guardrail stopped is a refusal that happens to have a body: the row
+        // says 403 with the reason the client read in the terminal error frame.
+        let (status, error) = match self.inner.blocked.as_deref() {
+            Some(message) => (403, Some(message)),
+            None => (200, None),
+        };
         record_once(
             &pending.state,
             Recorded {
@@ -2116,6 +2232,8 @@ impl ResponseStream {
                 started: pending.started,
                 ttft,
                 streamed: true,
+                status,
+                error,
             },
         );
         if !ok {
@@ -2155,8 +2273,9 @@ fn stream_response(
     pending: PendingRecord,
     open: StreamRoute,
     bytes: ByteStream,
+    guardrails: Option<Guardrails>,
 ) -> Response {
-    let wire = Wire::new(inbound, open.upstream, &open.client_model, bytes);
+    let wire = Wire::new(inbound, open.upstream, &open.client_model, bytes, guardrails);
     let stream = ResponseStream {
         inner: wire,
         pending: Some(pending),
@@ -2182,6 +2301,10 @@ fn endpoint_of(dialect: Dialect) -> &'static str {
 }
 
 /// One finished request, ready to turn into a usage row.
+///
+/// `Copy` so a refusal can record the row it just described (`..recorded`) rather than
+/// rebuilding it field by field.
+#[derive(Clone, Copy)]
 struct Recorded<'a> {
     candidate: &'a Candidate,
     model: &'a str,
@@ -2195,6 +2318,10 @@ struct Recorded<'a> {
     /// Time to the first model output; `None` when the client got one JSON body.
     ttft: Option<std::time::Duration>,
     streamed: bool,
+    /// `200` for a served request, `403` when a guardrail refused the response.
+    status: u16,
+    /// What the client was told, when the request failed. Prompt text never goes here.
+    error: Option<&'a str>,
 }
 
 fn record_once(state: &AppState, r: Recorded<'_>) {
@@ -2227,11 +2354,55 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
             .ttft
             .map(|d| d.as_millis().min(u32::MAX as u128) as u32)
             .unwrap_or(0),
-        status: 200,
+        status: r.status,
         streamed: r.streamed,
-        error: None,
+        error: r.error.map(str::to_owned),
     };
     spawn_record(state, rec);
+}
+
+/// Output side of a key's guardrails, for the non-streaming paths.
+///
+/// `text` is what the client would read (see [`response_text`]). On a hit the request is
+/// refused and the row says `403` with the reason; the caller returns the error before
+/// any response is built, so the offending text is never serialized nor cached.
+fn guard_output(
+    state: &AppState,
+    policy: &Guardrails,
+    text: &str,
+    recorded: Recorded<'_>,
+) -> Result<()> {
+    let Some(term) = policy.hit(text) else {
+        return Ok(());
+    };
+    crate::metrics::guardrail_blocked(Stage::Output);
+    let message = format!("the response contains the blocked term {term:?}");
+    record_once(
+        state,
+        Recorded {
+            status: 403,
+            error: Some(&message),
+            ..recorded
+        },
+    );
+    Err(Error::Forbidden {
+        code: "output_blocked",
+        message,
+    })
+}
+
+/// The text a client actually reads from a canonical response: every text and reasoning
+/// part. Tool calls are protocol payloads, not prose, and are never scanned.
+fn response_text(response: &ChatResponse) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for part in &response.parts {
+        match part {
+            Part::Text(text) => segments.push(text),
+            Part::Reasoning { text, .. } => segments.push(text),
+            _ => {}
+        }
+    }
+    segments.join("\n")
 }
 
 fn spawn_record(state: &AppState, mut rec: UsageRecord) {
@@ -2374,6 +2545,8 @@ async fn embeddings_inner(
                     started,
                     ttft: None,
                     streamed: false,
+                    status: 200,
+                    error: None,
                 },
             );
         }

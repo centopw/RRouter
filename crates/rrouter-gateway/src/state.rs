@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use axum::http::HeaderMap;
 use rrouter_core::{Dialect, Error, Result};
 use rrouter_router::Catalog;
-use rrouter_store::{ApiKey, Store};
+use rrouter_store::{ApiKey, Guardrails, Store};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -322,6 +322,85 @@ impl Caller {
             Self::Key(key) => Some(key.id),
         }
     }
+
+    /// This caller's guardrail policy, if it has one. Anonymous traffic never does.
+    pub fn guardrails(&self) -> Option<&Guardrails> {
+        match self {
+            Self::Anonymous => None,
+            Self::Key(key) => key.guardrails.as_ref(),
+        }
+    }
+
+    /// The policy that governs the response side: `scan_output` with no blocked terms
+    /// is a no-op, so it is reported as "no policy" rather than paying for a scan.
+    pub fn output_guardrails(&self) -> Option<&Guardrails> {
+        self.guardrails().filter(|g| g.scans_output())
+    }
+
+    /// The key id for a refusal message; anonymous traffic cannot be refused here.
+    fn key_id_for_refusal(&self) -> String {
+        match self {
+            Self::Anonymous => "-".to_string(),
+            Self::Key(key) => key.id.to_string(),
+        }
+    }
+}
+
+/// The prompt text a guardrail counts and searches: the system prompt plus every
+/// message's text parts, joined by a newline.
+///
+/// Tool payloads are ignored on purpose — a tool result is machine data (JSON
+/// arguments, function output), not prose a team typed, and scanning it would block
+/// requests for data the client itself produced. Images carry no text. The newline
+/// separator keeps a blocked term from matching across two unrelated parts, and it is
+/// part of the count so the number an operator sees is the number that was measured.
+pub fn prompt_text(request: &rrouter_core::ChatRequest) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    if let Some(system) = &request.system {
+        segments.push(system);
+    }
+    for message in &request.messages {
+        for part in &message.parts {
+            if let rrouter_core::Part::Text(text) = part {
+                segments.push(text);
+            }
+        }
+    }
+    segments.join("\n")
+}
+
+/// Input side of a key's guardrails. Runs after authentication and before planning, so
+/// a refused prompt never reaches a provider, never consumes a rate-limit slot and
+/// never fills the response cache. No policy → no work.
+pub fn check_prompt(caller: &Caller, prompt: &str) -> Result<()> {
+    let Some(policy) = caller.guardrails() else {
+        return Ok(());
+    };
+    if let Some(max) = policy.max_prompt_chars {
+        let chars = prompt.chars().count();
+        if chars > max {
+            crate::metrics::guardrail_blocked(crate::metrics::Stage::Input);
+            return Err(Error::Forbidden {
+                code: "prompt_too_long",
+                message: format!(
+                    "api key {} limits prompts to {max} characters; this one has {chars}",
+                    caller.key_id_for_refusal()
+                ),
+            });
+        }
+    }
+    if let Some(term) = policy.hit(prompt) {
+        crate::metrics::guardrail_blocked(crate::metrics::Stage::Input);
+        return Err(Error::Forbidden {
+            code: "guardrail_blocked",
+            message: format!(
+                "api key {} refused the prompt: it contains the blocked term {:?}",
+                caller.key_id_for_refusal(),
+                term
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Micro-USD as dollars, for the message an operator reads. Four decimals is the

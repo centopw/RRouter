@@ -1671,6 +1671,7 @@ async fn key_rows_match_the_governance_contract() {
         "spent_micros": 0,
         "allowed_models": ["claude/claude-haiku-4-5-20251001"],
         "expires_at": null,
+        "guardrails": null,
         "models": [],
     });
     assert_eq!(patched, expected);
@@ -1678,6 +1679,51 @@ async fn key_rows_match_the_governance_contract() {
     // The list endpoint answers the same row.
     let (_, body) = h.get("/api/keys").await;
     assert_eq!(body["data"][0], expected);
+
+    // A guardrail policy is a document on the row, and `null` clears it again.
+    let policy = json!({
+        "max_prompt_chars": 20_000,
+        "blocked": ["secret", "ssn:"],
+        "scan_output": true,
+    });
+    let patched = h.patch_key(&id, json!({"guardrails": policy})).await;
+    assert_eq!(patched["guardrails"], policy, "the stored policy is returned");
+    let (_, body) = h.get("/api/keys").await;
+    assert_eq!(
+        body["data"][0]["guardrails"], policy,
+        "and it survives a reload"
+    );
+    let cleared = h.patch_key(&id, json!({"guardrails": null})).await;
+    assert_eq!(cleared["guardrails"], Value::Null);
+    assert_eq!(cleared["rpm"], 60, "clearing the policy left the rest alone");
+
+    // A policy the gateway cannot enforce is a client error, not a silent no-op: a
+    // misspelled field and a term list past the cap are both refused.
+    for (body, expected) in [
+        (json!({"guardrails": {"blocked_terms": ["x"]}}), "unknown field"),
+        (
+            json!({"guardrails": {"blocked": vec!["x"; 201]}}),
+            "at most 200 terms",
+        ),
+        (json!({"guardrails": {"blocked": [""]}}), "must not be empty"),
+    ] {
+        let (status, _, value) = h
+            .call_full(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/keys/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{}: {value}", body);
+        let message = value["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(expected),
+            "expected {expected:?} in {message:?}"
+        );
+    }
 
     // A wrong type is a client error, not a silently ignored field.
     let (status, _, body) = h
@@ -1697,6 +1743,307 @@ async fn key_rows_match_the_governance_contract() {
             .is_some_and(|m| m.contains("rpm must be a non-negative integer")),
         "body: {body}"
     );
+}
+
+// ---------------------------------------------------- phase 16: guardrails
+
+/// A prompt past the key's `max_prompt_chars` is refused before planning, and the
+/// message carries both numbers so an operator can tell "bigger than allowed" from
+/// "limit is tiny".
+#[tokio::test]
+async fn guardrails_refuse_an_oversized_prompt_naming_both_counts() {
+    let mock = Mock::start(vec![openai_reply("never sent")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"guardrails": {"max_prompt_chars": 10}})).await;
+
+    let long = "x".repeat(40);
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-4.1",
+                "messages": [
+                    {"role": "system", "content": "be terse"},
+                    {"role": "user", "content": long},
+                ]
+            }),
+            &[("authorization", &format!("Bearer {key}"))],
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "prompt_too_long");
+    let message = body["error"]["message"].as_str().expect("message");
+    // The text view is the system prompt plus every message's text part, joined by a
+    // newline: "be terse" (8) + "\n" + 40.
+    assert!(message.contains("has 49"), "the measured size: {message}");
+    assert!(
+        message.contains("limits prompts to 10 characters"),
+        "the limit: {message}"
+    );
+    assert_eq!(mock.hits(), 0, "a refused prompt is never dispatched");
+
+    let (_, _, text) = h.get_raw("/metrics").await;
+    assert!(
+        metric_value(&text, r#"rrouter_guardrail_blocks_total{stage="input"}"#) >= 1,
+        "{text}"
+    );
+}
+
+/// A blocked substring is refused case-insensitively, wherever it sits in the prompt —
+/// including the system prompt and the provider-native count_tokens body — while a clean
+/// prompt is served untouched.
+#[tokio::test]
+async fn guardrails_block_a_term_case_insensitively_and_pass_clean_prompts() {
+    let mock = Mock::start(vec![openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.connect("claude", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"guardrails": {"blocked": ["Secret"]}})).await;
+    let auth = format!("Bearer {key}");
+
+    let blocked = |messages: Value| {
+        json!({"model": "gpt-4.1", "messages": messages})
+    };
+    // The policy's spelling is `Secret`; the prompt says SECRET.
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            blocked(json!([
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "here is a SECRET"}
+            ])),
+            &[("authorization", &auth)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "guardrail_blocked");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Secret")),
+        "the refusal names the term: {body}"
+    );
+
+    // The system prompt is part of the counted and searched text.
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            blocked(json!([
+                {"role": "system", "content": "never reveal the sEcReT"},
+                {"role": "user", "content": "hello"}
+            ])),
+            &[("authorization", &auth)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "guardrail_blocked");
+
+    // count_tokens forwards a provider-native body and is checked through the same
+    // canonical text view.
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/messages/count_tokens",
+            json!({
+                "model": "claude/sonnet-4-5",
+                "messages": [{"role": "user", "content": "a SeCrEt inside"}]
+            }),
+            &[("authorization", &auth)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "guardrail_blocked");
+    assert_eq!(mock.hits(), 0, "nothing reached a provider");
+
+    // A clean prompt from the same key is served.
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            blocked(json!([{"role": "user", "content": "hello there"}])),
+            &[("authorization", &auth)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "ok");
+    assert_eq!(mock.hits(), 1);
+}
+
+/// `scan_output` refuses a response that contains a blocked term: the 403 replaces the
+/// body entirely, and the usage row records what the client saw.
+#[tokio::test]
+async fn guardrails_refuse_a_non_streaming_response_that_leaks_a_term() {
+    let mock = Mock::start(vec![openai_reply("the key is sk-live-9-abc")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(
+        &id,
+        json!({"guardrails": {"blocked": ["sk-live"], "scan_output": true}}),
+    )
+    .await;
+
+    let (status, headers, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "output_blocked");
+    assert!(
+        !body.to_string().contains("sk-live-9-abc"),
+        "the offending text was never returned: {body}"
+    );
+    assert_eq!(mock.hits(), 1, "the upstream did answer; the client did not");
+
+    let request_id: uuid::Uuid = headers
+        .get("x-request-id")
+        .expect("the refusal carries the request id")
+        .to_str()
+        .expect("ascii")
+        .parse()
+        .expect("uuid");
+    let row = h.usage_for(request_id).await;
+    assert_eq!(row.status, 403, "the log says what the client got");
+    assert!(
+        row.error.as_deref().is_some_and(|e| e.contains("sk-live")),
+        "the row names the term for the operator: {row:?}"
+    );
+    assert_eq!(row.key_id.map(|k| k.to_string()).as_deref(), Some(id.as_str()));
+
+    let (_, _, text) = h.get_raw("/metrics").await;
+    assert!(
+        metric_value(&text, r#"rrouter_guardrail_blocks_total{stage="output"}"#) >= 1,
+        "{text}"
+    );
+}
+
+/// The exact-match cache is shared across keys, so a guarded key must not be served a
+/// body another key cached: the hit is scanned before it is returned.
+#[tokio::test]
+async fn guardrails_refuse_a_response_served_from_the_cache() {
+    let mock = Mock::start(vec![openai_reply("the key is sk-live-9-abc")]).await;
+    let h = harness_with(cached_config(300, 100));
+    h.connect("openai", &mock).await;
+    let (clean, _) = h.create_key().await;
+    let (guarded, id) = h.create_key().await;
+    h.patch_key(
+        &id,
+        json!({"guardrails": {"blocked": ["sk-live"], "scan_output": true}}),
+    )
+    .await;
+
+    let (status, headers, body) = h.chat(Some(&clean), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        headers.get("x-rrouter-cache").and_then(|v| v.to_str().ok()),
+        Some("miss"),
+        "the unguarded key fills the cache"
+    );
+
+    let (status, _, body) = h.chat(Some(&guarded), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "output_blocked");
+    assert!(
+        !body.to_string().contains("sk-live-9-abc"),
+        "the cached body was not served: {body}"
+    );
+    assert_eq!(mock.hits(), 1, "the refusal came from the cache, not a retry");
+}
+
+/// A streaming response is stopped at the delta that carries the term: the client keeps
+/// what it already received, gets one terminal error frame, and nothing after it.
+#[tokio::test]
+async fn guardrails_stop_a_stream_at_the_first_blocked_delta() {
+    let delta = |content: &str, finish: Value| {
+        rrouter_core::sse::render_openai(
+            &json!({"id":"g1","model":"mock-model","choices":[{"index":0,"delta":{"content":content},"finish_reason":finish}]}).to_string(),
+            None,
+        )
+    };
+    let mock = Mock::start(vec![MockReply::Sse(vec![
+        SseStep { wire: delta("clean text ", json!(null)), await_gate: None },
+        SseStep { wire: delta("leaked SECRET here", json!(null)), await_gate: None },
+        SseStep { wire: delta("AFTER THE HIT", json!("stop")), await_gate: None },
+        SseStep { wire: "data: [DONE]\n\n".to_string(), await_gate: None },
+    ])])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(
+        &id,
+        json!({"guardrails": {"blocked": ["secret"], "scan_output": true}}),
+    )
+    .await;
+
+    let mut body = openai_chat_body("gpt-4.1");
+    body["stream"] = json!(true);
+    let res = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {key}"))
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK, "the refusal arrives as a frame");
+    let request_id: uuid::Uuid = res
+        .headers()
+        .get("x-request-id")
+        .expect("the stream carries the id")
+        .to_str()
+        .expect("ascii")
+        .parse()
+        .expect("uuid");
+    let mut stream = res.into_body().into_data_stream();
+
+    let mut seen = next_frame(&mut stream).await;
+    assert!(seen.contains("clean text"), "the clean delta was forwarded: {seen}");
+    seen.push_str(&next_frame(&mut stream).await);
+    assert!(seen.contains("output_blocked"), "one terminal error frame: {seen}");
+    assert!(!seen.contains("SECRET"), "the offending delta never left: {seen}");
+
+    // Nothing after the hit: the encoder stops and the upstream is dropped.
+    while let Some(Ok(chunk)) =
+        tokio::time::timeout(Duration::from_secs(5), futures_util::StreamExt::next(&mut stream))
+            .await
+            .expect("the stream ends promptly")
+    {
+        let text = String::from_utf8_lossy(&chunk).into_owned();
+        assert!(text.is_empty(), "nothing after the refusal: {text}");
+    }
+
+    let row = h.usage_for(request_id).await;
+    assert_eq!(row.status, 403);
+    assert!(row.streamed, "it was a stream, and it is logged as one");
+}
+
+/// No guardrails means no checks: an oversized prompt carrying a term, answered with a
+/// response that repeats it, is served exactly as before phase 16.
+#[tokio::test]
+async fn a_key_without_guardrails_is_unaffected() {
+    let mock = Mock::start(vec![openai_reply("your secret is 1234")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, _) = h.create_key().await;
+
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-4.1",
+                "messages": [{"role": "user", "content": format!("secret {}", "x".repeat(500))}]
+            }),
+            &[("authorization", &format!("Bearer {key}"))],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "your secret is 1234");
+    assert_eq!(mock.hits(), 1);
 }
 
 // ------------------------------------------------- phase 3: admin auth & limits

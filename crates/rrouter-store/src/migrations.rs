@@ -8,10 +8,20 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 13;
+pub(crate) const SCHEMA_VERSION: i64 = 14;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
+const MIGRATIONS: &[&str] = &[
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14,
+];
+
+/// V14: per-key guardrails. One JSON blob rather than a column per field: the policy is
+/// a small document an operator edits as a unit, and every field is optional, so NULL
+/// (no policy) and `{}` (also no policy) mean the same thing — the store normalises the
+/// empty document to NULL so there is only one spelling.
+const V14: &str = r#"
+ALTER TABLE api_keys ADD COLUMN guardrails TEXT;
+"#;
 
 /// V13: retention. The sweep deletes `attempts` by `ts`, which the v8 index
 /// (`request_id, attempt`) cannot serve, so without this every sweep scans the table.

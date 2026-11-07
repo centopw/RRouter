@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection as Sql, OptionalExtension, Row};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -70,6 +71,98 @@ pub struct ApiKey {
     pub expires_at: Option<i64>,
     /// Span of time the two budgets are measured over; see [`BudgetWindow`].
     pub budget_window: BudgetWindow,
+    /// Traffic policy; `None` = no checks at all for this key.
+    pub guardrails: Option<Guardrails>,
+}
+
+/// Policy checks applied to one key's traffic: a prompt-size cap, blocked substrings, and
+/// whether the response is scanned for them too.
+///
+/// Every field is optional and the empty document is equivalent to "no policy" — the
+/// store turns `{}` into NULL, so "no guardrails" has exactly one representation. The
+/// checks themselves live in the gateway; this type only defines the shape and the
+/// invariants a stored policy must satisfy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Guardrails {
+    /// Refuse a request whose prompt text is longer than this many characters. `0`
+    /// means "no prompt at all", which is a policy, not "unlimited": unlimited is
+    /// `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_prompt_chars: Option<usize>,
+    /// Case-insensitive substrings that refuse the request (prompt) or the response
+    /// (when `scan_output`). Plain substrings, no regex engine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<String>,
+    /// Scan response text for `blocked` too. Without `blocked` terms this does nothing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scan_output: bool,
+}
+
+/// `skip_serializing_if` for a flag that is off by default.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl Guardrails {
+    /// Most blocked terms one key may carry: a policy that needs more is a content
+    /// filter, and a 200-term list is already an order of magnitude past useful.
+    pub const MAX_BLOCKED_TERMS: usize = 200;
+    /// Longest single blocked term, in characters.
+    pub const MAX_TERM_CHARS: usize = 200;
+
+    /// Does this policy do anything at all? An all-default document is stored as NULL.
+    pub fn is_empty(&self) -> bool {
+        self.max_prompt_chars.is_none() && self.blocked.is_empty() && !self.scan_output
+    }
+
+    /// Reject a policy the gateway cannot enforce as written. A bad policy is a client
+    /// error: silently dropping a term would leave an operator believing traffic is
+    /// filtered when it is not.
+    pub fn validate(&self) -> Result<()> {
+        if self.blocked.len() > Self::MAX_BLOCKED_TERMS {
+            return Err(Error::BadRequest(format!(
+                "guardrails.blocked allows at most {} terms, got {}",
+                Self::MAX_BLOCKED_TERMS,
+                self.blocked.len()
+            )));
+        }
+        for term in &self.blocked {
+            if term.is_empty() {
+                return Err(Error::BadRequest(
+                    "guardrails.blocked terms must not be empty".into(),
+                ));
+            }
+            if term.chars().count() > Self::MAX_TERM_CHARS {
+                return Err(Error::BadRequest(format!(
+                    "guardrails.blocked terms are limited to {} characters",
+                    Self::MAX_TERM_CHARS
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Does the response side need scanning? `scan_output` without terms is a no-op.
+    pub fn scans_output(&self) -> bool {
+        self.scan_output && !self.blocked.is_empty()
+    }
+
+    /// The first blocked term contained in `text`, case-insensitively.
+    ///
+    /// Lowercasing both sides is what makes the match Unicode-safe: comparing bytes or
+    /// ASCII-only case folding would miss `Ä`/`ä`. Returned as written in the policy so
+    /// the refusal can name the term the operator configured.
+    pub fn hit(&self, text: &str) -> Option<&str> {
+        if self.blocked.is_empty() {
+            return None;
+        }
+        let haystack = text.to_lowercase();
+        self.blocked
+            .iter()
+            .find(|term| haystack.contains(&term.to_lowercase()))
+            .map(String::as_str)
+    }
 }
 
 /// A partial update of an [`ApiKey`]. Absent = leave alone; `Some(None)` = clear a
@@ -87,6 +180,9 @@ pub struct ApiKeyPatch {
     /// `Some(None)` clears the expiry (back to never).
     pub expires_at: Option<Option<i64>>,
     pub budget_window: Option<BudgetWindow>,
+    /// `Some(None)` clears the policy. An empty document is normalised to `None`, so
+    /// `{}` and `null` leave a key with no guardrails.
+    pub guardrails: Option<Option<Guardrails>>,
 }
 
 impl ApiKeyPatch {
@@ -116,6 +212,11 @@ impl ApiKeyPatch {
         }
         if let Some(v) = self.budget_window {
             key.budget_window = v;
+        }
+        if let Some(v) = &self.guardrails {
+            // `{}` and `null` are the same policy: none. Normalising here keeps the
+            // merged row identical to what a later read returns.
+            key.guardrails = v.clone().filter(|g| !g.is_empty());
         }
     }
 }
@@ -808,7 +909,7 @@ impl Store {
     /// The key columns every read selects, in [`row_to_api_key`]'s order.
     const KEY_COLUMNS: &'static str =
         "id, key_hash, name, is_active, created_at, rpm, tpm, budget_tokens, allowed_models, \
-         expires_at, budget_micros, budget_window";
+         expires_at, budget_micros, budget_window, guardrails";
 
     /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
     ///
@@ -840,6 +941,7 @@ impl Store {
                 allowed_models: None,
                 expires_at: None,
                 budget_window: BudgetWindow::Total,
+                guardrails: None,
             },
         ))
     }
@@ -912,15 +1014,24 @@ impl Store {
             Some(k) => k,
             None => return Ok(None),
         };
+        // A policy that cannot be enforced as written is refused here rather than
+        // stored: an operator must never believe traffic is filtered when it is not.
+        if let Some(Some(policy)) = &patch.guardrails {
+            policy.validate()?;
+        }
         patch.apply(&mut key);
         let allowed = match &key.allowed_models {
             Some(models) => Some(serde_json::to_string(models)?),
             None => None,
         };
+        let guardrails = match &key.guardrails {
+            Some(policy) => Some(serde_json::to_string(policy)?),
+            None => None,
+        };
         conn.execute(
             "UPDATE api_keys SET is_active = ?2, rpm = ?3, tpm = ?4, budget_tokens = ?5, \
-             allowed_models = ?6, expires_at = ?7, budget_micros = ?8, budget_window = ?9 \
-             WHERE id = ?1",
+             allowed_models = ?6, expires_at = ?7, budget_micros = ?8, budget_window = ?9, \
+             guardrails = ?10 WHERE id = ?1",
             params![
                 id.to_string(),
                 key.is_active as i64,
@@ -931,6 +1042,7 @@ impl Store {
                 key.expires_at,
                 key.budget_micros,
                 key.budget_window.as_str(),
+                guardrails,
             ],
         )
         .map_err(migrations::db_err)?;
@@ -1982,6 +2094,19 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         })?),
         None => None,
     };
+    let raw_guardrails: Option<String> = r.get(12)?;
+    // A malformed policy is a storage failure, never a silent "no policy": the key's
+    // traffic would then run unfiltered while the operator believes otherwise.
+    let guardrails = match raw_guardrails {
+        Some(text) => Some(serde_json::from_str(&text).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                12,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?),
+        None => None,
+    };
     Ok(ApiKey {
         id: uuid_col(r.get(0)?)?,
         key_hash: r.get(1)?,
@@ -1995,6 +2120,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         expires_at: r.get(9)?,
         budget_micros: r.get(10)?,
         budget_window: BudgetWindow::from_stored(&r.get::<_, String>(11)?),
+        guardrails,
     })
 }
 

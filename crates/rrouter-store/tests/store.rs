@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
 use rrouter_store::{
-    cache_key, ApiKey, ApiKeyPatch, AttemptRecord, Credentials, KeyModel, ModelRow, PruneReport,
-    Store, StatusFilter, UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
+    cache_key, ApiKey, ApiKeyPatch, AttemptRecord, Credentials, Guardrails, KeyModel, ModelRow,
+    PruneReport, Store, StatusFilter, UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -521,7 +521,7 @@ fn model_costs_returns_published_rows_for_the_named_providers() {
 }
 
 #[test]
-fn v6_database_migrates_to_thirteen() {
+fn v6_database_migrates_to_fourteen() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
@@ -620,7 +620,7 @@ fn v6_database_migrates_to_thirteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
         ("idx_usage_request", "the usage row is looked up by request id"),
@@ -641,7 +641,7 @@ fn v6_database_migrates_to_thirteen() {
 /// connection defaults to weight 100 (the plain round-robin share), and the two new
 /// tables start empty.
 #[test]
-fn v8_database_migrates_to_thirteen() {
+fn v8_database_migrates_to_fourteen() {
     let dir = TempDir::new("v8");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -723,7 +723,7 @@ fn v8_database_migrates_to_thirteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
 
     let weight: i64 = conn
         .query_row("SELECT weight FROM connections", [], |r| r.get(0))
@@ -748,7 +748,7 @@ fn v8_database_migrates_to_thirteen() {
 /// A v9 database gains the money columns without touching existing rows: spend recorded
 /// before v10 stays at "unknown price", and every key stays unlimited.
 #[test]
-fn v9_database_migrates_to_thirteen() {
+fn v9_database_migrates_to_fourteen() {
     let dir = TempDir::new("v9");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -830,13 +830,13 @@ fn v9_database_migrates_to_thirteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
 }
 
 /// A v10 database gains the response cache in place: the migration only adds a table and
 /// its index, so every existing row is untouched and the version reaches 13.
 #[test]
-fn v10_database_migrates_to_thirteen() {
+fn v10_database_migrates_to_fourteen() {
     let dir = TempDir::new("v10");
     {
         // A real v10 database: the current schema with the v11 table and the v12 column
@@ -845,12 +845,12 @@ fn v10_database_migrates_to_thirteen() {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         conn.execute_batch(
             "DROP TABLE response_cache; ALTER TABLE api_keys DROP COLUMN budget_window; \
-             PRAGMA user_version = 10;",
+             ALTER TABLE api_keys DROP COLUMN guardrails; PRAGMA user_version = 10;",
         )
         .expect("rewind to v10");
     }
 
-    let store = Store::open(&dir.db(), None).expect("open store runs the v11 and v12 steps");
+    let store = Store::open(&dir.db(), None).expect("open store runs the v11, v12, v13 and v14 steps");
     assert!(
         rt().block_on(store.cache_entries()).expect("cache readable").is_empty(),
         "a fresh v11 cache starts empty"
@@ -861,7 +861,7 @@ fn v10_database_migrates_to_thirteen() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     for (kind, name) in [("table", "response_cache"), ("index", "idx_cache_expiry")] {
         let found: i64 = conn
             .query_row(
@@ -1557,18 +1557,20 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 // ----- 4d. budget windows (phase 9) -------------------------------------------------
 
 /// A v11 database gains `budget_window` in place: an existing key reads as `total`
-/// (lifetime, unchanged behaviour), and the version reaches 13.
+/// (lifetime, unchanged behaviour), and the version reaches 14.
 #[test]
-fn v11_database_migrates_to_thirteen_with_total_windows() {
+fn v11_database_migrates_to_fourteen_with_total_windows() {
     let dir = TempDir::new("v11");
     let id = Uuid::new_v4();
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         // Build the v11 schema by running the real migrations up to 11, then rewind the
-        // marker and drop the column so the table is exactly what v11 shipped.
+        // marker and drop the columns added since so the table is exactly what v11
+        // shipped.
         drop(Store::open(&dir.db(), None).expect("current schema"));
         conn.execute_batch(
-            "ALTER TABLE api_keys DROP COLUMN budget_window; PRAGMA user_version = 11;",
+            "ALTER TABLE api_keys DROP COLUMN budget_window; \
+             ALTER TABLE api_keys DROP COLUMN guardrails; PRAGMA user_version = 11;",
         )
         .expect("rewind to v11");
         conn.execute(
@@ -1593,29 +1595,32 @@ fn v11_database_migrates_to_thirteen_with_total_windows() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
 }
 
 /// v12 shipped no `attempts(ts)` index; the retention sweep deletes by `ts`, so opening
 /// a v12 database adds the index and bumps the marker.
 #[test]
-fn v12_database_migrates_to_thirteen_with_the_attempt_ts_index() {
+fn v12_database_migrates_to_fourteen_with_the_attempt_ts_index() {
     let dir = TempDir::new("v12");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
-        // Start from the current schema, then remove exactly what v13 adds.
+        // Start from the current schema, then remove exactly what v13 and v14 add.
         drop(Store::open(&dir.db(), None).expect("current schema"));
-        conn.execute_batch("DROP INDEX idx_attempts_ts; PRAGMA user_version = 12;")
-            .expect("rewind to v12");
+        conn.execute_batch(
+            "DROP INDEX idx_attempts_ts; ALTER TABLE api_keys DROP COLUMN guardrails; \
+             PRAGMA user_version = 12;",
+        )
+        .expect("rewind to v12");
     }
 
-    drop(Store::open(&dir.db(), None).expect("open runs the v13 step"));
+    drop(Store::open(&dir.db(), None).expect("open runs the v13 and v14 steps"));
 
     let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     let indexes: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type = 'index' \
@@ -1695,6 +1700,277 @@ fn budget_window_round_trips_through_patch() {
         let read = s.get_api_key(key.id).await.expect("read").expect("row");
         assert_eq!(read.budget_window, rrouter_store::BudgetWindow::Monthly);
     });
+}
+
+/// Guardrails are one JSON document per key: absent on a new key, written whole by a
+/// PATCH, and clearable back to NULL.
+#[test]
+fn guardrails_round_trip_through_patch_and_clear() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let (_, key) = s.create_api_key(Some("team")).await.expect("create");
+        assert_eq!(key.guardrails, None, "a new key has no policy");
+
+        let policy = Guardrails {
+            max_prompt_chars: Some(20_000),
+            blocked: vec!["secret".into(), "ssn:".into()],
+            scan_output: true,
+        };
+        let patched = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    guardrails: Some(Some(policy.clone())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("patch")
+            .expect("exists");
+        assert_eq!(patched.guardrails, Some(policy.clone()));
+        // What SQLite holds is what the patch returned, not just what the call built.
+        let read = s.get_api_key(key.id).await.expect("read").expect("row");
+        assert_eq!(read.guardrails, Some(policy.clone()));
+        assert_eq!(s.list_api_keys().await.expect("list"), vec![read]);
+
+        // One field at a time: the rest of the policy survives.
+        let patched = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    guardrails: Some(Some(Guardrails {
+                        max_prompt_chars: Some(500),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("patch")
+            .expect("exists");
+        assert_eq!(patched.guardrails, Some(Guardrails {
+            max_prompt_chars: Some(500),
+            ..Default::default()
+        }), "an empty document replaces the policy, it does not merge into it");
+
+        // `{}` is the same policy as `null`: none. Storing it must not create a row that
+        // reads back as Some(empty).
+        let cleared = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    guardrails: Some(Some(Guardrails::default())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("empty")
+            .expect("exists");
+        assert_eq!(cleared.guardrails, None);
+        assert_eq!(
+            s.get_api_key(key.id).await.expect("read").expect("row").guardrails,
+            None
+        );
+
+        // And an explicit null clears a stored policy.
+        s.update_api_key(
+            key.id,
+            &ApiKeyPatch {
+                guardrails: Some(Some(policy)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("restore")
+        .expect("exists");
+        let cleared = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch { guardrails: Some(None), ..Default::default() },
+            )
+            .await
+            .expect("clear")
+            .expect("exists");
+        assert_eq!(cleared.guardrails, None);
+    });
+}
+
+/// A policy the gateway could not enforce as written is refused, and the stored key is
+/// left exactly as it was: an operator must never think traffic is filtered.
+#[test]
+fn guardrails_reject_an_unenforceable_policy() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let (_, key) = s.create_api_key(Some("team")).await.expect("create");
+        let reject = |policy: Guardrails| {
+            let id = key.id;
+            async move {
+                let err = s
+                    .update_api_key(
+                        id,
+                        &ApiKeyPatch {
+                            guardrails: Some(Some(policy)),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect_err("a bad policy is a client error");
+                assert!(
+                    matches!(err, rrouter_core::Error::BadRequest(_)),
+                    "not a 400: {err:?}"
+                );
+                err.to_string()
+            }
+        };
+
+        let message = reject(Guardrails {
+            blocked: vec!["x".into(); Guardrails::MAX_BLOCKED_TERMS + 1],
+            ..Default::default()
+        })
+        .await;
+        assert!(message.contains("at most 200"), "{message}");
+
+        let message = reject(Guardrails {
+            blocked: vec!["x".repeat(Guardrails::MAX_TERM_CHARS + 1)],
+            ..Default::default()
+        })
+        .await;
+        assert!(message.contains("200 characters"), "{message}");
+
+        let message = reject(Guardrails {
+            blocked: vec![String::new()],
+            ..Default::default()
+        })
+        .await;
+        assert!(message.contains("must not be empty"), "{message}");
+
+        assert_eq!(
+            s.get_api_key(key.id).await.expect("read").expect("row").guardrails,
+            None,
+            "nothing was stored"
+        );
+
+        // The limits themselves are accepted at the boundary.
+        let ok = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    guardrails: Some(Some(Guardrails {
+                        blocked: vec!["x".repeat(Guardrails::MAX_TERM_CHARS)],
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("patch")
+            .expect("exists");
+        assert!(ok.guardrails.is_some());
+    });
+}
+
+/// A blob SQLite hands back that is not a policy is a storage failure, never a silent
+/// "no policy": the key's traffic would run unfiltered while the operator believes it
+/// is guarded.
+#[test]
+fn malformed_guardrails_blob_is_a_storage_failure() {
+    let dir = TempDir::new("badpolicy");
+    let store = dir.store();
+    let id = Uuid::new_v4();
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        conn.execute(
+            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at, guardrails) \
+             VALUES (?1, 'h', 'broken', 1, 1, '{\"blocked\": \"not-a-list\"}')",
+            [id.to_string()],
+        )
+        .expect("broken row");
+    }
+    let err = rt()
+        .block_on(store.get_api_key(id))
+        .expect_err("a malformed policy cannot be read");
+    assert!(
+        matches!(err, rrouter_core::Error::Store(_)),
+        "not a storage failure: {err:?}"
+    );
+}
+
+/// Matching is a plain case-insensitive substring search: no regex, and Unicode case
+/// folding rather than ASCII-only.
+#[test]
+fn guardrails_match_case_insensitively_and_name_the_term() {
+    let policy = Guardrails {
+        blocked: vec!["Secret".into(), "ärger".into()],
+        ..Default::default()
+    };
+    assert_eq!(policy.hit("my SECRET token"), Some("Secret"));
+    assert_eq!(policy.hit("kein ÄRGER hier"), Some("ärger"));
+    assert_eq!(policy.hit("nothing to see"), None);
+    // A term is reported as the operator wrote it, not as it was found.
+    assert_eq!(
+        policy.hit("CLASSIFIED secret"),
+        Some("Secret"),
+        "the policy's spelling is what the refusal names"
+    );
+
+    let none = Guardrails::default();
+    assert_eq!(none.hit("anything"), None);
+    assert!(none.is_empty());
+    assert!(!none.scans_output(), "scan_output without terms is a no-op");
+    let scan_only = Guardrails { scan_output: true, ..Default::default() };
+    assert!(!scan_only.is_empty());
+    assert!(!scan_only.scans_output(), "nothing to scan for");
+    assert!(policy_with_term().scans_output());
+}
+
+fn policy_with_term() -> Guardrails {
+    Guardrails { blocked: vec!["x".into()], scan_output: true, ..Default::default() }
+}
+
+/// v13 shipped no guardrails column; opening a v13 database adds it, and the key that
+/// existed before it keeps the only policy a pre-v14 key can have: none.
+#[test]
+fn v13_database_migrates_to_fourteen_with_the_guardrails_column() {
+    let dir = TempDir::new("v13");
+    let id = Uuid::new_v4();
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        // Start from the current schema, then remove exactly what v14 adds.
+        drop(Store::open(&dir.db(), None).expect("current schema"));
+        conn.execute_batch("ALTER TABLE api_keys DROP COLUMN guardrails; PRAGMA user_version = 13;")
+            .expect("rewind to v13");
+        conn.execute(
+            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at) \
+             VALUES (?1, 'h', 'legacy', 1, 1)",
+            [id.to_string()],
+        )
+        .expect("legacy key");
+    }
+
+    let store = Store::open(&dir.db(), None).expect("open runs the v14 step");
+    let key = rt()
+        .block_on(store.get_api_key(id))
+        .expect("read")
+        .expect("legacy key survives");
+    assert_eq!(key.guardrails, None, "a legacy key has no policy");
+    assert_eq!(key.allowed_models, None, "and no other column changed");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 14);
+    let columns: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('api_keys') WHERE name = 'guardrails'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("column");
+    assert_eq!(columns, 1, "the policy column exists after the migration");
 }
 
 /// A minimal usage row at `ts`, identified by `marker` in the model name so a test can
