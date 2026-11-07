@@ -110,6 +110,14 @@ decrypted. Stop the drill instance and remove `/tmp/restore-data` afterwards.
 A rollback to an older binary against a newer schema is not supported — restore the backup
 instead. Tags are immutable: pin a version and upgrade deliberately.
 
+## 5a. History growth
+
+`usage` and `attempts` keep every request. Set `RROUTER_USAGE_RETENTION_DAYS` (0 keeps
+everything) and a background sweep deletes older rows once a day, always drops expired cache
+entries, and runs `PRAGMA optimize`. The sweep logs
+`retention sweep deleted_usage=… deleted_attempts=… deleted_cache=…` at startup and every 24 h,
+so its effect is visible without guessing. Back up before lowering the value for the first time.
+
 ## 6. What healthy looks like
 
 - `rrouter --healthcheck` exits 0 (the container image runs it every 30 s).
