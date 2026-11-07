@@ -19,3 +19,6 @@ tracing.workspace = true
 [dev-dependencies]
 axum.workspace = true
 wiremock = "0.6"
+
+[build-dependencies]
+serde_json.workspace = true

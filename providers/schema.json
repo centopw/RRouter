@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/centopw/RRouter/providers/schema.json",
+  "title": "RRouter community provider manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "display", "base_url", "auth", "default_dialect"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "description": "Stable provider id used in provider/model references."
+    },
+    "display": { "type": "string", "minLength": 1 },
+    "website": { "type": "string", "format": "uri" },
+    "docs": { "type": "string", "format": "uri" },
+    "key_url": { "type": "string", "format": "uri" },
+    "base_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://",
+      "description": "Chat endpoint, or an OpenAI-compatible base ending in /v1."
+    },
+    "auth": { "enum": ["bearer", "x-api-key", "none"] },
+    "default_dialect": { "enum": ["chat", "responses", "messages"] },
+    "models_url": { "type": "string", "format": "uri" },
+    "responses_url": { "type": "string", "format": "uri" },
+    "messages_url": { "type": "string", "format": "uri" },
+    "images_url": { "type": "string", "format": "uri" },
+    "audio_speech_url": { "type": "string", "format": "uri" },
+    "audio_transcriptions_url": { "type": "string", "format": "uri" },
+    "default_max_tokens": { "type": "integer", "minimum": 1 },
+    "stream_only": { "type": "boolean" },
+    "extra_headers": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "endpoints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Human review metadata; the compiled spec uses the *_url fields."
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Human review metadata."
+    },
+    "notes": { "type": "string" }
+  }
+}

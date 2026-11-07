@@ -1,0 +1,143 @@
+name: API provider request
+description: Propose a provider that uses an API key (OpenAI-compatible or Anthropic Messages).
+title: "[provider] "
+labels: ["provider-api"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for adding a provider. This form creates a JSON manifest under
+        `providers/community/` and opens a pull request for maintainers to review.
+        Do **not** paste API keys or account credentials — public documentation URLs only.
+  - type: input
+    id: display
+    attributes:
+      label: Provider name
+      placeholder: Acme AI
+    validations:
+      required: true
+  - type: input
+    id: provider_id
+    attributes:
+      label: Provider ID
+      description: Lowercase slug used in `provider/model` references.
+      placeholder: acme
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: website
+    attributes:
+      label: Website
+      placeholder: https://acme.ai
+    validations:
+      required: true
+  - type: input
+    id: docs
+    attributes:
+      label: API documentation URL
+      placeholder: https://docs.acme.ai/api
+    validations:
+      required: true
+  - type: input
+    id: base_url
+    attributes:
+      label: Chat base URL
+      description: Full chat-completions endpoint, or the OpenAI-compatible base ending in /v1.
+      placeholder: https://api.acme.ai/v1/chat/completions
+    validations:
+      required: true
+  - type: dropdown
+    id: auth
+    attributes:
+      label: Authentication
+      options:
+        - Bearer token (Authorization: Bearer …)
+        - x-api-key header
+        - No authentication
+    validations:
+      required: true
+  - type: input
+    id: key_url
+    attributes:
+      label: API-key signup / console URL
+      placeholder: https://acme.ai/console/keys
+    validations:
+      required: true
+  - type: dropdown
+    id: dialect
+    attributes:
+      label: Native protocol
+      options:
+        - OpenAI chat completions
+        - OpenAI Responses
+        - Anthropic Messages
+    validations:
+      required: true
+  - type: input
+    id: models_url
+    attributes:
+      label: Models endpoint
+      description: Optional; used by the Models → fetch action.
+      placeholder: https://api.acme.ai/v1/models
+  - type: input
+    id: responses_url
+    attributes:
+      label: Responses endpoint
+      description: Optional; only when the provider supports the OpenAI Responses API.
+      placeholder: https://api.acme.ai/v1/responses
+  - type: input
+    id: messages_url
+    attributes:
+      label: Anthropic Messages endpoint
+      placeholder: https://api.acme.ai/v1/messages
+  - type: checkboxes
+    id: endpoints
+    attributes:
+      label: Supported endpoints
+      options:
+        - label: Chat completions
+        - label: Responses
+        - label: Anthropic Messages
+        - label: Embeddings
+        - label: Image generation
+        - label: Text-to-speech
+        - label: Speech-to-text
+  - type: checkboxes
+    id: capabilities
+    attributes:
+      label: Model capabilities
+      options:
+        - label: Streaming
+        - label: Tool / function calling
+        - label: Vision / images
+        - label: Reasoning
+        - label: Prompt caching
+  - type: input
+    id: max_tokens
+    attributes:
+      label: Default max output tokens
+      description: Optional; leave empty when the provider decides.
+      placeholder: "8192"
+  - type: textarea
+    id: headers
+    attributes:
+      label: Required headers
+      description: Optional JSON object of static headers, e.g. {"x-api-version":"2026-01-01"}.
+      render: json
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Quirks, rate limits, regional restrictions, or a link to the provider model list.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: This is public documentation, not leaked credentials.
+          required: true
+        - label: I checked the provider is not already in the RRouter list.
+          required: true
+        - label: I understand the manifest is reviewed before the next release.
+          required: true

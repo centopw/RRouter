@@ -124,6 +124,8 @@ pub struct ProviderSpec {
     pub base_url: &'static str,
     /// Native Responses endpoint, when the provider speaks it.
     pub responses_url: Option<&'static str>,
+    /// Explicit model-list URL when it cannot be derived from the inference base.
+    pub models_url: Option<&'static str>,
     /// Native Anthropic Messages endpoint, when the provider speaks it.
     pub messages_url: Option<&'static str>,
     /// Native image-generation endpoint, when the provider documents one.
@@ -267,6 +269,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::OAuth,
         base_url: "https://api.anthropic.com/v1/messages",
         responses_url: None,
+        models_url: None,
         messages_url: Some("https://api.anthropic.com/v1/messages"),
         images_url: None,
         audio_speech_url: None,
@@ -287,6 +290,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::OAuth,
         base_url: "https://chatgpt.com/backend-api/codex/responses",
         responses_url: Some("https://chatgpt.com/backend-api/codex/responses"),
+        models_url: None,
         messages_url: None,
         images_url: None,
         audio_speech_url: None,
@@ -307,6 +311,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::OAuth,
         base_url: "https://api.githubcopilot.com/chat/completions",
         responses_url: Some("https://api.githubcopilot.com/responses"),
+        models_url: None,
         messages_url: Some("https://api.githubcopilot.com/v1/messages"),
         images_url: None,
         audio_speech_url: None,
@@ -327,6 +332,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://api.openai.com/v1/chat/completions",
         responses_url: Some("https://api.openai.com/v1/responses"),
+        models_url: None,
         messages_url: None,
         images_url: Some("https://api.openai.com/v1/images/generations"),
         audio_speech_url: Some("https://api.openai.com/v1/audio/speech"),
@@ -349,6 +355,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         // OpenCode translates every text model through its OpenAI-compatible surface.
         base_url: "https://opencode.ai/inference/openai/v1/chat/completions",
         responses_url: Some("https://opencode.ai/inference/openai/v1/responses"),
+        models_url: Some("https://opencode.ai/inference/v1/models"),
         messages_url: None,
         images_url: None,
         audio_speech_url: None,
@@ -369,6 +376,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://api.anthropic.com/v1/messages",
         responses_url: None,
+        models_url: None,
         messages_url: Some("https://api.anthropic.com/v1/messages"),
         images_url: None,
         audio_speech_url: None,
@@ -389,6 +397,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://api.deepseek.com/chat/completions",
         responses_url: None,
+        models_url: None,
         messages_url: None,
         images_url: None,
         audio_speech_url: None,
@@ -409,6 +418,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         responses_url: None,
+        models_url: None,
         messages_url: None,
         images_url: None,
         audio_speech_url: None,
@@ -429,6 +439,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://api.groq.com/openai/v1/chat/completions",
         responses_url: None,
+        models_url: None,
         messages_url: None,
         images_url: None,
         audio_speech_url: Some("https://api.groq.com/openai/v1/audio/speech"),
@@ -449,6 +460,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://openrouter.ai/api/v1/chat/completions",
         responses_url: None,
+        models_url: None,
         messages_url: None,
         images_url: None,
         audio_speech_url: None,
@@ -469,6 +481,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://api.x.ai/v1/chat/completions",
         responses_url: None,
+        models_url: None,
         messages_url: None,
         images_url: Some("https://api.x.ai/v1/images/generations"),
         audio_speech_url: None,
@@ -489,6 +502,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://api.mistral.ai/v1/chat/completions",
         responses_url: None,
+        models_url: None,
         messages_url: None,
         images_url: None,
         audio_speech_url: None,
@@ -509,6 +523,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://api.together.xyz/v1/chat/completions",
         responses_url: None,
+        models_url: None,
         messages_url: None,
         images_url: Some("https://api.together.xyz/v1/images/generations"),
         audio_speech_url: Some("https://api.together.xyz/v1/audio/speech"),
@@ -529,6 +544,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://api.cerebras.ai/v1/chat/completions",
         responses_url: None,
+        models_url: None,
         messages_url: None,
         images_url: None,
         audio_speech_url: None,
@@ -549,6 +565,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::Local,
         base_url: "http://localhost:11434/v1/chat/completions",
         responses_url: None,
+        models_url: None,
         messages_url: None,
         images_url: None,
         audio_speech_url: None,
@@ -565,9 +582,18 @@ pub static PROVIDERS: &[ProviderSpec] = &[
     },
 ];
 
+// Reviewed community manifests, generated at build time from `providers/community`.
+include!(concat!(env!("OUT_DIR"), "/community.rs"));
+
+/// Every provider, core and community. OAuth flows only exist in the core slice.
+pub fn all() -> impl Iterator<Item = &'static ProviderSpec> {
+    PROVIDERS.iter().chain(COMMUNITY_PROVIDERS.iter())
+}
+
 static BY_ID: LazyLock<HashMap<&'static str, &'static ProviderSpec>> = LazyLock::new(|| {
-    let mut map = HashMap::with_capacity(PROVIDERS.len());
-    for spec in PROVIDERS {
+    let all: Vec<_> = all().collect();
+    let mut map = HashMap::with_capacity(all.len());
+    for spec in all {
         map.insert(spec.id, spec);
     }
     map
@@ -614,15 +640,16 @@ mod tests {
 
     #[test]
     fn ids_are_unique_and_reachable() {
-        for (i, spec) in PROVIDERS.iter().enumerate() {
+        let all: Vec<_> = all().collect();
+        for (i, spec) in all.iter().enumerate() {
             assert!(
                 get(spec.id).is_some_and(|s| std::ptr::eq(s, spec)),
                 "{} not reachable",
                 spec.id
             );
-            assert_eq!(BY_ID.len(), PROVIDERS.len());
+            assert_eq!(BY_ID.len(), all.len());
             assert!(
-                PROVIDERS[..i].iter().all(|p| p.id != spec.id),
+                all[..i].iter().all(|p| p.id != spec.id),
                 "duplicate id {}",
                 spec.id
             );

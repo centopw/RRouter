@@ -1,0 +1,45 @@
+name: provider-request
+
+# An API-provider issue form becomes a reviewed manifest PR. OAuth providers stay manual:
+# they need a client flow and credential review that a form cannot automate safely.
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  manifest:
+    if: contains(github.event.issue.labels.*.name, 'provider-api')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Generate provider manifest
+        id: generate
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: node scripts/provider-from-issue.mjs
+      - name: Validate compiled provider list
+        run: cargo check -p rrouter-auth
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: provider/${{ steps.generate.outputs.id }}
+          delete-branch: true
+          add-paths: providers/community/*.json
+          commit-message: "feat(providers): add ${{ steps.generate.outputs.id }} manifest"
+          title: "feat(providers): add ${{ github.event.issue.title }}"
+          body: |
+            Generated from ${{ github.event.issue.html_url }}.
+
+            The manifest was validated by `scripts/provider-from-issue.mjs` and compiled by
+            `cargo check -p rrouter-auth`. Review the endpoints, auth style and public docs
+            before merging; never merge a manifest containing credentials.
+          labels: provider-api

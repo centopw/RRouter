@@ -239,8 +239,7 @@ pub async fn providers(State(state): State<Arc<AppState>>) -> Response {
             .collect(),
         Err(e) => return admin_error(&e),
     };
-    let mut data: Vec<Value> = rrouter_auth::PROVIDERS
-        .iter()
+    let mut data: Vec<Value> = rrouter_auth::all()
         .map(|spec| {
             json!({
                 "id": spec.id,
@@ -321,7 +320,12 @@ async fn fetch_upstream(
         .fresh(state.store.as_ref(), spec, conn.id)
         .await?;
     let base = creds.base_url_override.as_deref().unwrap_or(spec.base_url);
-    let mut url = models_registry::models_url(base);
+    let mut url = match (creds.base_url_override.as_deref(), spec.models_url) {
+        // An override points at a different deployment, so its catalogue wins.
+        (Some(_), _) => models_registry::models_url(base),
+        (None, Some(explicit)) => explicit.to_string(),
+        (None, None) => models_registry::models_url(base),
+    };
     // Anthropic's list paginates (default 20). Asking for the maximum page once avoids a
     // "latest models missing" list without implementing cursor paging this endpoint does
     // not need for its other providers.

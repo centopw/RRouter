@@ -65,6 +65,12 @@ All notable changes. Dates are local; versions follow semver once tagged.
   model → first token, generation — instead of only inferring them from TTFT.
 
 ### Added
+- Community providers: the Add-provider → API key screen links to API and OAuth issue
+  forms. The API form is parsed into `providers/community/<id>.json`, compiled into the
+  next binary by `crates/rrouter-auth/build.rs`, and opened as a reviewed pull request by
+  the `provider-request` workflow. OAuth providers are reviewed manually with their flow.
+
+### Added
 - A semantic design system: one type scale in `index.css`, one component per file under
   `components/atoms` and `components/molecules`, and Radix-backed Dialog, Tabs, Switch,
   Separator and Label primitives. Shared molecules use Text/Heading/Stack/Inline; raw font

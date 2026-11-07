@@ -719,6 +719,31 @@ function AddProviderFlow({
               }))}
             />
           </div>
+          <div className="rounded-lg border border-dashed border-line-strong bg-surface-2 px-3 py-3">
+            <span className="block text-small font-medium">Missing your favorite provider?</span>
+            <span className="mt-0.5 block text-caption leading-relaxed text-muted">
+              Add it yourself. API-provider requests become a reviewed JSON manifest and a
+              pull request; OAuth providers are reviewed with their sign-in flow.
+            </span>
+            <span className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-small">
+              <a
+                className="font-medium text-[var(--color-accent-text)] hover:underline"
+                href="https://github.com/centopw/RRouter/issues/new?template=provider-api.yml"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Add an API provider →
+              </a>
+              <a
+                className="text-muted hover:text-fg hover:underline"
+                href="https://github.com/centopw/RRouter/issues/new?template=provider-oauth.yml"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Add an OAuth provider →
+              </a>
+            </span>
+          </div>
         </Stack>
       ) : null}
 

@@ -1,0 +1,100 @@
+name: OAuth provider request
+description: Propose a subscription provider that signs in through OAuth or a device flow.
+title: "[oauth] "
+labels: ["provider-oauth"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        OAuth support needs a provider-maintained client ID and a documented flow.
+        Never include client secrets, tokens, or personal credentials in this issue.
+  - type: input
+    id: display
+    attributes:
+      label: Provider name
+      placeholder: Acme Chat
+    validations:
+      required: true
+  - type: input
+    id: provider_id
+    attributes:
+      label: Provider ID
+      placeholder: acme
+    validations:
+      required: true
+  - type: input
+    id: website
+    attributes:
+      label: Website
+      placeholder: https://acme.ai
+    validations:
+      required: true
+  - type: input
+    id: docs
+    attributes:
+      label: OAuth documentation URL
+    validations:
+      required: true
+  - type: dropdown
+    id: flow
+    attributes:
+      label: Flow
+      options:
+        - Authorization code + PKCE
+        - Device code
+    validations:
+      required: true
+  - type: input
+    id: authorize_url
+    attributes:
+      label: Authorization URL
+    validations:
+      required: true
+  - type: input
+    id: token_url
+    attributes:
+      label: Token URL
+    validations:
+      required: true
+  - type: input
+    id: client_id
+    attributes:
+      label: Public client ID
+      description: Only a public client ID; never a client secret.
+    validations:
+      required: true
+  - type: input
+    id: scopes
+    attributes:
+      label: Scopes
+  - type: input
+    id: redirect
+    attributes:
+      label: Redirect URI
+      description: Required by the provider's registered client.
+  - type: input
+    id: api_base
+    attributes:
+      label: Inference base URL
+      placeholder: https://api.acme.ai/v1/messages
+    validations:
+      required: true
+  - type: textarea
+    id: headers
+    attributes:
+      label: Required headers
+      description: Optional JSON object of static headers.
+      render: json
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: This uses a public OAuth client, not leaked credentials.
+          required: true
+        - label: I can help test the flow and document the provider.
+          required: true

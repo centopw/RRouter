@@ -573,11 +573,6 @@ fn caps_from_models_dev(entry: &Value) -> Value {
 /// `…/v1/v1/models` while a bare override origin still gets `/v1/models`.
 pub fn models_url(base: &str) -> String {
     let trimmed = base.trim_end_matches('/');
-    // OpenCode exposes one catalogue for all its API dialects, not one under each
-    // inference prefix.
-    if trimmed.starts_with("https://opencode.ai/inference/") {
-        return "https://opencode.ai/inference/v1/models".to_string();
-    }
     let root = ["/chat/completions", "/v1/messages", "/messages"]
         .iter()
         .find_map(|suffix| trimmed.strip_suffix(suffix))
@@ -708,14 +703,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
-    fn opencode_uses_its_shared_model_catalogue() {
-        assert_eq!(
-            models_url("https://opencode.ai/inference/openai/v1/chat/completions"),
-            "https://opencode.ai/inference/v1/models"
-        );
-    }
-
     #[test]
     fn models_url_drops_operation_and_avoids_v1_v1() {
         assert_eq!(

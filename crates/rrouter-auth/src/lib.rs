@@ -26,5 +26,5 @@ pub use loopback::LoopbackServer;
 pub use overrides::{invalid_overrides, override_for, OverrideKind};
 pub use registry::{
     get, is_oauth, login_flow_for, AuthStyle, DeviceFlow, LoginFlow, PkceFlow, ProviderKind,
-    ProviderSpec, RefreshBody, RefreshSpec, PROVIDERS,
+    all, ProviderSpec, RefreshBody, RefreshSpec, PROVIDERS,
 };
