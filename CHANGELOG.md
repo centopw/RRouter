@@ -8,7 +8,9 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - Model lists are newest-first (version- and date-aware) and retired families (Claude 3.x,
   GPT-4 turbo, gpt-5-codex) sort last, carry a `deprecated` badge, and are never chosen by a
   connectivity probe. Probes prefer the cheapest current model, using the provider's own list
-  or a synced price, so testing an account no longer spends `claude-3-7-sonnet`.
+  or a synced price, so testing an account no longer spends `claude-3-7-sonnet`. Claude's
+  list fetch asks for one maximum-size page, so newly released models appear without cursor
+  paging.
 - Subscription usage: `/api/accounts/usage` reads the plan windows the provider already
   reports (Claude's 5-hour and weekly buckets, Codex's primary/secondary windows), cached for
   a minute, and the Providers page shows them as read-only bars next to the optional operator

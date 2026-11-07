@@ -291,7 +291,13 @@ async fn fetch_upstream(
 ) -> rrouter_core::Result<Value> {
     let creds = state.refresher.fresh(state.store.as_ref(), spec, conn.id).await?;
     let base = creds.base_url_override.as_deref().unwrap_or(spec.base_url);
-    let url = models_registry::models_url(base);
+    let mut url = models_registry::models_url(base);
+    // Anthropic's list paginates (default 20). Asking for the maximum page once avoids a
+    // "latest models missing" list without implementing cursor paging this endpoint does
+    // not need for its other providers.
+    if matches!(conn.provider.as_str(), "claude" | "anthropic") && !url.contains('?') {
+        url.push_str("?limit=1000");
+    }
     let headers = provider_headers(spec, &creds)?;
     let response = state
         .http
