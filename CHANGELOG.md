@@ -2,6 +2,14 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.2.2
+
+### Added
+- CSV export of the filtered request log (`/api/usage/export.csv`) and an Export CSV action on
+  the Logs page; rows stream in 1000-row cursor pages.
+- Usage retention: `RROUTER_USAGE_RETENTION_DAYS` deletes old usage/attempts in a daily sweep
+  (expired cache rows always go) and runs `PRAGMA optimize`; schema v13 indexes `attempts(ts)`.
+
 ## 0.2.1
 
 ### Added
@@ -11,10 +19,6 @@ All notable changes. Dates are local; versions follow semver once tagged.
   Activity.
 - Structured logs: `RROUTER_LOG_FORMAT=json` and one access line per finished request
   (request id, provider, model, status, latency, first-output time, endpoint, key id).
-- Usage retention: `RROUTER_USAGE_RETENTION_DAYS` deletes old usage/attempts in a daily sweep
-  (expired cache rows always go) and runs `PRAGMA optimize`.
-- CSV export of the filtered request log (`/api/usage/export.csv`) and an Export CSV action
-  on the Logs page; rows stream in 1000-row cursor pages.
 - Cursor pagination for the request log (`/api/usage` `before`/`before_id` and
   `next_before`), so history can be paged without time-window guessing.
 - Budget windows: per-key budgets reset daily, weekly or monthly (UTC), enforced alongside the
