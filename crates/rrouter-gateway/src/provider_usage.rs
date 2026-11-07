@@ -55,7 +55,7 @@ static CACHE: LazyLock<Mutex<HashMap<Uuid, Cached>>> = LazyLock::new(|| Mutex::n
 
 /// Providers whose plan limits this module knows how to read.
 pub fn supports(provider: &str) -> bool {
-    matches!(provider, "claude" | "codex")
+    matches!(provider, "claude" | "codex" | "github")
 }
 
 /// Fetch one account's subscription windows, with a short success cache and a longer
@@ -146,6 +146,7 @@ async fn fetch(state: &AppState, conn: &Connection) -> Result<Windows> {
     match conn.provider.as_str() {
         "claude" => claude(state, token).await,
         "codex" => codex(state, token, creds.id_token.as_deref(), &creds.extra).await,
+        "github" => github(state, spec, &creds).await,
         provider => Err(Error::BadRequest(format!(
             "{provider} does not expose subscription usage"
         ))),
@@ -179,6 +180,11 @@ async fn claude(state: &AppState, token: &str) -> Result<Windows> {
         .json()
         .await
         .map_err(|e| Error::Transport(format!("claude usage body: {e}")))?;
+    claude_windows(&body)
+}
+
+/// Pure parser for Claude's usage payload (fixtures cover the shape without a network).
+fn claude_windows(body: &Value) -> Result<Windows> {
     let mut windows = Vec::new();
     for (key, label) in [
         ("five_hour", "5 hour"),
@@ -265,6 +271,11 @@ async fn codex(
         .json()
         .await
         .map_err(|e| Error::Transport(format!("codex usage body: {e}")))?;
+    codex_windows(&body)
+}
+
+/// Pure parser for Codex's WHAM payload.
+fn codex_windows(body: &Value) -> Result<Windows> {
     let root = body
         .get("rate_limit")
         .or_else(|| body.get("rate_limits"))
@@ -303,6 +314,100 @@ async fn codex(
     Ok(Windows {
         plan: body
             .get("plan_type")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        windows,
+    })
+}
+
+/// GitHub Copilot reports monthly request allowances per feature under
+/// `quota_snapshots`. It authenticates with the derived copilot token.
+async fn github(
+    state: &AppState,
+    spec: &'static rrouter_auth::ProviderSpec,
+    creds: &rrouter_auth::Credentials,
+) -> Result<Windows> {
+    let mut request = state
+        .http
+        .get("https://api.github.com/copilot_internal/user")
+        .header("accept", "application/json")
+        .timeout(REQUEST_TIMEOUT);
+    for (name, value) in rrouter_auth::build_headers(spec, creds)? {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::from_bytes(name.as_bytes()),
+            axum::http::HeaderValue::from_str(&value),
+        ) {
+            request = request.header(name, value);
+        }
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| Error::Transport(format!("copilot usage: {e}")))?;
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        let body: String = response.text().await.unwrap_or_default().chars().take(256).collect();
+        return Err(Error::Upstream {
+            provider: "github".into(),
+            status,
+            body,
+            payload: None,
+        });
+    }
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Transport(format!("copilot usage body: {e}")))?;
+    github_windows(&body)
+}
+
+/// Pure parser for Copilot's snapshot payload.
+fn github_windows(body: &Value) -> Result<Windows> {
+    let mut windows = Vec::new();
+    let snapshots = body
+        .get("quota_snapshots")
+        .and_then(Value::as_object)
+        .ok_or_else(|| Error::Store("copilot usage has no quota_snapshots".into()))?;
+    for (key, label) in [
+        ("premium_interactions", "Premium"),
+        ("chat", "Chat"),
+        ("completions", "Completions"),
+    ] {
+        let Some(snapshot) = snapshots.get(key).filter(|v| v.is_object()) else {
+            continue;
+        };
+        if snapshot.get("unlimited").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let used = snapshot
+            .get("percent_remaining")
+            .and_then(Value::as_f64)
+            .map(|left| (100.0 - left).clamp(0.0, 100.0))
+            .or_else(|| {
+                let remaining = snapshot.get("remaining").and_then(Value::as_f64)?;
+                let entitlement = snapshot.get("entitlement").and_then(Value::as_f64)?;
+                (entitlement > 0.0).then(|| ((entitlement - remaining) / entitlement * 100.0).clamp(0.0, 100.0))
+            });
+        let Some(used) = used else { continue };
+        let reset = body
+            .get("quota_reset_date_utc")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339)
+            .or_else(|| snapshot.get("quota_reset_at").and_then(Value::as_str).and_then(parse_rfc3339));
+        windows.push(UsageWindow {
+            id: key.replace('_', "-"),
+            label: label.to_string(),
+            used_percent: used,
+            window_seconds: Some(30 * 24 * 3600),
+            resets_at: reset,
+        });
+    }
+    if windows.is_empty() {
+        return Err(Error::Store("copilot reports no finite quota windows".into()));
+    }
+    Ok(Windows {
+        plan: body
+            .get("copilot_plan")
             .and_then(Value::as_str)
             .map(str::to_string),
         windows,
@@ -410,6 +515,73 @@ pub async fn list(state: &AppState) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_payload_skips_null_buckets() {
+        let body = json!({
+            "five_hour": {"utilization": 6.0, "resets_at": "2026-04-08T18:59:59Z"},
+            "seven_day": {"utilization": 35.0, "resets_at": "2026-04-14T16:59:59Z"},
+            "seven_day_opus": null,
+            "seven_day_sonnet": {"utilization": 21.0, "resets_at": "2026-04-14T17:59:59Z"},
+            "extra_usage": {"is_enabled": true, "utilization": 12.5}
+        });
+        let windows = claude_windows(&body).expect("windows");
+        let ids: Vec<&str> = windows.windows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, vec!["five_hour", "seven_day", "seven_day_sonnet", "extra"]);
+        assert_eq!(windows.windows[0].used_percent, 6.0);
+        assert_eq!(windows.windows[0].resets_at, Some(1_775_674_799));
+        assert_eq!(windows.windows[3].window_seconds, None);
+    }
+
+    #[test]
+    fn codex_classifies_windows_by_duration() {
+        // Current shape: one weekly window in the primary slot.
+        let single = json!({
+            "plan_type": "team",
+            "rate_limit": {
+                "primary_window": {"used_percent": 1, "limit_window_seconds": 604800, "reset_at": 1785260773},
+                "secondary_window": null
+            }
+        });
+        let windows = codex_windows(&single).expect("windows");
+        assert_eq!(windows.plan.as_deref(), Some("team"));
+        assert_eq!(windows.windows.len(), 1);
+        assert_eq!(windows.windows[0].id, "weekly");
+        assert_eq!(windows.windows[0].used_percent, 1.0);
+        assert_eq!(windows.windows[0].resets_at, Some(1_785_260_773));
+
+        // Legacy shape: both windows, percent_left instead of used.
+        let legacy = json!({
+            "rate_limits": {
+                "five_hour": {"percent_left": 73.4, "limit_window_seconds": 18000, "reset_time_ms": 1_775_000_000_000i64},
+                "weekly": {"percent_left": 87.1, "limit_window_seconds": 604800, "reset_time_ms": 1_776_000_000_000i64}
+            }
+        });
+        let windows = codex_windows(&legacy).expect("windows");
+        assert_eq!(windows.windows[0].id, "five_hour");
+        assert!((windows.windows[0].used_percent - 26.6).abs() < 0.01);
+        assert_eq!(windows.windows[1].id, "weekly");
+        assert_eq!(windows.windows[0].resets_at, Some(1_775_000_000));
+    }
+
+    #[test]
+    fn copilot_skips_unlimited_and_computes_used() {
+        let body = json!({
+            "copilot_plan": "individual",
+            "quota_reset_date_utc": "2026-05-01T00:00:00Z",
+            "quota_snapshots": {
+                "premium_interactions": {"entitlement": 300, "remaining": 225, "percent_remaining": 75.0},
+                "chat": {"unlimited": true},
+                "completions": {"percent_remaining": 100.0}
+            }
+        });
+        let windows = github_windows(&body).expect("windows");
+        let ids: Vec<&str> = windows.windows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, vec!["premium-interactions", "completions"]);
+        assert_eq!(windows.windows[0].used_percent, 25.0);
+        assert_eq!(windows.windows[1].used_percent, 0.0);
+        assert!(windows.windows[0].resets_at.is_some());
+    }
 
     #[test]
     fn rfc3339_matches_known_epoch() {

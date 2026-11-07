@@ -14,7 +14,8 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - Subscription usage: `/api/accounts/usage` reads the plan windows the provider already
   reports (Claude's 5-hour and weekly buckets, Codex's primary/secondary windows), cached for
   a minute, and the Providers page shows them as read-only bars next to the optional operator
-  caps. The provider stays the source of truth; RRouter never invents a percentage.
+  caps. GitHub Copilot's monthly request snapshots are read too. The provider stays the
+  source of truth; RRouter never invents a percentage.
 - Dashboard accounts: first-run owner creation with the one-time setup code printed at startup,
   argon2id passwords, HttpOnly session cookies, ten single-use recovery codes, invite-only
   sign-up, and the admin/member/viewer roles (`/api/auth/*`, `/api/users`, `/api/users/invites`).

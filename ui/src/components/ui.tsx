@@ -628,15 +628,12 @@ export function CopyChip({
   value,
   prefix,
   display,
-  onDark = false,
 }: {
   value: string;
   prefix?: string;
   /** Shown instead of `value` when the full string cannot fit; the clipboard still gets
    *  the full value. */
   display?: string;
-  /** On the near-black rail the light border would glow; use a hairline white one. */
-  onDark?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | null>(null);
@@ -669,16 +666,9 @@ export function CopyChip({
       type="button"
       onClick={copy}
       aria-label={`copy ${value}`}
-      className={cx(
-        "group inline-flex h-7 min-w-0 items-center gap-1.5 rounded-full border px-2 font-mono text-[11px]",
-        onDark
-          ? "border-white/15 bg-white/5 text-white/70 hover:border-white/25 hover:text-white"
-          : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-fg",
-      )}
+      className="group inline-flex h-7 min-w-0 items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2 font-mono text-[11px] text-muted hover:border-line-strong hover:text-fg"
     >
-      {prefix ? (
-        <span className={cx("shrink-0", onDark ? "text-white/45" : "text-faint")}>{prefix}</span>
-      ) : null}
+      {prefix ? <span className="shrink-0 text-faint">{prefix}</span> : null}
       <span className="truncate">{copied ? "copied" : (display ?? value)}</span>
       {copied ? (
         <Check size={12} weight="bold" aria-hidden className="shrink-0" />

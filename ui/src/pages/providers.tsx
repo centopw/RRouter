@@ -802,10 +802,19 @@ function until(ts: number | null): string {
 function WindowBar({ window }: { window: SubscriptionWindow }) {
   const percent = Math.round(window.used_percent);
   const tone = usageTone(percent);
-  const short = window.id === "five_hour" ? "5h" : window.id === "weekly" ? "wk" : window.label.toLowerCase();
+  const short =
+    window.id === "five_hour"
+      ? "5h"
+      : window.id === "weekly"
+        ? "wk"
+        : window.id === "premium-interactions"
+          ? "req"
+          : window.id === "completions"
+            ? "code"
+            : window.label.toLowerCase();
   return (
     <div className="flex items-center gap-2 text-[11.5px]">
-      <span className="w-9 shrink-0 text-faint" title={window.label}>
+      <span className="w-11 shrink-0 text-faint" title={window.label}>
         {short}
       </span>
       <span className="h-1.5 min-w-[48px] flex-1 overflow-hidden rounded-full bg-rule" aria-hidden>
@@ -826,7 +835,13 @@ function SubscriptionRow({ account }: { account: AccountSubscription }) {
     <div className="border-b border-rule px-5 py-3 last:border-0">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className="text-[13.5px] font-medium text-fg">
-          {account.provider === "claude" ? "Claude" : account.provider === "codex" ? "Codex" : account.provider}
+          {account.provider === "claude"
+            ? "Claude"
+            : account.provider === "codex"
+              ? "Codex"
+              : account.provider === "github"
+                ? "GitHub Copilot"
+                : account.provider}
         </span>
         <span className="min-w-0 truncate text-[12px] text-muted">{account.name ?? ""}</span>
         {account.plan ? <Badge tone="neutral">{account.plan}</Badge> : null}
