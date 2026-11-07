@@ -169,6 +169,12 @@ export type Connection = {
   last_error: string | null;
 };
 
+/**
+ * What a key is allowed to reach. `inference` keys call `/v1` and carry limits and
+ * guardrails; `admin` keys manage the gateway (`/api/*`, `/metrics`) and never spend tokens.
+ */
+export type KeyScope = "inference" | "admin";
+
 /** One rewrite on a key: `from` is what the client sends, `to` a registry ref. */
 export type KeyModelMap = { from: string; to: string };
 
@@ -196,12 +202,14 @@ export type Guardrails = {
  * millionths of a dollar, so 1 USD = 1_000_000.
  * `models` is the key's rewrite map, absent when the server predates it.
  * `guardrails` null means no checks at all.
+ * `scope` decides where the key is accepted; admin keys are rejected on `/v1`.
  */
 export type KeyResult = {
   id: string;
   name: string | null;
   created_at: number;
   is_active: boolean;
+  scope: KeyScope;
   rpm: number;
   tpm: number;
   budget_tokens: number;
@@ -221,6 +229,8 @@ export type KeyResult = {
 /** Exactly the fields `PATCH /api/keys/{id}` accepts; null clears a nullable field. */
 export type UpdateKey = Partial<{
   is_active: boolean;
+  /** `admin` keys manage the gateway instead of calling `/v1`. */
+  scope: KeyScope;
   rpm: number;
   tpm: number;
   budget_tokens: number;

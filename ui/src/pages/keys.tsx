@@ -11,6 +11,7 @@ import {
   Field,
   Input,
   Modal,
+  Segmented,
   Select,
   PageHeader,
 } from "../components/ui";
@@ -25,6 +26,7 @@ import {
   type Guardrails,
   type KeyModelMap,
   type KeyResult,
+  type KeyScope,
   type NewKey,
   type UpdateKey,
 } from "../lib/api";
@@ -61,7 +63,16 @@ export default function Keys() {
     {
       key: "name",
       title: "Name",
-      render: (r) => <span className="font-medium">{r.name ?? <span className="text-faint">unnamed</span>}</span>,
+      render: (r) => (
+        <span className="flex items-center gap-1.5">
+          <span className="font-medium">{r.name ?? <span className="text-faint">unnamed</span>}</span>
+          {r.scope === "admin" ? (
+            <Badge tone="accent" title="manages the gateway; cannot call /v1 or spend tokens">
+              admin
+            </Badge>
+          ) : null}
+        </span>
+      ),
     },
     { key: "status", title: "Status", render: (r) => <Status row={r} /> },
     { key: "limits", title: "Limits", render: (r) => <Limits row={r} /> },
@@ -429,8 +440,15 @@ function validateMap(
 const MAX_BLOCKED_TERMS = 200;
 const MAX_TERM_CHARS = 200;
 
+/** Inference is the default: switching a key to admin is the deliberate move. */
+const SCOPES: ReadonlyArray<{ id: KeyScope; label: string }> = [
+  { id: "inference", label: "Inference" },
+  { id: "admin", label: "Admin" },
+];
+
 function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void }) {
   const [active, setActive] = useState(row.is_active);
+  const [scope, setScope] = useState<KeyScope>(row.scope);
   const [rpm, setRpm] = useState(row.rpm > 0 ? String(row.rpm) : "");
   const [tpm, setTpm] = useState(row.tpm > 0 ? String(row.tpm) : "");
   const [budget, setBudget] = useState(row.budget_tokens > 0 ? String(row.budget_tokens) : "");
@@ -554,6 +572,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
     setBusy(true);
     const patch: UpdateKey = {
       is_active: active,
+      scope,
       rpm: toCount(rpm),
       tpm: toCount(tpm),
       budget_tokens: toCount(budget),
@@ -608,6 +627,25 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
             {active ? "accepting requests" : "every request is rejected with 403"}
           </span>
         </label>
+
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">
+            scope
+          </span>
+          <Segmented
+            options={SCOPES}
+            value={scope}
+            onChange={(v) => {
+              if (!busy) setScope(v);
+            }}
+            ariaLabel="key scope"
+            className={busy ? "pointer-events-none opacity-60" : undefined}
+          />
+          <span className="text-[11px] text-faint">
+            admin keys manage the gateway and cannot spend tokens; inference keys call /v1 and
+            obey limits and guardrails.
+          </span>
+        </div>
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="requests/min" hint="empty = unlimited">
