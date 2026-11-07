@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, CardHeader, ConfirmDialog, ErrorNote } from "./ui";
+import { Grid, Stack } from "./atoms";
 import { useToast } from "./toast";
 import { api } from "../lib/api";
 import { when } from "../lib/format";
@@ -89,7 +90,7 @@ export function UpdateCard() {
     return (
       <Card className="mt-5">
         <CardHeader title="Software updates" />
-        <div className="px-5 pb-5 text-[12.5px] text-faint">{failure ? <ErrorNote error={failure} /> : "loading…"}</div>
+        <div className="px-5 pb-5 text-small text-faint">{failure ? <ErrorNote error={failure} /> : "loading…"}</div>
       </Card>
     );
   }
@@ -125,8 +126,8 @@ export function UpdateCard() {
           title="Software updates"
           action={<Badge tone="neutral">v{status.current_version}</Badge>}
         />
-        <div className="flex flex-col gap-4 px-5 pb-5">
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[12.5px]">
+        <Stack gap="lg" className="px-5 pb-5">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-small">
             <span className="text-muted">
               latest <span className="font-mono text-fg">{status.latest_version ? `v${status.latest_version}` : "—"}</span>
             </span>
@@ -143,16 +144,16 @@ export function UpdateCard() {
 
           <div className="rounded-lg border border-line bg-surface-2 px-3 py-2.5">
             <div className="flex flex-wrap items-baseline gap-2">
-              <span className="text-[12.5px] font-medium">Deployment</span>
+              <span className="text-small font-medium">Deployment</span>
               <Badge tone="neutral">{status.deployment.label}</Badge>
-              <span className="text-[11.5px] text-faint">
+              <span className="text-caption text-faint">
                 {status.deployment.automatic ? "this process can finish the upgrade" : "supervisor owns the upgrade"}
               </span>
             </div>
-            <p className="mt-1 text-[11.5px] leading-relaxed text-muted">{status.deployment.detail}</p>
+            <p className="mt-1 text-caption leading-relaxed text-muted">{status.deployment.detail}</p>
             {status.deployment.command ? (
               <div className="mt-2 flex items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded border border-line bg-surface px-2 py-1 font-mono text-[11.5px] text-fg">
+                <code className="min-w-0 flex-1 truncate rounded border border-line bg-surface px-2 py-1 font-mono text-caption text-fg">
                   {status.deployment.command}
                 </code>
                 <Button variant="quiet" onClick={() => void copy(status.deployment.command ?? "")}>
@@ -162,7 +163,7 @@ export function UpdateCard() {
             ) : null}
           </div>
 
-          <div className="grid gap-3 min-[700px]:grid-cols-2">
+          <Grid cols={2} gap="md" className="max-[700px]:grid-cols-1">
             <label className="flex items-start gap-3 rounded-lg border border-line px-3 py-2.5">
               <input
                 type="checkbox"
@@ -171,8 +172,8 @@ export function UpdateCard() {
                 className="mt-0.5 h-4 w-4 accent-[var(--color-accent)]"
               />
               <span>
-                <span className="block text-[12.5px] font-medium">Check daily</span>
-                <span className="block text-[11.5px] text-faint">Ask GitHub once a day for a newer release.</span>
+                <span className="block text-small font-medium">Check daily</span>
+                <span className="block text-caption text-faint">Ask GitHub once a day for a newer release.</span>
               </span>
             </label>
             <label className="flex items-start gap-3 rounded-lg border border-line px-3 py-2.5">
@@ -184,20 +185,20 @@ export function UpdateCard() {
                 className="mt-0.5 h-4 w-4 accent-[var(--color-accent)]"
               />
               <span>
-                <span className="block text-[12.5px] font-medium">Download automatically</span>
-                <span className="block text-[11.5px] text-faint">
+                <span className="block text-small font-medium">Download automatically</span>
+                <span className="block text-caption text-faint">
                   {status.deployment.can_download
                     ? "Verify and stage the archive; nothing restarts by itself."
                     : `${status.deployment.label} replaces the whole install, so there is no binary to stage.`}
                 </span>
               </span>
             </label>
-          </div>
+          </Grid>
 
           {status.notes ? (
-            <details className="rounded-lg border border-line px-3 py-2 text-[12px]">
+            <details className="rounded-lg border border-line px-3 py-2 text-small">
               <summary className="cursor-pointer text-muted">Release notes</summary>
-              <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap font-sans text-[11.5px] leading-relaxed text-muted">
+              <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap font-sans text-caption leading-relaxed text-muted">
                 {status.notes}
               </pre>
             </details>
@@ -225,7 +226,7 @@ export function UpdateCard() {
               </Button>
             ) : null}
             <a
-              className="ml-auto text-[12px] text-[var(--color-accent-text)] hover:underline"
+              className="ml-auto text-small text-[var(--color-accent-text)] hover:underline"
               href={status.release_url}
               target="_blank"
               rel="noreferrer"
@@ -233,11 +234,11 @@ export function UpdateCard() {
               release page →
             </a>
           </div>
-          <p className="text-[11px] leading-relaxed text-faint">
+          <p className="text-caption leading-relaxed text-faint">
             Downloads are verified against the release SHA-256. The staged binary lives under
             the data directory; restarting is the only step that changes the running process.
           </p>
-        </div>
+        </Stack>
       </Card>
     </>
   );

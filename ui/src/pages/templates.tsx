@@ -38,7 +38,7 @@ type Draft = {
 };
 
 const bodyClass =
-  "w-full resize-y rounded-lg border border-line bg-surface-2 px-2.5 py-2 font-mono text-[12px] leading-relaxed text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none";
+  "w-full resize-y rounded-lg border border-line bg-surface-2 px-2.5 py-2 font-mono text-small leading-relaxed text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none";
 
 export default function Templates() {
   const templates = useTemplates();
@@ -93,7 +93,7 @@ export default function Templates() {
           <div className="min-w-0">
             <div className="font-medium text-fg">{row.name}</div>
             {line ? (
-              <div className="mt-0.5 max-w-[420px] truncate font-mono text-[11px] text-faint">
+              <div className="mt-0.5 max-w-[420px] truncate font-mono text-caption text-faint">
                 {line}
               </div>
             ) : null}
@@ -112,7 +112,7 @@ export default function Templates() {
       title: "updated",
       width: "150px",
       render: (row) => (
-        <span className="text-[12px] text-muted" title={when(row.updated_at)}>
+        <span className="text-small text-muted" title={when(row.updated_at)}>
           {ago(row.updated_at)}
         </span>
       ),
@@ -192,14 +192,14 @@ export default function Templates() {
         <CardHeader
           title="Saved templates"
           action={
-            <span className="text-[11px] text-faint">
+            <span className="text-caption text-faint">
               {rows ? `${rows.length} ${rows.length === 1 ? "template" : "templates"}` : null}
             </span>
           }
         />
         {rows && rows.length === 0 ? (
           <EmptyState>
-            <p className="mx-auto max-w-[440px] text-[13px] text-muted">
+            <p className="mx-auto max-w-[440px] text-body text-muted">
               A template is a reusable system prompt: the instructions a model reads before the
               conversation. Save one here and load it into the Playground instead of retyping
               it for every test.
@@ -249,7 +249,7 @@ export default function Templates() {
               />
             </Field>
             {attempted && nameProblem ? (
-              <p className="text-[12px] text-neg">{nameProblem}</p>
+              <p className="text-small text-neg">{nameProblem}</p>
             ) : null}
 
             <Field
@@ -266,11 +266,11 @@ export default function Templates() {
               />
             </Field>
             {attempted && bodyProblem ? (
-              <p className="text-[12px] text-neg">{bodyProblem}</p>
+              <p className="text-small text-neg">{bodyProblem}</p>
             ) : null}
 
             {draft.id !== null ? (
-              <p className="font-mono text-[11px] text-faint">
+              <p className="font-mono text-caption text-faint">
                 editing v{
                   rows?.find((row) => row.id === draft.id)?.version ?? "?"
                 } · a name change alone keeps the version
@@ -313,7 +313,7 @@ function TemplateHistory({
       onClose={onClose}
       footer={<Button onClick={onClose}>close</Button>}
     >
-      <p className="mb-3 text-[12px] text-faint">
+      <p className="mb-3 text-small text-faint">
         Newest first. Restore copies that body into the editor; saving it publishes a new
         version, so nothing is lost.
       </p>
@@ -321,11 +321,11 @@ function TemplateHistory({
       {versions.isError ? <ErrorNote error={versions.error} onRetry={() => void versions.refetch()} /> : null}
 
       {!versions.data ? (
-        <p className="py-6 text-center text-[13px] text-faint">
+        <p className="py-6 text-center text-body text-faint">
           {versions.isLoading ? "loading…" : "—"}
         </p>
       ) : versions.data.length === 0 ? (
-        <p className="py-6 text-center text-[13px] text-faint">No revisions recorded.</p>
+        <p className="py-6 text-center text-body text-faint">No revisions recorded.</p>
       ) : (
         <ol className="space-y-2">
           {versions.data.map((version) => (
@@ -338,18 +338,18 @@ function TemplateHistory({
                   <Badge tone={version.version === template.version ? "pos" : "neutral"}>
                     v{version.version}
                   </Badge>
-                  <span className="text-[11px] text-faint" title={when(version.created_at)}>
+                  <span className="text-caption text-faint" title={when(version.created_at)}>
                     {when(version.created_at)} · {ago(version.created_at)}
                   </span>
                   {version.version === template.version ? (
-                    <span className="text-[11px] text-faint">current</span>
+                    <span className="text-caption text-faint">current</span>
                   ) : null}
                 </span>
                 <Button variant="ghost" onClick={() => onRestore(version)}>
                   restore
                 </Button>
               </div>
-              <p className="mt-1.5 max-h-24 overflow-hidden whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted">
+              <p className="mt-1.5 max-h-24 overflow-hidden whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-muted">
                 {version.body}
               </p>
             </li>

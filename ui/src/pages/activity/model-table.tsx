@@ -20,14 +20,14 @@ export function ModelTable({
   onSelect: (ref: string) => void;
 }) {
   if (rows.length === 0) {
-    return <div className="px-6 py-8 text-center text-[13px] text-faint">No models served in this window.</div>;
+    return <div className="px-6 py-8 text-center text-body text-faint">No models served in this window.</div>;
   }
   return (
     <div className="overflow-x-auto">
       <div role="table" aria-label="models in use" className="min-w-[760px]">
         <div
           role="row"
-          className="grid grid-cols-[minmax(0,1fr)_90px_190px_88px_96px_72px] items-center gap-3 border-b border-line px-6 py-2 text-[11px] uppercase tracking-[0.06em] text-faint"
+          className="grid grid-cols-[minmax(0,1fr)_90px_190px_88px_96px_72px] items-center gap-3 border-b border-line px-6 py-2 text-caption uppercase tracking-[0.06em] text-faint"
         >
           <span role="columnheader">Model</span>
           <span role="columnheader" className="text-right">
@@ -64,7 +64,7 @@ export function ModelTable({
                   }
                 }}
                 className={cx(
-                  "grid cursor-pointer grid-cols-[minmax(0,1fr)_90px_190px_88px_96px_72px] items-center gap-3 border-b border-[var(--color-rule)] py-2.5 pl-5 pr-6 text-[13.5px] last:border-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text",
+                  "grid cursor-pointer grid-cols-[minmax(0,1fr)_90px_190px_88px_96px_72px] items-center gap-3 border-b border-[var(--color-rule)] py-2.5 pl-5 pr-6 text-body last:border-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text",
                   on ? "bg-[var(--color-surface-2)]" : "hover:bg-[var(--color-row-hover)]",
                 )}
               >
@@ -77,11 +77,11 @@ export function ModelTable({
                   />
                   <ModelName ref_={row.ref} on={on} />
                 </span>
-                <span role="cell" className="text-right font-mono text-[12.5px] text-muted tnum">
+                <span role="cell" className="text-right font-mono text-small text-muted tnum">
                   {compact(row.requests)}
                 </span>
                 <span role="cell" className="text-right">
-                  <span className="font-mono text-[12.5px] text-fg tnum">{compact(row.tokens)}</span>
+                  <span className="font-mono text-small text-fg tnum">{compact(row.tokens)}</span>
                   <span className="mt-1 flex items-center justify-end gap-2">
                     <span className="h-1.5 w-full max-w-[110px] overflow-hidden rounded-full bg-[var(--color-rule)]">
                       <span
@@ -89,7 +89,7 @@ export function ModelTable({
                         style={{ width: `${Math.max(2, share)}%`, background: colorOf(row.ref) }}
                       />
                     </span>
-                    <span className="w-10 text-right font-mono text-[11px] text-faint tnum">
+                    <span className="w-10 text-right font-mono text-caption text-faint tnum">
                       {pct(share)}
                     </span>
                   </span>
@@ -97,19 +97,19 @@ export function ModelTable({
                 <span
                   role="cell"
                   className={cx(
-                    "text-right font-mono text-[12.5px] tnum",
+                    "text-right font-mono text-small tnum",
                     row.cost_micros > 0 ? "text-muted" : "text-faint",
                   )}
                 >
                   {usd(row.cost_micros)}
                 </span>
-                <span role="cell" className="text-right font-mono text-[12.5px] text-muted tnum">
+                <span role="cell" className="text-right font-mono text-small text-muted tnum">
                   {ms(row.avg_latency_ms)}
                 </span>
                 <span
                   role="cell"
                   className={cx(
-                    "text-right font-mono text-[12.5px] tnum",
+                    "text-right font-mono text-small tnum",
                     row.errors > 0 ? "text-neg" : "text-faint",
                   )}
                 >
@@ -133,7 +133,7 @@ function ModelName({ ref_, on }: { ref_: string; on: boolean }) {
       title={on ? "clear the model filter" : `filter the log to ${ref_}`}
       className="min-w-0 truncate text-left"
     >
-      {provider ? <span className="font-mono text-[12px] text-faint">{provider}/</span> : null}
+      {provider ? <span className="font-mono text-small text-faint">{provider}/</span> : null}
       <span className="text-fg">{id}</span>
     </span>
   );

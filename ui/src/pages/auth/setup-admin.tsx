@@ -17,6 +17,7 @@ import {
   RecoveryCodes,
 } from "../../components/auth-form";
 import { Badge } from "../../components/ui";
+import { Heading } from "../../components/atoms";
 
 /** A1 first run, then A2 recovery codes. The setup code proves control of the machine. */
 export default function SetupAdmin() {
@@ -74,10 +75,10 @@ export default function SetupAdmin() {
             lead="There is no reset email on a self-hosted gateway. Each of these works once, and this is the only time they are shown."
           />
           <RecoveryCodes codes={codes} />
-          <div className="mt-5 rounded-[10px] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-[12.5px] text-[var(--color-warn-ink)]">
+          <div className="mt-5 rounded-[10px] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-small text-[var(--color-warn-ink)]">
             These are shown only once.
           </div>
-          <label className="mt-4 flex items-start gap-2 text-[13px]">
+          <label className="mt-4 flex items-start gap-2 text-body">
             <input
               type="checkbox"
               checked={stored}
@@ -115,7 +116,7 @@ export default function SetupAdmin() {
               hint={
                 <>
                   Printed in the terminal where RRouter started, as{" "}
-                  <code className="font-mono text-[11px]">Setup code: XXXX-XXXX</code>. It proves
+                  <code className="font-mono text-caption">Setup code: XXXX-XXXX</code>. It proves
                   you control this machine.
                 </>
               }
@@ -171,13 +172,13 @@ export default function SetupAdmin() {
                 {busy ? "Creating…" : "Create admin account"}
               </AuthPrimary>
             </AuthActions>
-            <p className="text-center text-[11.5px] text-faint">Everything stays on this machine.</p>
+            <p className="text-center text-caption text-faint">Everything stays on this machine.</p>
           </form>
         </AuthCard>
 
         <aside className="rounded-[16px] border border-line bg-surface-2 px-5 py-6">
-          <h2 className="text-[13px] font-semibold">What an admin can do</h2>
-          <ul className="mt-3 space-y-2 text-[12.5px] text-muted">
+          <Heading level={2} className="text-body font-semibold">What an admin can do</Heading>
+          <ul className="mt-3 space-y-2 text-small text-muted">
             {[
               "Add, test and remove provider accounts",
               "Edit models, aliases and fallback combos",
@@ -192,8 +193,8 @@ export default function SetupAdmin() {
               </li>
             ))}
           </ul>
-          <h2 className="mt-5 text-[13px] font-semibold">Roles you can give later</h2>
-          <dl className="mt-2 space-y-2 text-[12.5px]">
+          <Heading level={2} className="mt-5 text-body font-semibold">Roles you can give later</Heading>
+          <dl className="mt-2 space-y-2 text-small">
             <div>
               <dt className="font-medium">Admin</dt>
               <dd className="text-muted">Everything on this page.</dd>
@@ -207,7 +208,7 @@ export default function SetupAdmin() {
               <dd className="text-muted">Read-only account.</dd>
             </div>
           </dl>
-          <p className="mt-5 border-t border-line pt-4 text-[11.5px] leading-relaxed text-faint">
+          <p className="mt-5 border-t border-line pt-4 text-caption leading-relaxed text-faint">
             The first account is the permanent owner. It can't be removed or demoted.
           </p>
         </aside>

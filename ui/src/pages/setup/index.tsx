@@ -31,6 +31,7 @@ import {
 import { compact, ms, splitRef } from "../../lib/format";
 import { ApiKeyStep, DeviceStep, PkceFailedStep, PkceStep } from "./signin";
 import { SNIPPET_LANGS, snippetFor, type SnippetLang } from "./snippets";
+import { Heading } from "../../components/atoms";
 
 /** First-run wizard: connect an account, mint a client key, watch the first request. */
 
@@ -134,10 +135,10 @@ export default function Setup() {
           height={26}
           className="h-[28px] w-auto shrink-0 select-none object-contain"
         />
-        <span className="text-[14px] font-semibold tracking-[-0.01em] text-fg">RRouter</span>
+        <span className="text-lead font-semibold tracking-[-0.01em] text-fg">RRouter</span>
         <span aria-hidden className="h-[18px] w-px bg-line" />
-        <span className="text-[14px] text-muted">Setup</span>
-        <span className="ml-auto hidden text-[12.5px] text-faint min-[820px]:inline">
+        <span className="text-lead text-muted">Setup</span>
+        <span className="ml-auto hidden text-small text-faint min-[820px]:inline">
           About 2 minutes · finish whenever you like
         </span>
         <Button variant="quiet" onClick={skip}>
@@ -148,7 +149,7 @@ export default function Setup() {
       <div className="mx-auto flex w-full max-w-[1280px] flex-wrap items-stretch">
         <aside className="hidden w-[300px] shrink-0 border-r border-line bg-[var(--color-sidebar)] px-7 py-9 min-[820px]:block">
           <Rail step={step} account={account} keyCreated={key !== null} firstRequest={firstRequest} />
-          <p className="mt-8 text-[12.5px] leading-relaxed text-faint">
+          <p className="mt-8 text-small leading-relaxed text-faint">
             Self-hosted. RRouter runs on this machine and talks to your providers directly.
           </p>
         </aside>
@@ -156,13 +157,13 @@ export default function Setup() {
         <main className="min-w-0 flex-1 px-4 py-6 min-[820px]:px-14 min-[820px]:pb-16 min-[820px]:pt-12">
           <div className="mx-auto w-full max-w-[880px]">
             <MobileProgress step={step} />
-            <div className="mb-2.5 hidden text-[13px] text-faint min-[820px]:block">
+            <div className="mb-2.5 hidden text-body text-faint min-[820px]:block">
               Step {macro} of 3
             </div>
-            <h1 className="text-[26px] font-semibold tracking-[-0.02em] min-[820px]:text-[30px]">
+            <Heading level={1} className="text-title font-semibold tracking-[-0.02em] min-[820px]:text-display">
               {stepTitle(step)}
-            </h1>
-            <p className="mt-2.5 max-w-[60ch] text-[15px] text-muted">{stepLead(step)}</p>
+            </Heading>
+            <p className="mt-2.5 max-w-[60ch] text-lead text-muted">{stepLead(step)}</p>
 
             <div className="mt-7">
               {step === "choose" ? (
@@ -293,7 +294,7 @@ export default function Setup() {
               ) : null}
             </div>
 
-            <footer className="mt-9 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-6 text-[12.5px] text-faint">
+            <footer className="mt-9 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-6 text-small text-faint">
               <span className="flex flex-wrap items-center gap-3">
                 {step !== "choose" && step !== "request-done" && step !== "key" && step !== "request" ? (
                   <Button onClick={back}>{backLabel}</Button>
@@ -410,10 +411,10 @@ function ChooseStep({
       </div>
 
       <details className="mt-6 rounded-[var(--radius-card)] border border-line bg-surface">
-        <summary className="cursor-pointer px-5 py-3.5 text-[13.5px] font-medium">
+        <summary className="cursor-pointer px-5 py-3.5 text-body font-medium">
           Which one should I pick?
         </summary>
-        <p className="border-t border-rule px-5 py-4 text-[13.5px] text-muted">
+        <p className="border-t border-rule px-5 py-4 text-body text-muted">
           A subscription uses the plan you already pay for and needs no key, which makes it the
           fastest start. An API key is billed per token and suits servers and shared setups. Both
           work the same once connected.
@@ -423,7 +424,7 @@ function ChooseStep({
       <button
         type="button"
         onClick={onSkip}
-        className="mt-5 text-[13.5px] text-muted underline underline-offset-4 hover:text-fg"
+        className="mt-5 text-body text-muted underline underline-offset-4 hover:text-fg"
       >
         Skip for now. I'll connect later
       </button>
@@ -459,11 +460,11 @@ function Option({
         </svg>
       </span>
       <span className="flex flex-wrap items-center gap-2">
-        <span className="text-[17px] font-semibold">{title}</span>
-        <span className="rounded-full border border-line px-2.5 py-0.5 text-[12px] text-muted">{tag}</span>
+        <span className="text-heading font-semibold">{title}</span>
+        <span className="rounded-full border border-line px-2.5 py-0.5 text-small text-muted">{tag}</span>
       </span>
-      <span className="text-[13.5px] text-muted">{body}</span>
-      <span className="mt-auto inline-flex items-center gap-2 text-[13.5px] font-medium">
+      <span className="text-body text-muted">{body}</span>
+      <span className="mt-auto inline-flex items-center gap-2 text-body font-medium">
         {action} <span aria-hidden>→</span>
       </span>
     </button>
@@ -507,19 +508,19 @@ function ConnectedStep({
   return (
     <div className="max-w-[640px]">
       <div className="flex flex-wrap items-center gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-5 py-4">
-        <span className="flex h-10 w-10 items-center justify-center rounded-full border border-line bg-surface-2 font-mono text-[13px] uppercase">
+        <span className="flex h-10 w-10 items-center justify-center rounded-full border border-line bg-surface-2 font-mono text-body uppercase">
           {account.provider.slice(0, 2)}
         </span>
         <div className="min-w-0">
-          <div className="truncate text-[14px] font-medium">{account.label}</div>
-          <div className="truncate text-[12.5px] text-faint">
+          <div className="truncate text-lead font-medium">{account.label}</div>
+          <div className="truncate text-small text-faint">
             {connection?.email ?? connection?.name ?? account.provider}
           </div>
         </div>
-        <span className="ml-auto rounded-full border border-[var(--color-pos)]/35 bg-[var(--color-pos)]/10 px-2.5 py-0.5 text-[12px] text-pos">
+        <span className="ml-auto rounded-full border border-[var(--color-pos)]/35 bg-[var(--color-pos)]/10 px-2.5 py-0.5 text-small text-pos">
           Active
         </span>
-        <span className="rounded-full border border-line px-2.5 py-0.5 text-[12px] text-muted">
+        <span className="rounded-full border border-line px-2.5 py-0.5 text-small text-muted">
           Priority {(connection?.priority ?? 0) + 1}
         </span>
       </div>
@@ -527,13 +528,13 @@ function ConnectedStep({
       <div
         role="status"
         aria-live="polite"
-        className="mt-3 flex flex-wrap items-center gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-5 py-3.5 text-[13px]"
+        className="mt-3 flex flex-wrap items-center gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-5 py-3.5 text-body"
       >
         {probe?.ok ? (
           <>
             <span aria-hidden className="h-2 w-2 rounded-full bg-pos" />
             <span>Test request succeeded</span>
-            <span className="font-mono text-[12.5px] text-muted tnum">{ms(probe.latency_ms)}</span>
+            <span className="font-mono text-small text-muted tnum">{ms(probe.latency_ms)}</span>
           </>
         ) : probe ? (
           <>
@@ -551,20 +552,20 @@ function ConnectedStep({
       </div>
 
       <div className="mt-5">
-        <div className="text-[13px] text-muted">
+        <div className="text-body text-muted">
           {accountModels.length} models available
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
           {accountModels.slice(0, 8).map((m) => (
             <span
               key={m.ref}
-              className="rounded-lg border border-line bg-surface-2 px-2.5 py-1 font-mono text-[12px] text-muted"
+              className="rounded-lg border border-line bg-surface-2 px-2.5 py-1 font-mono text-small text-muted"
             >
               {splitRef(m.ref).id}
             </span>
           ))}
           {accountModels.length > 8 ? (
-            <span className="px-2.5 py-1 text-[12px] text-faint">
+            <span className="px-2.5 py-1 text-small text-faint">
               +{accountModels.length - 8} more
             </span>
           ) : null}
@@ -636,27 +637,27 @@ function KeyCreatedStep({
 }) {
   return (
     <div className="max-w-[640px]">
-      <div className="rounded-[var(--radius-card)] border border-[var(--color-warn)]/35 bg-[var(--color-warn)]/10 px-5 py-4 text-[13.5px] text-[var(--color-warn-ink)]">
+      <div className="rounded-[var(--radius-card)] border border-[var(--color-warn)]/35 bg-[var(--color-warn)]/10 px-5 py-4 text-body text-[var(--color-warn-ink)]">
         Copy the key now. It cannot be shown again.
       </div>
 
       <div className="mt-4">
-        <div className="text-[13px] text-muted">Your key</div>
+        <div className="text-body text-muted">Your key</div>
         <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-line bg-surface-2 py-1 pl-3.5 pr-1.5">
-          <code className="min-w-0 flex-1 truncate font-mono text-[13px]">{created.key}</code>
+          <code className="min-w-0 flex-1 truncate font-mono text-body">{created.key}</code>
           <CopyButton value={created.key} label="Copy key" />
         </div>
       </div>
 
       <div className="mt-4">
-        <div className="text-[13px] text-muted">Base URL</div>
+        <div className="text-body text-muted">Base URL</div>
         <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-line bg-surface-2 py-1 pl-3.5 pr-1.5">
-          <code className="min-w-0 flex-1 truncate font-mono text-[13px]">{baseUrl}</code>
+          <code className="min-w-0 flex-1 truncate font-mono text-body">{baseUrl}</code>
           <CopyButton value={baseUrl} label="Copy" />
         </div>
       </div>
 
-      <p className="mt-4 text-[13px] text-faint">
+      <p className="mt-4 text-body text-faint">
         Point any OpenAI-compatible client at the base URL and use the key above.
       </p>
 
@@ -727,7 +728,7 @@ function RequestStep({
   return (
     <div className="max-w-[720px]">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <label htmlFor="setup-model" className="text-[13px] text-muted">
+        <label htmlFor="setup-model" className="text-body text-muted">
           Model
         </label>
         <div className="min-w-[240px] max-w-[420px] flex-1">
@@ -757,7 +758,7 @@ function RequestStep({
               aria-pressed={lang === l.id}
               onClick={() => setLang(l.id)}
               className={cx(
-                "h-[30px] rounded-lg px-3 text-[12.5px]",
+                "h-[30px] rounded-lg px-3 text-small",
                 lang === l.id ? "bg-fg font-medium text-bg" : "text-muted hover:text-fg",
               )}
             >
@@ -768,7 +769,7 @@ function RequestStep({
         <CopyButton value={snippet} label="Copy snippet" />
       </div>
 
-      <pre className="mt-2 overflow-x-auto rounded-[10px] border border-line bg-[var(--color-bg)] p-4 font-mono text-[12.5px] leading-relaxed text-fg">
+      <pre className="mt-2 overflow-x-auto rounded-[10px] border border-line bg-[var(--color-bg)] p-4 font-mono text-small leading-relaxed text-fg">
         {snippet}
       </pre>
 
@@ -778,8 +779,8 @@ function RequestStep({
         className="mt-5 flex flex-wrap items-center gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-5 py-4"
       >
         <span aria-hidden className="pulse h-2.5 w-2.5 shrink-0 rounded-full bg-accent" />
-        <span className="text-[14px]">Listening for the first request</span>
-        <span className="text-[12.5px] text-faint">Nothing yet. Your request will appear here.</span>
+        <span className="text-lead">Listening for the first request</span>
+        <span className="text-small text-faint">Nothing yet. Your request will appear here.</span>
       </div>
 
       <div className="mt-5 flex flex-wrap items-center gap-2">
@@ -820,15 +821,15 @@ function DoneStep({
     <div className="max-w-[720px]">
       <div className="flex flex-wrap items-center gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-5 py-4">
         <span aria-hidden className="h-2.5 w-2.5 rounded-full bg-pos" />
-        <span className="text-[14px]">
+        <span className="text-lead">
           {account ? `${account.label} received the request` : "The first request arrived"}
         </span>
       </div>
 
       {event ? (
-        <dl className="mt-4 divide-y divide-[var(--color-rule)] rounded-[var(--radius-card)] border border-line bg-surface px-5 text-[13px]">
+        <dl className="mt-4 divide-y divide-[var(--color-rule)] rounded-[var(--radius-card)] border border-line bg-surface px-5 text-body">
           <Row k="Model">
-            <span className="font-mono text-[12.5px]">{event.model}</span>
+            <span className="font-mono text-small">{event.model}</span>
           </Row>
           <Row k="Status">
             <StatusPill status={event.status} />
@@ -844,7 +845,7 @@ function DoneStep({
         </dl>
       ) : null}
 
-      <h2 className="mt-8 text-[15px] font-semibold">What to do next</h2>
+      <Heading level={2} className="mt-8 text-lead font-semibold">What to do next</Heading>
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
         <Next title="Add a fallback" body="Chain models in a Combo so a rate limit never reaches your app." onClick={onCombos} />
         <Next title="Create an alias" body="Give clients a stable name like default and repoint it later." onClick={onAliases} />
@@ -852,7 +853,7 @@ function DoneStep({
       </div>
 
       <div className="mt-8 flex flex-wrap items-center gap-2 border-t border-line pt-6">
-        <span className="text-[12.5px] text-faint">Setup complete. You can reopen it from Health.</span>
+        <span className="text-small text-faint">Setup complete. You can reopen it from Health.</span>
         <Button variant="primary" onClick={onActivity} className="ml-auto">
           Open Activity
         </Button>
@@ -877,8 +878,8 @@ function Next({ title, body, onClick }: { title: string; body: string; onClick: 
       onClick={onClick}
       className="flex flex-col gap-1.5 rounded-[var(--radius-card)] border border-line bg-surface p-4 text-left transition-colors hover:border-line-strong hover:bg-[var(--color-row-hover)]"
     >
-      <span className="text-[13.5px] font-medium">{title}</span>
-      <span className="text-[12.5px] text-muted">{body}</span>
+      <span className="text-body font-medium">{title}</span>
+      <span className="text-small text-muted">{body}</span>
     </button>
   );
 }
@@ -912,7 +913,7 @@ function Rail({
             <div className="flex flex-col items-center">
               <span
                 className={cx(
-                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border font-mono text-[12px]",
+                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border font-mono text-small",
                   done && "border-accent bg-accent text-[var(--color-accent-ink)]",
                   current && "border-accent text-accent-text",
                   !done && !current && "border-line text-muted",
@@ -925,10 +926,10 @@ function Rail({
               ) : null}
             </div>
             <div className={cx("min-w-0 pb-6", n === 3 && "pb-0")}>
-              <div className={cx("text-[13.5px] font-medium", done || current ? "text-fg" : "text-muted")}>
+              <div className={cx("text-body font-medium", done || current ? "text-fg" : "text-muted")}>
                 {STEP_TITLES[n - 1]}
               </div>
-              <div className="mt-0.5 text-[12.5px] text-faint">{summaries[n - 1]}</div>
+              <div className="mt-0.5 text-small text-faint">{summaries[n - 1]}</div>
             </div>
           </li>
         );
@@ -941,7 +942,7 @@ function MobileProgress({ step }: { step: Step }) {
   const macro = MACRO[step];
   return (
     <div className="mb-5 min-[820px]:hidden">
-      <div className="mb-2 text-[12.5px] text-faint">Step {macro} of 3</div>
+      <div className="mb-2 text-small text-faint">Step {macro} of 3</div>
       <div className="flex gap-1">
         {[1, 2, 3].map((n) => (
           <span

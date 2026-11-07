@@ -43,7 +43,7 @@ export default function Invite() {
   if (meta.isLoading) {
     return (
       <AuthShell>
-        <p className="text-center text-[13px] text-muted">Checking your invitation…</p>
+        <p className="text-center text-body text-muted">Checking your invitation…</p>
       </AuthShell>
     );
   }
@@ -70,7 +70,7 @@ export default function Invite() {
       <AuthShell width={540}>
         <AuthCard>
           <AuthTitle
-            badge={<span className="text-[11.5px] font-medium text-pos">Account created</span>}
+            badge={<span className="text-caption font-medium text-pos">Account created</span>}
             title="Save your recovery codes"
             lead="There is no reset email here. Each code works once, and this is the only time they are shown."
           />
@@ -114,11 +114,11 @@ export default function Invite() {
         <div className="mb-4 flex items-center gap-3">
           <span
             aria-hidden
-            className="flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-[13px] font-semibold"
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-body font-semibold"
           >
             {invite.inviter_name.slice(0, 1).toUpperCase()}
           </span>
-          <p className="text-[12.5px] text-muted">
+          <p className="text-small text-muted">
             <span className="font-medium text-fg">{invite.inviter_name}</span> invited you to join
             this RRouter as a{" "}
             <span className="font-medium capitalize text-fg">{invite.role}</span>.

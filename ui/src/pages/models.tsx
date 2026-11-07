@@ -16,6 +16,7 @@ import {
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS, CapabilityChips } from "../components/capability-chips";
+import { Heading, Toggle } from "../components/atoms";
 import { compact } from "../lib/format";
 import { compareModels } from "../lib/models";
 import { useToast } from "../components/toast";
@@ -137,7 +138,7 @@ export default function Models() {
             <span
               title={m.ref}
               className={cx(
-                "truncate font-mono text-[12px]",
+                "truncate font-mono text-small",
                 m.enabled ? "text-fg" : "text-faint",
               )}
             >
@@ -150,7 +151,7 @@ export default function Models() {
             ) : null}
           </div>
           {m.display && m.display !== m.id ? (
-            <div className="mt-0.5 truncate text-[11px] text-faint">{m.display}</div>
+            <div className="mt-0.5 truncate text-caption text-faint">{m.display}</div>
           ) : null}
         </div>
       ),
@@ -211,27 +212,13 @@ export default function Models() {
       render: (m) => {
         const pending = toggleTarget === m.id;
         return (
-          <button
-            type="button"
-            role="switch"
-            aria-checked={m.enabled}
-            aria-label={`${m.ref} ${m.enabled ? "enabled" : "disabled"}`}
-            title={m.enabled ? "disable this model" : "enable this model"}
+          <Toggle
+            size="sm"
+            checked={m.enabled}
+            label={`${m.ref} ${m.enabled ? "enabled" : "disabled"}`}
             disabled={pending}
-            onClick={() => toggle.mutate(m)}
-            className={cx(
-              "relative inline-flex h-4 w-7 items-center rounded-full border transition-colors disabled:opacity-40",
-              m.enabled ? "border-transparent bg-accent" : "border-line bg-surface-2",
-            )}
-          >
-            <span
-              aria-hidden
-              className={cx(
-                "absolute h-2.5 w-2.5 rounded-full transition-all",
-                m.enabled ? "left-[13px] bg-white" : "left-[3px] bg-[var(--color-muted)]",
-              )}
-            />
-          </button>
+            onChange={() => toggle.mutate(m)}
+          />
         );
       },
     },
@@ -343,7 +330,7 @@ export default function Models() {
           <CardHeader
             title="Registry"
             action={
-              <span className="text-[11px] text-faint tnum">
+              <span className="text-caption text-faint tnum">
                 {rows ? `${rows.length} of ${all.length} models` : "loading…"}
               </span>
             }
@@ -525,10 +512,10 @@ function CustomModelModal({
           </Field>
         </div>
         <div className="flex min-w-0 flex-col gap-1.5">
-          <span className="text-[12px] font-semibold text-ink-soft">capabilities</span>
+          <span className="text-small font-semibold text-ink-soft">capabilities</span>
           <div className="grid grid-cols-3 gap-x-3 gap-y-1.5">
             {CAPABILITY_KEYS.map((key) => (
-              <label key={key} className="flex items-center gap-2 text-[12px] text-muted">
+              <label key={key} className="flex items-center gap-2 text-small text-muted">
                 <input
                   type="checkbox"
                   checked={caps[key] === true}
@@ -552,8 +539,8 @@ const rowKey = (model: Model) => model.ref;
 function EmptyRegistry({ onSync, syncing }: { onSync: () => void; syncing: boolean }) {
   return (
     <Card className="px-6 py-12 text-center">
-      <h2 className="text-[16px] font-medium">No models yet</h2>
-      <p className="mx-auto mt-1.5 max-w-[440px] text-[13px] text-muted">
+      <Heading level={2} className="text-heading font-medium">No models yet</Heading>
+      <p className="mx-auto mt-1.5 max-w-[440px] text-body text-muted">
         Models are listed from the providers you connected — add one under{" "}
         <a href="/app/providers" className="underline underline-offset-2">
           Providers
@@ -566,7 +553,7 @@ function EmptyRegistry({ onSync, syncing }: { onSync: () => void; syncing: boole
         </Button>
         <a
           href="/app/providers"
-          className="inline-flex h-8 items-center rounded-lg border border-line-strong bg-surface-2 px-3 text-[13px] text-fg hover:border-[var(--color-line-strong)]"
+          className="inline-flex h-8 items-center rounded-lg border border-line-strong bg-surface-2 px-3 text-body text-fg hover:border-[var(--color-line-strong)]"
         >
           go to providers
         </a>

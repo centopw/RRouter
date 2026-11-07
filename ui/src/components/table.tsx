@@ -25,13 +25,13 @@ export function DataTable<T>({
   loading?: boolean;
 }) {
   if (!rows) {
-    return <div className="px-5 py-10 text-center text-[13px] text-faint">{loading ? "loading…" : "—"}</div>;
+    return <div className="px-5 py-10 text-center text-body text-faint">{loading ? "loading…" : "—"}</div>;
   }
   if (rows.length === 0) return <EmptyState>{empty ?? "nothing here yet"}</EmptyState>;
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-[13px]">
+      <table className="w-full border-collapse text-body">
         <thead>
           <tr className="border-b border-line text-left">
             {columns.map((c) => (
@@ -40,7 +40,7 @@ export function DataTable<T>({
                 scope="col"
                 style={c.width ? { width: c.width } : undefined}
                 className={cx(
-                  "px-4 py-2.5 text-[12px] font-semibold text-ink-soft",
+                  "px-4 py-2.5 text-small font-semibold text-ink-soft",
                   c.align === "right" && "text-right",
                 )}
               >

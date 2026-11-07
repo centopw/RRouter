@@ -143,15 +143,15 @@ export function PkceStep({
         className="flex flex-wrap items-center gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-5 py-4"
       >
         <span aria-hidden className="pulse inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-pos" />
-        <span className="text-[14px]">
+        <span className="text-lead">
           {startError ? "Could not start the sign-in" : !start ? "Starting the sign-in…" : "Waiting for approval…"}
         </span>
-        <span className="ml-auto rounded-full border border-line px-2.5 py-[1px] text-[12px] text-muted">
+        <span className="ml-auto rounded-full border border-line px-2.5 py-[1px] text-small text-muted">
           Browser sign-in
         </span>
       </div>
 
-      <ol className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-2 text-[13.5px]">
+      <ol className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-2 text-body">
         <Stage
           n={1}
           state="done"
@@ -165,16 +165,16 @@ export function PkceStep({
       </ol>
 
       <div className="mt-7 flex flex-col gap-2">
-        <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">
+        <span className="text-caption font-medium uppercase tracking-[0.08em] text-faint">
           Callback address
         </span>
         <div className="flex flex-wrap items-center gap-2 rounded-[10px] border border-line bg-surface-2 px-3 py-2">
-          <code className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-muted">
+          <code className="min-w-0 flex-1 truncate font-mono text-small text-muted">
             {challenge?.redirect_uri ?? "waiting for the server…"}
           </code>
           {challenge ? <CopyButton value={challenge.redirect_uri} label="Copy" /> : null}
         </div>
-        <p className="text-[12.5px] text-faint">
+        <p className="text-small text-faint">
           Your browser has to be able to reach this address. It is on this machine, so sign in from a
           browser that runs here.{" "}
           {approveUrl ? (
@@ -232,12 +232,12 @@ export function PkceFailedStep({
           <path d="M12 3l10 18H2L12 3zM12 10v5M12 18h.01" />
         </svg>
         <div className="min-w-0">
-          <div className="text-[14px] font-semibold">Approval didn't go through</div>
-          <p className="mt-1 text-[13px] text-muted">
+          <div className="text-lead font-semibold">Approval didn't go through</div>
+          <p className="mt-1 text-body text-muted">
             Nothing was saved. The tab may have been closed before you approved, or your browser
             could not reach the callback address.
           </p>
-          {error ? <p className="mt-2 break-words text-[12.5px] text-muted">{describe(error)}</p> : null}
+          {error ? <p className="mt-2 break-words text-small text-muted">{describe(error)}</p> : null}
         </div>
       </div>
       <div className="mt-5 flex flex-wrap gap-2">
@@ -308,8 +308,8 @@ export function DeviceStep({
           role="alert"
           className="rounded-[var(--radius-card)] border border-[var(--color-warn)]/35 bg-[var(--color-warn)]/10 px-5 py-4"
         >
-          <div className="text-[14px] font-semibold">This code expired</div>
-          <p className="mt-1 text-[13px] text-muted">
+          <div className="text-lead font-semibold">This code expired</div>
+          <p className="mt-1 text-body text-muted">
             Codes are short lived. Get a new one and enter it on the provider's page.
           </p>
         </div>
@@ -325,8 +325,8 @@ export function DeviceStep({
   return (
     <div className="mt-7">
       <div className="rounded-[var(--radius-card)] border border-line bg-surface px-6 py-7 text-center">
-        <div className="text-[13px] text-muted">Your code</div>
-        <div className="mt-2 select-all font-mono text-[44px] font-medium leading-none tracking-[0.14em] text-fg">
+        <div className="text-body text-muted">Your code</div>
+        <div className="mt-2 select-all font-mono text-hero font-medium leading-none tracking-[0.14em] text-fg">
           {challenge?.user_code ?? "————"}
         </div>
         <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
@@ -336,13 +336,13 @@ export function DeviceStep({
               href={challenge.verification_uri}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-transparent bg-accent px-3 text-[13px] font-semibold text-[var(--color-accent-ink)] hover:brightness-110"
+              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-transparent bg-accent px-3 text-body font-semibold text-[var(--color-accent-ink)] hover:brightness-110"
             >
               Open verification page <span aria-hidden>→</span>
             </a>
           ) : null}
         </div>
-        <div className="mt-4 truncate font-mono text-[12.5px] text-faint">
+        <div className="mt-4 truncate font-mono text-small text-faint">
           {challenge?.verification_uri ?? "waiting for the server…"}
         </div>
       </div>
@@ -353,14 +353,14 @@ export function DeviceStep({
         className="mt-4 flex flex-wrap items-center gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-5 py-4"
       >
         <span aria-hidden className="pulse inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-pos" />
-        <span className="text-[14px]">
+        <span className="text-lead">
           {startError
             ? "Could not start the sign-in"
             : !start
               ? "Starting the sign-in…"
               : `Checking every ${Math.round(intervalMs / 1_000)}s…`}
         </span>
-        <span className="ml-auto font-mono text-[12.5px] tnum text-muted">
+        <span className="ml-auto font-mono text-small tnum text-muted">
           {remaining === null ? "—" : `Expires in ${clock(remaining)}`}
         </span>
       </div>
@@ -371,7 +371,7 @@ export function DeviceStep({
         />
       </div>
 
-      <ol className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-2 text-[13.5px]">
+      <ol className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-2 text-body">
         <Stage n={1} state="current" label="Open the page" />
         <Connector done={false} />
         <Stage n={2} state="upcoming" label="Enter the code" />
@@ -478,7 +478,7 @@ export function ApiKeyStep({
       </Field>
 
       <details className="rounded-[var(--radius-card)] border border-line bg-surface">
-        <summary className="cursor-pointer px-4 py-3 text-[13.5px] font-medium">Advanced</summary>
+        <summary className="cursor-pointer px-4 py-3 text-body font-medium">Advanced</summary>
         <div className="border-t border-rule px-4 py-4">
           <Field label="Base URL" hint="Leave empty to use the provider default.">
             <Input
@@ -491,7 +491,7 @@ export function ApiKeyStep({
         </div>
       </details>
 
-      <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-4 py-3 text-[13px] text-muted">
+      <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-4 py-3 text-body text-muted">
         <svg
           aria-hidden
           width="18"
@@ -537,7 +537,7 @@ export function Stage({
       <span
         aria-hidden
         className={cx(
-          "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border font-mono text-[11.5px]",
+          "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border font-mono text-caption",
           done && "border-fg bg-fg text-bg",
           state === "current" && "border-fg text-fg",
           state === "upcoming" && "border-line text-faint",
@@ -552,7 +552,7 @@ export function Stage({
         )}
       </span>
       {label}
-      {detail ? <span className="text-[12px] text-faint">· {detail}</span> : null}
+      {detail ? <span className="text-small text-faint">· {detail}</span> : null}
     </li>
   );
 }

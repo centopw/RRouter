@@ -49,7 +49,7 @@ export default function Audit() {
       key: "ip",
       title: "source",
       width: "10rem",
-      render: (event) => <span className="font-mono text-[11.5px] text-muted">{event.ip ?? "—"}</span>,
+      render: (event) => <span className="font-mono text-caption text-muted">{event.ip ?? "—"}</span>,
     },
     {
       key: "detail",

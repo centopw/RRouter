@@ -3,8 +3,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, type FetchResult, type SyncResult } from "../lib/api";
 import { qk, useConnections, useSystem } from "../lib/queries";
-import { Button, Card, CardHeader, ErrorNote, Field, Input, PageHeader, Select, cx } from "../components/ui";
+import { Button, Card, CardHeader, ErrorNote, Field, Input, PageHeader, Select } from "../components/ui";
 import { UpdateCard } from "../components/update-card";
+import { Toggle } from "../components/atoms";
 import { uptime } from "../lib/format";
 
 /** White-label brand fields stored through `/api/settings` (flat object). */
@@ -76,7 +77,7 @@ export default function Settings() {
         actions={
           <Link
             to="/setup"
-            className="inline-flex h-8 items-center rounded-lg border border-line bg-surface-2 px-3 text-[13px] hover:border-line-strong"
+            className="inline-flex h-8 items-center rounded-lg border border-line bg-surface-2 px-3 text-body hover:border-line-strong"
           >
             Run setup again
           </Link>
@@ -92,7 +93,7 @@ export default function Settings() {
       <Card>
         <CardHeader
           title="Branding"
-          action={<span className="text-[11.5px] text-faint">applies to the dashboard</span>}
+          action={<span className="text-caption text-faint">applies to the dashboard</span>}
         />
         <div className="grid max-w-[720px] gap-4 px-5 pb-5 md:grid-cols-2">
           <Field label="Name" hint="Shown in the sidebar, the phone header and the tab title.">
@@ -144,9 +145,9 @@ export default function Settings() {
           <Button variant="primary" onClick={() => void save()} disabled={saving || !dirty}>
             {saving ? "Saving…" : "Save branding"}
           </Button>
-          {dirty ? <span className="text-[12px] text-faint">Unsaved changes</span> : null}
+          {dirty ? <span className="text-small text-faint">Unsaved changes</span> : null}
           {error ? (
-            <span className="text-[12.5px] text-neg">
+            <span className="text-small text-neg">
               {error instanceof Error ? error.message : String(error)}
             </span>
           ) : null}
@@ -156,12 +157,12 @@ export default function Settings() {
       <Card className="mt-5">
         <CardHeader
           title="Model metadata"
-          action={<span className="text-[11.5px] text-faint">registry-only · never changes routing</span>}
+          action={<span className="text-caption text-faint">registry-only · never changes routing</span>}
         />
         <div className="flex flex-col gap-4 px-5 pb-5">
           <div className="grid gap-4 min-[800px]:grid-cols-2">
             <div>
-              <p className="text-[12.5px] leading-relaxed text-muted">
+              <p className="text-small leading-relaxed text-muted">
                 <span className="font-medium text-fg">sync metadata</span> downloads models.dev and
                 updates context windows, prices and capabilities for models this gateway already
                 lists. It never adds or removes a model, so it cannot change routing.
@@ -187,7 +188,7 @@ export default function Settings() {
               </Button>
             </div>
             <div>
-              <p className="text-[12.5px] leading-relaxed text-muted">
+              <p className="text-small leading-relaxed text-muted">
                 <span className="font-medium text-fg">fetch</span> asks one connected account for
                 the model list the provider itself serves, and stores those ids as upstream rows.
                 Use it after adding a provider or when a new model is missing.
@@ -241,7 +242,7 @@ export default function Settings() {
               </div>
             </div>
           </div>
-          {metadataNote ? <p className="text-[12px] text-[var(--color-pos)]">{metadataNote}</p> : null}
+          {metadataNote ? <p className="text-small text-[var(--color-pos)]">{metadataNote}</p> : null}
         </div>
       </Card>
 
@@ -249,25 +250,23 @@ export default function Settings() {
         <CardHeader
           title="Token Saver"
           action={
-            <span className="text-[11.5px] text-faint">
+            <span className="text-caption text-faint">
               RTK filters · error results are never touched
             </span>
           }
         />
         <div className="flex flex-wrap items-center justify-between gap-4 px-5 pb-5">
-          <p className="max-w-[62ch] text-[12.5px] leading-relaxed text-muted">
+          <p className="max-w-[62ch] text-small leading-relaxed text-muted">
             Compresses noisy tool results (git diffs, grep matches, build logs) before they reach
             the provider: repetition is collapsed and long dumps keep their head and tail with a
             marker. A client can bypass it per request with{" "}
-            <code className="font-mono text-[11px] text-fg">x-rrouter-rtk: off</code>.
+            <code className="font-mono text-caption text-fg">x-rrouter-rtk: off</code>.
           </p>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={draft.rtk ?? true}
-            aria-label="Token Saver"
+          <Toggle
+            checked={draft.rtk ?? true}
+            label="Token Saver"
             disabled={savingRtk}
-            onClick={async () => {
+            onChange={async () => {
               const next = !(draft.rtk ?? true);
               setSavingRtk(true);
               setError(null);
@@ -282,29 +281,15 @@ export default function Settings() {
                 setSavingRtk(false);
               }
             }}
-            className={cx(
-              "relative h-6 w-11 shrink-0 rounded-full border transition-colors disabled:opacity-50",
-              (draft.rtk ?? true)
-                ? "border-accent bg-accent"
-                : "border-line-strong bg-surface-3",
-            )}
-          >
-            <span
-              aria-hidden
-              className={cx(
-                "absolute top-1 h-4 w-4 rounded-full transition-[left] duration-150",
-                (draft.rtk ?? true) ? "left-[22px] bg-white" : "left-[3px] bg-[var(--color-muted)]",
-              )}
-            />
-          </button>
+          />
         </div>
       </Card>
 
       <UpdateCard />
 
       <Card className="mt-5">
-        <CardHeader title="Runtime" action={<span className="text-[11.5px] text-faint">read-only</span>} />
-        <dl className="grid gap-x-8 gap-y-0 px-5 pb-4 text-[13px] md:grid-cols-2">
+        <CardHeader title="Runtime" action={<span className="text-caption text-faint">read-only</span>} />
+        <dl className="grid gap-x-8 gap-y-0 px-5 pb-4 text-body md:grid-cols-2">
           <Row k="Version" v={`v${version}`} />
           <Row k="Uptime" v={system.data ? uptime(system.data.uptime_secs) : "—"} />
           <Row k="API keys required" v={system.data?.require_api_key ? "yes" : "no"} />
@@ -316,7 +301,7 @@ export default function Settings() {
           <Row k="Public models" v={counts ? String(counts.disabled_models) + " disabled" : "—"} />
           <Row k="Aliases / combos" v={counts ? `${counts.aliases} / ${counts.combos}` : "—"} />
         </dl>
-        <p className="border-t border-line px-5 py-3 text-[12px] text-faint">
+        <p className="border-t border-line px-5 py-3 text-small text-faint">
           Bind address, timeouts and other process settings are environment variables; see
           docs/DEPLOY.md. This page never shows credential material.
         </p>
@@ -329,7 +314,7 @@ function Row({ k, v }: { k: string; v: string }) {
   return (
     <div className="flex items-center justify-between gap-4 border-b border-[var(--color-rule)] py-2.5 last:border-0">
       <dt className="text-faint">{k}</dt>
-      <dd className="min-w-0 truncate text-right font-mono text-[12.5px] text-muted tnum">{v}</dd>
+      <dd className="min-w-0 truncate text-right font-mono text-small text-muted tnum">{v}</dd>
     </div>
   );
 }

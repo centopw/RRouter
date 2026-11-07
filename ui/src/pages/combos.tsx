@@ -37,7 +37,7 @@ export default function Combos() {
   });
 
   const columns: Array<Column<Combo>> = [
-    { key: "name", title: "name", render: (r) => <span className="font-mono text-[12px]">{r.name}</span> },
+    { key: "name", title: "name", render: (r) => <span className="font-mono text-small">{r.name}</span> },
     {
       key: "models",
       title: "fallback order",
@@ -46,7 +46,7 @@ export default function Combos() {
           {r.models.map((m, i) => (
             <span key={`${m}-${i}`} className="flex items-center gap-1.5">
               {i > 0 ? <span className="text-faint">→</span> : null}
-              <span className="rounded border border-line-strong bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-muted">
+              <span className="rounded border border-line-strong bg-surface-2 px-1.5 py-0.5 font-mono text-caption text-muted">
                 {m}
               </span>
             </span>

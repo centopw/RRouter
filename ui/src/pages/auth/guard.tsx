@@ -30,7 +30,7 @@ export function AuthGuard({ children }: { children: ReactNode }) {
   if (state.isLoading) {
     return (
       <AuthShell footer={false}>
-        <p className="text-center text-[13px] text-muted">Loading…</p>
+        <p className="text-center text-body text-muted">Loading…</p>
       </AuthShell>
     );
   }

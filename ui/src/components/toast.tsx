@@ -56,9 +56,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             >
               <Icon size={17} aria-hidden className="mt-0.5 shrink-0" />
               <div className="min-w-0 flex-1">
-                <div className="text-[12.5px] font-semibold">{item.title}</div>
+                <div className="text-small font-semibold">{item.title}</div>
                 {item.detail ? (
-                  <div className="mt-0.5 break-words text-[11.5px] opacity-80">{item.detail}</div>
+                  <div className="mt-0.5 break-words text-caption opacity-80">{item.detail}</div>
                 ) : null}
               </div>
               <button

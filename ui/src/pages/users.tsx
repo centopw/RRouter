@@ -177,7 +177,7 @@ export default function Users() {
       />
 
       {notice ? (
-        <p className="mb-4 rounded-md border border-line bg-surface-2 px-3 py-2 text-[12.5px] text-muted">
+        <p className="mb-4 rounded-md border border-line bg-surface-2 px-3 py-2 text-small text-muted">
           {notice}
         </p>
       ) : null}
@@ -191,7 +191,7 @@ export default function Users() {
       <Card>
         <CardHeader
           title="Accounts"
-          action={<span className="text-[11px] text-faint">{users.data?.length ?? 0} total</span>}
+          action={<span className="text-caption text-faint">{users.data?.length ?? 0} total</span>}
         />
         <DataTable
           columns={columns}
@@ -206,7 +206,7 @@ export default function Users() {
         <Card>
           <CardHeader
             title="Invitations"
-            action={<span className="text-[11px] text-faint">single use · expire in 7 days</span>}
+            action={<span className="text-caption text-faint">single use · expire in 7 days</span>}
           />
           <DataTable
             columns={inviteColumns}
@@ -299,7 +299,7 @@ function InviteModal({
         </Field>
         {link ? (
           <div className="flex flex-col gap-1.5">
-            <span className="text-[11.5px] text-muted">Share this link once:</span>
+            <span className="text-caption text-muted">Share this link once:</span>
             <CopyChip value={link} />
           </div>
         ) : null}

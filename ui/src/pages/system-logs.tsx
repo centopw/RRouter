@@ -148,28 +148,28 @@ export default function SystemLogs() {
         <CardHeader
           title="Gateway events"
           action={
-            <span className="text-[11.5px] text-faint tnum">
+            <span className="text-caption text-faint tnum">
               {entries.length.toLocaleString()} / {capacity.toLocaleString()} in memory
             </span>
           }
         />
         {enabled === null ? (
-          <div className="px-5 py-8 text-[12.5px] text-faint">loading…</div>
+          <div className="px-5 py-8 text-small text-faint">loading…</div>
         ) : !enabled ? (
           <EmptyState>
             <div>System logging is off.</div>
-            <div className="mt-1.5 max-w-[460px] text-[12.5px] text-muted">
+            <div className="mt-1.5 max-w-[460px] text-small text-muted">
               Enabling captures the gateway’s own log events in memory so you can debug a
               failure here. It is not persisted, and prompt or response content is never logged.
             </div>
           </EmptyState>
         ) : entries.length === 0 ? (
-          <div className="px-5 py-8 text-[12.5px] text-faint">
+          <div className="px-5 py-8 text-small text-faint">
             Capturing. New platform events appear here.
           </div>
         ) : (
           <div ref={scroller} className="max-h-[560px] overflow-y-auto border-t border-line">
-            <div className="divide-y divide-[var(--color-rule)] font-mono text-[11.5px]">
+            <div className="divide-y divide-[var(--color-rule)] font-mono text-caption">
               {entries.map((entry) => (
                 <div key={entry.id} className="flex gap-3 px-4 py-2 hover:bg-surface-2">
                   <span className="shrink-0 text-faint">{clock(entry.ts)}</span>

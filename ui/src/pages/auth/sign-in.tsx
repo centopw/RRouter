@@ -90,7 +90,7 @@ export default function SignIn() {
             rules={false}
             aside={<AuthFooterLink to="/forgot">Forgot password?</AuthFooterLink>}
           />
-          <label className="mt-1 flex items-center gap-2 text-[13px]">
+          <label className="mt-1 flex items-center gap-2 text-body">
             <input
               type="checkbox"
               checked={remember}
@@ -112,7 +112,7 @@ export default function SignIn() {
         </form>
       </AuthCard>
 
-      <p className="mt-6 text-center text-[12.5px] text-muted">
+      <p className="mt-6 text-center text-small text-muted">
         Signing up is by invitation. Register with the link an admin sent you.
       </p>
       <p className="mt-3 text-center">

@@ -52,7 +52,7 @@ export default function TokenSignIn() {
             <AuthPrimary disabled={token.trim() === ""}>Use token</AuthPrimary>
           </AuthActions>
         </form>
-        <p className="mt-5 text-center text-[11.5px] text-faint">
+        <p className="mt-5 text-center text-caption text-faint">
           A wrong token is rejected by the API; sign in as a user instead.
         </p>
       </AuthCard>

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Badge, Button, Card, EmptyState, ErrorNote, PageHeader, Segmented, Select, cx } from "../components/ui";
+import { Divider } from "../components/atoms";
 import { ago, compact, ms, splitRef } from "../lib/format";
 import {
   usageFilterQuery,
@@ -148,7 +149,7 @@ export default function Logs() {
             ariaLabel="time range"
             className="shrink-0"
           />
-          <span aria-hidden className="hidden h-6 w-px bg-line min-[900px]:block" />
+          <Divider vertical className="hidden min-[900px]:block" />
           <div className="grid min-w-0 flex-1 grid-cols-2 gap-2 min-[700px]:flex min-[700px]:flex-wrap min-[700px]:items-center">
             <Select className="w-full min-[700px]:w-[140px]" value={status} onChange={(v) => setStatus(v as Status)} ariaLabel="status">
               <option value="all">All statuses</option>
@@ -189,7 +190,7 @@ export default function Logs() {
               </Button>
             ) : null}
           </div>
-          <span className="shrink-0 text-[11.5px] text-faint tnum min-[900px]:text-right">
+          <span className="shrink-0 text-caption text-faint tnum min-[900px]:text-right">
             {loaded.length.toLocaleString()} loaded
           </span>
         </div>
@@ -249,7 +250,7 @@ export default function Logs() {
                   onSelect={setSelectedId}
                   keyNames={keyNames}
                 />
-                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-6 py-2.5 text-[12px] text-faint">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-6 py-2.5 text-small text-faint">
                   <span>{loaded.length} loaded</span>
                   {usage.hasNextPage ? (
                     <Button variant="quiet" onClick={() => void usage.fetchNextPage()} disabled={usage.isFetchingNextPage}>
@@ -296,7 +297,7 @@ function LogTable({
           role="row"
           className={cx(
             GRID,
-            "border-b border-line px-6 py-2 text-[11px] uppercase tracking-[0.06em] text-faint",
+            "border-b border-line px-6 py-2 text-caption uppercase tracking-[0.06em] text-faint",
           )}
         >
           <span role="columnheader">Time</span>
@@ -332,31 +333,31 @@ function LogTable({
               }}
               className={cx(
                 GRID,
-                "cursor-pointer border-b border-[var(--color-rule)] px-6 py-2.5 text-[13px] last:border-0",
+                "cursor-pointer border-b border-[var(--color-rule)] px-6 py-2.5 text-body last:border-0",
                 selected ? "bg-[var(--color-surface-2)]" : "hover:bg-[var(--color-row-hover)]",
               )}
             >
               <span role="cell" className="flex flex-col" title={new Date(row.ts * 1000).toLocaleString()}>
-                <span className="font-mono text-[12px] text-fg">
+                <span className="font-mono text-small text-fg">
                   {new Date(row.ts * 1000).toLocaleTimeString(undefined, {
                     hour: "2-digit",
                     minute: "2-digit",
                     second: "2-digit",
                   })}
                 </span>
-                <span className="text-[10.5px] text-faint">{ago(row.ts)}</span>
+                <span className="text-caption text-faint">{ago(row.ts)}</span>
               </span>
-              <span role="cell" className="min-w-0 truncate font-mono text-[12px]">
+              <span role="cell" className="min-w-0 truncate font-mono text-small">
                 <span className="text-faint">{provider ?? row.provider}/</span>
                 {id}
               </span>
-              <span role="cell" className="text-right font-mono text-[12px] text-muted tnum">
+              <span role="cell" className="text-right font-mono text-small text-muted tnum">
                 {failed ? "—" : `${compact(row.input_tokens)} → ${compact(row.output_tokens)}`}
               </span>
-              <span role="cell" className="text-right font-mono text-[12px] text-muted tnum">
+              <span role="cell" className="text-right font-mono text-small text-muted tnum">
                 {ms(row.latency_ms)}
               </span>
-              <span role="cell" className="text-[11.5px] text-faint">
+              <span role="cell" className="text-caption text-faint">
                 {failed ? "—" : cacheLabel(row)}
               </span>
               <span role="cell">
@@ -366,14 +367,14 @@ function LogTable({
                   </Badge>
                 </button>
               </span>
-              <span role="cell" className="min-w-0 truncate text-[12.5px] text-muted">
+              <span role="cell" className="min-w-0 truncate text-small text-muted">
                 {row.key_id ? (keyNames.get(row.key_id) ?? "—") : "—"}
               </span>
               <span role="cell">
                 <button
                   type="button"
                   onClick={() => onSelect(key)}
-                  className="font-mono text-[11.5px] text-faint hover:text-fg"
+                  className="font-mono text-caption text-faint hover:text-fg"
                   title={row.request_id || undefined}
                 >
                   {row.request_id ? row.request_id.slice(0, 8) : "—"}

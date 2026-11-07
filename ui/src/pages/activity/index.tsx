@@ -39,6 +39,7 @@ import { ModelTable, type ModelRow } from "./model-table";
 import { RequestDetailDialog, RequestLog } from "./request-log";
 import { LiveRoutingCard } from "../../components/live-routing";
 import { Onboarding } from "./onboarding";
+import { Heading } from "../../components/atoms";
 
 /** The one id the chart uses when the per-model split is unavailable. */
 const ALL = "__all__";
@@ -200,8 +201,8 @@ export default function Activity() {
     <div className="mx-auto max-w-[1160px] max-[820px]:-mx-4">
       <header className="mb-5 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-[30px] font-semibold tracking-[-0.02em] text-fg">Activity</h1>
-          <p className="mt-1 text-[13.5px] text-muted">
+          <Heading level={1} className="text-display font-semibold tracking-[-0.02em] text-fg">Activity</Heading>
+          <p className="mt-1 text-body text-muted">
             What this gateway is serving, how fast, and whether anything is failing.
           </p>
         </div>
@@ -233,7 +234,7 @@ export default function Activity() {
               </Button>
               <Link
                 to="/combos"
-                className="inline-flex h-8 items-center rounded-lg px-3 text-[13px] text-muted transition-colors hover:bg-surface-2 hover:text-fg"
+                className="inline-flex h-8 items-center rounded-lg px-3 text-body text-muted transition-colors hover:bg-surface-2 hover:text-fg"
               >
                 Open Combos →
               </Link>
@@ -367,7 +368,7 @@ export default function Activity() {
               {showPanels ? (
                 <div className="border-t border-line">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-6 pb-2 pt-4">
-                    <h2 className="text-[15px] font-semibold">Traffic</h2>
+                    <Heading level={2} className="text-lead font-semibold">Traffic</Heading>
                     <Segmented
                       options={METRICS}
                       value={metric}
@@ -379,7 +380,7 @@ export default function Activity() {
                         <span
                           key={entry.id}
                           title={entry.id}
-                          className="inline-flex items-center gap-1.5 text-[11.5px] text-muted"
+                          className="inline-flex items-center gap-1.5 text-caption text-muted"
                         >
                           <span
                             aria-hidden
@@ -409,7 +410,7 @@ export default function Activity() {
                     />
                   )}
                   {cacheNote || onlyLastHour ? (
-                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-6 py-3 text-[13px] text-muted">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-6 py-3 text-body text-muted">
                       <span>
                         {cacheNote
                           ? "Cache hits: none recorded in this window. They appear once a request reuses an earlier prompt prefix."
@@ -446,12 +447,12 @@ export default function Activity() {
             <Card>
               <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-6 py-4">
                 <div className="flex flex-wrap items-baseline gap-2">
-                  <h2 className="text-[15px] font-semibold">Models</h2>
-                  <span className="text-[12.5px] text-faint">
+                  <Heading level={2} className="text-lead font-semibold">Models</Heading>
+                  <span className="text-small text-faint">
                     {rows.length} in use · ranked by tokens
                   </span>
                 </div>
-                <span className="text-[12px] text-faint">
+                <span className="text-small text-faint">
                   Select a model to filter the requests below
                 </span>
               </div>
@@ -475,8 +476,8 @@ export default function Activity() {
             <Card>
               <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
                 <div className="flex flex-wrap items-baseline gap-2">
-                  <h2 className="text-[15px] font-semibold">Requests</h2>
-                  <span className="text-[12.5px] text-faint">Most recent first</span>
+                  <Heading level={2} className="text-lead font-semibold">Requests</Heading>
+                  <span className="text-small text-faint">Most recent first</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="w-[148px]">
@@ -520,7 +521,7 @@ export default function Activity() {
                       ariaLabel={`clear model filter ${modelFilter}`}
                     >
                       <span className="max-w-[220px] truncate">{nameOf(modelFilter)}</span>
-                      <span aria-hidden className="-mr-0.5 text-[14px] leading-none">
+                      <span aria-hidden className="-mr-0.5 text-lead leading-none">
                         ×
                       </span>
                     </FilterChip>
@@ -536,7 +537,7 @@ export default function Activity() {
                 ) : usage.isLoading && !usage.data ? (
                   <RowsSkeleton rows={3} />
                 ) : events.length === 0 ? (
-                  <div className="px-6 py-10 text-center text-[13px] text-faint">
+                  <div className="px-6 py-10 text-center text-body text-faint">
                     No requests in this window. Try 30d.
                     {rangeId !== "30d" ? (
                       <div className="mt-3">
@@ -547,7 +548,7 @@ export default function Activity() {
                     ) : null}
                   </div>
                 ) : filtered.length === 0 ? (
-                  <div className="px-6 py-10 text-center text-[13px] text-faint">
+                  <div className="px-6 py-10 text-center text-body text-faint">
                     No requests match these filters.
                     <div className="mt-3">
                       <Button
@@ -798,7 +799,7 @@ function LiveStamp({ at, waiting }: { at: number; waiting: boolean }) {
         : `Live · updated ${secs}s ago`;
 
   return (
-    <span className="inline-flex items-center gap-2 text-[12px] text-muted">
+    <span className="inline-flex items-center gap-2 text-small text-muted">
       <span
         aria-hidden
         className={cx(

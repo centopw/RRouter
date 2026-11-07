@@ -36,11 +36,11 @@ export default function Aliases() {
   });
 
   const columns: Array<Column<Alias>> = [
-    { key: "alias", title: "alias", render: (r) => <span className="font-mono text-[12px]">{r.alias}</span> },
+    { key: "alias", title: "alias", render: (r) => <span className="font-mono text-small">{r.alias}</span> },
     {
       key: "target",
       title: "target",
-      render: (r) => <span className="font-mono text-[12px] text-muted">{r.target}</span>,
+      render: (r) => <span className="font-mono text-small text-muted">{r.target}</span>,
     },
     {
       key: "actions",

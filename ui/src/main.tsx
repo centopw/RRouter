@@ -180,13 +180,13 @@ function RouteError() {
 
   return (
     <div className="mx-auto max-w-[560px] py-16 text-center">
-      <h1 className="text-[20px] font-bold">{stale ? "This dashboard was updated" : "This page failed to load"}</h1>
-      <p className="mt-2 text-[13px] text-muted">
+      <h1 className="text-subtitle font-bold">{stale ? "This dashboard was updated" : "This page failed to load"}</h1>
+      <p className="mt-2 text-body text-muted">
         {stale
           ? "A newer build is running. Reload to pick up its files."
           : "The page could not be rendered. The rest of the dashboard still works."}
       </p>
-      <pre className="mt-4 max-h-40 overflow-auto rounded-lg border border-line bg-surface-2 p-3 text-left font-mono text-[11px] text-faint">
+      <pre className="mt-4 max-h-40 overflow-auto rounded-lg border border-line bg-surface-2 p-3 text-left font-mono text-caption text-faint">
         {detail}
       </pre>
       <div className="mt-5 flex justify-center gap-2">
@@ -195,13 +195,13 @@ function RouteError() {
             sessionStorage.removeItem(RELOAD_FLAG);
             window.location.reload();
           }}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent px-3 text-[13px] font-semibold text-[var(--color-accent-ink)] hover:brightness-110"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent px-3 text-body font-semibold text-[var(--color-accent-ink)] hover:brightness-110"
         >
           reload
         </button>
         <a
           href="/app/activity"
-          className="inline-flex h-8 items-center rounded-lg border border-line bg-surface-2 px-3 text-[13px] text-fg hover:border-line-strong"
+          className="inline-flex h-8 items-center rounded-lg border border-line bg-surface-2 px-3 text-body text-fg hover:border-line-strong"
         >
           go to activity
         </a>
@@ -212,7 +212,7 @@ function RouteError() {
 
 function NotFound() {
   return (
-    <div className="text-[13px] text-muted">
+    <div className="text-body text-muted">
       No such page.{" "}
       <a className="underline" href="/app/activity">
         Back to activity
@@ -235,11 +235,11 @@ class FatalBoundary extends Component<{ children: ReactNode }, { error: Error | 
     return (
       <div className="grid min-h-full place-items-center px-6">
         <div className="max-w-[520px] text-center">
-          <h1 className="text-[20px] font-bold">The dashboard crashed</h1>
-          <p className="mt-2 text-[13px] text-muted">{this.state.error.message}</p>
+          <h1 className="text-subtitle font-bold">The dashboard crashed</h1>
+          <p className="mt-2 text-body text-muted">{this.state.error.message}</p>
           <button
             onClick={() => window.location.reload()}
-            className="mt-5 inline-flex h-8 items-center rounded-lg bg-accent px-3 text-[13px] font-semibold text-[var(--color-accent-ink)]"
+            className="mt-5 inline-flex h-8 items-center rounded-lg bg-accent px-3 text-body font-semibold text-[var(--color-accent-ink)]"
           >
             reload
           </button>

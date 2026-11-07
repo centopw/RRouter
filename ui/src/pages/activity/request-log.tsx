@@ -27,7 +27,7 @@ export function RequestLog({
   const visible = showAll ? rows : rows.slice(0, 8);
 
   if (rows.length === 0) {
-    return <div className="px-6 py-10 text-center text-[13px] text-faint">{empty}</div>;
+    return <div className="px-6 py-10 text-center text-body text-faint">{empty}</div>;
   }
 
   return (
@@ -36,7 +36,7 @@ export function RequestLog({
         <div role="table" aria-label="request log" className="min-w-[560px]">
           <div
             role="row"
-            className="grid grid-cols-[86px_minmax(0,1fr)_112px_76px_54px_82px] items-center gap-2 border-b border-line px-6 py-2 text-[11px] uppercase tracking-[0.06em] text-faint"
+            className="grid grid-cols-[86px_minmax(0,1fr)_112px_76px_54px_82px] items-center gap-2 border-b border-line px-6 py-2 text-caption uppercase tracking-[0.06em] text-faint"
           >
             <span role="columnheader">Time</span>
             <span role="columnheader">Model</span>
@@ -66,11 +66,11 @@ export function RequestLog({
                   }
                 }}
                 className={cx(
-                  "grid cursor-pointer grid-cols-[86px_minmax(0,1fr)_112px_76px_54px_82px] items-center gap-2 border-b border-[var(--color-rule)] px-6 py-2.5 text-[13px] last:border-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text",
+                  "grid cursor-pointer grid-cols-[86px_minmax(0,1fr)_112px_76px_54px_82px] items-center gap-2 border-b border-[var(--color-rule)] px-6 py-2.5 text-body last:border-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text",
                   selected ? "bg-[var(--color-surface-2)]" : "hover:bg-[var(--color-row-hover)]",
                 )}
               >
-                <span role="cell" className="font-mono text-[12px] text-muted" title={when(row.ts)}>
+                <span role="cell" className="font-mono text-small text-muted" title={when(row.ts)}>
                   {new Date(row.ts * 1000).toLocaleTimeString(undefined, {
                     hour: "2-digit",
                     minute: "2-digit",
@@ -78,7 +78,7 @@ export function RequestLog({
                   })}
                 </span>
                 <span role="cell" className="flex min-w-0 items-center gap-2">
-                  <span className="min-w-0 truncate font-mono text-[12px]">
+                  <span className="min-w-0 truncate font-mono text-small">
                     {(() => {
                       const { provider, id } = splitRef(row.model);
                       return provider ? (
@@ -94,15 +94,15 @@ export function RequestLog({
                 </span>
                 <span
                   role="cell"
-                  className="whitespace-nowrap text-right font-mono text-[12px] text-muted tnum"
+                  className="whitespace-nowrap text-right font-mono text-small text-muted tnum"
                   title={`Cost ${usd(row.cost_micros, { dash: true })}`}
                 >
                   {failed ? "—" : `${compact(row.input_tokens)} → ${compact(row.output_tokens)}`}
                 </span>
-                <span role="cell" className="text-right font-mono text-[12px] text-muted tnum">
+                <span role="cell" className="text-right font-mono text-small text-muted tnum">
                   {ms(row.latency_ms)}
                 </span>
-                <span role="cell" className="text-[11.5px] text-faint">
+                <span role="cell" className="text-caption text-faint">
                   {failed ? "—" : cacheLabel(row)}
                 </span>
                 <span role="cell">
@@ -115,7 +115,7 @@ export function RequestLog({
           })}
         </div>
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-6 py-2.5 text-[12px] text-faint">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-6 py-2.5 text-small text-faint">
         <span>
           Showing {visible.length} of {total}
         </span>
@@ -179,12 +179,12 @@ export function RequestDetail({
       <div className="flex items-start gap-2 border-b border-line px-5 py-3">
         <div className="min-w-0 flex-1">
           <div
-            className="truncate font-mono text-[11px] text-faint"
+            className="truncate font-mono text-caption text-faint"
             title={row.request_id || undefined}
           >
             {row.request_id ? `request ${row.request_id.slice(0, 8)}` : "request"}
           </div>
-          <div className="mt-1 truncate text-[15px] font-semibold">
+          <div className="mt-1 truncate text-lead font-semibold">
             {(() => {
               const { provider, id } = splitRef(row.model);
               return provider ? (
@@ -214,19 +214,19 @@ export function RequestDetail({
         <StatusPill status={row.status} title={row.error ?? undefined} />
 
         {failed ? (
-          <div className="rounded-lg border border-[var(--color-neg)]/30 bg-[var(--color-neg)]/10 px-3 py-2 text-[12.5px] text-[var(--color-neg-ink)]">
+          <div className="rounded-lg border border-[var(--color-neg)]/30 bg-[var(--color-neg)]/10 px-3 py-2 text-small text-[var(--color-neg-ink)]">
             {row.error ?? `upstream answered ${row.status} ${statusText(row.status)}`}
           </div>
         ) : (
           <>
-            <div className="text-[13px] text-muted">
+            <div className="text-body text-muted">
               Latency <span className="font-mono text-fg tnum">{ms(row.latency_ms)}</span>
               {row.streamed ? <span className="text-faint"> · streamed</span> : null}
             </div>
             {measured ? (
               phased ? (
                 <div>
-                  <div className="text-[12.5px] text-faint">
+                  <div className="text-small text-faint">
                     First output <span className="font-mono tnum">{ms(row.ttft_ms)}</span> ·
                     generation <span className="font-mono tnum">{ms(generation)}</span>
                   </div>
@@ -248,7 +248,7 @@ export function RequestDetail({
                       style={{ width: `${(generation / row.latency_ms) * 100}%` }}
                     />
                   </div>
-                  <dl className="mt-2 grid grid-cols-[auto_1fr_auto] items-center gap-x-2 gap-y-1 text-[11.5px]">
+                  <dl className="mt-2 grid grid-cols-[auto_1fr_auto] items-center gap-x-2 gap-y-1 text-caption">
                     {[
                       ["connect + headers", row.upstream_ms, "var(--color-series-3)"],
                       ["model → first token", waitMs, "var(--color-accent)"],
@@ -268,7 +268,7 @@ export function RequestDetail({
                 </div>
               ) : (
                 <div>
-                  <div className="text-[12.5px] text-faint">
+                  <div className="text-small text-faint">
                     First output <span className="font-mono tnum">{ms(row.ttft_ms)}</span> · generation{" "}
                     <span className="font-mono tnum">{ms(generation)}</span>
                   </div>
@@ -288,7 +288,7 @@ export function RequestDetail({
           </>
         )}
 
-        <dl className="divide-y divide-[var(--color-rule)] text-[13px]">
+        <dl className="divide-y divide-[var(--color-rule)] text-body">
           <Row k="When" v={when(row.ts)} />
           <Row k="Provider" v={row.provider} />
           {row.endpoint ? <Row k="Endpoint" v={row.endpoint} mono /> : null}
@@ -301,9 +301,9 @@ export function RequestDetail({
         {showAttempts ? (
           <section aria-label="attempts" className="space-y-2">
             <div className="flex items-baseline justify-between gap-2">
-              <h3 className="text-[12px] font-medium text-muted">Attempts</h3>
+              <h3 className="text-small font-medium text-muted">Attempts</h3>
               {attempts.length > 1 ? (
-                <span className="text-[11.5px] text-faint">{attempts.length} in dispatch order</span>
+                <span className="text-caption text-faint">{attempts.length} in dispatch order</span>
               ) : null}
             </div>
             {detail.isError ? (
@@ -320,7 +320,7 @@ export function RequestDetail({
                   const served = !attemptFailed && i === attempts.length - 1;
                   return (
                     <li key={attempt.attempt} className="px-3 py-2">
-                      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[12px]">
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-small">
                         <span className="font-mono text-faint tnum">#{attempt.attempt}</span>
                         <span className="min-w-0 flex-1 truncate font-mono">
                           <span className="text-faint">{provider ?? attempt.provider}/</span>
@@ -343,10 +343,10 @@ export function RequestDetail({
                           ·
                         </span>
                         <span className="font-mono text-muted tnum">{ms(attempt.latency_ms)}</span>
-                        {served ? <span className="text-[11px] text-faint">served</span> : null}
+                        {served ? <span className="text-caption text-faint">served</span> : null}
                       </div>
                       {attemptFailed && attempt.error ? (
-                        <p className="mt-1 break-words text-[12px] leading-[1.45] text-neg">
+                        <p className="mt-1 break-words text-small leading-[1.45] text-neg">
                           {attempt.error}
                         </p>
                       ) : null}
@@ -421,7 +421,7 @@ function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
     <div className="flex items-center justify-between gap-3 py-2">
       <dt className="text-faint">{k}</dt>
-      <dd className={cx("min-w-0 truncate text-right text-muted", mono && "font-mono text-[12px]")}>{v}</dd>
+      <dd className={cx("min-w-0 truncate text-right text-muted", mono && "font-mono text-small")}>{v}</dd>
     </div>
   );
 }

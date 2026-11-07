@@ -26,7 +26,7 @@ export function AuthShell({
           height={26}
           className="h-[28px] w-auto shrink-0 select-none object-contain"
         />
-        <span className="text-[14px] font-semibold tracking-[-0.01em]">RRouter</span>
+        <span className="text-lead font-semibold tracking-[-0.01em]">RRouter</span>
       </header>
       <main className="flex flex-1 justify-center px-4 py-10 min-[560px]:py-16">
         <div className="w-full" style={{ maxWidth: width }}>
@@ -34,7 +34,7 @@ export function AuthShell({
         </div>
       </main>
       {footer ? (
-        <footer className="pb-8 text-center text-[11.5px] text-faint">
+        <footer className="pb-8 text-center text-caption text-faint">
           Self-hosted · everything stays on this machine
         </footer>
       ) : null}
@@ -75,11 +75,11 @@ export function AuthTitle({
       <h1
         ref={ref}
         tabIndex={-1}
-        className="text-[24px] font-semibold leading-tight tracking-[-0.02em] focus:outline-none focus-visible:outline-none"
+        className="text-title font-semibold leading-tight tracking-[-0.02em] focus:outline-none focus-visible:outline-none"
       >
         {title}
       </h1>
-      {lead ? <p className="mt-2 text-[13.5px] leading-relaxed text-muted">{lead}</p> : null}
+      {lead ? <p className="mt-2 text-body leading-relaxed text-muted">{lead}</p> : null}
     </div>
   );
 }
@@ -103,18 +103,18 @@ export function AuthField({
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-3">
-        <label htmlFor={htmlFor} className="text-[13px] font-medium">
+        <label htmlFor={htmlFor} className="text-body font-medium">
           {label}
         </label>
         {aside}
       </div>
       {children}
       {problem ? (
-        <span className="text-[11.5px] text-neg" role="alert">
+        <span className="text-caption text-neg" role="alert">
           {problem}
         </span>
       ) : hint ? (
-        <span className="text-[11.5px] leading-relaxed text-faint">{hint}</span>
+        <span className="text-caption leading-relaxed text-faint">{hint}</span>
       ) : null}
     </div>
   );
@@ -152,7 +152,7 @@ export function AuthInput({
       disabled={disabled}
       aria-label={ariaLabel}
       className={cx(
-        "h-11 w-full rounded-[4px] border border-line-strong bg-surface px-3 text-[14px] text-fg",
+        "h-11 w-full rounded-[4px] border border-line-strong bg-surface px-3 text-lead text-fg",
         "placeholder:text-faint hover:border-fg/40 focus:border-accent-text focus:outline-none",
         "focus-visible:ring-2 focus-visible:ring-accent-text focus-visible:ring-offset-2",
         "disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted",
@@ -192,7 +192,7 @@ export function PasswordField({
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-3">
-        <label htmlFor={id} className="text-[13px] font-medium">
+        <label htmlFor={id} className="text-body font-medium">
           {label}
         </label>
         {aside}
@@ -207,7 +207,7 @@ export function PasswordField({
           autoComplete={autoComplete}
           disabled={disabled}
           className={cx(
-            "h-11 w-full rounded-[4px] border border-line-strong bg-surface pl-3 pr-16 text-[14px] text-fg",
+            "h-11 w-full rounded-[4px] border border-line-strong bg-surface pl-3 pr-16 text-lead text-fg",
             "hover:border-fg/40 focus:border-accent-text focus:outline-none",
             "focus-visible:ring-2 focus-visible:ring-accent-text focus-visible:ring-offset-2",
             "disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted",
@@ -217,7 +217,7 @@ export function PasswordField({
           type="button"
           aria-pressed={shown}
           onClick={() => setShown((v) => !v)}
-          className="absolute inset-y-0 right-1 my-1 rounded-md px-2 text-[11.5px] text-muted hover:text-fg"
+          className="absolute inset-y-0 right-1 my-1 rounded-md px-2 text-caption text-muted hover:text-fg"
         >
           {shown ? "hide" : "show"}
         </button>
@@ -236,11 +236,11 @@ export function PasswordField({
             />
           ))}
         </div>
-        <span aria-hidden className="w-16 text-right text-[11px] text-muted">
+        <span aria-hidden className="w-16 text-right text-caption text-muted">
           {value.length > 0 ? meter.label : ""}
         </span>
       </div>
-      <span className="text-[11.5px] text-faint">
+      <span className="text-caption text-faint">
         At least {MIN_PASSWORD} characters. No composition rules.
       </span>
         </>
@@ -263,7 +263,7 @@ export function AuthNotice({
     warn: "border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] text-[var(--color-warn-ink)]",
   } as const;
   return (
-    <div role="alert" className={cx("rounded-[8px] border px-3 py-2 text-[12.5px]", styles[tone])}>
+    <div role="alert" className={cx("rounded-[8px] border px-3 py-2 text-small", styles[tone])}>
       {children}
     </div>
   );
@@ -290,7 +290,7 @@ export function RecoveryCodes({ codes }: { codes: string[] }) {
         {codes.map((code) => (
           <code
             key={code}
-            className="rounded-[4px] border border-line bg-surface-2 px-2 py-1.5 text-center font-mono text-[13px] tracking-wide"
+            className="rounded-[4px] border border-line bg-surface-2 px-2 py-1.5 text-center font-mono text-body tracking-wide"
           >
             {code}
           </code>

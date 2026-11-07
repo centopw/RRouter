@@ -15,6 +15,7 @@ import {
 } from "../components/ui";
 import { ms } from "../lib/format";
 import { useCreateTemplate, useModels, useSystem, useTemplates } from "../lib/queries";
+import { Heading } from "../components/atoms";
 
 /**
  * A live conversation against the gateway, so an operator can prove a model answers
@@ -351,15 +352,15 @@ export default function Playground() {
     <div className="mx-auto flex min-h-[calc(100dvh-7rem)] w-full max-w-[880px] flex-col gap-4 pb-2">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-[22px] font-semibold leading-tight tracking-[-0.02em] text-fg">
+          <Heading level={1} className="text-subtitle font-semibold leading-tight tracking-[-0.02em] text-fg">
             Playground
-          </h1>
-          <p className="mt-0.5 text-[12.5px] text-muted">
+          </Heading>
+          <p className="mt-0.5 text-small text-muted">
             A live conversation through the gateway. Same endpoint, headers and SSE frames a client sees.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="hidden font-mono text-[11px] text-faint min-[700px]:inline">
+          <span className="hidden font-mono text-caption text-faint min-[700px]:inline">
             {ENDPOINTS[dialect]}
           </span>
           <Button onClick={() => setSettingsOpen(true)}>
@@ -371,7 +372,7 @@ export default function Playground() {
 
       {models.isError ? <ErrorNote error={models.error} onRetry={() => void models.refetch()} /> : null}
       {keyMissing ? (
-        <div className="rounded-[8px] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-[12.5px] text-[var(--color-warn-ink)]">
+        <div className="rounded-[8px] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-small text-[var(--color-warn-ink)]">
           This gateway requires a key. Add one in Parameters before sending.
         </div>
       ) : null}
@@ -397,16 +398,16 @@ export default function Playground() {
             aria-label="message"
             placeholder={model ? `Message ${modelLabel}…` : "Choose a model in Parameters to start…"}
             style={{ outline: "none" }}
-            className="block max-h-[220px] w-full resize-none rounded-t-[16px] bg-transparent px-4 pt-3.5 text-[14px] leading-relaxed text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none"
+            className="block max-h-[220px] w-full resize-none rounded-t-[16px] bg-transparent px-4 pt-3.5 text-lead leading-relaxed text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none"
           />
           <div className="flex flex-wrap items-center gap-2 px-3 pb-2.5 pt-1">
             <div className="min-w-[160px] max-w-[240px] flex-1">
               <ModelSelect value={model} onChange={setModel} ariaLabel="model" plain />
             </div>
-            <span className="hidden text-[11px] text-faint min-[560px]:inline">
+            <span className="hidden text-caption text-faint min-[560px]:inline">
               {temp === "1" ? "temperature 1" : `temperature ${temp}`}
             </span>
-            <span className="ml-auto hidden items-center gap-1 text-[11px] text-faint min-[820px]:flex">
+            <span className="ml-auto hidden items-center gap-1 text-caption text-faint min-[820px]:flex">
               <kbd className={kbdClass}>⌘↵</kbd> send · <kbd className={kbdClass}>Esc</kbd> stop
             </span>
             {streaming ? (
@@ -470,7 +471,7 @@ export default function Playground() {
           <Field label="Endpoint" hint="The body is built for this dialect; the gateway translates the reply back.">
             <div className="flex items-center gap-3">
               <Segmented options={DIALECTS} value={dialect} onChange={setDialect} ariaLabel="endpoint dialect" />
-              <code className="truncate font-mono text-[11.5px] text-muted">{ENDPOINTS[dialect]}</code>
+              <code className="truncate font-mono text-caption text-muted">{ENDPOINTS[dialect]}</code>
             </div>
           </Field>
 
@@ -577,7 +578,7 @@ export default function Playground() {
                 ariaLabel="template name"
               />
             </Field>
-            <p className="max-h-24 overflow-hidden whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-faint">
+            <p className="max-h-24 overflow-hidden whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-faint">
               {systemPrompt}
             </p>
             {createTemplate.isError ? <ErrorNote error={createTemplate.error} /> : null}
@@ -595,7 +596,7 @@ function TurnCard({ turn }: { turn: Turn }) {
   if (!assistant) {
     return (
       <article className="ml-auto max-w-[85%] rounded-[14px] bg-surface-3 px-4 py-2.5">
-        <p className="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg">
+        <p className="whitespace-pre-wrap break-words text-body leading-relaxed text-fg">
           {turn.text}
         </p>
       </article>
@@ -606,12 +607,12 @@ function TurnCard({ turn }: { turn: Turn }) {
     <article className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
         <span aria-hidden className="h-2 w-2 rounded-full bg-[var(--color-accent)]" />
-        <span className="font-mono text-[11px] text-muted">{turn.model ?? "assistant"}</span>
-        <span className={cx("text-[11px]", turn.status === "error" ? "text-neg" : "text-faint")}>
+        <span className="font-mono text-caption text-muted">{turn.model ?? "assistant"}</span>
+        <span className={cx("text-caption", turn.status === "error" ? "text-neg" : "text-faint")}>
           {STATUS_LABEL[turn.status]}
         </span>
         {turn.latency !== null ? (
-          <span className="ml-auto font-mono text-[11px] text-faint tnum">
+          <span className="ml-auto font-mono text-caption text-faint tnum">
             {turn.ttft !== null ? `first token ${ms(turn.ttft)} · ` : ""}
             {ms(turn.latency)}
             {turn.promptTokens !== null || turn.completionTokens !== null
@@ -624,7 +625,7 @@ function TurnCard({ turn }: { turn: Turn }) {
       <div
         aria-live={turn.status === "streaming" ? "polite" : undefined}
         aria-busy={turn.status === "streaming" ? true : undefined}
-        className="text-[14px] leading-7 text-fg"
+        className="text-lead leading-7 text-fg"
       >
         {turn.text ? (
           <p className="whitespace-pre-wrap break-words">
@@ -637,7 +638,7 @@ function TurnCard({ turn }: { turn: Turn }) {
             ) : null}
           </p>
         ) : turn.status !== "error" ? (
-          <p className="text-[13px] text-faint">
+          <p className="text-body text-faint">
             {turn.status === "streaming"
               ? "Waiting for the first token…"
               : turn.status === "stopped"
@@ -657,12 +658,12 @@ function TurnCard({ turn }: { turn: Turn }) {
           <button
             type="button"
             onClick={() => setRawOpen((open) => !open)}
-            className="text-[11.5px] text-faint underline-offset-2 hover:text-fg hover:underline"
+            className="text-caption text-faint underline-offset-2 hover:text-fg hover:underline"
           >
             {rawOpen ? "hide raw frames" : "raw frames"}
           </button>
           {rawOpen ? (
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-[8px] border border-line bg-surface-2 p-3 font-mono text-[11px] leading-relaxed text-muted">
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-[8px] border border-line bg-surface-2 p-3 font-mono text-caption leading-relaxed text-muted">
               {turn.raw || "No frames were received."}
             </pre>
           ) : null}
@@ -683,10 +684,10 @@ function EmptyPlayground({ model, onPick }: { model: string; onPick: (prompt: st
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-6 pb-8 pt-6 text-center">
       <div>
-        <h2 className="text-[24px] font-semibold tracking-[-0.02em] text-fg">
+        <Heading level={2} className="text-title font-semibold tracking-[-0.02em] text-fg">
           What do you want to test?
-        </h2>
-        <p className="mx-auto mt-2 max-w-[46ch] text-[13px] leading-relaxed text-muted">
+        </Heading>
+        <p className="mx-auto mt-2 max-w-[46ch] text-body leading-relaxed text-muted">
           {model
             ? `Messages go to ${model} through the real gateway. Nothing is simulated.`
             : "Pick a model in Parameters, then send a message to see the real reply stream."}
@@ -698,13 +699,13 @@ function EmptyPlayground({ model, onPick }: { model: string; onPick: (prompt: st
             key={prompt}
             type="button"
             onClick={() => onPick(prompt)}
-            className="rounded-[10px] border border-line bg-surface px-3.5 py-2.5 text-left text-[12.5px] leading-relaxed text-ink-soft transition-colors hover:border-line-strong hover:bg-surface-2"
+            className="rounded-[10px] border border-line bg-surface px-3.5 py-2.5 text-left text-small leading-relaxed text-ink-soft transition-colors hover:border-line-strong hover:bg-surface-2"
           >
             {prompt}
           </button>
         ))}
       </div>
-      <p className="text-[11px] text-faint">
+      <p className="text-caption text-faint">
         <kbd className={kbdClass}>⌘↵</kbd> send · <kbd className={kbdClass}>Esc</kbd> stop a stream
       </p>
     </div>
@@ -714,13 +715,13 @@ function EmptyPlayground({ model, onPick }: { model: string; onPick: (prompt: st
 // ---------------------------------------------------------------- styling
 
 const inputClass =
-  "h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 text-[13px] text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none";
+  "h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 text-body text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none";
 
 const textareaClass =
-  "w-full resize-y rounded-lg border border-line bg-surface-2 px-2.5 py-2 text-[13px] text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none";
+  "w-full resize-y rounded-lg border border-line bg-surface-2 px-2.5 py-2 text-body text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none";
 
 const kbdClass =
-  "rounded border border-line bg-surface-2 px-1 py-0.5 font-sans text-[10px] text-muted";
+  "rounded border border-line bg-surface-2 px-1 py-0.5 font-sans text-caption text-muted";
 
 // ---------------------------------------------------------------- streaming
 

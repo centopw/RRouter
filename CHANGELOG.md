@@ -65,6 +65,12 @@ All notable changes. Dates are local; versions follow semver once tagged.
   model → first token, generation — instead of only inferring them from TTFT.
 
 ### Added
+- A semantic design system: one type scale in `index.css`, atomic components under
+  `components/atoms`, and Radix-backed Dialog, Tabs, Switch, Separator and Label primitives.
+  Shared molecules use Text/Heading/Stack/Inline; raw font sizes were removed from the
+  dashboard so typography is changed in one place.
+
+### Added
 - The Add-provider → API key screen now carries the two custom endpoints, tinted with the
   OpenAI and Anthropic brand colours. Every provider row shows its real mark from
   simple-icons where available, with the provider's favicon as the fallback.

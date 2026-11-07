@@ -102,7 +102,7 @@ export function ModelChain({
     <div className="flex flex-col gap-2">
       {models.map((ref, index) => (
         <div key={`${index}-${ref}`} className="flex items-center gap-2">
-          <span className="w-5 text-right text-[11px] text-faint tnum">{index + 1}</span>
+          <span className="w-5 text-right text-caption text-faint tnum">{index + 1}</span>
           <div className={cx("min-w-0 flex-1")}>
             <ModelSelect
               ariaLabel={`model ${index + 1}`}
@@ -141,7 +141,7 @@ export function ModelChain({
         <button
           type="button"
           onClick={() => onChange([...models, ""])}
-          className="text-[12px] text-muted underline underline-offset-2 hover:text-fg"
+          className="text-small text-muted underline underline-offset-2 hover:text-fg"
         >
           add model
         </button>

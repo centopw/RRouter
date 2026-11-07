@@ -58,7 +58,7 @@ export type Bar = { label: string; value: number; highlight?: boolean };
  */
 export function Bars({ bars, height = 220, fill = false }: { bars: Bar[]; height?: number; fill?: boolean }) {
   if (bars.length === 0) {
-    return <div className="px-5 py-10 text-center text-[13px] text-faint">no usage in this window</div>;
+    return <div className="px-5 py-10 text-center text-body text-faint">no usage in this window</div>;
   }
   const max = Math.max(...bars.map((b) => b.value), 1);
   const ticks = 4;
@@ -70,7 +70,7 @@ export function Bars({ bars, height = 220, fill = false }: { bars: Bar[]; height
           return (
             <div
               key={i}
-              className="absolute inset-x-0 flex items-center gap-2 text-[10px] text-faint"
+              className="absolute inset-x-0 flex items-center gap-2 text-caption text-faint"
               style={{ top: `${(i / ticks) * 100}%` }}
             >
               <span className="w-10 shrink-0 text-right tnum">{compact(Math.round(value))}</span>
@@ -113,7 +113,7 @@ export function Bars({ bars, height = 220, fill = false }: { bars: Bar[]; height
           ))}
         </div>
       </div>
-      <div className={fill ? "mt-2 flex justify-between pl-12 text-[10px] text-faint" : "mt-2 flex gap-4 overflow-hidden pl-12"}>
+      <div className={fill ? "mt-2 flex justify-between pl-12 text-caption text-faint" : "mt-2 flex gap-4 overflow-hidden pl-12"}>
         {fill ? (
           <>
             <span>{bars[0]?.label}</span>
@@ -121,7 +121,7 @@ export function Bars({ bars, height = 220, fill = false }: { bars: Bar[]; height
           </>
         ) : (
           bars.map((b, i) => (
-            <div key={`${b.label}-label-${i}`} className="w-[46px] shrink-0 truncate text-[10px] text-faint" title={b.label}>
+            <div key={`${b.label}-label-${i}`} className="w-[46px] shrink-0 truncate text-caption text-faint" title={b.label}>
               {shortId(b.label)}
             </div>
           ))
@@ -157,13 +157,13 @@ export function Metric({
   return (
     <div className="rounded-[var(--radius-card)] border border-line bg-surface px-4 py-3.5">
       <div className="flex items-start justify-between gap-2">
-        <span className="text-[12px] text-muted">{label}</span>
+        <span className="text-small text-muted">{label}</span>
         {series && series.length > 1 ? (
           <Sparkline values={series} tone={tone ?? (up ? "pos" : "neg")} width={72} height={22} />
         ) : null}
       </div>
-      <div className="mt-2 text-[26px] font-semibold leading-none tracking-[-0.02em] tnum">{value}</div>
-      <div className="mt-2 flex items-center gap-1.5 text-[11px]">
+      <div className="mt-2 text-title font-semibold leading-none tracking-[-0.02em] tnum">{value}</div>
+      <div className="mt-2 flex items-center gap-1.5 text-caption">
         {delta !== null && delta !== undefined ? (
           <>
             <span className={up ? "text-pos" : "text-neg"}>
@@ -197,16 +197,16 @@ export function Readout({
 }) {
   return (
     <div className="px-6 py-5">
-      <div className="text-[13px] text-muted">{label}</div>
+      <div className="text-body text-muted">{label}</div>
       <div
         className={cx(
-          "mt-2 font-mono text-[34px] font-medium leading-none tracking-[-0.02em] tnum",
+          "mt-2 font-mono text-display font-medium leading-none tracking-[-0.02em] tnum",
           tone === "neg" ? "text-neg" : "text-fg",
         )}
       >
         {value}
       </div>
-      <div className="mt-2.5 flex min-h-[16px] flex-wrap items-center gap-1.5 text-[12.5px] text-faint">
+      <div className="mt-2.5 flex min-h-[16px] flex-wrap items-center gap-1.5 text-small text-faint">
         {dot ? <Dot tone={dot} /> : null}
         {note}
         {delta ? (
@@ -269,7 +269,7 @@ export function TrafficChart({
           {ticks.map((t) => (
             <span
               key={t}
-              className="absolute right-2 -translate-y-1/2 text-[11px] text-faint tnum"
+              className="absolute right-2 -translate-y-1/2 text-caption text-faint tnum"
               style={{ top: `${(1 - t) * 100}%` }}
             >
               {amount(max * t, unit, true)}
@@ -338,7 +338,7 @@ export function TrafficChart({
 
       {/* Error lane: one cell per bucket, aligned with the plot columns. */}
       <div className="mt-1 flex">
-        <div className="shrink-0 text-[10px] leading-4 text-faint" style={{ width: AXIS_WIDTH }}>
+        <div className="shrink-0 text-caption leading-4 text-faint" style={{ width: AXIS_WIDTH }}>
           Errors
         </div>
         <div className="flex min-w-0 flex-1 gap-px">
@@ -361,7 +361,7 @@ export function TrafficChart({
           {buckets.map((b, i) => (
             <div key={`x-${i}`} className="min-w-0 flex-1 text-center">
               {labelIdx.has(i) ? (
-                <span className="whitespace-nowrap text-[10.5px] text-faint">{b.label}</span>
+                <span className="whitespace-nowrap text-caption text-faint">{b.label}</span>
               ) : null}
             </div>
           ))}
@@ -382,8 +382,8 @@ function Tooltip({
 }) {
   return (
     <div className="w-[208px] rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-left shadow-xl">
-      <div className="text-[11px] text-faint">{bucket.full}</div>
-      <div className="mt-1 text-[13px] font-medium text-fg tnum">
+      <div className="text-caption text-faint">{bucket.full}</div>
+      <div className="mt-1 text-body font-medium text-fg tnum">
         {amount(bucket.total, unit, false)} {unit}
       </div>
       <div className="mt-2 space-y-1">
@@ -391,7 +391,7 @@ function Tooltip({
           .filter((p) => p.value > 0)
           .slice(0, 5)
           .map((p) => (
-            <div key={p.id} className="flex items-center gap-2 text-[11.5px]">
+            <div key={p.id} className="flex items-center gap-2 text-caption">
               <span
                 aria-hidden
                 className="h-2 w-2 shrink-0 rounded-[2px]"
@@ -403,7 +403,7 @@ function Tooltip({
           ))}
       </div>
       {bucket.errors > 0 ? (
-        <div className="mt-1.5 text-[11.5px] text-neg tnum">{bucket.errors} failed</div>
+        <div className="mt-1.5 text-caption text-neg tnum">{bucket.errors} failed</div>
       ) : null}
     </div>
   );

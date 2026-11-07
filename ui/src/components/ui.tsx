@@ -9,6 +9,11 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import * as Dialog from "@radix-ui/react-dialog";
+import * as Label from "@radix-ui/react-label";
+import * as RadixTabs from "@radix-ui/react-tabs";
+import { cx } from "../lib/cx";
+import { Heading, IconButton, Inline, Text } from "./atoms";
 import {
   CaretDown,
   Check,
@@ -20,9 +25,7 @@ import {
 
 /** Shared primitives. Every page composes these; none of them fetches. */
 
-export function cx(...parts: Array<string | false | null | undefined>): string {
-  return parts.filter(Boolean).join(" ");
-}
+export { cx } from "../lib/cx";
 
 export function Card({
   children,
@@ -60,10 +63,10 @@ export function PageHeader({
     <div className="mb-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-[32px] font-bold tracking-[-0.02em] text-fg">{title}</h1>
-          {subtitle ? <p className="mt-1.5 text-[13.5px] text-muted">{subtitle}</p> : null}
+          <Heading level={1} className="font-bold">{title}</Heading>
+          {subtitle ? <Text as="p" tone="muted" className="mt-1.5">{subtitle}</Text> : null}
         </div>
-        {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
+        {actions ? <Inline gap="sm" wrap>{actions}</Inline> : null}
       </div>
       {tabs ? <div className="mt-5 border-b border-line">{tabs}</div> : null}
     </div>
@@ -80,27 +83,23 @@ export function Tabs({
   onChange: (id: string) => void;
 }) {
   return (
-    <div role="tablist" className="flex gap-6">
-      {tabs.map((t) => {
-        const active = t.id === value;
-        return (
-          <button
+    <RadixTabs.Root value={value} onValueChange={onChange}>
+      <RadixTabs.List className="flex gap-6">
+        {tabs.map((t) => (
+          <RadixTabs.Trigger
             key={t.id}
-            role="tab"
-            aria-selected={active}
-            onClick={() => onChange(t.id)}
+            value={t.id}
             className={cx(
-              "-mb-px border-b-2 pb-2.5 text-sm transition-colors",
-              active
-                ? "border-accent text-fg"
-                : "border-transparent text-muted hover:text-fg",
+              "-mb-px border-b-2 pb-2.5 text-body transition-colors",
+              "border-transparent text-muted hover:text-fg",
+              "data-[state=active]:border-accent data-[state=active]:text-fg",
             )}
           >
             {t.label}
-          </button>
-        );
-      })}
-    </div>
+          </RadixTabs.Trigger>
+        ))}
+      </RadixTabs.List>
+    </RadixTabs.Root>
   );
 }
 
@@ -146,7 +145,7 @@ export function Button({
       disabled={disabled}
       className={cx(
         "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-full transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed",
-        size === "lg" ? "h-11 px-5 text-[13.5px]" : "h-8 px-3.5 text-[13px]",
+        size === "lg" ? "h-11 px-5 text-body" : "h-8 px-3.5 text-body",
         styles[variant],
         className,
       )}
@@ -177,7 +176,7 @@ export function Badge({
     <span
       title={title}
       className={cx(
-        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] leading-4",
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-caption leading-4",
         tones[tone],
       )}
     >
@@ -218,7 +217,7 @@ export function Segmented<T extends string>({
             aria-pressed={on}
             onClick={() => onChange(o.id)}
             className={cx(
-              "h-[26px] rounded-full px-2.5 text-[12px] transition-colors max-[820px]:h-9",
+              "h-[26px] rounded-full px-2.5 text-small transition-colors max-[820px]:h-9",
               on ? "bg-accent font-medium text-[var(--color-accent-ink)]" : "text-muted hover:text-fg",
             )}
           >
@@ -251,7 +250,7 @@ export function FilterChip({
       aria-label={ariaLabel}
       onClick={onClick}
       className={cx(
-        "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[12px] transition-colors max-[820px]:h-10",
+        "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-small transition-colors max-[820px]:h-10",
         on
           ? "border-accent bg-accent font-medium text-[var(--color-accent-ink)]"
           : bad
@@ -316,11 +315,11 @@ export function AlertBanner({
     >
       <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-[14px] font-semibold text-[var(--color-neg-ink)]">
+          <div className="flex items-center gap-2 text-lead font-semibold text-[var(--color-neg-ink)]">
             <Dot tone="neg" />
             {title}
           </div>
-          <div className="mt-1 text-[13px] text-muted">{children}</div>
+          <div className="mt-1 text-body text-muted">{children}</div>
         </div>
         {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
       </div>
@@ -335,16 +334,16 @@ export function Dot({ tone = "pos" }: { tone?: "pos" | "neg" | "warn" | "muted" 
 
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
-    <label className="flex min-w-0 flex-col gap-1.5">
-      <span className="text-[12px] font-semibold text-ink-soft">{label}</span>
+    <Label.Root className="flex min-w-0 flex-col gap-1.5">
+      <Text as="span" variant="small" className="font-semibold text-ink-soft">{label}</Text>
       {children}
-      {hint ? <span className="text-[11px] text-faint">{hint}</span> : null}
-    </label>
+      {hint ? <Text as="span" variant="caption" tone="faint">{hint}</Text> : null}
+    </Label.Root>
   );
 }
 
 const control =
-  "h-8 w-full min-w-0 rounded-[var(--radius-input)] border border-line-strong bg-surface px-2.5 text-[13px] text-fg placeholder:text-faint hover:border-[var(--color-fg)]/40 focus:border-[var(--color-accent-text)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-text)]/25 disabled:bg-surface-3 disabled:text-muted";
+  "h-8 w-full min-w-0 rounded-[var(--radius-input)] border border-line-strong bg-surface px-2.5 text-body text-fg placeholder:text-faint hover:border-[var(--color-fg)]/40 focus:border-[var(--color-accent-text)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-text)]/25 disabled:bg-surface-3 disabled:text-muted";
 
 export function Input({
   value,
@@ -528,7 +527,7 @@ export function Select({
         onKeyDown={onKeyDown}
         className={cx(
           plain
-            ? "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-full border border-transparent bg-transparent px-2 text-left text-[12.5px] text-ink-soft hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+            ? "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-full border border-transparent bg-transparent px-2 text-left text-small text-ink-soft hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
             : control,
           !plain &&
             "flex items-center justify-between gap-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text",
@@ -568,7 +567,7 @@ export function Select({
                     placeholder="filter…"
                     aria-label={`filter ${ariaLabel}`}
                     style={{ outline: "none" }}
-                    className="h-6 w-full bg-transparent text-[12.5px] text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none"
+                    className="h-6 w-full bg-transparent text-small text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none"
                   />
                   <X
                     size={13}
@@ -580,7 +579,7 @@ export function Select({
               ) : null}
               <div className="max-h-[264px] overflow-auto py-1">
                 {filtered.length === 0 ? (
-                  <div className="px-3 py-2 text-[12px] text-faint">no match</div>
+                  <div className="px-3 py-2 text-small text-faint">no match</div>
                 ) : (
                   filtered.map((option, index) => (
                     <button
@@ -592,7 +591,7 @@ export function Select({
                       onMouseEnter={() => setActive(index)}
                       onClick={() => choose(option)}
                       className={cx(
-                        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px]",
+                        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-small",
                         index === active && "bg-[var(--color-selected)]",
                         option.value === value ? "font-medium text-fg" : "text-fg",
                         option.disabled && "cursor-not-allowed text-faint",
@@ -603,7 +602,7 @@ export function Select({
                       </span>
                       <span className="min-w-0 flex-1 truncate">{option.label}</span>
                       {option.group ? (
-                        <span className="shrink-0 text-[10.5px] text-faint">{option.group}</span>
+                        <span className="shrink-0 text-caption text-faint">{option.group}</span>
                       ) : null}
                     </button>
                   ))
@@ -696,7 +695,7 @@ export function CopyChip({
       type="button"
       onClick={copy}
       aria-label={`copy ${value}`}
-      className="group inline-flex h-7 min-w-0 items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2 font-mono text-[11px] text-muted hover:border-line-strong hover:text-fg"
+      className="group inline-flex h-7 min-w-0 items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2 font-mono text-caption text-muted hover:border-line-strong hover:text-fg"
     >
       {prefix ? <span className="shrink-0 text-faint">{prefix}</span> : null}
       <span className="truncate">{copied ? "copied" : (display ?? value)}</span>
@@ -761,17 +760,17 @@ export function CopyButton({
 }
 
 export function EmptyState({ children }: { children: ReactNode }) {
-  return <div className="px-4 py-10 text-center text-[13px] text-faint">{children}</div>;
+  return <div className="px-4 py-10 text-center text-body text-faint">{children}</div>;
 }
 
 export function ErrorNote({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   const message = error instanceof Error ? error.message : String(error);
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] px-3 py-2 text-[13px] text-[var(--color-neg-ink)]">
+    <div className="flex items-start gap-3 rounded-lg border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] px-3 py-2 text-body text-[var(--color-neg-ink)]">
       <span className="font-medium">Request failed</span>
       <span className="min-w-0 flex-1 break-words">{message}</span>
       {onRetry ? (
-        <button onClick={onRetry} className="text-[12px] underline underline-offset-2">
+        <button onClick={onRetry} className="text-small underline underline-offset-2">
           retry
         </button>
       ) : null}
@@ -783,7 +782,7 @@ export function ErrorNote({ error, onRetry }: { error: unknown; onRetry?: () => 
 export function CardHeader({ title, action }: { title: string; action?: ReactNode }) {
   return (
     <div className="flex items-center justify-between px-5 pt-4 pb-3">
-      <h2 className="text-[16px] font-semibold text-fg">{title}</h2>
+      <Heading level={2}>{title}</Heading>
       {action}
     </div>
   );
@@ -811,90 +810,57 @@ export function Modal({
   /** Right-hand side sheet by default; small centred dialog for confirmations. */
   variant?: "drawer" | "dialog";
 }) {
-  const titleId = useId();
-  const describedBy = useId();
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    ref.current?.focus();
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previous;
-    };
-  }, [open, onClose]);
-
-  if (!open) return null;
   const drawer = variant === "drawer";
   const dialogWidths = { md: "max-w-[560px]", lg: "max-w-[720px]", xl: "max-w-[900px]" } as const;
   const drawerWidths = { md: "max-w-[520px]", lg: "max-w-[700px]", xl: "max-w-[880px]" } as const;
   return (
-    <div
-      className={
-        drawer
-          ? "fixed inset-0 z-50 flex justify-end bg-[rgba(16,18,20,0.38)] backdrop-blur-[1.5px]"
-          : "fixed inset-0 z-50 flex items-end justify-center bg-[rgba(16,18,20,0.48)] p-0 backdrop-blur-[1.5px] min-[560px]:items-center min-[560px]:p-6"
-      }
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div
-        ref={ref}
-        tabIndex={-1}
-        style={{ outline: "none" }}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={description ? describedBy : undefined}
-        className={cx(
-          "flex w-full flex-col overflow-hidden border bg-surface shadow-[0_24px_64px_rgba(16,18,20,0.22)]",
-          drawer
-            ? cx(
-                "drawer-panel h-full border-l border-line",
-                drawerWidths[width],
-              )
-            : cx(
-                "max-h-[92vh] rounded-t-[14px] rounded-[12px] border-line min-[560px]:rounded-[12px]",
-                dialogWidths[width],
-              ),
-        )}
-      >
-        <header className="flex items-start justify-between gap-4 border-b border-line px-5 py-4 min-[560px]:px-6">
-          <div className="min-w-0">
-            <h2 id={titleId} className="text-[18px] font-semibold leading-tight text-fg">
-              {title}
-            </h2>
-            {description ? (
-              <p id={describedBy} className="mt-1 text-[12.5px] leading-relaxed text-muted">
-                {description}
-              </p>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="close"
-            className="-mr-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
-          >
-            <X size={16} aria-hidden />
-          </button>
-        </header>
-        <div className="min-h-0 flex-1 overflow-auto px-5 py-5 min-[560px]:px-6">{children}</div>
-        {footer ? (
-          <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3.5 min-[560px]:px-6">
-            {footer}
-          </footer>
-        ) : null}
-      </div>
-    </div>
+    <Dialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay
+          className={cx(
+            "fixed inset-0 z-50 backdrop-blur-[1.5px]",
+            drawer ? "bg-[rgba(16,18,20,0.38)]" : "bg-[rgba(16,18,20,0.48)]",
+          )}
+        />
+        <Dialog.Content
+          className={cx(
+            "fixed z-50 flex w-full flex-col overflow-hidden border bg-surface shadow-[0_24px_64px_rgba(16,18,20,0.22)] focus:outline-none",
+            drawer
+              ? cx("drawer-panel inset-y-0 right-0 h-full border-l border-line", drawerWidths[width])
+              : cx("left-1/2 top-1/2 max-h-[92vh] -translate-x-1/2 -translate-y-1/2 rounded-[12px] border-line", dialogWidths[width]),
+          )}
+        >
+          <header className="flex items-start justify-between gap-4 border-b border-line px-5 py-4 min-[560px]:px-6">
+            <div className="min-w-0">
+              <Dialog.Title asChild>
+                <Heading level={2} className="leading-tight">{title}</Heading>
+              </Dialog.Title>
+              {description ? (
+                <Dialog.Description asChild>
+                  <Text as="p" tone="muted" className="mt-1 leading-relaxed">
+                    {description}
+                  </Text>
+                </Dialog.Description>
+              ) : (
+                <Dialog.Description className="sr-only">{title}</Dialog.Description>
+              )}
+            </div>
+            <Dialog.Close asChild>
+              <IconButton label="close" className="-mr-1">
+                <X size={16} aria-hidden />
+              </IconButton>
+            </Dialog.Close>
+          </header>
+          <div className="min-h-0 flex-1 overflow-auto px-5 py-5 min-[560px]:px-6">{children}</div>
+          {footer ? (
+            <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3.5 min-[560px]:px-6">
+              {footer}
+            </footer>
+          ) : null}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
-
 }
 
 /**
@@ -934,7 +900,7 @@ export function ConfirmDialog({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className="inline-flex h-8 items-center gap-1.5 rounded-full bg-[var(--color-neg-fill)] px-3.5 text-[13px] font-semibold text-white transition-colors hover:bg-[var(--color-neg)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed"
+            className="inline-flex h-8 items-center gap-1.5 rounded-full bg-[var(--color-neg-fill)] px-3.5 text-body font-semibold text-white transition-colors hover:bg-[var(--color-neg)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed"
           >
             {busy ? "working…" : confirmLabel}
           </button>
@@ -945,7 +911,7 @@ export function ConfirmDialog({
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--color-neg-tint)] text-[var(--color-neg)]">
           <WarningOctagon size={19} aria-hidden />
         </span>
-        <div className="min-w-0 text-[13.5px] leading-relaxed text-ink-soft">{message}</div>
+        <div className="min-w-0 text-body leading-relaxed text-ink-soft">{message}</div>
       </div>
     </Modal>
   );

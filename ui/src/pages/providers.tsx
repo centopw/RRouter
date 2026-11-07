@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import { ProviderIcon, providerBrand } from "../components/provider-icon";
+import { Grid, SectionLabel, Stack } from "../components/atoms";
 import {
   Badge,
   Button,
@@ -44,6 +45,7 @@ import {
 } from "../lib/api";
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
 import { useToast } from "../components/toast";
+import { Heading } from "../components/atoms";
 
 type AddStep = "kind" | "provider" | "opencode" | "key";
 
@@ -291,14 +293,14 @@ export default function Providers() {
       {notice ? (
         <div
           className={cx(
-            "mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[13px]",
+            "mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-body",
             notice.tone === "pos"
               ? "border-[var(--color-pos)]/35 bg-[var(--color-pos-tint)] text-[var(--color-pos)]"
               : "border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)]",
           )}
         >
           <span className="min-w-0 flex-1 break-words">{notice.text}</span>
-          <button onClick={() => setNotice(null)} className="text-[11px] underline underline-offset-2">
+          <button onClick={() => setNotice(null)} className="text-caption underline underline-offset-2">
             dismiss
           </button>
         </div>
@@ -317,7 +319,7 @@ export default function Providers() {
           <CardHeader
             title="Connected"
             action={
-              <span className="text-[11px] text-faint">
+              <span className="text-caption text-faint">
                 {connectedIds.size} provider{connectedIds.size === 1 ? "" : "s"} · {accounts.length} account
                 {accounts.length === 1 ? "" : "s"}
               </span>
@@ -339,7 +341,7 @@ export default function Providers() {
             <CardHeader
               title="Subscription limits"
               action={
-                <span className="text-[11px] text-faint">
+                <span className="text-caption text-faint">
                   {subscriptions.isFetching ? "refreshing…" : "from your provider plan · refreshes every five minutes"}
                 </span>
               }
@@ -349,9 +351,9 @@ export default function Providers() {
                 <ErrorNote error={subscriptions.error} onRetry={() => void subscriptions.refetch()} />
               </div>
             ) : subscriptions.isLoading ? (
-              <p className="px-5 pb-4 text-[12.5px] text-faint">reading plan limits…</p>
+              <p className="px-5 pb-4 text-small text-faint">reading plan limits…</p>
             ) : (subscriptions.data ?? []).length === 0 ? (
-              <p className="px-5 pb-4 text-[12.5px] text-muted">
+              <p className="px-5 pb-4 text-small text-muted">
                 No subscription limits to show. Claude and Codex sign-ins report their plan windows;
                 API-key accounts have none.
               </p>
@@ -372,7 +374,7 @@ export default function Providers() {
             <CardHeader
               title="Operator limits"
               action={
-                <span className="text-[11px] text-faint">
+                <span className="text-caption text-faint">
                   optional caps you set · an exhausted account is skipped by the router
                 </span>
               }
@@ -504,9 +506,9 @@ function RoutingModal({ connection, onClose }: { connection: Connection; onClose
       }
     >
       <div className="flex flex-col gap-4">
-        <p className="text-[12px] leading-relaxed text-muted">
+        <p className="text-small leading-relaxed text-muted">
           Priority groups accounts (lower first); weight only splits traffic inside one priority
-          group when <span className="font-mono text-[11px] text-fg">RROUTER_STRATEGY=weighted</span>.
+          group when <span className="font-mono text-caption text-fg">RROUTER_STRATEGY=weighted</span>.
         </p>
 
         <div className="grid grid-cols-2 gap-3">
@@ -524,7 +526,7 @@ function RoutingModal({ connection, onClose }: { connection: Connection; onClose
               />
             </Field>
             {priorityProblem ? (
-              <span role="alert" className="text-[11px] text-neg">
+              <span role="alert" className="text-caption text-neg">
                 {priorityProblem}
               </span>
             ) : null}
@@ -543,14 +545,14 @@ function RoutingModal({ connection, onClose }: { connection: Connection; onClose
               />
             </Field>
             {weightProblem ? (
-              <span role="alert" className="text-[11px] text-neg">
+              <span role="alert" className="text-caption text-neg">
                 {weightProblem}
               </span>
             ) : null}
           </div>
         </div>
 
-        <div className="flex items-center justify-between gap-3 text-[11px] text-faint">
+        <div className="flex items-center justify-between gap-3 text-caption text-faint">
           <span>{connection.name ?? connection.email ?? connection.provider}</span>
           <span className="font-mono">{connection.id}</span>
         </div>
@@ -571,8 +573,8 @@ function EmptyProviders({ onAdd }: { onAdd: () => void }) {
         height={56}
         className="mx-auto h-14 w-14 opacity-90"
       />
-      <h2 className="mt-4 text-[17px] font-medium">Connect your first provider</h2>
-      <p className="mx-auto mt-1.5 max-w-[420px] text-[13px] text-muted">
+      <Heading level={2} className="mt-4 text-heading font-medium">Connect your first provider</Heading>
+      <p className="mx-auto mt-1.5 max-w-[420px] text-body text-muted">
         RRouter has nothing to route to yet. Sign in to a subscription account, or paste an API key — either
         takes about a minute.
       </p>
@@ -674,12 +676,10 @@ function AddProviderFlow({
       ) : null}
 
       {step === "provider" && kind === "api_key" ? (
-        <div className="flex flex-col gap-4">
+        <Stack gap="lg">
           <div>
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">
-              custom endpoint
-            </p>
-            <div className="grid gap-2 sm:grid-cols-2">
+            <SectionLabel className="mb-2">custom endpoint</SectionLabel>
+            <Grid cols={2} gap="sm">
               {([
                 { protocol: "openai", title: "Custom OpenAI", body: "Any OpenAI-compatible chat API" },
                 { protocol: "anthropic", title: "Custom Anthropic", body: "Any Anthropic Messages API" },
@@ -698,18 +698,16 @@ function AddProviderFlow({
                   >
                     <ProviderIcon provider={item.protocol} size={22} />
                     <span className="min-w-0">
-                      <span className="block truncate text-[13px] font-medium">{item.title}</span>
-                      <span className="block truncate text-[11px] text-muted">{item.body}</span>
+                      <span className="block truncate text-body font-medium">{item.title}</span>
+                      <span className="block truncate text-caption text-muted">{item.body}</span>
                     </span>
                   </button>
                 );
               })}
-            </div>
+            </Grid>
           </div>
           <div>
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">
-              registered providers
-            </p>
+            <SectionLabel className="mb-2">registered providers</SectionLabel>
             <ProviderList
               empty="No API-key provider is registered."
               items={keyProviders.map((p) => ({
@@ -721,7 +719,7 @@ function AddProviderFlow({
               }))}
             />
           </div>
-        </div>
+        </Stack>
       ) : null}
 
       {step === "opencode" ? <OpenCodeGuide onContinue={onOpenCodeContinue} /> : null}
@@ -744,8 +742,8 @@ function Choice({ title, body, onClick }: { title: string; body: string; onClick
       onClick={onClick}
       className="rounded-[var(--radius-card)] border border-line-strong bg-surface-2 p-4 text-left transition-colors hover:border-[var(--color-line-strong)] hover:bg-[var(--color-selected)]"
     >
-      <span className="block text-[14px] font-medium">{title}</span>
-      <span className="mt-1 block text-[12px] leading-relaxed text-muted">{body}</span>
+      <span className="block text-lead font-medium">{title}</span>
+      <span className="mt-1 block text-small leading-relaxed text-muted">{body}</span>
     </button>
   );
 }
@@ -757,7 +755,7 @@ function ProviderList({
   items: Array<{ id: string; title: string; meta: string; connected: boolean; onClick: () => void }>;
   empty: string;
 }) {
-  if (items.length === 0) return <p className="text-[13px] text-faint">{empty}</p>;
+  if (items.length === 0) return <p className="text-body text-faint">{empty}</p>;
   return (
     <ul className="flex flex-col gap-1.5">
       {items.map((item) => (
@@ -768,11 +766,11 @@ function ProviderList({
           >
             <ProviderIcon provider={item.id} size={20} />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px]">{item.title}</span>
-              <span className="block text-[11px] text-faint">{item.meta}</span>
+              <span className="block truncate text-body">{item.title}</span>
+              <span className="block text-caption text-faint">{item.meta}</span>
             </span>
             {item.connected ? <Badge tone="pos">connected</Badge> : null}
-            <span className="text-[11px] text-faint">→</span>
+            <span className="text-caption text-faint">→</span>
           </button>
         </li>
       ))}
@@ -783,7 +781,7 @@ function ProviderList({
 function OpenCodeGuide({ onContinue }: { onContinue: () => void }) {
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-[12.5px] leading-relaxed text-muted">
+      <p className="text-small leading-relaxed text-muted">
         OpenCode exposes its models through an OpenAI-compatible endpoint. Pick the plan you
         use — all three reuse one OpenCode API key, created in the Console.
       </p>
@@ -807,14 +805,14 @@ function OpenCodeGuide({ onContinue }: { onContinue: () => void }) {
         ].map((plan) => (
           <div key={plan.title} className="rounded-lg border border-line bg-surface-2 px-3 py-2.5">
             <div className="flex flex-wrap items-baseline gap-2">
-              <span className="text-[13px] font-medium">{plan.title}</span>
-              <span className="text-[11px] text-faint">{plan.meta}</span>
+              <span className="text-body font-medium">{plan.title}</span>
+              <span className="text-caption text-faint">{plan.meta}</span>
             </div>
-            <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted">{plan.body}</p>
+            <p className="mt-0.5 text-caption leading-relaxed text-muted">{plan.body}</p>
           </div>
         ))}
       </div>
-      <div className="flex flex-wrap items-center gap-3 text-[12px]">
+      <div className="flex flex-wrap items-center gap-3 text-small">
         <a
           className="font-medium text-[var(--color-accent-text)] hover:underline"
           href="https://opencode.ai/console"
@@ -832,7 +830,7 @@ function OpenCodeGuide({ onContinue }: { onContinue: () => void }) {
           Go plans and limits
         </a>
       </div>
-      <p className="text-[11.5px] leading-relaxed text-faint">
+      <p className="text-caption leading-relaxed text-faint">
         The OpenCode key authorises RRouter upstream. Clients calling RRouter still need a
         gateway key from API Keys unless the server runs with RROUTER_REQUIRE_API_KEY=false.
       </p>
@@ -911,7 +909,7 @@ function ApiKeyForm({
         }
       >
         {fixedProvider ? (
-          <div className="flex h-9 items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 text-[13px] text-muted">
+          <div className="flex h-9 items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 text-body text-muted">
             <ProviderIcon provider={fixedProvider} size={16} />
             {fixedDisplay ?? fixedProvider}
           </div>
@@ -1028,7 +1026,7 @@ function WindowBar({ window }: { window: SubscriptionWindow }) {
             ? "code"
             : window.label.toLowerCase();
   return (
-    <div className="flex items-center gap-2 text-[11.5px]">
+    <div className="flex items-center gap-2 text-caption">
       <span className="w-11 shrink-0 text-faint" title={window.label}>
         {short}
       </span>
@@ -1050,7 +1048,7 @@ function SubscriptionRow({ account }: { account: AccountSubscription }) {
   return (
     <div className="border-b border-rule px-5 py-3 last:border-0">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <span className="text-[13.5px] font-medium text-fg">
+        <span className="text-body font-medium text-fg">
           {account.provider === "claude"
             ? "Claude"
             : account.provider === "codex"
@@ -1059,7 +1057,7 @@ function SubscriptionRow({ account }: { account: AccountSubscription }) {
                 ? "GitHub Copilot"
                 : account.provider}
         </span>
-        <span className="min-w-0 truncate text-[12px] text-muted">{account.name ?? ""}</span>
+        <span className="min-w-0 truncate text-small text-muted">{account.name ?? ""}</span>
         {account.plan ? <Badge tone="neutral">{account.plan}</Badge> : null}
         {exhausted ? (
           <Badge tone="neg" title={exhausted.resets_at ? `resets ${when(exhausted.resets_at)}` : undefined}>
@@ -1068,13 +1066,13 @@ function SubscriptionRow({ account }: { account: AccountSubscription }) {
         ) : null}
         {account.error ? (
           <span
-            className="max-w-full truncate text-[11.5px] text-faint"
+            className="max-w-full truncate text-caption text-faint"
             title={account.error}
           >
             {account.error.length > 110 ? `${account.error.slice(0, 110)}…` : account.error}
           </span>
         ) : (
-          <span className="ml-auto flex items-center gap-1.5 text-[11px] text-faint">
+          <span className="ml-auto flex items-center gap-1.5 text-caption text-faint">
             <Dot tone="pos" />
             live
           </span>
@@ -1200,7 +1198,7 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
       />
 
       <div className="flex flex-col gap-4">
-        <p className="text-[12px] leading-relaxed text-muted">
+        <p className="text-small leading-relaxed text-muted">
           Measured from the start of the current UTC window. The router skips an account
           once a limit is reached and falls back to the next one.
         </p>
@@ -1231,7 +1229,7 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
               />
             </Field>
             {requestsProblem ? (
-              <span role="alert" className="text-[11px] text-neg">
+              <span role="alert" className="text-caption text-neg">
                 {requestsProblem}
               </span>
             ) : null}
@@ -1250,7 +1248,7 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
               />
             </Field>
             {tokensProblem ? (
-              <span role="alert" className="text-[11px] text-neg">
+              <span role="alert" className="text-caption text-neg">
                 {tokensProblem}
               </span>
             ) : null}
@@ -1270,13 +1268,13 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
             />
           </Field>
           {costProblem ? (
-            <span role="alert" className="text-[11px] text-neg">
+            <span role="alert" className="text-caption text-neg">
               {costProblem}
             </span>
           ) : null}
         </div>
 
-        <div className="flex items-center justify-between gap-3 text-[11px] text-faint">
+        <div className="flex items-center justify-between gap-3 text-caption text-faint">
           <span>{row.name ?? row.provider}</span>
           <span className="font-mono">{row.connection_id}</span>
         </div>

@@ -128,7 +128,7 @@ export default function Keys() {
         <CardHeader
           title="Keys"
           action={
-            <span className="text-[11.5px] text-faint">{keys.data?.length ?? 0} configured</span>
+            <span className="text-caption text-faint">{keys.data?.length ?? 0} configured</span>
           }
         />
         <DataTable
@@ -138,7 +138,7 @@ export default function Keys() {
           loading={keys.isLoading}
           empty="No keys yet. Create one above to require authentication on /v1."
         />
-        <div className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-3 text-[11px] text-faint">
+        <div className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-3 text-caption text-faint">
           <span>endpoint</span>
           <CopyChip value={`${window.location.origin}/v1`} />
           <span className="ml-auto flex items-center gap-1.5">
@@ -203,7 +203,7 @@ function Limits({ row }: { row: KeyResult }) {
     [row.budget_tokens, "tokens"],
   ];
   return (
-    <span className="whitespace-nowrap text-[12px]">
+    <span className="whitespace-nowrap text-small">
       {parts.map(([value, unit], i) => (
         <span key={unit}>
           {i > 0 ? <span className="text-faint"> · </span> : null}
@@ -277,9 +277,9 @@ function Spend({ row }: { row: KeyResult }) {
   const budget = row.budget_micros;
   if (!(budget > 0)) {
     return (
-      <span className="font-mono text-[12px] text-muted tnum" title={title}>
+      <span className="font-mono text-small text-muted tnum" title={title}>
         {usd(row.spent_micros)}
-        {now ? <span className="ml-1 text-[11px] text-faint">{now}</span> : null}
+        {now ? <span className="ml-1 text-caption text-faint">{now}</span> : null}
       </span>
     );
   }
@@ -287,10 +287,10 @@ function Spend({ row }: { row: KeyResult }) {
   const share = Math.min(100, (row.spent_micros / budget) * 100);
   return (
     <div className="min-w-[132px]" title={title}>
-      <div className="flex items-baseline gap-1 font-mono text-[12px] tnum">
+      <div className="flex items-baseline gap-1 font-mono text-small tnum">
         <span className={reached ? "text-neg" : "text-fg"}>{usd(row.spent_micros)}</span>
         <span className="text-faint">/ {usd(budget)}</span>
-        {now ? <span className="text-[11px] text-faint">{now}</span> : null}
+        {now ? <span className="text-caption text-faint">{now}</span> : null}
       </div>
       <span className="mt-1 block h-1.5 w-full overflow-hidden rounded-full bg-[var(--color-rule)]">
         <span
@@ -301,7 +301,7 @@ function Spend({ row }: { row: KeyResult }) {
           }}
         />
       </span>
-      {reached ? <span className="mt-1 block text-[11px] text-neg">budget reached</span> : null}
+      {reached ? <span className="mt-1 block text-caption text-neg">budget reached</span> : null}
     </div>
   );
 }
@@ -368,7 +368,7 @@ function DateInput({
       disabled={disabled}
       aria-label={ariaLabel}
       onChange={(e) => onChange(e.target.value)}
-      className="h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 text-[13px] text-fg focus:border-[var(--color-accent)]/60 focus:outline-none [color-scheme:dark]"
+      className="h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 text-body text-fg focus:border-[var(--color-accent)]/60 focus:outline-none [color-scheme:dark]"
     />
   );
 }
@@ -388,9 +388,9 @@ function InlineError({ error }: { error: unknown }) {
   const message = error instanceof Error ? error.message : String(error);
   const code = errorCode(error);
   return (
-    <div className="rounded-lg border border-[var(--color-neg)]/35 bg-[var(--color-neg)]/10 px-3 py-2 text-[12px]">
+    <div className="rounded-lg border border-[var(--color-neg)]/35 bg-[var(--color-neg)]/10 px-3 py-2 text-small">
       <span className="break-words text-[color-mix(in_srgb,var(--color-neg)_62%,white)]">{message}</span>
-      {code ? <span className="ml-2 font-mono text-[11px] text-faint">{code}</span> : null}
+      {code ? <span className="ml-2 font-mono text-caption text-faint">{code}</span> : null}
     </div>
   );
 }
@@ -483,8 +483,8 @@ function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated
       >
         <div className="flex flex-col gap-3">
           <CopyChip value={created.key} />
-          <p className="text-[12.5px] text-muted">
-            Clients send it as <code className="font-mono text-[11px]">Authorization: Bearer …</code>{" "}
+          <p className="text-small text-muted">
+            Clients send it as <code className="font-mono text-caption">Authorization: Bearer …</code>{" "}
             against the endpoint on the Keys page.
           </p>
         </div>
@@ -725,7 +725,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
       }
     >
       <div className="flex flex-col gap-4">
-        <label className="flex items-center gap-2 text-[13px] text-fg">
+        <label className="flex items-center gap-2 text-body text-fg">
           <input
             ref={first}
             type="checkbox"
@@ -735,13 +735,13 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
             className="h-3.5 w-3.5 rounded border border-line-strong bg-[var(--color-surface-2)] accent-[var(--color-accent)]"
           />
           active
-          <span className="text-[11px] text-faint">
+          <span className="text-caption text-faint">
             {active ? "accepting requests" : "every request is rejected with 403"}
           </span>
         </label>
 
         <div className="flex min-w-0 flex-col gap-1.5">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">
+          <span className="text-caption font-medium uppercase tracking-[0.08em] text-faint">
             scope
           </span>
           <Segmented
@@ -753,7 +753,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
             ariaLabel="key scope"
             className={busy ? "pointer-events-none opacity-60" : undefined}
           />
-          <span className="text-[11px] text-faint">
+          <span className="text-caption text-faint">
             admin keys manage the gateway and cannot spend tokens; inference keys call /v1 and
             obey limits and guardrails.
           </span>
@@ -804,7 +804,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
               />
             </Field>
             {budgetProblem ? (
-              <span role="alert" className="text-[11px] text-neg">
+              <span role="alert" className="text-caption text-neg">
                 {budgetProblem}
               </span>
             ) : null}
@@ -838,12 +838,12 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
 
         <section className="flex min-w-0 flex-col gap-2">
           <div className="flex items-baseline justify-between gap-3">
-            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">
+            <span className="text-caption font-medium uppercase tracking-[0.08em] text-faint">
               model mapping
             </span>
-            <span className="text-[11px] text-faint tnum">{summary}</span>
+            <span className="text-caption text-faint tnum">{summary}</span>
           </div>
-          <span className="text-[11px] text-faint">
+          <span className="text-caption text-faint">
             Rewrite the model a client sends to a model this gateway serves.
           </span>
 
@@ -852,11 +852,11 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
           ) : null}
 
           {baseline === null ? (
-            map.isError ? null : <div className="text-[12px] text-faint">loading mapping…</div>
+            map.isError ? null : <div className="text-small text-faint">loading mapping…</div>
           ) : (
             <>
               {pairs.length === 0 ? (
-                <div className="text-[12px] text-faint">
+                <div className="text-small text-faint">
                   no rewrites — model names pass through unchanged
                 </div>
               ) : null}
@@ -872,7 +872,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
                     placeholder="default"
                     aria-label={`mapping ${index + 1} from`}
                     onChange={(e) => setPair(index, { from: e.target.value })}
-                    className="h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 font-mono text-[12px] text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
+                    className="h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 font-mono text-small text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
                   />
                   <input
                     list={listId}
@@ -881,7 +881,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
                     placeholder="provider/model"
                     aria-label={`mapping ${index + 1} to`}
                     onChange={(e) => setPair(index, { to: e.target.value })}
-                    className="h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 font-mono text-[12px] text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
+                    className="h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 font-mono text-small text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
                   />
                   <button
                     type="button"
@@ -906,7 +906,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
                   type="button"
                   disabled={busy}
                   onClick={() => setPairs([...pairs, { from: "", to: "" }])}
-                  className="text-[12px] text-muted underline underline-offset-2 hover:text-fg"
+                  className="text-small text-muted underline underline-offset-2 hover:text-fg"
                 >
                   add mapping
                 </button>
@@ -915,7 +915,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
           )}
 
           {problem ? (
-            <span role="alert" className="text-[12px] text-neg">
+            <span role="alert" className="text-small text-neg">
               {problem}
             </span>
           ) : null}
@@ -923,14 +923,14 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
 
         <section className="flex min-w-0 flex-col gap-2">
           <div className="flex items-baseline justify-between gap-3">
-            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">
+            <span className="text-caption font-medium uppercase tracking-[0.08em] text-faint">
               guardrails
             </span>
-            <span className="text-[11px] text-faint tnum">
+            <span className="text-caption text-faint tnum">
               {blocked.length}/{MAX_BLOCKED_TERMS} blocked
             </span>
           </div>
-          <span className="text-[11px] text-faint">
+          <span className="text-caption text-faint">
             Case-insensitive substring match, no regex. A hit refuses the request; with
             response scanning it refuses the reply too.
           </span>
@@ -950,7 +950,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
           </Field>
 
           <div className="flex min-w-0 flex-col gap-1.5">
-            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">
+            <span className="text-caption font-medium uppercase tracking-[0.08em] text-faint">
               blocked phrases
             </span>
             <form
@@ -969,7 +969,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
                   setTerm(e.target.value);
                   setGuardProblem(null);
                 }}
-                className="h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 text-[13px] text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
+                className="h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 text-body text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
               />
               <Button
                 type="submit"
@@ -981,7 +981,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
               </Button>
             </form>
             {blocked.length === 0 ? (
-              <div className="text-[12px] text-faint">
+              <div className="text-small text-faint">
                 none — every prompt passes through
               </div>
             ) : (
@@ -989,7 +989,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
                 {blocked.map((phrase) => (
                   <span
                     key={phrase}
-                    className="inline-flex max-w-full items-center gap-1 rounded-md border border-line bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
+                    className="inline-flex max-w-full items-center gap-1 rounded-md border border-line bg-surface-2 px-1.5 py-0.5 text-caption text-muted"
                   >
                     <span className="break-all font-mono">{phrase}</span>
                     <button
@@ -1007,7 +1007,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
             )}
           </div>
 
-          <label className="flex items-start gap-2 text-[13px] text-fg">
+          <label className="flex items-start gap-2 text-body text-fg">
             <input
               type="checkbox"
               checked={scanOutput}
@@ -1018,7 +1018,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
             />
             <span>
               scan responses
-              <span className="mt-0.5 block text-[11px] text-faint">
+              <span className="mt-0.5 block text-caption text-faint">
                 a matching response is refused before it reaches the client, and a stream is
                 cut with an error instead of completing. Needs at least one blocked phrase.
               </span>
@@ -1026,13 +1026,13 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
           </label>
 
           {guardProblem ? (
-            <span role="alert" className="text-[12px] text-neg">
+            <span role="alert" className="text-small text-neg">
               {guardProblem}
             </span>
           ) : null}
         </section>
 
-        <div className="flex items-center justify-between gap-3 text-[11px] text-faint">
+        <div className="flex items-center justify-between gap-3 text-caption text-faint">
           <span className="font-mono">{row.id}</span>
           <span>0 or empty limits mean unlimited, except max prompt characters</span>
         </div>

@@ -108,7 +108,7 @@ export function OAuthDialog({
       }
     >
       <div className="space-y-4">
-        <div className="flex items-center gap-2 text-[13px] text-muted">
+        <div className="flex items-center gap-2 text-body text-muted">
           <Dot tone={status.data?.pending === false ? "pos" : "warn"} />
           <span aria-live="polite">
             {startError
@@ -132,18 +132,18 @@ export function OAuthDialog({
         {complete.isError ? <ErrorNote error={complete.error} /> : null}
 
         {!start ? (
-          <div className="rounded-lg border border-line-strong bg-surface-2 px-3 py-6 text-center text-[13px] text-faint">
+          <div className="rounded-lg border border-line-strong bg-surface-2 px-3 py-6 text-center text-body text-faint">
             requesting an authorization challenge…
           </div>
         ) : challenge?.kind === "pkce" ? (
           <>
-            <p className="text-[13px] text-muted">
+            <p className="text-body text-muted">
               A browser tab opened at the provider. Approve access there; this dialog finishes
               automatically once the loopback listener receives the callback.
             </p>
             <Field label="redirect uri" hint="the loopback the browser must reach">
               <div className="flex items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-[12px] text-muted">
+                <code className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-small text-muted">
                   {challenge.redirect_uri}
                 </code>
                 <Button onClick={() => copy(challenge.redirect_uri)}>copy</Button>
@@ -155,14 +155,14 @@ export function OAuthDialog({
                   href={challenge.authorize_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-[12px] text-accent underline underline-offset-2"
+                  className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-small text-accent underline underline-offset-2"
                 >
                   {challenge.authorize_url}
                 </a>
                 <Button onClick={() => copy(challenge.authorize_url)}>copy</Button>
               </div>
             </Field>
-            <p className="text-[11px] text-faint">
+            <p className="text-caption text-faint">
               If the provider cannot reach the loopback, approve anyway and press <b>complete</b> —
               the server still holds the pending exchange.
             </p>
@@ -171,7 +171,7 @@ export function OAuthDialog({
           <>
             <Field label="user code" hint={`expires in ${Math.round(challenge.expires_in / 60)} min`}>
               <div className="flex items-center gap-2">
-                <code className="min-w-0 flex-1 rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-3 py-2 font-mono text-[24px] tracking-[0.18em] text-fg">
+                <code className="min-w-0 flex-1 rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-3 py-2 font-mono text-title tracking-[0.18em] text-fg">
                   {challenge.user_code}
                 </code>
                 <Button onClick={() => copy(challenge.user_code)}>copy</Button>
@@ -183,14 +183,14 @@ export function OAuthDialog({
                   href={challenge.verification_uri}
                   target="_blank"
                   rel="noreferrer"
-                  className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-[12px] text-accent underline underline-offset-2"
+                  className="min-w-0 flex-1 truncate rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-small text-accent underline underline-offset-2"
                 >
                   {challenge.verification_uri}
                 </a>
                 <Button onClick={() => copy(challenge.verification_uri)}>copy</Button>
               </div>
             </Field>
-            <p className="text-[11px] text-faint">
+            <p className="text-caption text-faint">
               Enter the code on that page. This dialog polls the gateway and completes the sign-in
               by itself.
             </p>

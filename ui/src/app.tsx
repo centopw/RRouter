@@ -191,7 +191,7 @@ export function Shell() {
                 height={30}
                 className="h-[30px] w-auto max-w-[52px] shrink-0 select-none object-contain"
               />
-              <span className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-[-0.01em] text-fg">
+              <span className="min-w-0 flex-1 truncate text-lead font-semibold tracking-[-0.01em] text-fg">
                 {name}
               </span>
               <button
@@ -218,7 +218,7 @@ export function Shell() {
               {collapsed ? (
                 <div aria-hidden className="mx-2 mb-2 border-t border-line" />
               ) : (
-                <div className="px-2 pb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-faint">
+                <div className="px-2 pb-1.5 text-caption font-semibold uppercase tracking-[0.12em] text-faint">
                   {group}
                 </div>
               )}
@@ -260,7 +260,7 @@ export function Shell() {
             height={24}
             className="h-6 w-6 shrink-0 select-none object-contain"
           />
-          <span className="text-[13px] font-semibold text-fg">{name}</span>
+          <span className="text-body font-semibold text-fg">{name}</span>
           <span className="flex items-center gap-1.5">
             <RunningDot running={running} />
             <span className="sr-only">{running ? "Gateway running" : "Gateway unreachable"}</span>
@@ -283,7 +283,7 @@ export function Shell() {
 
       <main className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 min-[820px]:px-10 min-[820px]:pb-14 min-[820px]:pt-8">
         <div className="mx-auto w-full max-w-[1160px]">
-          <Suspense fallback={<div className="text-[13px] text-faint">loading…</div>}>
+          <Suspense fallback={<div className="text-body text-faint">loading…</div>}>
             <Outlet />
           </Suspense>
         </div>
@@ -316,11 +316,11 @@ function JumpButton({ onClick, collapsed }: { onClick: () => void; collapsed?: b
       type="button"
       onClick={onClick}
       aria-label="Jump to a page or model"
-      className="flex h-9 w-full items-center gap-2 rounded-full border border-line-strong bg-surface px-3 text-left text-[13px] text-muted transition-colors hover:bg-surface-3 hover:text-fg"
+      className="flex h-9 w-full items-center gap-2 rounded-full border border-line-strong bg-surface px-3 text-left text-body text-muted transition-colors hover:bg-surface-3 hover:text-fg"
     >
       <MagnifyingGlass size={14} aria-hidden />
       <span className="truncate">Jump to…</span>
-      <kbd className="ml-auto shrink-0 rounded border border-line px-1 py-0.5 font-sans text-[10px] text-faint">
+      <kbd className="ml-auto shrink-0 rounded border border-line px-1 py-0.5 font-sans text-caption text-faint">
         ⌘K
       </kbd>
     </button>
@@ -355,7 +355,7 @@ function SessionFooter({ collapsed }: { collapsed?: boolean }) {
       <div className="flex flex-col items-center gap-1 border-t border-line py-2">
         <span
           title={`${user.name} · ${user.email}`}
-          className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-3 text-[12px] font-semibold text-fg"
+          className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-3 text-small font-semibold text-fg"
         >
           {user.name.slice(0, 1).toUpperCase()}
         </span>
@@ -375,8 +375,8 @@ function SessionFooter({ collapsed }: { collapsed?: boolean }) {
   return (
     <div className="flex items-center gap-2 border-t border-line px-3 py-2.5">
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[12px] font-medium text-fg">{user.name}</div>
-        <div className="truncate text-[11px] text-faint">{user.email}</div>
+        <div className="truncate text-small font-medium text-fg">{user.name}</div>
+        <div className="truncate text-caption text-faint">{user.email}</div>
       </div>
       <Button variant="quiet" disabled={signOut.isPending} onClick={signOutAndLeave}>
         sign out
@@ -401,17 +401,17 @@ function SidebarFooter({
   return (
     <div className="border-t border-line px-3 py-3">
       <div className="rounded-[8px] border border-line bg-surface-2 px-2.5 py-2">
-        <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-faint">Endpoint</div>
+        <div className="text-caption font-semibold uppercase tracking-[0.12em] text-faint">Endpoint</div>
         <div className="mt-1 flex min-w-0">
           <CopyChip value={endpoint} display={endpoint.replace(/^https?:\/\//, "")} />
         </div>
-        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
+        <div className="mt-2 flex items-center gap-1.5 text-caption text-muted">
           <RunningDot running={running} />
           <span className="truncate">
             {running ? `Running · up ${uptime(uptimeSecs)}` : "unreachable"}
           </span>
         </div>
-        <div className="mt-0.5 truncate text-[11px] text-faint">
+        <div className="mt-0.5 truncate text-caption text-faint">
           v{version ?? "—"} · {note?.trim() || "MIT"}
         </div>
       </div>
@@ -437,7 +437,7 @@ function NavItemLink({
       aria-label={variant === "sidebar" && collapsed ? item.label : undefined}
       className={({ isActive }) =>
         cx(
-          "relative flex items-center text-[13px] transition-colors",
+          "relative flex items-center text-body transition-colors",
           variant === "tab"
             ? "h-11 shrink-0 gap-2 whitespace-nowrap rounded-lg px-3"
             : collapsed
@@ -521,7 +521,7 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Jump to a page or model…"
           aria-label="Search pages and models"
-          className="h-11 w-full border-b border-line bg-transparent px-4 text-[14px] text-fg placeholder:text-faint focus:outline-none"
+          className="h-11 w-full border-b border-line bg-transparent px-4 text-lead text-fg placeholder:text-faint focus:outline-none"
         />
         <div className="max-h-[50vh] overflow-y-auto p-2">
           {results.pages.length > 0 ? (
@@ -530,7 +530,7 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
                 <button
                   key={p.to}
                   onClick={() => go(p.to)}
-                  className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-[13px] text-muted hover:bg-surface-2 hover:text-fg"
+                  className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-body text-muted hover:bg-surface-2 hover:text-fg"
                 >
                   {p.icon}
                   {p.label}
@@ -544,16 +544,16 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
                 <button
                   key={m.ref}
                   onClick={() => go(`/models?q=${encodeURIComponent(m.ref)}`)}
-                  className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-[13px] text-muted hover:bg-surface-2 hover:text-fg"
+                  className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-body text-muted hover:bg-surface-2 hover:text-fg"
                 >
                   <span className="truncate">{m.ref}</span>
-                  <span className="text-[11px] text-faint">{m.provider}</span>
+                  <span className="text-caption text-faint">{m.provider}</span>
                 </button>
               ))}
             </Section>
           ) : null}
           {results.pages.length === 0 && results.modelHits.length === 0 ? (
-            <div className="px-3 py-6 text-center text-[13px] text-faint">no matches</div>
+            <div className="px-3 py-6 text-center text-body text-faint">no matches</div>
           ) : null}
         </div>
       </div>
@@ -564,7 +564,7 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mb-1">
-      <div className="px-2 py-1 text-[10px] uppercase tracking-[0.1em] text-faint">{title}</div>
+      <div className="px-2 py-1 text-caption uppercase tracking-[0.1em] text-faint">{title}</div>
       {children}
     </div>
   );
@@ -616,34 +616,34 @@ function AdminGate({ onUnlock }: { onUnlock: () => void }) {
             height={26}
             className="h-[26px] w-[26px]"
           />
-          <span className="text-[15px] font-semibold">Admin token required</span>
+          <span className="text-lead font-semibold">Admin token required</span>
         </div>
-        <p className="mt-2 text-[13px] text-muted">
-          This gateway was started with <span className="font-mono text-[12px]">RROUTER_ADMIN_TOKEN</span>.
+        <p className="mt-2 text-body text-muted">
+          This gateway was started with <span className="font-mono text-small">RROUTER_ADMIN_TOKEN</span>.
           Paste it to manage providers, keys and models from this browser. It is kept for this
           tab only.
         </p>
         <label className="mt-5 flex flex-col gap-1.5">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">Token</span>
+          <span className="text-caption font-medium uppercase tracking-[0.08em] text-faint">Token</span>
           <input
             type="password"
             value={token}
             onChange={(e) => setToken(e.target.value)}
             autoFocus
             aria-label="admin token"
-            className="h-9 w-full rounded-lg border border-line bg-surface-2 px-2.5 font-mono text-[13px] text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
+            className="h-9 w-full rounded-lg border border-line bg-surface-2 px-2.5 font-mono text-body text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
             placeholder="the value of RROUTER_ADMIN_TOKEN"
           />
         </label>
-        {error ? <p className="mt-3 text-[12.5px] text-neg">{error}</p> : null}
+        {error ? <p className="mt-3 text-small text-neg">{error}</p> : null}
         <div className="mt-5 flex items-center justify-between gap-3">
-          <a href="/health" className="text-[12px] text-faint underline underline-offset-4 hover:text-fg">
+          <a href="/health" className="text-small text-faint underline underline-offset-4 hover:text-fg">
             gateway health
           </a>
           <button
             type="submit"
             disabled={busy || token.trim().length === 0}
-            className="inline-flex h-9 items-center rounded-lg bg-accent px-4 text-[13px] font-semibold text-[var(--color-accent-ink)] disabled:opacity-40"
+            className="inline-flex h-9 items-center rounded-lg bg-accent px-4 text-body font-semibold text-[var(--color-accent-ink)] disabled:opacity-40"
           >
             {busy ? "Checking…" : "Unlock"}
           </button>

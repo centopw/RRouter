@@ -109,7 +109,7 @@ export default function Account() {
         </div>
       ) : null}
       {notice ? (
-        <p className="mb-4 rounded-[8px] border border-[var(--color-pos)]/35 bg-[var(--color-pos-tint)] px-3 py-2 text-[12.5px] text-[var(--color-pos)]">
+        <p className="mb-4 rounded-[8px] border border-[var(--color-pos)]/35 bg-[var(--color-pos-tint)] px-3 py-2 text-small text-[var(--color-pos)]">
           {notice}
         </p>
       ) : null}

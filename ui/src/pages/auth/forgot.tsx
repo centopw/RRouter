@@ -13,6 +13,7 @@ import {
   PasswordField,
 } from "../../components/auth-form";
 import { Button, CopyButton } from "../../components/ui";
+import { Heading } from "../../components/atoms";
 
 /** B3: recovery-code reset, plus the two local escape hatches. */
 export default function Forgot() {
@@ -92,11 +93,11 @@ export default function Forgot() {
           </form>
 
           <div className="mt-6 border-t border-line pt-5">
-            <h2 className="text-[13px] font-semibold">No recovery code?</h2>
-            <p className="mt-2 text-[12.5px] text-muted">
+            <Heading level={2} className="text-body font-semibold">No recovery code?</Heading>
+            <p className="mt-2 text-small text-muted">
               An administrator can reset the password from the terminal:
             </p>
-            <div className="mt-2 flex items-center gap-2 rounded-md border border-line bg-surface-2 px-2.5 py-1.5 font-mono text-[11.5px]">
+            <div className="mt-2 flex items-center gap-2 rounded-md border border-line bg-surface-2 px-2.5 py-1.5 font-mono text-caption">
               <code className="min-w-0 flex-1 truncate">rrouter admin reset-password &lt;email&gt;</code>
               <CopyButton value="rrouter admin reset-password <email>" label="copy" />
             </div>

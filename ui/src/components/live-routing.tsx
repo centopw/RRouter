@@ -89,10 +89,10 @@ export function LiveRoutingCard({
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-6 py-4">
         <div>
           <div className="flex items-center gap-2">
-            <h2 className="text-[15px] font-semibold">Live routing</h2>
+            <h2 className="text-lead font-semibold">Live routing</h2>
             <span
               className={cx(
-                "flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                "flex items-center gap-1.5 rounded-full px-2 py-0.5 text-caption font-medium",
                 active
                   ? "bg-[var(--color-pos-tint)] text-[var(--color-pos)]"
                   : "bg-surface-2 text-faint",
@@ -108,11 +108,11 @@ export function LiveRoutingCard({
               {active ? "routing" : "idle"}
             </span>
           </div>
-          <p className="mt-0.5 text-[12.5px] text-muted">
+          <p className="mt-0.5 text-small text-muted">
             Providers serving traffic in the last 15 minutes. The map refreshes every 5 seconds.
           </p>
         </div>
-        <div className="flex items-center gap-4 text-[12px] text-muted">
+        <div className="flex items-center gap-4 text-small text-muted">
           <span>
             <span className="font-mono text-fg tnum">{requests}</span> requests
           </span>
@@ -126,7 +126,7 @@ export function LiveRoutingCard({
       {loading && events.length === 0 ? (
         <div aria-hidden className="h-[300px] animate-pulse bg-[var(--color-surface-2)]/40" />
       ) : nodes.length === 0 ? (
-        <div className="px-6 py-12 text-center text-[13px] text-faint">
+        <div className="px-6 py-12 text-center text-body text-faint">
           No provider traffic yet. The map fills in as requests arrive.
         </div>
       ) : (
@@ -176,8 +176,8 @@ export function LiveRoutingCard({
                 alt=""
                 className="h-8 w-8 object-contain"
               />
-              <span className="mt-1 text-[13px] font-semibold text-fg">RRouter</span>
-              <span className="text-[11px] text-faint tnum">{requests} in window</span>
+              <span className="mt-1 text-body font-semibold text-fg">RRouter</span>
+              <span className="text-caption text-faint tnum">{requests} in window</span>
             </div>
           </div>
 
@@ -205,10 +205,10 @@ export function LiveRoutingCard({
                     style={{ backgroundColor: tone }}
                   />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-[12.5px] font-medium text-fg">
+                    <div className="truncate text-small font-medium text-fg">
                       {NAMES[node.provider] ?? node.provider}
                     </div>
-                    <div className="truncate text-[10.5px] text-faint tnum">
+                    <div className="truncate text-caption text-faint tnum">
                       {node.requests} req
                       {node.errors > 0 ? ` · ${node.errors} err` : ""}
                       {node.lastTs > 0 ? ` · ${ago(node.lastTs)}` : " · idle"}
@@ -227,7 +227,7 @@ export function LiveRoutingCard({
           })}
         </div>
       )}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-6 py-2.5 text-[11px] text-faint">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-6 py-2.5 text-caption text-faint">
         <span>animated edge = provider served a request in the last 90 seconds</span>
         <span className="ml-auto">5s refresh</span>
       </div>
