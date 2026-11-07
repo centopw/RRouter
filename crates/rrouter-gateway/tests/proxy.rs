@@ -3016,6 +3016,324 @@ async fn usage_api_filters_compose_with_the_cursor() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
 }
 
+// ------------------------------------------------------------- usage CSV export
+
+/// A complete usage row for the export tests: every printed field is explicit so a
+/// test only edits the cells it is about.
+fn export_row(ts: i64) -> UsageRecord {
+    UsageRecord {
+        id: None,
+        ts,
+        request_id: Some(uuid::Uuid::new_v4()),
+        provider: "openai".to_string(),
+        model: "gpt-4.1".to_string(),
+        connection_id: None,
+        endpoint: Some("/v1/chat/completions".to_string()),
+        key_id: None,
+        cost_micros: 0,
+        input_tokens: 7,
+        output_tokens: 3,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        latency_ms: 12,
+        ttft_ms: 4,
+        status: 200,
+        streamed: false,
+        error: None,
+    }
+}
+
+/// Minimal RFC 4180 reader: a quoted cell may hold commas, doubled quotes and newlines,
+/// which is what turns the escaping assertions into a round trip instead of a grep.
+fn parse_csv(text: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut cell = String::new();
+    let mut quoted = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                cell.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => row.push(std::mem::take(&mut cell)),
+            '\n' if !quoted => {
+                row.push(std::mem::take(&mut cell));
+                rows.push(std::mem::take(&mut row));
+            }
+            '\r' if !quoted => {}
+            c => cell.push(c),
+        }
+    }
+    if !cell.is_empty() || !row.is_empty() {
+        row.push(cell);
+        rows.push(row);
+    }
+    rows
+}
+
+/// The cells of one column, header excluded.
+fn csv_column(rows: &[Vec<String>], index: usize) -> Vec<&str> {
+    rows[1..].iter().map(|r| r[index].as_str()).collect()
+}
+
+/// The export is the contract finance reads: exact header, `text/csv` + attachment
+/// filename, RFC 3339 timestamps, micro-USD and a six-decimal dollar column, empty
+/// cells for absent ids, and a model/endpoint that need quoting still lands in the
+/// right column.
+#[tokio::test]
+async fn usage_export_csv_has_the_contract_header_and_escapes_cells() {
+    let h = harness(false);
+    let mut plain = export_row(1_794_009_599); // 2026-11-06T23:59:59Z
+    plain.request_id = None;
+    plain.streamed = true;
+    plain.cost_micros = 130;
+    let request_id = uuid::Uuid::new_v4();
+    let key_id = uuid::Uuid::new_v4();
+    let mut tricky = export_row(1_794_017_491); // 2026-11-07T02:11:31Z
+    tricky.request_id = Some(request_id);
+    tricky.model = "weird,\"model\"\nline2".to_string();
+    tricky.endpoint = Some("/v1/chat/completions?x=1,2".to_string());
+    tricky.key_id = Some(key_id);
+    tricky.cost_micros = 1_234_567;
+    tricky.status = 500;
+    for row in [plain, tricky] {
+        h.state.store.record_usage(&row).await.expect("seed export row");
+    }
+
+    let (status, headers, body) = h.get_raw("/api/usage/export.csv").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("text/csv; charset=utf-8")
+    );
+    let disposition = headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .expect("attachment");
+    let name = disposition
+        .strip_prefix("attachment; filename=\"rrouter-usage-")
+        .and_then(|rest| rest.strip_suffix(".csv\""))
+        .unwrap_or_else(|| panic!("filename shape: {disposition}"));
+    assert_eq!(name.len(), 8, "YYYYMMDD: {disposition}");
+    assert!(name.chars().all(|c| c.is_ascii_digit()), "YYYYMMDD: {disposition}");
+
+    let rows = parse_csv(&body);
+    assert_eq!(
+        rows[0],
+        vec![
+            "ts", "iso_utc", "provider", "model", "request_id", "key_id", "endpoint",
+            "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+            "latency_ms", "ttft_ms", "status", "streamed", "cost_micros", "cost_usd",
+        ],
+        "header is a contract"
+    );
+    assert_eq!(rows.len(), 3, "header + two rows: {body}");
+
+    // Newest first, and the quoted cells survive the round trip in their own column.
+    assert_eq!(
+        rows[1],
+        vec![
+            "1794017491",
+            "2026-11-07T02:11:31Z",
+            "openai",
+            "weird,\"model\"\nline2",
+            &request_id.to_string(),
+            &key_id.to_string(),
+            "/v1/chat/completions?x=1,2",
+            "7",
+            "3",
+            "0",
+            "0",
+            "12",
+            "4",
+            "500",
+            "false",
+            "1234567",
+            "1.234567",
+        ]
+    );
+    assert_eq!(
+        rows[2],
+        vec![
+            "1794009599",
+            "2026-11-06T23:59:59Z",
+            "openai",
+            "gpt-4.1",
+            "",
+            "",
+            "/v1/chat/completions",
+            "7",
+            "3",
+            "0",
+            "0",
+            "12",
+            "4",
+            "200",
+            "true",
+            "130",
+            "0.000130",
+        ],
+        "absent ids are empty cells, streamed is a boolean"
+    );
+}
+
+/// The export selects the same rows the dashboard does: `status=error` is the failure
+/// rule of the list, `hours` bounds the range, provider/key/model filters compose, and a
+/// malformed filter is a `400` JSON error, never a header-only download.
+#[tokio::test]
+async fn usage_export_csv_applies_the_list_filters() {
+    let h = harness(false);
+    let now = rrouter_gateway::now_unix();
+    let key = uuid::Uuid::new_v4();
+    let mut recent_ok = export_row(now - 60);
+    recent_ok.model = "recent-ok".to_string();
+    let mut recent_err = export_row(now - 120);
+    recent_err.model = "recent-err".to_string();
+    recent_err.status = 500;
+    recent_err.key_id = Some(key);
+    let mut old_err = export_row(now - 5 * 3_600);
+    old_err.model = "old-err".to_string();
+    old_err.status = 502;
+    old_err.provider = "anthropic".to_string();
+    for row in [recent_ok, recent_err, old_err] {
+        h.state.store.record_usage(&row).await.expect("seed export row");
+    }
+
+    let models = |body: &str| -> Vec<String> {
+        csv_column(&parse_csv(body), 3).into_iter().map(str::to_string).collect()
+    };
+    let (status, _, all) = h.get_raw("/api/usage/export.csv").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models(&all), vec!["recent-ok", "recent-err", "old-err"]);
+
+    let (status, _, errors) = h.get_raw("/api/usage/export.csv?status=error").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models(&errors), vec!["recent-err", "old-err"]);
+
+    let (status, _, last_hour) = h.get_raw("/api/usage/export.csv?hours=1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models(&last_hour), vec!["recent-ok", "recent-err"], "hours bounds the range");
+
+    let (status, _, bounded) = h.get_raw("/api/usage/export.csv?hours=1&status=error").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models(&bounded), vec!["recent-err"]);
+
+    // Provider, key and model are the list's filters, applied in SQL for the walk too.
+    let (status, _, by_provider) = h.get_raw("/api/usage/export.csv?provider=anthropic").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models(&by_provider), vec!["old-err"]);
+    let (status, _, by_key) = h.get_raw(&format!("/api/usage/export.csv?key_id={key}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models(&by_key), vec!["recent-err"]);
+    let (status, _, by_model) =
+        h.get_raw("/api/usage/export.csv?model=recent-ok&status=2xx").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models(&by_model), vec!["recent-ok"]);
+
+    let (status, headers, body) = h.get_raw("/api/usage/export.csv?status=ok").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "a bad filter is an admin error, not a CSV"
+    );
+    let (status, _, _) = h.get_raw("/api/usage/export.csv?key_id=nope").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The download sits behind the same admin gate as the rest of `/api/usage`: loopback
+/// passes, a remote peer without the token does not, and the token is what admits one.
+#[tokio::test]
+async fn usage_export_csv_is_behind_the_admin_gate() {
+    let h = harness(false);
+    let (status, _, body) = h.get_raw("/api/usage/export.csv").await;
+    assert_eq!(status, StatusCode::OK, "in-process calls count as loopback: {body}");
+    let res = h
+        .router
+        .clone()
+        .oneshot(as_peer(get_with("/api/usage/export.csv", &[]), remote_peer()))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "no token, remote peer");
+
+    let mut cfg = config(false);
+    cfg.admin_token = Some(TEST_ADMIN_TOKEN.into());
+    let gated = harness_with(cfg);
+    let res = gated
+        .router
+        .clone()
+        .oneshot(as_peer(get_with("/api/usage/export.csv", &[]), remote_peer()))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "a token replaces the loopback rule");
+    let res = gated
+        .router
+        .clone()
+        .oneshot(as_peer(
+            get_with("/api/usage/export.csv", &[("x-admin-token", TEST_ADMIN_TOKEN)]),
+            remote_peer(),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    assert!(String::from_utf8_lossy(&bytes).starts_with("ts,iso_utc,provider"));
+}
+
+/// The walk is keyset-paged at 1000 rows: 1005 rows come back complete, newest first,
+/// exactly once, with the page boundary not dropping or repeating the tied rows — and
+/// the body arrives as one frame per page instead of a buffered blob.
+#[tokio::test]
+async fn usage_export_csv_walks_past_the_page_boundary() {
+    let h = harness(false);
+    for i in 0..1005 {
+        let mut row = export_row(1_000 + i);
+        row.model = format!("m{i:04}");
+        h.state.store.record_usage(&row).await.expect("seed export row");
+    }
+
+    let res = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/usage/export.csv")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    // Count the data frames: streaming means the header and each page are written as
+    // they are produced, not one body assembled after the walk finished.
+    let mut body = res.into_body();
+    let mut frames = 0;
+    let mut raw = Vec::new();
+    while let Some(next) = body.frame().await {
+        let frame = next.expect("frame");
+        if let Some(data) = frame.data_ref() {
+            frames += 1;
+            raw.extend_from_slice(data);
+        }
+    }
+    assert_eq!(frames, 3, "header frame + one frame per page");
+    let text = String::from_utf8(raw).expect("utf-8 csv");
+    let rows = parse_csv(&text);
+    assert_eq!(rows.len(), 1006, "header + 1005 rows over two pages");
+
+    let ts: Vec<i64> = csv_column(&rows, 0).iter().map(|t| t.parse().expect("ts")).collect();
+    assert_eq!(ts.len(), 1005);
+    assert_eq!(ts[0], 2004, "newest first");
+    assert_eq!(ts[1004], 1000);
+    assert!(ts.windows(2).all(|w| w[0] > w[1]), "descending across the page boundary");
+    let models: std::collections::HashSet<&str> = csv_column(&rows, 3).into_iter().collect();
+    assert_eq!(models.len(), 1005, "no row repeated");
+}
+
 /// A USD budget is enforced from durable spend, and the refusal names dollars.
 #[tokio::test]
 async fn usd_budget_below_durable_spend_answers_429_naming_dollars() {
