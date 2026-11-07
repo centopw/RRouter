@@ -5,8 +5,9 @@
 //! combo that happens to share the client's model name), then a catalog lookup
 //! over every active connection. Connections of equal priority are ordered by the
 //! configured [`Strategy`]: round-robin (default), a smooth weighted round-robin over
-//! their `weight`, or ascending EWMA latency. Priority always dominates the strategy,
-//! so a group is fully drained before the next one is reached.
+//! their `weight`, ascending EWMA latency, or the model's published price. Priority
+//! always dominates the strategy, so a group is fully drained before the next one is
+//! reached.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,6 +66,9 @@ pub enum Strategy {
     Weighted,
     /// Ascending measured latency; never-tried connections sort after measured ones.
     LeastLatency,
+    /// Ascending `input + output` price per million tokens for the candidate's
+    /// `(provider, model)`; a pair with no published price sorts after every priced one.
+    Cheapest,
 }
 
 impl Strategy {
@@ -75,6 +79,7 @@ impl Strategy {
             "priority" => Some(Self::Priority),
             "weighted" => Some(Self::Weighted),
             "least_latency" => Some(Self::LeastLatency),
+            "cheapest" => Some(Self::Cheapest),
             _ => None,
         }
     }
@@ -84,6 +89,7 @@ impl Strategy {
             Self::Priority => "priority",
             Self::Weighted => "weighted",
             Self::LeastLatency => "least_latency",
+            Self::Cheapest => "cheapest",
         }
     }
 }
@@ -114,8 +120,8 @@ impl Planner {
     /// want.
     ///
     /// `strategy` only orders connections of equal priority; priority itself always
-    /// dominates, so an operator's preference is never overridden by a weight or a
-    /// latency sample.
+    /// dominates, so an operator's preference is never overridden by a weight, a
+    /// latency sample or a price.
     pub async fn plan(
         &self,
         catalog: &Catalog,
@@ -205,7 +211,7 @@ impl Planner {
                 }
                 let group = &mut matching[group_start..group_end];
                 match strategy {
-                    Strategy::Priority => rotate(group, offset),
+                    Strategy::Priority | Strategy::Cheapest => rotate(group, offset),
                     Strategy::Weighted => weighted_order(group, offset),
                     Strategy::LeastLatency => latency_order(group, &latencies),
                 }
@@ -220,6 +226,10 @@ impl Planner {
                     dialect: provider_dialect(provider),
                 });
             }
+        }
+
+        if strategy == Strategy::Cheapest {
+            candidates = cheapest_order(store, candidates).await;
         }
 
         if candidates.is_empty() {
@@ -400,6 +410,127 @@ fn latency_order(group: &mut [&Connection], latencies: &HashMap<Uuid, f64>) {
         .then_with(|| a.created_at.cmp(&b.created_at))
         .then_with(|| a.id.cmp(&b.id))
     });
+}
+
+/// Stable reorder of a whole plan by price: priority first, because an operator's
+/// preference must never be outbid, then `input + output` USD per million tokens for the
+/// candidate's `(provider, model)`.
+///
+/// The price applies to every target in the plan rather than to one provider's accounts
+/// in isolation — a model served by several providers at the same priority is exactly the
+/// case this strategy exists for. Equal prices keep the order the group rotation produced,
+/// so equal-priced accounts still alternate across plans.
+async fn cheapest_order(store: &Store, candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let prices: Vec<Option<f64>> = {
+        // One registry read per distinct pair, per plan: no cache, so a price the
+        // operator just edited decides the next route.
+        let mut seen: HashMap<(&str, &str), Option<f64>> =
+            HashMap::with_capacity(candidates.len());
+        let mut aligned = Vec::with_capacity(candidates.len());
+        for candidate in &candidates {
+            let key = (candidate.provider.as_str(), candidate.model.as_str());
+            let price = match seen.get(&key) {
+                Some(price) => *price,
+                None => {
+                    let price =
+                        target_price(store, candidate.provider.as_str(), candidate.model.as_str())
+                            .await;
+                    seen.insert(key, price);
+                    price
+                }
+            };
+            aligned.push(price);
+        }
+        aligned
+    };
+
+    let mut priced: Vec<(Option<f64>, Candidate)> = prices.into_iter().zip(candidates).collect();
+    priced.sort_by(|(price_a, a), (price_b, b)| {
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| price_order(*price_a, *price_b))
+    });
+    priced.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
+/// Ascending price; `None` (no published price) sorts after every known price.
+fn price_order(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+/// `input + output` USD per million tokens for one `(provider, model)` pair, from the
+/// registry rows the cost accounting prices a request with.
+///
+/// Precedence mirrors the registry merge: the provider's own row wins over the models.dev
+/// vendor row it mirrors, and within one provider `custom` > `upstream` > `synced`. A pair
+/// with no price, or a failed read, is `None`: routing must not invent a rate, and a
+/// broken registry must not fail every plan while another strategy still works.
+async fn target_price(store: &Store, provider: &str, model: &str) -> Option<f64> {
+    let vendor = crate::catalog::models_dev_provider(provider);
+    // Usage rows record the resolved ref (`provider/id`), while the registry keys models
+    // by bare id. Strip only this provider's own prefix, so `meta-llama/...` survives.
+    let bare = model
+        .strip_prefix(provider)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or(model);
+    let rows = match store.model_costs(bare, &[provider, vendor]).await {
+        Ok(rows) if rows.is_empty() && bare != model => {
+            store.model_costs(model, &[provider, vendor]).await.unwrap_or_default()
+        }
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::debug!(error = %e, provider, model, "price lookup failed; treating as unpriced");
+            return None;
+        }
+    };
+    let mut best: Option<((u8, u8), f64)> = None;
+    for row in &rows {
+        let Some(price) = published_price(&row.cost) else {
+            continue;
+        };
+        // The provider's own row first, then the registry's source precedence.
+        let key = (u8::from(row.provider == provider), source_rank(&row.source));
+        let better = match best.as_ref() {
+            Some((best_key, _)) => key > *best_key,
+            None => true,
+        };
+        if better {
+            best = Some((key, price));
+        }
+    }
+    best.map(|(_, price)| price)
+}
+
+/// Per-million-token price a stored `cost` blob publishes, or `None` when it publishes no
+/// rate at all. Same validity rule as the accounting's `rates`: a partial price prices
+/// the missing side at 0 rather than disqualifying the row.
+fn published_price(value: &serde_json::Value) -> Option<f64> {
+    if !value.is_object() {
+        return None;
+    }
+    let rate = |key: &str| value.get(key).and_then(serde_json::Value::as_f64);
+    let (input, output) = (rate("input"), rate("output"));
+    if input.is_none() && output.is_none() && rate("cache_read").is_none()
+        && rate("cache_write").is_none()
+    {
+        return None;
+    }
+    Some(input.unwrap_or(0.0) + output.unwrap_or(0.0))
+}
+
+/// Precedence of a stored source. Higher wins; unknown values rank lowest.
+fn source_rank(source: &str) -> u8 {
+    match source {
+        "custom" => 3,
+        "upstream" => 2,
+        "synced" => 1,
+        _ => 0,
+    }
 }
 
 /// Apply an index permutation to a slice in place.

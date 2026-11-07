@@ -12,7 +12,7 @@ use rrouter_router::breaker::{BreakerState, ProbeTicket};
 use rrouter_router::dispatch::AttemptOutcome;
 use rrouter_router::stream_dispatch::{byte_stream, collect_stream};
 use rrouter_router::{Breaker, Candidate, Catalog, Dispatcher, Plan, Planner, Strategy};
-use rrouter_store::Store;
+use rrouter_store::{ModelRow, Store};
 use uuid::Uuid;
 
 fn resp(model: &str) -> ChatResponse {
@@ -276,6 +276,130 @@ async fn least_latency_orders_by_ewma_and_puts_unknown_connections_last() {
         vec![slow, fast, unknown_heavy, unknown_light],
         "one slow sample must reorder, and only that connection's EWMA moved"
     );
+}
+
+/// Equal-priority order of every candidate for `model` under `strategy`.
+async fn order(store: &Store, model: &str, strategy: Strategy) -> Vec<Uuid> {
+    Planner::new()
+        .plan(&Catalog::builtin(), store, model, false, None, strategy)
+        .await
+        .expect("plan")
+        .candidates
+        .iter()
+        .map(|c| c.connection)
+        .collect()
+}
+
+/// Publish a price for one `(provider, model)` pair the way the registry does: `input`
+/// and `output` USD per million tokens on a `custom` row.
+async fn price(store: &Store, provider: &str, model: &str, input: f64, output: f64) {
+    price_from(store, provider, model, "custom", input, output).await;
+}
+
+/// Same, with an explicit registry source, so precedence between the provider's own row
+/// and the models.dev vendor row can be exercised.
+async fn price_from(
+    store: &Store,
+    provider: &str,
+    model: &str,
+    source: &str,
+    input: f64,
+    output: f64,
+) {
+    store
+        .upsert_model(&ModelRow {
+            provider: provider.into(),
+            model: model.into(),
+            display: None,
+            context: None,
+            max_output: None,
+            caps: serde_json::json!({}),
+            cost: Some(serde_json::json!({ "input": input, "output": output })),
+            source: source.into(),
+            updated_at: 0,
+        })
+        .await
+        .expect("price row");
+}
+
+/// Cheapest picks the provider that publishes the lower `input + output` price, not the
+/// catalog order the other strategies follow.
+#[tokio::test]
+async fn cheapest_puts_the_cheaper_provider_first() {
+    let store = Store::open_in_memory().unwrap();
+    let expensive = conn(&store, "openai", "gpt-4.1", 0).await;
+    let cheap = conn(&store, "github", "gpt-4.1", 0).await;
+    price(&store, "openai", "gpt-4.1", 10.0, 30.0).await;
+    price(&store, "github", "gpt-4.1", 1.0, 2.0).await;
+
+    assert_eq!(
+        order(&store, "gpt-4.1", Strategy::Cheapest).await,
+        vec![cheap, expensive],
+        "40.0 vs 3.0 USD per million tokens"
+    );
+    assert_eq!(
+        order(&store, "gpt-4.1", Strategy::Priority).await,
+        vec![expensive, cheap],
+        "catalog order must stay untouched under the default strategy"
+    );
+}
+
+/// Equal prices are equal preference: the strategy must not invent an order, so the
+/// catalog/priority order survives unchanged.
+#[tokio::test]
+async fn cheapest_keeps_input_order_when_prices_tie() {
+    let store = Store::open_in_memory().unwrap();
+    let first = conn(&store, "openai", "gpt-4.1", 0).await;
+    let second = conn(&store, "github", "gpt-4.1", 0).await;
+    price(&store, "openai", "gpt-4.1", 2.0, 4.0).await;
+    price(&store, "github", "gpt-4.1", 1.0, 5.0).await;
+
+    assert_eq!(
+        order(&store, "gpt-4.1", Strategy::Cheapest).await,
+        vec![first, second],
+        "6.0 == 6.0 must keep the pre-strategy order"
+    );
+}
+
+/// A pair with no published price sorts after every priced pair: routing never guesses a
+/// rate, so an unpriced provider never wins by looking free.
+#[tokio::test]
+async fn cheapest_puts_the_unpriced_provider_last() {
+    let store = Store::open_in_memory().unwrap();
+    let priced = conn(&store, "openai", "gpt-4.1", 0).await;
+    let unpriced = conn(&store, "github", "gpt-4.1", 0).await;
+    price(&store, "openai", "gpt-4.1", 100.0, 100.0).await;
+
+    assert_eq!(order(&store, "gpt-4.1", Strategy::Cheapest).await, vec![priced, unpriced]);
+}
+
+/// Priority dominates the price: a cheap account an operator deliberately demoted is
+/// still tried after the expensive priority-0 one.
+#[tokio::test]
+async fn cheapest_never_overrides_priority() {
+    let store = Store::open_in_memory().unwrap();
+    let expensive = conn(&store, "openai", "gpt-4.1", 0).await;
+    let cheap = conn(&store, "github", "gpt-4.1", 1).await;
+    price(&store, "openai", "gpt-4.1", 100.0, 100.0).await;
+    price(&store, "github", "gpt-4.1", 0.01, 0.01).await;
+
+    assert_eq!(order(&store, "gpt-4.1", Strategy::Cheapest).await, vec![expensive, cheap]);
+}
+
+/// Price precedence follows the cost accounting: the provider's own registry row decides,
+/// and only its absence falls through to the models.dev vendor row it mirrors.
+#[tokio::test]
+async fn cheapest_prefers_the_providers_row_over_the_vendor_row() {
+    let store = Store::open_in_memory().unwrap();
+    let openai = conn(&store, "openai", "gpt-4.1", 0).await;
+    let github = conn(&store, "github", "gpt-4.1", 0).await;
+    price(&store, "openai", "gpt-4.1", 10.0, 0.0).await;
+    // `github` mirrors models.dev's `github-copilot`; that vendor row is far cheaper, but
+    // the provider's own row is what the accounting prices with, so it decides.
+    price_from(&store, "github", "gpt-4.1", "synced", 50.0, 0.0).await;
+    price_from(&store, "github-copilot", "gpt-4.1", "custom", 0.5, 0.0).await;
+
+    assert_eq!(order(&store, "gpt-4.1", Strategy::Cheapest).await, vec![openai, github]);
 }
 
 /// Conversations must stay on one account: KV caches are per upstream account, so

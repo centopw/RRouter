@@ -243,19 +243,7 @@ impl Config {
         // An unknown strategy is refused at startup rather than silently treated as
         // `priority`: the operator asked for different routing and must know it did not
         // take effect.
-        let strategy = match var("RROUTER_STRATEGY") {
-            None => Strategy::Priority,
-            Some(raw) => match Strategy::parse(&raw) {
-                Some(strategy) => strategy,
-                None => {
-                    problems.push(format!(
-                        "RROUTER_STRATEGY={raw:?} is not one of priority, weighted, \
-                         least_latency"
-                    ));
-                    Strategy::Priority
-                }
-            },
-        };
+        let strategy = strategy_setting(var("RROUTER_STRATEGY"), &mut problems);
 
         // An unknown cache backend is refused at startup for the same reason as an
         // unknown strategy: silently staying off would look like the cache is working.
@@ -441,6 +429,21 @@ fn log_format_setting(raw: Option<String>, problems: &mut Vec<String>) -> LogFor
     }
 }
 
+/// Equal-priority ordering. Unset means `priority`; a name the router does not know is a
+/// startup error, because silently routing differently than asked is the worst outcome.
+fn strategy_setting(raw: Option<String>, problems: &mut Vec<String>) -> Strategy {
+    match raw {
+        None => Strategy::Priority,
+        Some(raw) => Strategy::parse(&raw).unwrap_or_else(|| {
+            problems.push(format!(
+                "RROUTER_STRATEGY={raw:?} is not one of priority, weighted, least_latency, \
+                 cheapest"
+            ));
+            Strategy::Priority
+        }),
+    }
+}
+
 /// The per-request access line is on unless the operator explicitly turns it off.
 fn access_log_setting(raw: Option<String>, problems: &mut Vec<String>) -> bool {
     match raw {
@@ -534,8 +537,20 @@ mod tests {
         assert_eq!(Strategy::parse("priority"), Some(Strategy::Priority));
         assert_eq!(Strategy::parse(" Weighted "), Some(Strategy::Weighted));
         assert_eq!(Strategy::parse("least_latency"), Some(Strategy::LeastLatency));
+        assert_eq!(Strategy::parse("CHEAPEST"), Some(Strategy::Cheapest));
         assert_eq!(Strategy::parse("least-latency"), None);
         assert_eq!(Strategy::parse(""), None);
+        // The startup message is the only place an operator learns the accepted names,
+        // so it must list every one of them.
+        let mut problems = Vec::new();
+        assert_eq!(strategy_setting(None, &mut problems), Strategy::Priority);
+        assert_eq!(strategy_setting(Some("cheapest".into()), &mut problems), Strategy::Cheapest);
+        assert!(problems.is_empty(), "valid settings must not report problems");
+        assert_eq!(strategy_setting(Some("round_robin".into()), &mut problems), Strategy::Priority);
+        assert_eq!(problems.len(), 1);
+        for name in ["priority", "weighted", "least_latency", "cheapest"] {
+            assert!(problems[0].contains(name), "{name} missing from {:?}", problems[0]);
+        }
     }
 
     #[test]
