@@ -132,6 +132,16 @@ fn label(value: &str) -> String {
 /// Breaker state needs the live connection list: a connection that no longer exists
 /// must not keep a stale series alive, and one that exists but was never used is
 /// simply closed.
+static RTK_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RTK_SAVED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record one compressed request and its byte saving.
+pub fn rtk(stats: &rrouter_rtk::Stats) {
+    use std::sync::atomic::Ordering;
+    RTK_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    RTK_SAVED_BYTES.fetch_add(stats.saved() as u64, Ordering::Relaxed);
+}
+
 pub async fn scrape(State(state): State<Arc<AppState>>) -> Response {
     let connections = match state.store.list_connections(None).await {
         Ok(rows) => rows,
@@ -200,6 +210,18 @@ pub fn render(version: &str, open_connections: &[(String, bool)]) -> String {
         reg.guardrail_output_blocks
     ));
 
+    out.push_str("# HELP rrouter_rtk_requests_total Requests compressed by the Token Saver.\n");
+    out.push_str("# TYPE rrouter_rtk_requests_total counter\n");
+    out.push_str(&format!(
+        "rrouter_rtk_requests_total {}\n",
+        RTK_REQUESTS.load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    out.push_str("# HELP rrouter_rtk_saved_bytes_total Context bytes removed by the Token Saver.\n");
+    out.push_str("# TYPE rrouter_rtk_saved_bytes_total counter\n");
+    out.push_str(&format!(
+        "rrouter_rtk_saved_bytes_total {}\n",
+        RTK_SAVED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+    ));
     out.push_str("# HELP rrouter_cache_hits_total Non-streaming requests served from the exact-match cache.\n");
     out.push_str("# TYPE rrouter_cache_hits_total counter\n");
     out.push_str(&format!("rrouter_cache_hits_total {}\n", reg.cache_hits));

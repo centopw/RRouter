@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/rrouter-rtk",
     "crates/rrouter-core",
     "crates/rrouter-translate",
     "crates/rrouter-auth",
@@ -17,6 +18,7 @@ license = "MIT"
 repository = "https://github.com/centopw/RRouter"
 
 [workspace.dependencies]
+rrouter-rtk = { path = "crates/rrouter-rtk" }
 rrouter-core = { path = "crates/rrouter-core" }
 rrouter-translate = { path = "crates/rrouter-translate" }
 rrouter-auth = { path = "crates/rrouter-auth" }

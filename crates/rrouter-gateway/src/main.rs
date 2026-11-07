@@ -256,6 +256,10 @@ async fn serve(config: Config) -> Result<(), String> {
         auth: rrouter_gateway::auth::Auth::load(&config.data_dir, users_exist),
     });
 
+    if let Err(e) = rrouter_gateway::settings::prime(&state).await {
+        tracing::warn!(error = %e, "settings could not be primed; Token Saver defaults on");
+    }
+
     // Retention lives on its own task: the first pass waits a few seconds, so startup
     // and the initial bind are never delayed by a large delete.
     state.spawn_retention();

@@ -5020,3 +5020,50 @@ async fn account_quota_api_lists_updates_and_clears() {
     let (status, _, _) = h.delete(&uri).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "delete is idempotent");
 }
+
+// ---------------------------------------------------------------- Token Saver (RTK)
+
+fn grep_tool_body() -> Value {
+    let matches: Vec<String> = (1..=40)
+        .map(|n| format!("src/main.rs:{n}:    let value = compute({n});"))
+        .collect();
+    json!({
+        "model": "gpt-4.1",
+        "messages": [
+            {"role": "user", "content": "search the repo"},
+            {
+                "role": "tool",
+                "tool_call_id": "t1",
+                "content": matches.join("\n")
+            }
+        ]
+    })
+}
+
+#[tokio::test]
+async fn token_saver_compresses_tool_results_and_can_be_bypassed() {
+    let mock = Mock::start(vec![openai_reply("ok"), openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (status, _) = h
+        .post_with("/v1/chat/completions", grep_tool_body(), &[("x-rrouter-rtk", "on")])
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let sent = mock.seen();
+    let tool = sent[0]["messages"][1]["content"].as_str().expect("tool content");
+    assert!(tool.contains("40 matches in 1 files"), "compressed: {}", &tool[..tool.len().min(120)]);
+    assert!(tool.len() < 1600, "the 40-match dump shrank");
+
+    let (status, _) = h
+        .post_with(
+            "/v1/chat/completions",
+            grep_tool_body(),
+            &[("x-rrouter-rtk", "off")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let sent = mock.seen();
+    let tool = sent[1]["messages"][1]["content"].as_str().expect("tool content");
+    assert!(tool.starts_with("src/main.rs:1:"), "bypass kept the raw dump");
+}

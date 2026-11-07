@@ -521,6 +521,29 @@ async fn passthrough_inner(
     }
 }
 
+
+/// Token Saver: compress noisy tool results in a canonical request. Headers may force
+/// it on or off per request (`x-rrouter-rtk: on|off`); otherwise the stored setting wins.
+/// Guardrails run before this, so a blocked phrase cannot hide inside a dropped middle.
+fn rtk_enabled(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-rrouter-rtk")
+        .and_then(|v| v.to_str().ok())
+        .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "off" | "0" | "false"))
+        .unwrap_or_else(crate::settings::rtk)
+}
+
+fn record_rtk(stats: &rrouter_rtk::Stats) {
+    crate::metrics::rtk(stats);
+    tracing::info!(
+        saved = stats.saved(),
+        before = stats.before,
+        percent = stats.percent(),
+        filters = ?stats.filters,
+        "token saver compressed tool output"
+    );
+}
+
 /// Plan for a JSON passthrough: the model is required, this key's mapping and limits
 /// apply, and only providers that serve the endpoint stay in the plan.
 async fn json_plan(
@@ -932,8 +955,8 @@ async fn handle(
     trace.set_key(caller.key_id());
     let started = Instant::now();
 
-    let body: Value = serde_json::from_slice(raw)?;
-    let canonical = rrouter_translate::parse_request(inbound, &body)?;
+    let mut body: Value = serde_json::from_slice(raw)?;
+    let mut canonical = rrouter_translate::parse_request(inbound, &body)?;
     // This key's model mapping is one hop that runs before alias/combo resolution.
     let model = state.mapped_model(caller.key_id(), &canonical.model).await?;
     trace.set_model(&model);
@@ -944,6 +967,14 @@ async fn handle(
     // Governance runs before planning: an inactive/expired key, a model outside the
     // allowlist, or an exhausted quota must not reach a provider.
     state.admit(&caller, &model).await?;
+    // Token Saver runs on the wire body after guardrails: same-dialect forwarding sends
+    // this body unchanged, and the canonical parse is refreshed from the compressed text.
+    if rtk_enabled(headers) {
+        if let Some(stats) = rrouter_rtk::compress_source(&mut body, inbound) {
+            record_rtk(&stats);
+            canonical = rrouter_translate::parse_request(inbound, &body)?;
+        }
+    }
     let key_id = caller.key_id();
     let plan = state
         .planner

@@ -4,6 +4,7 @@
 //! so the table lives here: one row (`key TEXT PRIMARY KEY, value TEXT`). It is only
 //! touched by admin requests — never on the proxy path.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rrouter_core::{Error, Result};
@@ -15,8 +16,24 @@ use crate::state::AppState;
 /// Keys a white-label deployment may set on `brand`.
 pub const BRAND_KEYS: &[&str] = &["brand_name", "brand_color", "logo_url", "footer_text"];
 
+/// Token Saver (RTK) switch, readable on the proxy path without touching the settings
+/// database. Default on: 9Router ships the same feature on, and a request can opt out with
+/// `x-rrouter-rtk: off`.
+static RTK: AtomicBool = AtomicBool::new(true);
+
+pub fn rtk() -> bool {
+    RTK.load(Ordering::Relaxed)
+}
+
 pub fn defaults() -> Value {
-    json!({ "brand_name": "RRouter" })
+    json!({ "brand_name": "RRouter", "rtk": true })
+}
+
+/// Load the stored switch once at startup (and after a settings write).
+pub async fn prime(state: &Arc<AppState>) -> Result<()> {
+    let stored = load(state).await?;
+    RTK.store(stored.get("rtk").and_then(Value::as_bool).unwrap_or(true), Ordering::Relaxed);
+    Ok(())
 }
 
 /// The stored settings merged over the defaults.
@@ -45,6 +62,9 @@ pub async fn merge(state: &Arc<AppState>, patch: Value) -> Result<Value> {
     for (k, v) in patch {
         current.insert(k, v);
     }
+    if let Some(rtk) = current.get("rtk").and_then(Value::as_bool) {
+        RTK.store(rtk, Ordering::Relaxed);
+    }
     let merged = Value::Object(current);
     write_blob(state, &merged).await?;
     Ok(merged)
@@ -59,7 +79,7 @@ pub async fn ui_settings(state: &Arc<AppState>) -> Result<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    Ok(json!({ "brand": brand, "panels": panels }))
+    Ok(json!({ "brand": brand, "panels": panels, "rtk": rtk() }))
 }
 
 /// Only the four documented brand keys, with `RRouter` defaults.

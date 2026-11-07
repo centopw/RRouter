@@ -1343,6 +1343,7 @@ dependencies = [
  "rrouter-auth",
  "rrouter-core",
  "rrouter-router",
+ "rrouter-rtk",
  "rrouter-store",
  "rrouter-translate",
  "rrouter-ui",
@@ -1372,6 +1373,14 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "rrouter-rtk"
+version = "0.2.3"
+dependencies = [
+ "rrouter-core",
+ "serde_json",
 ]
 
 [[package]]

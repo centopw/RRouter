@@ -5,6 +5,10 @@ All notable changes. Dates are local; versions follow semver once tagged.
 ## Unreleased
 
 ### Added
+- Token Saver (RTK): inbound tool results are compressed before routing — grouped greps,
+  capped git status/diff/log, collapsed build logs and repeated lines, head/tail truncation
+  with markers. On by default, toggle in Settings, bypass with `x-rrouter-rtk: off`; savings
+  are logged and exported as `rrouter_rtk_saved_bytes_total`.
 - Production identity tooling: persisted audit trail with an Audit page, self-service
   account page (rename, password change with session rotation, per-device revoke), recovery
   throttling, `/ready`, and `rrouter admin backup <file>` (consistent `VACUUM INTO`). CI runs
