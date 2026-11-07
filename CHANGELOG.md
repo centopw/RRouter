@@ -65,6 +65,9 @@ All notable changes. Dates are local; versions follow semver once tagged.
   model → first token, generation — instead of only inferring them from TTFT.
 
 ### Added
+- The Add-provider → API key screen now carries the two custom endpoints, tinted with the
+  OpenAI and Anthropic brand colours. Every provider row shows its real mark from
+  simple-icons where available, with the provider's favicon as the fallback.
 - OTA updates: **Settings → Software updates** checks GitHub daily, shows release notes and
   the detected deployment, optionally downloads and verifies the release archive, and offers
   a confirmed restart. Binary/systemd installs replace and exec in place; Homebrew runs

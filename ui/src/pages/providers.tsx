@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
+import { ProviderIcon, providerBrand } from "../components/provider-icon";
 import {
   Badge,
   Button,
@@ -156,6 +157,7 @@ export default function Providers() {
       render: (r) => (
         <span className="flex min-w-0 items-center gap-2">
           <Dot tone={r.exhausted ? "neg" : r.is_active ? "pos" : "muted"} />
+          <ProviderIcon provider={r.provider} size={17} />
           <span className="font-medium">{displayOf(r.provider)}</span>
           <span className="truncate text-muted">{r.name ?? <span className="text-faint">unnamed</span>}</span>
           {r.exhausted ? <Badge tone="neg">over quota</Badge> : null}
@@ -187,6 +189,7 @@ export default function Providers() {
       render: (r) => (
         <span className="flex items-center gap-2">
           <Dot tone={!r.is_active ? "muted" : r.backoff_level > 0 ? "warn" : "pos"} />
+          <ProviderIcon provider={r.provider} size={17} />
           <span className="font-medium">{displayOf(r.provider)}</span>
         </span>
       ),
@@ -397,6 +400,7 @@ export default function Providers() {
         onChooseKind={chooseKind}
         onChooseOAuth={startSignIn}
         onChooseKey={startKey}
+        onChooseCustom={startCustom}
         onOpenCodeContinue={() => setStep("key")}
         selectedKeyProvider={keyProvider}
         customProtocol={customProtocol}
@@ -590,6 +594,7 @@ function AddProviderFlow({
   onChooseKind,
   onChooseOAuth,
   onChooseKey,
+  onChooseCustom,
   onOpenCodeContinue,
   selectedKeyProvider,
   customProtocol,
@@ -606,6 +611,7 @@ function AddProviderFlow({
   onChooseKind: (kind: "subscription" | "api_key") => void;
   onChooseOAuth: (provider: OAuthProvider) => void;
   onChooseKey: (provider: string) => void;
+  onChooseCustom: (protocol: "openai" | "anthropic") => void;
   onOpenCodeContinue: () => void;
   selectedKeyProvider: string | null;
   customProtocol: "openai" | "anthropic" | null;
@@ -668,16 +674,54 @@ function AddProviderFlow({
       ) : null}
 
       {step === "provider" && kind === "api_key" ? (
-        <ProviderList
-          empty="No API-key provider is registered."
-          items={keyProviders.map((p) => ({
-            id: p.id,
-            title: p.display,
-            meta: p.listed ? "lists its models" : "add models manually",
-            connected: connected.has(p.id),
-            onClick: () => onChooseKey(p.id),
-          }))}
-        />
+        <div className="flex flex-col gap-4">
+          <div>
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">
+              custom endpoint
+            </p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {([
+                { protocol: "openai", title: "Custom OpenAI", body: "Any OpenAI-compatible chat API" },
+                { protocol: "anthropic", title: "Custom Anthropic", body: "Any Anthropic Messages API" },
+              ] as const).map((item) => {
+                const brand = providerBrand(item.protocol);
+                return (
+                  <button
+                    key={item.protocol}
+                    type="button"
+                    onClick={() => onChooseCustom(item.protocol)}
+                    className="flex items-center gap-3 rounded-[var(--radius-card)] border px-3 py-2.5 text-left transition-colors hover:brightness-[0.98]"
+                    style={{
+                      borderColor: `${brand.color}66`,
+                      backgroundColor: `${brand.color}0f`,
+                    }}
+                  >
+                    <ProviderIcon provider={item.protocol} size={22} />
+                    <span className="min-w-0">
+                      <span className="block truncate text-[13px] font-medium">{item.title}</span>
+                      <span className="block truncate text-[11px] text-muted">{item.body}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div>
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">
+              registered providers
+            </p>
+            <ProviderList
+              empty="No API-key provider is registered."
+              items={keyProviders.map((p) => ({
+                id: p.id,
+                title: p.display,
+                meta: p.listed ? "lists its models" : "add models manually",
+                connected: connected.has(p.id),
+                onClick: () => onChooseKey(p.id),
+              }))}
+            />
+          </div>
+        </div>
       ) : null}
 
       {step === "opencode" ? <OpenCodeGuide onContinue={onOpenCodeContinue} /> : null}
@@ -722,6 +766,7 @@ function ProviderList({
             onClick={item.onClick}
             className="flex w-full items-center gap-3 rounded-lg border border-line bg-[var(--color-surface-2)] px-3 py-2.5 text-left hover:border-line-strong hover:bg-surface-2"
           >
+            <ProviderIcon provider={item.id} size={20} />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[13px]">{item.title}</span>
               <span className="block text-[11px] text-faint">{item.meta}</span>
@@ -866,7 +911,8 @@ function ApiKeyForm({
         }
       >
         {fixedProvider ? (
-          <div className="flex h-9 items-center rounded-lg border border-line bg-surface-2 px-3 text-[13px] text-muted">
+          <div className="flex h-9 items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 text-[13px] text-muted">
+            <ProviderIcon provider={fixedProvider} size={16} />
             {fixedDisplay ?? fixedProvider}
           </div>
         ) : (
