@@ -69,7 +69,7 @@ export function ModelPicker({
             checked={selected.length === 0}
             disabled={disabled}
             onChange={() => onChange([])}
-            className="h-3.5 w-3.5 rounded border border-line-strong bg-[var(--color-surface-2)] accent-[var(--color-accent)]"
+            className="h-4 w-4 shrink-0 accent-[var(--color-accent)]"
           />
           Any model
           <span className="text-[11px] text-faint">no restriction</span>
@@ -164,7 +164,7 @@ function Row({
         checked={checked}
         disabled={disabled}
         onChange={onToggle}
-        className="h-3.5 w-3.5 shrink-0 rounded border border-line-strong bg-[var(--color-surface-2)] accent-[var(--color-accent)]"
+        className="h-4 w-4 shrink-0 accent-[var(--color-accent)]"
       />
       <span className={cx("truncate", dim ? "text-faint" : "text-muted")}>{label}</span>
       {deprecated ? (

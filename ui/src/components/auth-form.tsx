@@ -24,7 +24,7 @@ export function AuthShell({
           alt=""
           width={26}
           height={26}
-          className="h-[26px] w-[26px] shrink-0 select-none"
+          className="h-[28px] w-auto shrink-0 select-none object-contain"
         />
         <span className="text-[14px] font-semibold tracking-[-0.01em]">RRouter</span>
       </header>

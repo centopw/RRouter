@@ -162,7 +162,7 @@ export function Shell() {
             alt=""
             width={30}
             height={30}
-            className="h-[30px] w-[30px] shrink-0 select-none object-contain"
+            className="h-[30px] w-auto max-w-[52px] shrink-0 select-none object-contain"
           />
           {!collapsed ? (
             <span className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-[-0.01em] text-fg">
