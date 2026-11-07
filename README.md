@@ -108,6 +108,7 @@ Usage reads are windowed and aggregated in SQL, so the dashboard never pages thr
 | `GET /api/usage/series?hours=&bucket=5m\|hour\|day` | one row per time bucket (requests, errors, tokens, cache, avg latency) |
 | `GET /api/usage/series?by=model` | the same buckets split per model, for the stacked traffic chart |
 | `GET /api/usage/summary?hours=` | per-model totals for the window; omit `hours` for all time |
+| `GET /api/usage/export.csv?…` | the same filters as the log, streamed as a CSV download |
 
 ## Routing
 
