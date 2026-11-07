@@ -69,6 +69,42 @@ const SetupAdmin = page(() => import("./pages/auth/setup-admin"));
 const Forgot = page(() => import("./pages/auth/forgot"));
 const Invite = page(() => import("./pages/auth/invite"));
 
+/**
+ * A tab left open across a deploy keeps the old bundle in memory; no HTTP header can
+ * replace JavaScript that is already running. Compare the loaded entry chunk with the one
+ * the server currently serves, and reload once when they differ. Dev mode has no hashed
+ * entry, so the check is a no-op there.
+ */
+function watchForNewBuild() {
+  const loaded = document.querySelector('script[type="module"][src]')?.getAttribute("src") ?? "";
+  const loadedChunk = /assets\/index-[^/]+\.js/.exec(loaded)?.[0];
+  if (!loadedChunk) return;
+  const CHECK_KEY = "rrouter:build-check";
+  const RELOADED_KEY = "rrouter:build-reloaded-at";
+  let last = 0;
+  const check = async () => {
+    const now = Date.now();
+    if (now - last < 60_000) return;
+    last = now;
+    try {
+      const response = await fetch(`${import.meta.env.BASE_URL}index.html`, { cache: "no-store" });
+      if (!response.ok) return;
+      const served = /assets\/index-[^/]+\.js/.exec(await response.text())?.[0];
+      if (!served || served === loadedChunk) return;
+      const reloadedAt = Number(sessionStorage.getItem(RELOADED_KEY) ?? "0");
+      if (Date.now() - reloadedAt < 10 * 60_000) return;
+      sessionStorage.setItem(RELOADED_KEY, String(Date.now()));
+      window.location.reload();
+    } catch {
+      // Offline or a transient failure: try again on the next focus/tick.
+    }
+  };
+  window.addEventListener("focus", () => void check());
+  window.setInterval(() => void check(), 5 * 60_000);
+  void check();
+  sessionStorage.setItem(CHECK_KEY, String(Date.now()));
+}
+
 const router = createBrowserRouter(
   [
     // Signed-out surfaces. They own their chrome: no sidebar.
@@ -205,6 +241,8 @@ class FatalBoundary extends Component<{ children: ReactNode }, { error: Error | 
     );
   }
 }
+
+watchForNewBuild();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

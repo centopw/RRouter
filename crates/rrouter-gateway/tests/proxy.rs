@@ -782,7 +782,7 @@ async fn streaming_flushes_before_upstream_finishes() {
     let res = h.router.clone().oneshot(req).await.expect("oneshot");
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()["content-type"], "text/event-stream");
-    assert_eq!(res.headers()["cache-control"], "no-cache");
+    assert_eq!(res.headers()["cache-control"], "no-store");
     assert_eq!(res.headers()["x-accel-buffering"], "no");
 
     let mut stream = res.into_body().into_data_stream();

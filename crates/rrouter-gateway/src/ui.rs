@@ -71,7 +71,7 @@ pub async fn index() -> Response {
     if rrouter_ui::is_built() {
         return axum::response::Redirect::temporary("/app/").into_response();
     }
-    asset_response("text/html; charset=utf-8", INDEX_HTML, "no-cache")
+    asset_response("text/html; charset=utf-8", INDEX_HTML, "no-store")
 }
 
 /// `/app` and `/app/` — the dashboard entry point.
@@ -98,7 +98,9 @@ fn embedded(asset: &'static rrouter_ui::Asset) -> Response {
     let cache = if asset.hashed {
         "public, max-age=31536000, immutable"
     } else {
-        "no-cache"
+        // A document must never be reused across a deploy: its hashed asset references
+        // change, and a cached copy points at chunks the new binary no longer serves.
+        "no-store"
     };
     (
         [

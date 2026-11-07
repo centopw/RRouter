@@ -668,7 +668,6 @@ export function CopyChip({
     <button
       type="button"
       onClick={copy}
-      title={`copy ${value}`}
       aria-label={`copy ${value}`}
       className={cx(
         "group inline-flex h-7 min-w-0 items-center gap-1.5 rounded-full border px-2 font-mono text-[11px]",
