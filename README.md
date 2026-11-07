@@ -289,6 +289,9 @@ The operational guide — exposure, TLS proxy, backups, upgrades, failure modes 
 | `RROUTER_ADMIN_TOKEN` | unset | Require this token (`Authorization: Bearer` or `x-admin-token`) on every `/api/*` and `/metrics` request; loopback stops being a shortcut |
 | `RROUTER_MAX_CONCURRENCY` | `0` | Cap concurrent `/v1` requests; over the cap answers `503 overloaded` instead of queueing |
 | `RROUTER_MAX_ATTEMPTS` | `4` | Upstream sends per request before giving up (1–8) |
+| `RROUTER_RETRY_ATTEMPTS` | `1` | Extra tries of the same candidate on a retryable error (0–5) |
+| `RROUTER_RETRY_BASE_MS` | `200` | First backoff; doubles per retry, ±20% jitter |
+| `RROUTER_RETRY_MAX_MS` | `5000` | Backoff ceiling, also caps an upstream `Retry-After` |
 | `RROUTER_SHUTDOWN_GRACE_SECS` | `20` | How long a graceful shutdown waits for live streams |
 | `RROUTER_CORS_ORIGINS` | unset | Comma-separated allowlist; `*` is rejected |
 | `RROUTER_USAGE_RETENTION_DAYS` | `0` | Delete usage/attempts older than N days (0 keeps everything); expired cache rows are swept daily regardless |
