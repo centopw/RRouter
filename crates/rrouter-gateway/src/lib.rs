@@ -22,6 +22,7 @@ pub mod settings;
 pub mod state;
 pub mod syslog;
 pub mod ui;
+pub mod updates;
 
 use std::sync::Arc;
 
@@ -69,6 +70,7 @@ pub fn auth_header(headers: &HeaderMap) -> Option<String> {
 /// Build the full application router.
 pub fn app(state: Arc<AppState>) -> Router {
     spawn_model_sync(&state);
+    updates::spawn_daily(&state);
     let api = Router::new()
         .route(
             "/connections",
@@ -159,6 +161,11 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/settings",
             get(routes::settings::get_settings).put(routes::settings::put_settings),
         )
+        .route("/update", get(routes::updates::status))
+        .route("/update/check", post(routes::updates::check))
+        .route("/update/download", post(routes::updates::download))
+        .route("/update/apply", post(routes::updates::apply))
+        .route("/update/settings", put(routes::updates::settings))
         .route("/oauth/providers", get(routes::oauth::providers))
         .route("/oauth/{provider}/start", post(routes::oauth::start))
         .route("/oauth/{provider}/status/{id}", get(routes::oauth::status))

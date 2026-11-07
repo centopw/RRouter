@@ -65,6 +65,11 @@ All notable changes. Dates are local; versions follow semver once tagged.
   model → first token, generation — instead of only inferring them from TTFT.
 
 ### Added
+- OTA updates: **Settings → Software updates** checks GitHub daily, shows release notes and
+  the detected deployment, optionally downloads and verifies the release archive, and offers
+  a confirmed restart. Binary/systemd installs replace and exec in place; Homebrew runs
+  `brew upgrade`. Docker, Kubernetes and Helm report their supervisor's exact upgrade
+  command because a container or pod cannot replace its own image or release.
 - OpenCode is a native provider (`https://opencode.ai/inference/openai/v1`), with its shared
   model catalogue and an add-provider guide for the Free, pay-as-you-go, Go/Go Plus/Go Teams
   plans, including direct API-key links.

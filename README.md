@@ -397,6 +397,29 @@ OpenAI-speaking provider, tool calls and tool results crossing dialects, `strict
 provider-native tools surviving translation, credential material absent from the database
 file, and the admin API never returning tokens.
 
+## Updates
+
+Settings → **Software updates** checks the latest GitHub release, shows the release notes,
+and can download the release archive. Checking is enabled daily by default; automatic
+downloading is opt-in. Archives are verified against the published SHA-256 and staged under
+`<data_dir>/updates/<version>/`.
+
+The detected deployment decides how the upgrade is applied:
+
+| Deployment | Detection | Upgrade |
+| --- | --- | --- |
+| Binary / systemd | default, `INVOCATION_ID` | staged binary replaces the executable and restarts in place |
+| Homebrew | executable under `/Cellar/` | `brew upgrade rrouter` |
+| Docker | `/.dockerenv` or `container` | pull and recreate the container on the host |
+| Kubernetes | `KUBERNETES_SERVICE_HOST` | update the image and roll out the deployment |
+| Helm | Kubernetes + `RROUTER_HELM_RELEASE` | `helm upgrade <release> <chart> --reuse-values --set image.tag=<version>` |
+
+Containers and pods cannot replace their own image or Helm release, so those deployments get
+the exact supervisor command instead of a button that cannot work. Set
+`RROUTER_DEPLOYMENT=docker|helm|kubernetes|brew|systemd|binary` when detection cannot infer
+the deployment, and `RROUTER_UPDATE_COMMAND` to run a deployment-specific upgrade command
+instead. A staged binary is never applied automatically; an operator chooses the restart.
+
 ## Releasing
 
 ```sh

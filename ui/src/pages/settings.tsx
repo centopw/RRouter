@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { api, type FetchResult, type SyncResult } from "../lib/api";
 import { qk, useConnections, useSystem } from "../lib/queries";
 import { Button, Card, CardHeader, ErrorNote, Field, Input, PageHeader, Select, cx } from "../components/ui";
+import { UpdateCard } from "../components/update-card";
 import { uptime } from "../lib/format";
 
 /** White-label brand fields stored through `/api/settings` (flat object). */
@@ -298,6 +299,8 @@ export default function Settings() {
           </button>
         </div>
       </Card>
+
+      <UpdateCard />
 
       <Card className="mt-5">
         <CardHeader title="Runtime" action={<span className="text-[11.5px] text-faint">read-only</span>} />

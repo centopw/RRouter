@@ -13,6 +13,7 @@ pub mod settings;
 pub mod system;
 pub mod system_logs;
 pub mod templates;
+pub mod updates;
 pub mod usage;
 pub mod users;
 
