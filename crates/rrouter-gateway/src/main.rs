@@ -126,6 +126,19 @@ fn admin(args: &[String]) -> ExitCode {
                 None => ExitCode::FAILURE,
             }
         }
+        [command, path] if command == "backup" => {
+            let path = std::path::PathBuf::from(path);
+            match runtime.block_on(store.backup_to(&path)) {
+                Ok(()) => {
+                    println!("Backup written to {}", path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("rrouter: backup failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         [command, email] if command == "reset-password" => {
             let user = match runtime.block_on(store.user_by_email(email)) {
                 Ok(Some(user)) => user,
@@ -156,7 +169,7 @@ fn admin(args: &[String]) -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: rrouter admin show-setup-code | admin reset-password <email>"
+                "usage: rrouter admin show-setup-code | admin reset-password <email> | admin backup <file>"
             );
             ExitCode::FAILURE
         }

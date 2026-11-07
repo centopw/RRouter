@@ -1,13 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="RRouter">
   <defs>
-    <linearGradient id="rr" x1="8" y1="40" x2="42" y2="8" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1d4ed8"/>
-      <stop offset="0.5" stop-color="#7c3aed"/>
-      <stop offset="1" stop-color="#06b6d4"/>
+    <linearGradient id="rr" x1="6" y1="42" x2="42" y2="6" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#06b6d4"/>
+      <stop offset="0.5" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
     </linearGradient>
   </defs>
-  <text x="5" y="37" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="34" font-weight="800" fill="#1b1d22">R</text>
-  <rect x="33" y="12" width="12" height="4" rx="2" fill="url(#rr)"/>
-  <rect x="33" y="21" width="9" height="4" rx="2" fill="url(#rr)" opacity="0.8"/>
-  <rect x="33" y="30" width="6" height="4" rx="2" fill="url(#rr)" opacity="0.6"/>
+  <g fill="none" stroke="url(#rr)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M19 41V9h11a9 9 0 010 18h-6l12 14" stroke-width="5.5"/>
+    <path d="M4 14h8M3 22h10M7 30h6" stroke-width="3"/>
+  </g>
 </svg>

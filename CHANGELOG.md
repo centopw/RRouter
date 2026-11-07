@@ -5,6 +5,10 @@ All notable changes. Dates are local; versions follow semver once tagged.
 ## Unreleased
 
 ### Added
+- Production identity tooling: persisted audit trail with an Audit page, self-service
+  account page (rename, password change with session rotation, per-device revoke), recovery
+  throttling, `/ready`, and `rrouter admin backup <file>` (consistent `VACUUM INTO`). CI runs
+  clippy, tests and the dashboard build.
 - Model lists are newest-first (version- and date-aware) and retired families (Claude 3.x,
   GPT-4 turbo, gpt-5-codex) sort last, carry a `deprecated` badge, and are never chosen by a
   connectivity probe. Probes prefer the cheapest current model, using the provider's own list

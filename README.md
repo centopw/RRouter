@@ -230,6 +230,18 @@ Cache reads and writes are recorded per request, and **Activity** shows the hit 
 (`cache_read / (input + cache_read + cache_write)`), so a regression is visible instead of
 inferred from the bill.
 
+## Operations
+
+```sh
+rrouter admin show-setup-code            # while no user exists
+rrouter admin reset-password <email>     # prints a new password; ends that user's sessions
+rrouter admin backup ./rrouter-backup.db # consistent online SQLite backup (VACUUM INTO)
+```
+
+`GET /health` answers liveness; `GET /ready` additionally reads the store, so an
+orchestrator can distinguish a running process from a usable one. Security events land in
+the **Audit** page and are pruned with the usage retention window.
+
 ## Security
 
 - Credentials encrypted with AES-256-GCM, unique nonce per write; the key lives in

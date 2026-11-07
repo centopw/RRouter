@@ -2451,6 +2451,24 @@ impl Store {
     /// `PRAGMA optimize` is cheap when it has nothing to do — it checks whether the
     /// schema or workload changed since the last run — and is the documented way to
     /// keep plans sane after the large deletes a retention sweep performs.
+    /// Consistent online backup to a new file (`VACUUM INTO`). The target must not
+    /// exist, so a mistaken path cannot overwrite another database.
+    pub async fn backup_to(&self, path: &std::path::Path) -> Result<()> {
+        if path.exists() {
+            return Err(Error::BadRequest(format!(
+                "{} already exists; choose a new path",
+                path.display()
+            )));
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        self.conn()
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])
+            .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
     pub async fn optimize(&self) -> Result<()> {
         let conn = self.conn();
         conn.execute_batch("PRAGMA optimize")
