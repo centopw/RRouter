@@ -8,6 +8,11 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - Guardrails per key: prompt-size cap, case-insensitive blocked phrases, and response scanning
   (streams are cut with one error frame). Blocks return 403 and are counted per stage.
 - `RROUTER_STRATEGY=cheapest` orders equal-priority accounts by the model's catalog price.
+- Retries before failover: `RROUTER_RETRY_ATTEMPTS`, `RROUTER_RETRY_BASE_MS`,
+  `RROUTER_RETRY_MAX_MS` drive exponential backoff with jitter, capped by `Retry-After`, the
+  headers deadline and the send budget. Streaming attempts retry only before the first byte.
+- Prompt templates with version history (`/api/templates`), and a Templates page plus Playground
+  insert / save-as-template.
 
 ### Changed
 - The request detail opens as a dialog when a row is clicked (Activity and Logs) instead of
