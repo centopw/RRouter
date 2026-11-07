@@ -128,7 +128,7 @@ export default function Setup() {
     <div className="min-h-full bg-bg text-fg">
       <header className="flex h-16 shrink-0 items-center gap-3 border-b border-white/10 bg-[var(--color-sidebar)] px-4 min-[820px]:px-7">
         <img
-          src={`${import.meta.env.BASE_URL}logo-mark.png`}
+          src={`${import.meta.env.BASE_URL}logo-mark-light.svg`}
           alt=""
           width={26}
           height={26}

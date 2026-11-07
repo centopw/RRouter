@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="RRouter">
+  <defs>
+    <linearGradient id="rr" x1="8" y1="40" x2="42" y2="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d4ed8"/>
+      <stop offset="0.5" stop-color="#7c3aed"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+  <text x="5" y="37" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="34" font-weight="800" fill="#1b1d22">R</text>
+  <rect x="33" y="12" width="12" height="4" rx="2" fill="url(#rr)"/>
+  <rect x="33" y="21" width="9" height="4" rx="2" fill="url(#rr)" opacity="0.8"/>
+  <rect x="33" y="30" width="6" height="4" rx="2" fill="url(#rr)" opacity="0.6"/>
+</svg>

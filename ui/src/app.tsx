@@ -154,7 +154,7 @@ export function Shell() {
       >
         <div className={cx("flex items-center gap-2 pt-3", collapsed ? "justify-center px-2" : "px-3")}>
           <img
-            src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark-light.png`}
+            src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark-light.svg`}
             alt=""
             width={30}
             height={30}
@@ -226,7 +226,7 @@ export function Shell() {
       <header className="shrink-0 border-b border-line bg-surface min-[820px]:hidden">
         <div className="flex h-14 items-center gap-3 px-3">
           <img
-            src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark-light.png`}
+            src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark-light.svg`}
             alt=""
             width={24}
             height={24}
@@ -582,7 +582,7 @@ function AdminGate({ onUnlock }: { onUnlock: () => void }) {
       >
         <div className="flex items-center gap-2.5">
           <img
-            src={`${import.meta.env.BASE_URL}logo-mark-light.png`}
+            src={`${import.meta.env.BASE_URL}logo-mark-light.svg`}
             alt=""
             width={26}
             height={26}
