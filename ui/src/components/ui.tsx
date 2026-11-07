@@ -14,6 +14,7 @@ export { CopyButton } from "./atoms/CopyButton";
 export { Card } from "./molecules/Card";
 export { PageHeader } from "./molecules/PageHeader";
 export { Tabs } from "./molecules/Tabs";
+export { Disclosure } from "./molecules/Disclosure";
 export { Field } from "./molecules/Field";
 export { CardFooter } from "./molecules/CardFooter";
 export { EmptyState } from "./molecules/EmptyState";

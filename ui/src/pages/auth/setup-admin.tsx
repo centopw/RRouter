@@ -1,3 +1,4 @@
+import { Checkbox } from "../../components/atoms";
 import { useState, type FormEvent } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -78,15 +79,9 @@ export default function SetupAdmin() {
           <div className="mt-5 rounded-[10px] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-small text-[var(--color-warn-ink)]">
             These are shown only once.
           </div>
-          <label className="mt-4 flex items-start gap-2 text-body">
-            <input
-              type="checkbox"
-              checked={stored}
-              onChange={(event) => setStored(event.target.checked)}
-              className="mt-0.5 h-4 w-4 accent-[var(--color-accent-text)]"
-            />
-            I have stored these somewhere safe
-          </label>
+          <div className="mt-4">
+            <Checkbox checked={stored} onChange={setStored} label="I have stored these somewhere safe" />
+          </div>
           <AuthActions>
             <AuthPrimary type="button" disabled={!stored} onClick={() => navigate("/setup", { replace: true })}>
               Continue to setup

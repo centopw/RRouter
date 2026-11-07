@@ -1,4 +1,5 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import {
   Pulse,
   ArrowsLeftRight,
@@ -485,14 +486,6 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
     if (open) setQuery("");
   }, [open]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    if (open) document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
     const pages = NAV.filter((n) => !q || n.label.toLowerCase().includes(q)).slice(0, 6);
@@ -502,62 +495,64 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
     return { pages, modelHits };
   }, [query, models.data]);
 
-  if (!open) return null;
-
   const go = (path: string) => {
     navigate(path);
     onClose();
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 p-4 pt-[14vh]" onClick={onClose}>
-      <div
-        className="mx-auto w-full max-w-xl overflow-hidden rounded-[var(--radius-card)] border border-line-strong bg-surface shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <input
-          autoFocus
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Jump to a page or model…"
-          aria-label="Search pages and models"
-          className="h-11 w-full border-b border-line bg-transparent px-4 text-lead text-fg placeholder:text-faint focus:outline-none"
-        />
-        <div className="max-h-[50vh] overflow-y-auto p-2">
-          {results.pages.length > 0 ? (
-            <Section title="Pages">
-              {results.pages.map((p) => (
-                <button
-                  key={p.to}
-                  onClick={() => go(p.to)}
-                  className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-body text-muted hover:bg-surface-2 hover:text-fg"
-                >
-                  {p.icon}
-                  {p.label}
-                </button>
-              ))}
-            </Section>
-          ) : null}
-          {results.modelHits.length > 0 ? (
-            <Section title="Models">
-              {results.modelHits.map((m) => (
-                <button
-                  key={m.ref}
-                  onClick={() => go(`/models?q=${encodeURIComponent(m.ref)}`)}
-                  className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-body text-muted hover:bg-surface-2 hover:text-fg"
-                >
-                  <span className="truncate">{m.ref}</span>
-                  <span className="text-caption text-faint">{m.provider}</span>
-                </button>
-              ))}
-            </Section>
-          ) : null}
-          {results.pages.length === 0 && results.modelHits.length === 0 ? (
-            <div className="px-3 py-6 text-center text-body text-faint">no matches</div>
-          ) : null}
-        </div>
-      </div>
-    </div>
+    <Dialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/70" />
+        <Dialog.Content className="fixed left-1/2 top-[14vh] z-50 w-full max-w-xl -translate-x-1/2 overflow-hidden rounded-[var(--radius-card)] border border-line-strong bg-surface shadow-2xl focus:outline-none">
+          <Dialog.Title className="sr-only">Jump to a page or model</Dialog.Title>
+          <Dialog.Description className="sr-only">
+            Search dashboard pages and models.
+          </Dialog.Description>
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Jump to a page or model…"
+            aria-label="Search pages and models"
+            className="h-11 w-full border-b border-line bg-transparent px-4 text-lead text-fg placeholder:text-faint focus:outline-none"
+          />
+          <div className="max-h-[50vh] overflow-y-auto p-2">
+            {results.pages.length > 0 ? (
+              <Section title="Pages">
+                {results.pages.map((p) => (
+                  <button
+                    key={p.to}
+                    onClick={() => go(p.to)}
+                    className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-body text-muted hover:bg-surface-2 hover:text-fg"
+                  >
+                    {p.icon}
+                    {p.label}
+                  </button>
+                ))}
+              </Section>
+            ) : null}
+            {results.modelHits.length > 0 ? (
+              <Section title="Models">
+                {results.modelHits.map((m) => (
+                  <button
+                    key={m.ref}
+                    onClick={() => go(`/models?q=${encodeURIComponent(m.ref)}`)}
+                    className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-body text-muted hover:bg-surface-2 hover:text-fg"
+                  >
+                    <span className="truncate">{m.ref}</span>
+                    <span className="text-caption text-faint">{m.provider}</span>
+                  </button>
+                ))}
+              </Section>
+            ) : null}
+            {results.pages.length === 0 && results.modelHits.length === 0 ? (
+              <div className="px-3 py-6 text-center text-body text-faint">no matches</div>
+            ) : null}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 

@@ -7,5 +7,6 @@ export { Divider } from "./Divider";
 export { SectionLabel } from "./SectionLabel";
 export { IconButton } from "./IconButton";
 export { Toggle } from "./Toggle";
+export { Checkbox } from "./Checkbox";
 export type { TextVariant, Tone } from "./typography";
 export type { Gap } from "./layout";

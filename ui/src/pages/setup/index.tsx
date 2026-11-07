@@ -32,6 +32,7 @@ import { compact, ms, splitRef } from "../../lib/format";
 import { ApiKeyStep, DeviceStep, PkceFailedStep, PkceStep } from "./signin";
 import { SNIPPET_LANGS, snippetFor, type SnippetLang } from "./snippets";
 import { Heading } from "../../components/atoms";
+import { Disclosure } from "../../components/ui";
 
 /** First-run wizard: connect an account, mint a client key, watch the first request. */
 
@@ -410,16 +411,13 @@ function ChooseStep({
         />
       </div>
 
-      <details className="mt-6 rounded-[var(--radius-card)] border border-line bg-surface">
-        <summary className="cursor-pointer px-5 py-3.5 text-body font-medium">
-          Which one should I pick?
-        </summary>
-        <p className="border-t border-rule px-5 py-4 text-body text-muted">
+      <Disclosure title="Which one should I pick?" className="mt-6" contentClassName="px-5 py-4">
+        <p className="text-body text-muted">
           A subscription uses the plan you already pay for and needs no key, which makes it the
           fastest start. An API key is billed per token and suits servers and shared setups. Both
           work the same once connected.
         </p>
-      </details>
+      </Disclosure>
 
       <button
         type="button"

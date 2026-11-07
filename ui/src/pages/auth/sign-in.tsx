@@ -15,6 +15,7 @@ import {
   PasswordField,
 } from "../../components/auth-form";
 import { Button } from "../../components/ui";
+import { Checkbox } from "../../components/atoms";
 
 /** Only same-origin paths are honoured as a `next` target. */
 export function safeNext(raw: string | null): string {
@@ -90,15 +91,9 @@ export default function SignIn() {
             rules={false}
             aside={<AuthFooterLink to="/forgot">Forgot password?</AuthFooterLink>}
           />
-          <label className="mt-1 flex items-center gap-2 text-body">
-            <input
-              type="checkbox"
-              checked={remember}
-              onChange={(event) => setRemember(event.target.checked)}
-              className="h-4 w-4 accent-[var(--color-accent-text)]"
-            />
-            Keep me signed in on this device
-          </label>
+          <div className="mt-1">
+            <Checkbox checked={remember} onChange={setRemember} label="Keep me signed in on this device" />
+          </div>
           {failure ? <AuthNotice>{failure}</AuthNotice> : null}
           <AuthActions
             secondary={

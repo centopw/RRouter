@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import type { Model } from "../lib/api";
 import { useModelProviders, useModels } from "../lib/queries";
 import { Badge, cx } from "./ui";
+import { Checkbox } from "./atoms";
 import { compareModels } from "../lib/models";
 
 /**
@@ -63,17 +64,15 @@ export function ModelPicker({
       />
 
       <div className="overflow-hidden rounded-lg border border-line bg-surface-2">
-        <label className="flex items-center gap-2 border-b border-line px-2.5 py-1.5 text-small text-fg">
-          <input
-            type="checkbox"
+        <div className="flex items-center gap-2 border-b border-line px-2.5 py-1.5 text-small text-fg">
+          <Checkbox
             checked={selected.length === 0}
             disabled={disabled}
             onChange={() => onChange([])}
-            className="h-4 w-4 shrink-0 accent-[var(--color-accent)]"
+            label="Any model"
           />
-          Any model
           <span className="text-caption text-faint">no restriction</span>
-        </label>
+        </div>
 
         <div className="max-h-[220px] overflow-auto py-1">
           {models.isLoading ? (
@@ -159,13 +158,7 @@ function Row({
       className="flex min-w-0 items-center gap-2 px-2.5 py-1 text-small hover:bg-[var(--color-row-hover)]"
       title={ref_}
     >
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={onToggle}
-        className="h-4 w-4 shrink-0 accent-[var(--color-accent)]"
-      />
+      <Checkbox checked={checked} disabled={disabled} onChange={onToggle} />
       <span className={cx("truncate", dim ? "text-faint" : "text-muted")}>{label}</span>
       {deprecated ? (
         <Badge tone="warn" title="this family is retired by its provider">

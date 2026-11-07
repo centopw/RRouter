@@ -18,6 +18,7 @@ import {
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { ModelPicker } from "../components/model-picker";
+import { Checkbox } from "../components/atoms";
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
 import { qk, useKeyModels, useKeys, useModels, useSystem, useUpdateKey, useUpdateKeyModels } from "../lib/queries";
 import {
@@ -601,7 +602,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
     setBaseline(map.data);
   }, [baseline, map.data]);
 
-  const first = useRef<HTMLInputElement>(null);
+  const first = useRef<HTMLButtonElement>(null);
   // Modal focuses its own container in an effect that runs after this one; the
   // animation frame puts the caret in the first field instead.
   useEffect(() => {
@@ -725,20 +726,18 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
       }
     >
       <div className="flex flex-col gap-4">
-        <label className="flex items-center gap-2 text-body text-fg">
-          <input
-            ref={first}
-            type="checkbox"
+        <div className="flex items-center gap-2 text-body text-fg">
+          <Checkbox
+            rootRef={first}
             checked={active}
             aria-label="key active"
-            onChange={(e) => setActive(e.target.checked)}
-            className="h-3.5 w-3.5 rounded border border-line-strong bg-[var(--color-surface-2)] accent-[var(--color-accent)]"
+            onChange={setActive}
           />
           active
           <span className="text-caption text-faint">
             {active ? "accepting requests" : "every request is rejected with 403"}
           </span>
-        </label>
+        </div>
 
         <div className="flex min-w-0 flex-col gap-1.5">
           <span className="text-caption font-medium uppercase tracking-[0.08em] text-faint">
@@ -1007,14 +1006,13 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
             )}
           </div>
 
-          <label className="flex items-start gap-2 text-body text-fg">
-            <input
-              type="checkbox"
+          <div className="flex items-start gap-2 text-body text-fg">
+            <Checkbox
               checked={scanOutput}
               disabled={busy}
               aria-label="scan responses"
-              onChange={(e) => setScanOutput(e.target.checked)}
-              className="mt-0.5 h-3.5 w-3.5 rounded border border-line-strong bg-[var(--color-surface-2)] accent-[var(--color-accent)]"
+              onChange={setScanOutput}
+              className="mt-0.5"
             />
             <span>
               scan responses
@@ -1023,7 +1021,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
                 cut with an error instead of completing. Needs at least one blocked phrase.
               </span>
             </span>
-          </label>
+          </div>
 
           {guardProblem ? (
             <span role="alert" className="text-small text-neg">

@@ -9,6 +9,7 @@ import {
   type OAuthStart,
 } from "../../lib/api";
 import { qk, useOAuthStatus } from "../../lib/queries";
+import { Disclosure } from "../../components/ui";
 
 /** Step 1, sub-screens: browser sign-in (PKCE), device code, and a pasted API key. */
 
@@ -477,19 +478,16 @@ export function ApiKeyStep({
         <Input value={label} onChange={setLabel} placeholder="e.g. Personal OpenAI" ariaLabel="account label" />
       </Field>
 
-      <details className="rounded-[var(--radius-card)] border border-line bg-surface">
-        <summary className="cursor-pointer px-4 py-3 text-body font-medium">Advanced</summary>
-        <div className="border-t border-rule px-4 py-4">
-          <Field label="Base URL" hint="Leave empty to use the provider default.">
-            <Input
-              value={baseUrl}
-              onChange={setBaseUrl}
-              placeholder="https://…/v1"
-              ariaLabel="base url override"
-            />
-          </Field>
-        </div>
-      </details>
+      <Disclosure title="Advanced" contentClassName="px-4 py-4">
+        <Field label="Base URL" hint="Leave empty to use the provider default.">
+          <Input
+            value={baseUrl}
+            onChange={setBaseUrl}
+            placeholder="https://…/v1"
+            ariaLabel="base url override"
+          />
+        </Field>
+      </Disclosure>
 
       <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-4 py-3 text-body text-muted">
         <svg

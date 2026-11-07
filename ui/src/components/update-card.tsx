@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, Card, CardHeader, ConfirmDialog, ErrorNote } from "./ui";
-import { Grid, Stack } from "./atoms";
+import { Badge, Button, Card, CardHeader, ConfirmDialog, Disclosure, ErrorNote } from "./ui";
+import { Checkbox, Grid, Stack } from "./atoms";
 import { useToast } from "./toast";
 import { api } from "../lib/api";
 import { when } from "../lib/format";
@@ -165,11 +165,10 @@ export function UpdateCard() {
 
           <Grid cols={2} gap="md" className="max-[700px]:grid-cols-1">
             <label className="flex items-start gap-3 rounded-lg border border-line px-3 py-2.5">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={status.options.auto_check}
-                onChange={(e) => void saveOptions({ auto_check: e.target.checked })}
-                className="mt-0.5 h-4 w-4 accent-[var(--color-accent)]"
+                onChange={(next) => void saveOptions({ auto_check: next })}
+                className="mt-0.5"
               />
               <span>
                 <span className="block text-small font-medium">Check daily</span>
@@ -177,12 +176,11 @@ export function UpdateCard() {
               </span>
             </label>
             <label className="flex items-start gap-3 rounded-lg border border-line px-3 py-2.5">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={status.options.auto_download}
                 disabled={!status.deployment.can_download}
-                onChange={(e) => void saveOptions({ auto_download: e.target.checked })}
-                className="mt-0.5 h-4 w-4 accent-[var(--color-accent)]"
+                onChange={(next) => void saveOptions({ auto_download: next })}
+                className="mt-0.5"
               />
               <span>
                 <span className="block text-small font-medium">Download automatically</span>
@@ -196,12 +194,11 @@ export function UpdateCard() {
           </Grid>
 
           {status.notes ? (
-            <details className="rounded-lg border border-line px-3 py-2 text-small">
-              <summary className="cursor-pointer text-muted">Release notes</summary>
-              <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap font-sans text-caption leading-relaxed text-muted">
+            <Disclosure title="Release notes" contentClassName="pt-0">
+              <pre className="max-h-56 overflow-auto whitespace-pre-wrap font-sans text-caption leading-relaxed text-muted">
                 {status.notes}
               </pre>
-            </details>
+            </Disclosure>
           ) : null}
 
           {status.error ? <ErrorNote error={status.error} /> : null}

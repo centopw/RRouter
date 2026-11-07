@@ -16,7 +16,7 @@ import {
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS, CapabilityChips } from "../components/capability-chips";
-import { Heading, Toggle } from "../components/atoms";
+import { Checkbox, Heading, Toggle } from "../components/atoms";
 import { compact } from "../lib/format";
 import { compareModels } from "../lib/models";
 import { useToast } from "../components/toast";
@@ -515,15 +515,12 @@ function CustomModelModal({
           <span className="text-small font-semibold text-ink-soft">capabilities</span>
           <div className="grid grid-cols-3 gap-x-3 gap-y-1.5">
             {CAPABILITY_KEYS.map((key) => (
-              <label key={key} className="flex items-center gap-2 text-small text-muted">
-                <input
-                  type="checkbox"
-                  checked={caps[key] === true}
-                  onChange={(e) => setCaps((c) => ({ ...c, [key]: e.target.checked }))}
-                  className="h-3.5 w-3.5 rounded border border-line-strong bg-[var(--color-surface-2)] accent-[var(--color-accent)]"
-                />
-                {CAPABILITY_LABELS[key].chip}
-              </label>
+              <Checkbox
+                key={key}
+                checked={caps[key] === true}
+                onChange={(next) => setCaps((c) => ({ ...c, [key]: next }))}
+                label={CAPABILITY_LABELS[key].chip}
+              />
             ))}
           </div>
         </div>

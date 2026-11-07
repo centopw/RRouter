@@ -32,12 +32,12 @@ export function Toggle({
     >
       <Switch.Thumb
         className={cx(
-          "absolute rounded-full bg-[var(--color-muted)] transition-transform duration-150",
+          "absolute left-0 top-1/2 -translate-y-1/2 rounded-full bg-[var(--color-muted)] transition-transform duration-150",
           "data-[state=checked]:bg-white",
-          small ? "h-2.5 w-2.5" : "top-1 h-4 w-4",
+          small ? "h-2.5 w-2.5" : "h-4 w-4",
           small
-            ? "translate-x-[3px] data-[state=checked]:translate-x-[13px]"
-            : "translate-x-[3px] data-[state=checked]:translate-x-[22px]",
+            ? checked ? "translate-x-[13px]" : "translate-x-[3px]"
+            : checked ? "translate-x-[22px]" : "translate-x-[3px]",
         )}
       />
     </Switch.Root>

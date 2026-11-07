@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import { Badge, Button, CopyButton, ErrorNote, StatusPill, cx, statusText } from "../../components/ui";
 import { compact, ms, splitRef, usd, when } from "../../lib/format";
 import { useUsageDetail } from "../../lib/queries";
@@ -380,40 +381,19 @@ export function RequestDetailDialog({
   onClose: () => void;
   baseUrl: string;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    ref.current?.focus();
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previous;
-    };
-  }, [onClose]);
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-end bg-[rgba(16,18,20,0.38)] backdrop-blur-[1.5px]"
-      role="presentation"
-      onClick={onClose}
-    >
-      <div
-        ref={ref}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-label="request detail"
-        style={{ outline: "none" }}
-        className="drawer-panel h-full w-full max-w-[560px] overflow-y-auto border-l border-line bg-surface shadow-[0_24px_64px_rgba(16,18,20,0.22)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <RequestDetail row={row} onClose={onClose} baseUrl={baseUrl} />
-      </div>
-    </div>
+    <Dialog.Root open onOpenChange={(next) => { if (!next) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-[rgba(16,18,20,0.38)] backdrop-blur-[1.5px]" />
+        <Dialog.Content className="drawer-panel fixed inset-y-0 right-0 z-50 h-full w-full max-w-[560px] overflow-y-auto border-l border-line bg-surface shadow-[0_24px_64px_rgba(16,18,20,0.22)] focus:outline-none">
+          <Dialog.Title className="sr-only">Request detail</Dialog.Title>
+          <Dialog.Description className="sr-only">
+            One gateway request, its timing, attempts and error.
+          </Dialog.Description>
+          <RequestDetail row={row} onClose={onClose} baseUrl={baseUrl} />
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 

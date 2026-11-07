@@ -64,6 +64,12 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - Request detail now records and draws the latency phases — connect + upstream headers,
   model → first token, generation — instead of only inferring them from TTFT.
 
+### Changed
+- Interactive primitives are fully Radix-backed: Dialog, AlertDialog, Tabs, Switch,
+  Checkbox, Popover, Toast, Accordion, Tooltip-group/Toggle, Separator and Label. The
+  searchable Select keeps its filter UX on a Radix Popover; no hand-rolled dismiss/focus
+  logic remains.
+
 ### Security
 - Dashboard sessions are HS256 JWTs signed with a key stored beside the data volume.
   The database still validates every session, so logout and password changes revoke a

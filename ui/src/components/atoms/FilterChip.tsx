@@ -1,7 +1,8 @@
-import { type ReactNode } from "react";
+import * as Toggle from "@radix-ui/react-toggle";
+import type { ReactNode } from "react";
 import { cx } from "../../lib/cx";
 
-/** A pill that filters a list; `on` marks the active filter, `bad` an error count. */
+/** A filter pill built on Radix Toggle; `bad` marks an error count. */
 export function FilterChip({
   children,
   on = false,
@@ -16,21 +17,19 @@ export function FilterChip({
   ariaLabel?: string;
 }) {
   return (
-    <button
-      type="button"
-      aria-pressed={on}
+    <Toggle.Root
+      pressed={on}
+      onPressedChange={onClick}
       aria-label={ariaLabel}
-      onClick={onClick}
       className={cx(
         "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-small transition-colors max-[820px]:h-10",
-        on
-          ? "border-accent bg-accent font-medium text-[var(--color-accent-ink)]"
-          : bad
-            ? "border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)] hover:border-[var(--color-neg)]"
-            : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-fg",
+        "data-[state=off]:border-line data-[state=off]:bg-surface-2 data-[state=off]:text-muted",
+        "data-[state=off]:hover:border-line-strong data-[state=off]:hover:text-fg",
+        bad && "data-[state=off]:border-[var(--color-neg-line)] data-[state=off]:bg-[var(--color-neg-tint)] data-[state=off]:text-[var(--color-neg-ink)]",
+        "data-[state=on]:border-accent data-[state=on]:bg-accent data-[state=on]:font-medium data-[state=on]:text-[var(--color-accent-ink)]",
       )}
     >
       {children}
-    </button>
+    </Toggle.Root>
   );
 }
