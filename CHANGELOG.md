@@ -50,7 +50,9 @@ All notable changes. Dates are local; versions follow semver once tagged.
   shows each account's window usage with a quota editor. Usage is aggregated from the request
   log, so nothing counts, resets or repairs a counter.
 
-### Changed
+### Fixed
+- Sign-in reads the submitted DOM values instead of React state, so browser autofill and
+  password managers (which can fill fields without firing `input`) work on the first submit.
 - Dialogs are right-hand drawers; test results and other transient outcomes use a toast
   stack. The Logs row is clickable everywhere with a clock time + relative age. Models can be
   edited per row (display, context, output, price, capabilities), metadata sync/fetch moved to

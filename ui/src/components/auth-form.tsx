@@ -123,6 +123,7 @@ export function AuthField({
 /** Tall text input used by every auth form. */
 export function AuthInput({
   id,
+  name,
   type = "text",
   value,
   onChange,
@@ -131,6 +132,8 @@ export function AuthInput({
   ariaLabel,
 }: {
   id: string;
+  /** Form field name, so a submit can read the DOM value rather than React state. */
+  name?: string;
   type?: string;
   value: string;
   onChange: (value: string) => void;
@@ -141,6 +144,7 @@ export function AuthInput({
   return (
     <input
       id={id}
+      name={name ?? id}
       type={type}
       value={value}
       onChange={(event) => onChange(event.target.value)}
@@ -163,6 +167,7 @@ export function AuthInput({
  */
 export function PasswordField({
   id,
+  name,
   label,
   value,
   onChange,
@@ -172,6 +177,7 @@ export function PasswordField({
   rules = true,
 }: {
   id: string;
+  name?: string;
   label: string;
   value: string;
   onChange: (value: string) => void;
@@ -194,6 +200,7 @@ export function PasswordField({
       <div className="relative">
         <input
           id={id}
+          name={name ?? id}
           type={shown ? "text" : "password"}
           value={value}
           onChange={(event) => onChange(event.target.value)}
