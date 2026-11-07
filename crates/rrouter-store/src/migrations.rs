@@ -8,10 +8,17 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 12;
+pub(crate) const SCHEMA_VERSION: i64 = 13;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
+
+/// V13: retention. The sweep deletes `attempts` by `ts`, which the v8 index
+/// (`request_id, attempt`) cannot serve, so without this every sweep scans the table.
+/// One index, no column or data change.
+const V13: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_attempts_ts ON attempts(ts);
+"#;
 
 /// V11: the opt-in exact-match response cache. `key` is the SHA-256 of the canonical
 /// request (see `Store::cache_key`), `body` is the client-facing JSON that was sent,

@@ -377,6 +377,16 @@ pub struct CacheEntry {
     pub hits: u32,
 }
 
+/// What one retention sweep removed. Counts are rows, not bytes.
+///
+/// `usage` and `attempts` are deleted by the same cutoff in one transaction, so the
+/// pair is the honest answer to "how much history did the retention knob discard?".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    pub usage: usize,
+    pub attempts: usize,
+}
+
 /// One time bucket for one model: the traffic chart stacks these by model, so
 /// every segment is an honest server-side count rather than a client estimate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1793,6 +1803,57 @@ impl Store {
             out.push(r.map_err(migrations::db_err)?);
         }
         Ok(out)
+    }
+
+    // ----- maintenance --------------------------------------------------------------
+
+    /// Delete `usage` and `attempts` rows older than `cutoff` (unix seconds).
+    ///
+    /// One immediate transaction covers both tables: a sweep is either fully applied or
+    /// not at all, and no reader observes usage rows whose attempt trail already went.
+    /// Rows exactly at `cutoff` survive — retention is "keep this many days", inclusive
+    /// at the boundary.
+    pub async fn prune_usage(&self, cutoff: i64) -> Result<PruneReport> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        let usage = tx
+            .execute("DELETE FROM usage WHERE ts < ?1", params![cutoff])
+            .map_err(migrations::db_err)?;
+        let attempts = tx
+            .execute("DELETE FROM attempts WHERE ts < ?1", params![cutoff])
+            .map_err(migrations::db_err)?;
+        tx.commit().map_err(migrations::db_err)?;
+        Ok(PruneReport { usage, attempts })
+    }
+
+    /// Delete every response-cache row that can no longer be served at `now`.
+    ///
+    /// Independent of usage retention: a cache entry's life is its own TTL, so expired
+    /// rows go even when the operator keeps history forever. The expiry index makes
+    /// this one range delete.
+    pub async fn prune_expired_cache(&self, now: i64) -> Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        let deleted = tx
+            .execute("DELETE FROM response_cache WHERE expires_at < ?1", params![now])
+            .map_err(migrations::db_err)?;
+        tx.commit().map_err(migrations::db_err)?;
+        Ok(deleted)
+    }
+
+    /// Let SQLite refresh its query-planner statistics.
+    ///
+    /// `PRAGMA optimize` is cheap when it has nothing to do — it checks whether the
+    /// schema or workload changed since the last run — and is the documented way to
+    /// keep plans sane after the large deletes a retention sweep performs.
+    pub async fn optimize(&self) -> Result<()> {
+        let conn = self.conn();
+        conn.execute_batch("PRAGMA optimize")
+            .map_err(migrations::db_err)
     }
 }
 

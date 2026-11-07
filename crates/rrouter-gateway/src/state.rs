@@ -19,6 +19,15 @@ use crate::config::Config;
 /// Width of the sliding window behind `rpm` and `tpm`.
 const MINUTE: Duration = Duration::from_secs(60);
 
+/// How long the first retention sweep waits after startup: long enough for the bind and
+/// catalog refresh to finish, so a large first delete never delays `serve`.
+const FIRST_SWEEP_DELAY: Duration = Duration::from_secs(10);
+
+/// Retention period: history is measured in days, so one pass a day is the useful rate.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+const SECS_PER_DAY: i64 = 86_400;
+
 pub struct AppState {
     pub store: Arc<Store>,
     pub catalog: Arc<Catalog>,
@@ -61,6 +70,55 @@ pub fn concurrency_for(max_concurrency: usize) -> Option<Arc<tokio::sync::Semaph
 }
 
 impl AppState {
+    /// Start the daily usage-retention sweep.
+    ///
+    /// The task owns an `Arc<Self>` for the life of the process; it waits
+    /// [`FIRST_SWEEP_DELAY`] before the first pass so the bind is never delayed, then
+    /// runs every [`SWEEP_INTERVAL`]. No join handle is kept: no sweep can stop the
+    /// server, and the task ends with the process. Exercised by the live binary rather
+    /// than a unit test — a 24 h timer is not worth faking.
+    pub fn spawn_retention(self: &Arc<Self>) {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(FIRST_SWEEP_DELAY).await;
+            loop {
+                state.retention_sweep().await;
+                tokio::time::sleep(SWEEP_INTERVAL).await;
+            }
+        });
+    }
+
+    /// One sweep: drop history past the retention cutoff, always drop expired cache
+    /// rows, then refresh planner statistics. A failed phase is logged and the next
+    /// pass retries; nothing here is visible to a client.
+    async fn retention_sweep(&self) {
+        let now = crate::now_unix();
+        let days = i64::try_from(self.config.usage_retention_days).unwrap_or(i64::MAX);
+        let (deleted_usage, deleted_attempts) = if days == 0 {
+            (0, 0)
+        } else {
+            let cutoff = now.saturating_sub(days.saturating_mul(SECS_PER_DAY));
+            match self.store.prune_usage(cutoff).await {
+                Ok(report) => (report.usage, report.attempts),
+                Err(e) => {
+                    tracing::warn!(error = %e, "usage retention delete failed");
+                    (0, 0)
+                }
+            }
+        };
+        let deleted_cache = match self.store.prune_expired_cache(now).await {
+            Ok(deleted) => deleted,
+            Err(e) => {
+                tracing::warn!(error = %e, "expired cache delete failed");
+                0
+            }
+        };
+        if let Err(e) = self.store.optimize().await {
+            tracing::warn!(error = %e, "pragma optimize failed");
+        }
+        tracing::info!(deleted_usage, deleted_attempts, deleted_cache, "retention sweep");
+    }
+
     pub fn request_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.config.request_timeout_secs)
     }

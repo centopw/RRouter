@@ -28,6 +28,13 @@ const MAX_CACHE_TTL_SECS: usize = 86_400;
 const DEFAULT_CACHE_MAX_ENTRIES: usize = 1_000;
 /// Hard ceiling on cache rows: the whole point is a bounded amount of memory/disk.
 const MAX_CACHE_ENTRIES: usize = 100_000;
+/// Days of `usage`/`attempts` history kept when `RROUTER_USAGE_RETENTION_DAYS` is
+/// unset. `0` keeps everything, which is the pre-phase-14 behaviour.
+const DEFAULT_USAGE_RETENTION_DAYS: usize = 0;
+/// Upper bound on retention: ten years, well past any history a local gateway can use.
+const MAX_USAGE_RETENTION_DAYS: usize = 3650;
+/// The retention setting's env var, named once so parsing and tests agree.
+const USAGE_RETENTION_VAR: &str = "RROUTER_USAGE_RETENTION_DAYS";
 
 /// Where the exact-match response cache keeps its entries.
 ///
@@ -121,6 +128,9 @@ pub struct Config {
     pub cache_ttl_secs: u64,
     /// Cached responses kept, clamped to `1..=100000`; oldest evicted first.
     pub cache_max_entries: usize,
+    /// Days of `usage`/`attempts` history to keep, clamped to `0..=3650`. `0` keeps
+    /// everything; expired `response_cache` rows are swept either way.
+    pub usage_retention_days: usize,
     /// Shape of every log line: `text` (default) or `json`.
     pub log_format: LogFormat,
     /// Emit one `request` info line per finished request. `false` silences only that line.
@@ -277,6 +287,15 @@ impl Config {
         ));
         let log_format = log_format_setting(var("RROUTER_LOG_FORMAT"), &mut problems);
         let access_log = access_log_setting(var("RROUTER_ACCESS_LOG"), &mut problems);
+        // Same rule as the cache bounds: an oversized number is clamped, garbage stops
+        // startup. `0` disables history deletion, not the sweep itself.
+        let usage_retention_days = clamped_var(
+            USAGE_RETENTION_VAR,
+            DEFAULT_USAGE_RETENTION_DAYS,
+            0,
+            MAX_USAGE_RETENTION_DAYS,
+            &mut problems,
+        );
 
         if problems.is_empty() {
             Ok(Self {
@@ -299,6 +318,7 @@ impl Config {
                 cache,
                 cache_ttl_secs,
                 cache_max_entries,
+                usage_retention_days,
                 log_format,
                 access_log,
             })
@@ -440,7 +460,7 @@ impl Serialize for Redacted<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let c = self.0;
-        let mut st = s.serialize_struct("Config", 22)?;
+        let mut st = s.serialize_struct("Config", 23)?;
         st.serialize_field("host", &c.host.to_string())?;
         st.serialize_field("port", &c.port)?;
         st.serialize_field("data_dir", &c.data_dir.to_string_lossy())?;
@@ -464,6 +484,7 @@ impl Serialize for Redacted<'_> {
         st.serialize_field("cache", c.cache.as_str())?;
         st.serialize_field("cache_ttl_secs", &c.cache_ttl_secs)?;
         st.serialize_field("cache_max_entries", &c.cache_max_entries)?;
+        st.serialize_field("usage_retention_days", &c.usage_retention_days)?;
         st.serialize_field("log_format", c.log_format.as_str())?;
         st.serialize_field("access_log", &c.access_log)?;
         st.end()
@@ -502,6 +523,7 @@ mod tests {
             cache: CacheMode::Off,
             cache_ttl_secs: DEFAULT_CACHE_TTL_SECS as u64,
             cache_max_entries: DEFAULT_CACHE_MAX_ENTRIES,
+            usage_retention_days: DEFAULT_USAGE_RETENTION_DAYS,
             log_format: LogFormat::Text,
             access_log: true,
         }
@@ -549,6 +571,45 @@ mod tests {
         assert_eq!(clamp_attempts(8), 8);
         assert_eq!(clamp_attempts(100), MAX_ATTEMPTS_CEILING);
         assert_eq!(clamp_attempts(usize::MAX), MAX_ATTEMPTS_CEILING);
+    }
+
+    /// Retention is a bound, not a promise: unset keeps everything, an oversized number
+    /// is clamped to ten years, and garbage stops startup like the other numeric knobs.
+    #[test]
+    fn usage_retention_defaults_to_zero_and_is_clamped() {
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV.lock().unwrap_or_else(|p| p.into_inner());
+        let read = |problems: &mut Vec<String>| {
+            clamped_var(
+                USAGE_RETENTION_VAR,
+                DEFAULT_USAGE_RETENTION_DAYS,
+                0,
+                MAX_USAGE_RETENTION_DAYS,
+                problems,
+            )
+        };
+
+        std::env::remove_var(USAGE_RETENTION_VAR);
+        let mut problems = Vec::new();
+        assert_eq!(read(&mut problems), 0, "unset keeps history forever");
+        assert!(problems.is_empty());
+
+        std::env::set_var(USAGE_RETENTION_VAR, "30");
+        let mut problems = Vec::new();
+        assert_eq!(read(&mut problems), 30);
+        assert!(problems.is_empty());
+
+        std::env::set_var(USAGE_RETENTION_VAR, "99999");
+        let mut problems = Vec::new();
+        assert_eq!(read(&mut problems), MAX_USAGE_RETENTION_DAYS);
+        assert!(problems.is_empty(), "an oversized bound is clamped, not refused");
+
+        std::env::set_var(USAGE_RETENTION_VAR, "-1");
+        let mut problems = Vec::new();
+        assert_eq!(read(&mut problems), 0, "a bad value falls back to the default");
+        assert_eq!(problems.len(), 1, "garbage must fail startup: {problems:?}");
+
+        std::env::remove_var(USAGE_RETENTION_VAR);
     }
 
     #[test]

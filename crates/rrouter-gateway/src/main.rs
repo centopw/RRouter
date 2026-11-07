@@ -154,6 +154,10 @@ async fn serve(config: Config) -> Result<(), String> {
         concurrency: concurrency_for(config.max_concurrency),
     });
 
+    // Retention lives on its own task: the first pass waits a few seconds, so startup
+    // and the initial bind are never delayed by a large delete.
+    state.spawn_retention();
+
     // Fail closed: binding beyond loopback while the admin gate is still in its
     // default loopback-only mode leaves a half-open deployment — the client API is
     // reachable, the admin API answers 403 even to the operator's own browser via a

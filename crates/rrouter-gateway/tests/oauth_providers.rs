@@ -46,6 +46,7 @@ fn test_state() -> Arc<AppState> {
         cache: Default::default(),
         cache_ttl_secs: 300,
         cache_max_entries: 1000,
+        usage_retention_days: 0,
         log_format: rrouter_gateway::config::LogFormat::Text,
         access_log: true,
         },

@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
 use rrouter_store::{
-    cache_key, ApiKey, ApiKeyPatch, AttemptRecord, Credentials, KeyModel, ModelRow, Store,
-    StatusFilter, UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
+    cache_key, ApiKey, ApiKeyPatch, AttemptRecord, Credentials, KeyModel, ModelRow, PruneReport,
+    Store, StatusFilter, UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -521,7 +521,7 @@ fn model_costs_returns_published_rows_for_the_named_providers() {
 }
 
 #[test]
-fn v6_database_migrates_to_twelve() {
+fn v6_database_migrates_to_thirteen() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
@@ -620,7 +620,7 @@ fn v6_database_migrates_to_twelve() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
         ("idx_usage_request", "the usage row is looked up by request id"),
@@ -641,7 +641,7 @@ fn v6_database_migrates_to_twelve() {
 /// connection defaults to weight 100 (the plain round-robin share), and the two new
 /// tables start empty.
 #[test]
-fn v8_database_migrates_to_twelve() {
+fn v8_database_migrates_to_thirteen() {
     let dir = TempDir::new("v8");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -680,6 +680,19 @@ fn v8_database_migrates_to_twelve() {
                allowed_models TEXT,
                expires_at     INTEGER
              );
+             CREATE TABLE attempts (
+               id            INTEGER PRIMARY KEY AUTOINCREMENT,
+               request_id    TEXT NOT NULL,
+               ts            INTEGER NOT NULL,
+               attempt       INTEGER NOT NULL,
+               provider      TEXT NOT NULL,
+               model         TEXT NOT NULL,
+               connection_id TEXT,
+               status        INTEGER NOT NULL DEFAULT 0,
+               error         TEXT,
+               latency_ms    INTEGER NOT NULL DEFAULT 0,
+               key_id        TEXT
+             );
              CREATE TABLE usage (
                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
                ts                 INTEGER NOT NULL,
@@ -710,7 +723,7 @@ fn v8_database_migrates_to_twelve() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
 
     let weight: i64 = conn
         .query_row("SELECT weight FROM connections", [], |r| r.get(0))
@@ -735,7 +748,7 @@ fn v8_database_migrates_to_twelve() {
 /// A v9 database gains the money columns without touching existing rows: spend recorded
 /// before v10 stays at "unknown price", and every key stays unlimited.
 #[test]
-fn v9_database_migrates_to_twelve() {
+fn v9_database_migrates_to_thirteen() {
     let dir = TempDir::new("v9");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -755,6 +768,19 @@ fn v9_database_migrates_to_twelve() {
              INSERT INTO api_keys (id, key_hash, name, is_active, created_at, budget_tokens)
              VALUES ('11111111-1111-4111-8111-111111111111', 'deadbeef', 'v9', 1, 1700000000, 500);
 
+             CREATE TABLE attempts (
+               id            INTEGER PRIMARY KEY AUTOINCREMENT,
+               request_id    TEXT NOT NULL,
+               ts            INTEGER NOT NULL,
+               attempt       INTEGER NOT NULL,
+               provider      TEXT NOT NULL,
+               model         TEXT NOT NULL,
+               connection_id TEXT,
+               status        INTEGER NOT NULL DEFAULT 0,
+               error         TEXT,
+               latency_ms    INTEGER NOT NULL DEFAULT 0,
+               key_id        TEXT
+             );
              CREATE TABLE usage (
                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
                ts                 INTEGER NOT NULL,
@@ -804,13 +830,13 @@ fn v9_database_migrates_to_twelve() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
 }
 
 /// A v10 database gains the response cache in place: the migration only adds a table and
-/// its index, so every existing row is untouched and the version reaches 12.
+/// its index, so every existing row is untouched and the version reaches 13.
 #[test]
-fn v10_database_migrates_to_twelve() {
+fn v10_database_migrates_to_thirteen() {
     let dir = TempDir::new("v10");
     {
         // A real v10 database: the current schema with the v11 table and the v12 column
@@ -835,7 +861,7 @@ fn v10_database_migrates_to_twelve() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     for (kind, name) in [("table", "response_cache"), ("index", "idx_cache_expiry")] {
         let found: i64 = conn
             .query_row(
@@ -1390,6 +1416,118 @@ fn response_cache_upsert_replaces_the_body_and_hits() {
     });
 }
 
+// ----- usage retention (phase 14) ----------------------------------------------------
+
+/// One sweep removes `usage` and `attempts` before the cutoff and keeps the boundary
+/// row, in one report; a second sweep over the same cutoff finds nothing.
+#[test]
+fn prune_usage_deletes_history_older_than_the_cutoff() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    let row = |ts: i64| UsageRecord {
+        id: None,
+        ts,
+        request_id: Some(Uuid::from_u128(ts as u128)),
+        provider: "openai".to_string(),
+        model: "gpt-4.1".to_string(),
+        connection_id: None,
+        endpoint: None,
+        key_id: None,
+        cost_micros: 0,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        latency_ms: 1,
+        ttft_ms: 0,
+        status: 200,
+        streamed: false,
+        error: None,
+    };
+    // Attempts carry their own request id, so each timestamp is separately reachable.
+    let attempt_request = |ts: i64| Uuid::from_u128(0xa000 + ts as u128);
+    rt().block_on(async {
+        for ts in [100i64, 200, 300] {
+            s.record_usage(&row(ts)).await.expect("usage");
+            s.record_attempt(&AttemptRecord {
+                id: None,
+                request_id: attempt_request(ts),
+                ts,
+                attempt: 1,
+                provider: "openai".to_string(),
+                model: "gpt-4.1".to_string(),
+                connection_id: None,
+                status: 200,
+                error: None,
+                latency_ms: 1,
+                key_id: None,
+            })
+            .await
+            .expect("attempt");
+        }
+
+        let report = s.prune_usage(200).await.expect("prune");
+        assert_eq!(report, PruneReport { usage: 1, attempts: 1 }, "the report counts each table");
+
+        let remaining: Vec<i64> = s
+            .recent_usage(&UsageQuery { limit: 10, ..Default::default() })
+            .await
+            .expect("usage")
+            .into_iter()
+            .map(|r| r.ts)
+            .collect();
+        assert_eq!(remaining, vec![300, 200], "the cutoff row and newer survive");
+        assert!(s.attempts_for(attempt_request(100)).await.expect("old").is_empty());
+        assert_eq!(s.attempts_for(attempt_request(200)).await.expect("boundary").len(), 1);
+        assert_eq!(s.attempts_for(attempt_request(300)).await.expect("new").len(), 1);
+
+        assert_eq!(
+            s.prune_usage(200).await.expect("second sweep"),
+            PruneReport::default(),
+            "a repeated sweep is a no-op"
+        );
+        assert_eq!(s.recent_usage(&UsageQuery { limit: 10, ..Default::default() }).await.expect("usage").len(), 2);
+
+        // The maintenance pass runs against the same connection without failing.
+        s.optimize().await.expect("optimize");
+    });
+}
+
+/// Expired cache rows are swept independently of the usage cutoff, and the unexpired
+/// entry stays servable.
+#[test]
+fn prune_expired_cache_drops_only_expired_rows() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        s.cache_put(&cache_key("expired"), "old", 100, 500, 10)
+            .await
+            .expect("put expired");
+        s.cache_put(&cache_key("live"), "new", 100, 900, 10)
+            .await
+            .expect("put live");
+
+        assert_eq!(s.prune_expired_cache(600).await.expect("prune"), 1);
+        let keys: Vec<String> = s
+            .cache_entries()
+            .await
+            .expect("entries")
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
+        assert_eq!(keys, vec![cache_key("live")], "the unexpired row stays");
+        assert_eq!(
+            s.cache_get(&cache_key("live"), 600).await.expect("hit"),
+            Some("new".to_string())
+        );
+        assert_eq!(
+            s.prune_expired_cache(600).await.expect("second sweep"),
+            0,
+            "a repeated sweep deletes nothing"
+        );
+    });
+}
+
 // ----- helpers ---------------------------------------------------------------------
 
 fn read_blob(db: &Path, id: Uuid) -> Vec<u8> {
@@ -1419,9 +1557,9 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 // ----- 4d. budget windows (phase 9) -------------------------------------------------
 
 /// A v11 database gains `budget_window` in place: an existing key reads as `total`
-/// (lifetime, unchanged behaviour), and the version reaches 12.
+/// (lifetime, unchanged behaviour), and the version reaches 13.
 #[test]
-fn v11_database_migrates_to_twelve_with_total_windows() {
+fn v11_database_migrates_to_thirteen_with_total_windows() {
     let dir = TempDir::new("v11");
     let id = Uuid::new_v4();
     {
@@ -1455,7 +1593,38 @@ fn v11_database_migrates_to_twelve_with_total_windows() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
+}
+
+/// v12 shipped no `attempts(ts)` index; the retention sweep deletes by `ts`, so opening
+/// a v12 database adds the index and bumps the marker.
+#[test]
+fn v12_database_migrates_to_thirteen_with_the_attempt_ts_index() {
+    let dir = TempDir::new("v12");
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        // Start from the current schema, then remove exactly what v13 adds.
+        drop(Store::open(&dir.db(), None).expect("current schema"));
+        conn.execute_batch("DROP INDEX idx_attempts_ts; PRAGMA user_version = 12;")
+            .expect("rewind to v12");
+    }
+
+    drop(Store::open(&dir.db(), None).expect("open runs the v13 step"));
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 13);
+    let indexes: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' \
+             AND name = 'idx_attempts_ts'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("index");
+    assert_eq!(indexes, 1, "the retention sweep needs the attempts ts index");
 }
 
 /// Spend queries honour `since`: a key with rows inside and outside the window reports
