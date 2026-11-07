@@ -159,31 +159,53 @@ export function Shell() {
         )}
       >
         <div className={cx("flex items-center gap-2 pt-3", collapsed ? "justify-center px-2" : "px-3")}>
-          <img
-            src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-light.png`}
-            alt=""
-            width={30}
-            height={30}
-            className="h-[30px] w-auto max-w-[52px] shrink-0 select-none object-contain"
-          />
-          {!collapsed ? (
-            <span className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-[-0.01em] text-fg">
-              {name}
-            </span>
-          ) : null}
-          <button
-            type="button"
-            onClick={toggleCollapsed}
-            aria-label={collapsed ? "expand sidebar" : "collapse sidebar"}
-            aria-expanded={!collapsed}
-            title={collapsed ? "expand sidebar" : "collapse sidebar"}
-            className={cx(
-              "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text",
-              collapsed && "mt-1",
-            )}
-          >
-            <SidebarSimple size={16} aria-hidden />
-          </button>
+          {collapsed ? (
+            /* One target in the rail: the logo becomes the expand control on hover. */
+            <button
+              type="button"
+              onClick={toggleCollapsed}
+              aria-label="expand sidebar"
+              aria-expanded={false}
+              title="expand sidebar"
+              className="group relative flex h-10 w-10 shrink-0 items-center justify-center rounded-lg hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+            >
+              <img
+                src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-light.png`}
+                alt=""
+                width={30}
+                height={30}
+                className="h-[30px] w-auto max-w-[36px] select-none object-contain transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
+              />
+              <SidebarSimple
+                size={17}
+                aria-hidden
+                className="absolute text-muted opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+              />
+            </button>
+          ) : (
+            <>
+              <img
+                src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-light.png`}
+                alt=""
+                width={30}
+                height={30}
+                className="h-[30px] w-auto max-w-[52px] shrink-0 select-none object-contain"
+              />
+              <span className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-[-0.01em] text-fg">
+                {name}
+              </span>
+              <button
+                type="button"
+                onClick={toggleCollapsed}
+                aria-label="collapse sidebar"
+                aria-expanded
+                title="collapse sidebar"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+              >
+                <SidebarSimple size={16} aria-hidden />
+              </button>
+            </>
+          )}
         </div>
 
         <div className={collapsed ? "px-2 pb-1 pt-3" : "px-3 pb-2 pt-2"}>

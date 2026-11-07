@@ -36,11 +36,11 @@ export function RequestLog({
         <div role="table" aria-label="request log" className="min-w-[560px]">
           <div
             role="row"
-            className="grid grid-cols-[86px_minmax(0,1fr)_96px_76px_54px_82px] items-center gap-2 border-b border-line px-6 py-2 text-[11px] uppercase tracking-[0.06em] text-faint"
+            className="grid grid-cols-[86px_minmax(0,1fr)_112px_76px_54px_82px] items-center gap-2 border-b border-line px-6 py-2 text-[11px] uppercase tracking-[0.06em] text-faint"
           >
             <span role="columnheader">Time</span>
             <span role="columnheader">Model</span>
-            <span role="columnheader" className="text-right">
+            <span role="columnheader" className="whitespace-nowrap text-right">
               Tokens in → out
             </span>
             <span role="columnheader" className="text-right">
@@ -56,25 +56,26 @@ export function RequestLog({
               <div
                 key={row.id ?? `${row.ts}-${row.model}`}
                 role="row"
+                tabIndex={0}
+                aria-selected={selected}
+                onClick={() => onSelect(row)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect(row);
+                  }
+                }}
                 className={cx(
-                  "grid grid-cols-[86px_minmax(0,1fr)_96px_76px_54px_82px] items-center gap-2 border-b border-[var(--color-rule)] px-6 py-2.5 text-[13px] last:border-0",
+                  "grid cursor-pointer grid-cols-[86px_minmax(0,1fr)_112px_76px_54px_82px] items-center gap-2 border-b border-[var(--color-rule)] px-6 py-2.5 text-[13px] last:border-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text",
                   selected ? "bg-[var(--color-surface-2)]" : "hover:bg-[var(--color-row-hover)]",
                 )}
               >
-                <span role="cell">
-                  <button
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => onSelect(row)}
-                    className="font-mono text-[12px] text-muted hover:text-fg"
-                    title={when(row.ts)}
-                  >
-                    {new Date(row.ts * 1000).toLocaleTimeString(undefined, {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                      second: "2-digit",
-                    })}
-                  </button>
+                <span role="cell" className="font-mono text-[12px] text-muted" title={when(row.ts)}>
+                  {new Date(row.ts * 1000).toLocaleTimeString(undefined, {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  })}
                 </span>
                 <span role="cell" className="flex min-w-0 items-center gap-2">
                   <span className="min-w-0 truncate font-mono text-[12px]">
@@ -93,7 +94,7 @@ export function RequestLog({
                 </span>
                 <span
                   role="cell"
-                  className="text-right font-mono text-[12px] text-muted tnum"
+                  className="whitespace-nowrap text-right font-mono text-[12px] text-muted tnum"
                   title={`Cost ${usd(row.cost_micros, { dash: true })}`}
                 >
                   {failed ? "—" : `${compact(row.input_tokens)} → ${compact(row.output_tokens)}`}
@@ -105,11 +106,9 @@ export function RequestLog({
                   {failed ? "—" : cacheLabel(row)}
                 </span>
                 <span role="cell">
-                  <button type="button" onClick={() => onSelect(row)} className="block">
-                    <Badge tone={failed ? "neg" : "pos"} title={row.error ?? undefined}>
-                      <span className="font-mono">{row.status || "err"}</span>
-                    </Badge>
-                  </button>
+                  <Badge tone={failed ? "neg" : "pos"} title={row.error ?? undefined}>
+                    <span className="font-mono">{row.status || "err"}</span>
+                  </Badge>
                 </span>
               </div>
             );
@@ -324,7 +323,7 @@ export function RequestDetail({
   );
 }
 
-/** The detail is an overlay: opened by a row click, it never reserves layout space. */
+/** The detail slides in from the right, matching every other inspector. */
 export function RequestDetailDialog({
   row,
   onClose,
@@ -341,12 +340,17 @@ export function RequestDetailDialog({
     };
     document.addEventListener("keydown", onKey);
     ref.current?.focus();
-    return () => document.removeEventListener("keydown", onKey);
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previous;
+    };
   }, [onClose]);
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 pt-[8vh]"
+      className="fixed inset-0 z-50 flex justify-end bg-[rgba(16,18,20,0.38)] backdrop-blur-[1.5px]"
       role="presentation"
       onClick={onClose}
     >
@@ -357,7 +361,7 @@ export function RequestDetailDialog({
         aria-modal="true"
         aria-label="request detail"
         style={{ outline: "none" }}
-        className="w-full max-w-xl rounded-[var(--radius-card)] border border-line-strong bg-surface shadow-2xl"
+        className="drawer-panel h-full w-full max-w-[560px] overflow-y-auto border-l border-line bg-surface shadow-[0_24px_64px_rgba(16,18,20,0.22)]"
         onClick={(e) => e.stopPropagation()}
       >
         <RequestDetail row={row} onClose={onClose} baseUrl={baseUrl} />

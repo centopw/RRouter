@@ -58,6 +58,10 @@ All notable changes. Dates are local; versions follow semver once tagged.
   cleared at runtime.
 
 ### Changed
+- In the collapsed sidebar the logo itself is the expand control: hovering swaps it for the
+  expand icon, with no second button competing for the rail's width. Activity request rows
+  are clickable across every cell, the inspector is a right-hand drawer, and the tokens
+  column no longer wraps its header.
 - Rate-limited accounts fail over immediately: a 429 is no longer retried on the same
   sub-account before trying the next one, and the breaker's 429 cooldown now starts at 30 s
   and escalates to one hour instead of expiring after four minutes. Providers shows an
