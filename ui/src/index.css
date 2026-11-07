@@ -79,6 +79,13 @@ body,
   height: 100%;
 }
 
+/* System selection colors follow the OS accent (often graphite), which can paint black on
+   near-black text. Pin both colors so selected text is always readable. */
+::selection {
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+}
+
 body {
   background: var(--color-bg);
   color: var(--color-fg);
