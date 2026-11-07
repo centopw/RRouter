@@ -2807,7 +2807,7 @@ fn parse_caps(raw: String) -> serde_json::Value {
 
 #[cfg(test)]
 mod window_tests {
-    use super::{window_start, BudgetWindow};
+    use super::{window_reset, window_start, BudgetWindow};
 
     /// Unix seconds of a UTC wall-clock instant, written out so the expected values are
     /// independent of the code under test.
@@ -2865,6 +2865,37 @@ mod window_tests {
         assert_eq!(
             window_start(BudgetWindow::Weekly, ts(2025, 6, 23, 0, 0) - 1),
             Some(ts(2025, 6, 16, 0, 0))
+        );
+    }
+
+    /// The reset is the end of the window that starts at `window_start`: daily and
+    /// weekly add a fixed span, monthly rolls to the first day of the next month
+    /// (including a 31-day month and a year boundary).
+    #[test]
+    fn reset_is_the_end_of_the_window() {
+        assert_eq!(window_reset(BudgetWindow::Total, ts(2025, 6, 15, 0, 0)), None);
+        assert_eq!(
+            window_reset(BudgetWindow::Daily, ts(2025, 6, 15, 0, 0)),
+            Some(ts(2025, 6, 16, 0, 0))
+        );
+        assert_eq!(
+            window_reset(BudgetWindow::Weekly, ts(2025, 6, 16, 0, 0)),
+            Some(ts(2025, 6, 23, 0, 0))
+        );
+        // June has 30 days; December rolls into the next year.
+        assert_eq!(
+            window_reset(BudgetWindow::Monthly, ts(2025, 6, 1, 0, 0)),
+            Some(ts(2025, 7, 1, 0, 0))
+        );
+        assert_eq!(
+            window_reset(BudgetWindow::Monthly, ts(2025, 12, 1, 0, 0)),
+            Some(ts(2026, 1, 1, 0, 0))
+        );
+        // A month's reset is exactly where the next month's window starts.
+        let start = window_start(BudgetWindow::Monthly, ts(2025, 1, 31, 23, 0)).expect("start");
+        assert_eq!(
+            window_reset(BudgetWindow::Monthly, start),
+            window_start(BudgetWindow::Monthly, ts(2025, 2, 1, 0, 0))
         );
     }
 

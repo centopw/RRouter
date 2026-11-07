@@ -18,17 +18,18 @@ background jobs: aggregate at read time so restarts are free.
 ```sql
 CREATE TABLE IF NOT EXISTS account_quotas (
   connection_id   TEXT PRIMARY KEY,
-  window          TEXT NOT NULL DEFAULT 'day',  -- day | week | month
-  max_requests    INTEGER NOT NULL DEFAULT 0,   -- 0 = unlimited
+  window          TEXT NOT NULL DEFAULT 'daily', -- daily | weekly | monthly | total
+  max_requests    INTEGER NOT NULL DEFAULT 0,    -- 0 = unlimited
   max_tokens      INTEGER NOT NULL DEFAULT 0,
   max_cost_micros INTEGER NOT NULL DEFAULT 0,
   updated_at      INTEGER NOT NULL
 );
 ```
 
-Window = **trailing** duration ending now: `day` = now-86_400_000 ms, `week` =
-now-7*86_400_000, `month` = now-30*86_400_000. Document this in the migration comment (no
-calendar boundaries, so no timezone or DST logic). Unknown stored `window` reads as `day`.
+Window reuses the key budgets' `BudgetWindow` and `window_start` (UTC calendar boundaries:
+midnight, Monday, the 1st), so a reset is predictable and there is no trailing-window
+bookkeeping. `window_reset(window, start)` returns the end of the window; unknown stored
+spellings read as `total` (all time — the strictest rule, never unlimited).
 
 ## Store (`rrouter-store`)
 

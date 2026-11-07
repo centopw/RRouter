@@ -17,7 +17,7 @@ export interface AccountQuotaRow {
   name: string | null;
   provider: string;
   is_active: boolean;
-  window: "day" | "week" | "month";
+  window: "daily" | "weekly" | "monthly";
   max_requests: number;      // 0 = unlimited
   max_tokens: number;        // 0 = unlimited
   max_cost_micros: number;   // 0 = unlimited
@@ -25,12 +25,12 @@ export interface AccountQuotaRow {
   tokens: number;            // input + output
   cost_micros: number;
   exhausted: boolean;
-  resets_at: number | null;  // epoch ms, null when there is no usage
+  resets_at: number | null;  // epoch seconds, null for an all-time quota
 }
 ```
 
 - `PUT /api/accounts/quotas/{connection_id}` body
-  `{ window?: "day"|"week"|"month"; max_requests?: number; max_tokens?: number; max_cost_micros?: number }`
+  `{ window?: "daily"|"weekly"|"monthly"; max_requests?: number; max_tokens?: number; max_cost_micros?: number }`
   -> `{ quota: AccountQuotaRow }`. Missing fields keep their current values.
 - `DELETE /api/accounts/quotas/{connection_id}` -> 204 (idempotent).
 
@@ -52,8 +52,8 @@ export interface AccountQuotaRow {
      `unlimited` and still show what was spent in the window (`$0.00 · 1.2M tokens · 12
      requests`).
    - `edit` opens a modal (copy the modal + Segmented patterns from `keys.tsx` / existing
-     modals): WINDOW segmented control (`day`/`week`/`month`, label "trailing 24 h / 7 d /
-     30 d"), three numeric inputs (`max_requests`, `max_tokens`, `max_cost_micros` entered as
+     modals): WINDOW segmented control (`daily`/`weekly`/`monthly`) with a "UTC calendar
+     window" hint, three numeric inputs (`max_requests`, `max_tokens`, `max_cost_micros` entered as
      dollars with step 0.01, converted with the same rounding helper used for key budgets —
      search the file), each with `empty = unlimited` hint. Save PUTs only the changed fields;
      `clear` (visible only when a quota row exists, i.e. any limit non-zero or window not
