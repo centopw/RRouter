@@ -115,6 +115,7 @@ export function Button({
   type = "button",
   className,
   arrow,
+  size = "md",
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -125,15 +126,17 @@ export function Button({
   className?: string;
   /** Primary actions carry a directional arrow; that is part of the brand. */
   arrow?: boolean;
+  /** `lg` is the auth/primary-action height: 44px, comfortably tappable. */
+  size?: "md" | "lg";
 }) {
   const styles: Record<ButtonVariant, string> = {
     primary:
-      "bg-accent text-[var(--color-accent-ink)] font-semibold border border-transparent hover:bg-fg active:translate-y-[1px]",
+      "bg-accent text-[var(--color-accent-ink)] font-semibold border border-transparent hover:bg-fg disabled:bg-surface-3 disabled:text-faint",
     ghost:
-      "border border-line-strong bg-surface text-fg hover:bg-surface-3 active:translate-y-[1px]",
-    quiet: "border border-transparent text-muted hover:bg-surface-3 hover:text-fg",
+      "border border-line-strong bg-surface text-fg hover:bg-surface-3 disabled:border-line disabled:bg-surface-2 disabled:text-faint",
+    quiet: "border border-transparent text-muted hover:bg-surface-3 hover:text-fg disabled:text-faint",
     danger:
-      "border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)] hover:border-[var(--color-neg)]",
+      "border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)] hover:border-[var(--color-neg)] disabled:border-line disabled:bg-surface-2 disabled:text-faint",
   };
   return (
     <button
@@ -142,7 +145,8 @@ export function Button({
       onClick={onClick}
       disabled={disabled}
       className={cx(
-        "inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 text-[13px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed disabled:opacity-40",
+        "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-full transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed",
+        size === "lg" ? "h-11 px-5 text-[13.5px]" : "h-8 px-3.5 text-[13px]",
         styles[variant],
         className,
       )}
@@ -893,7 +897,7 @@ export function ConfirmDialog({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className="inline-flex h-8 items-center gap-1.5 rounded-full bg-[var(--color-neg-fill)] px-3.5 text-[13px] font-semibold text-white transition-colors hover:bg-[var(--color-neg)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex h-8 items-center gap-1.5 rounded-full bg-[var(--color-neg-fill)] px-3.5 text-[13px] font-semibold text-white transition-colors hover:bg-[var(--color-neg)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed"
           >
             {busy ? "working…" : confirmLabel}
           </button>

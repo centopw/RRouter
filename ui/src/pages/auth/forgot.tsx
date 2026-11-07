@@ -2,11 +2,12 @@ import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiCode, recover } from "../../lib/auth";
 import {
+  AuthActions,
   AuthCard,
   AuthField,
-  AuthFooterLink,
   AuthInput,
   AuthNotice,
+  AuthPrimary,
   AuthShell,
   AuthTitle,
   PasswordField,
@@ -49,9 +50,11 @@ export default function Forgot() {
             title="Password reset"
             lead="Every other session for this account was signed out. Sign in with the new password."
           />
-          <Button variant="primary" className="w-full" onClick={() => navigate("/sign-in", { replace: true })}>
-            Back to sign in
-          </Button>
+          <AuthActions>
+            <AuthPrimary type="button" onClick={() => navigate("/sign-in", { replace: true })}>
+              Back to sign in
+            </AuthPrimary>
+          </AuthActions>
         </AuthCard>
       ) : (
         <AuthCard>
@@ -75,14 +78,17 @@ export default function Forgot() {
               disabled={busy}
             />
             {failure ? <AuthNotice>{failure}</AuthNotice> : null}
-            <Button
-              type="submit"
-              variant="primary"
-              className="w-full"
-              disabled={busy || email.trim() === "" || code.trim() === "" || password.length < 12}
+            <AuthActions
+              secondary={
+                <Button size="lg" onClick={() => navigate("/sign-in", { replace: true })}>
+                  Back to sign in
+                </Button>
+              }
             >
-              {busy ? "Resetting…" : "Reset password"}
-            </Button>
+              <AuthPrimary disabled={busy || email.trim() === "" || code.trim() === "" || password.length < 12}>
+                {busy ? "Resetting…" : "Reset password"}
+              </AuthPrimary>
+            </AuthActions>
           </form>
 
           <div className="mt-6 border-t border-line pt-5">
@@ -95,10 +101,6 @@ export default function Forgot() {
               <CopyButton value="rrouter admin reset-password <email>" label="copy" />
             </div>
           </div>
-
-          <p className="mt-5 text-center text-[12px]">
-            <AuthFooterLink to="/sign-in">Back to sign in</AuthFooterLink>
-          </p>
         </AuthCard>
       )}
     </AuthShell>

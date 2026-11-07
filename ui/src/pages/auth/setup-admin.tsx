@@ -5,16 +5,18 @@ import { ApiError } from "../../lib/api";
 import { apiCode, setupAdmin } from "../../lib/auth";
 import { useAuthState } from "../../lib/queries";
 import {
+  AuthActions,
   AuthCard,
   AuthField,
   AuthInput,
   AuthNotice,
+  AuthPrimary,
   AuthShell,
   AuthTitle,
   PasswordField,
   RecoveryCodes,
 } from "../../components/auth-form";
-import { Badge, Button } from "../../components/ui";
+import { Badge } from "../../components/ui";
 
 /** A1 first run, then A2 recovery codes. The setup code proves control of the machine. */
 export default function SetupAdmin() {
@@ -84,14 +86,11 @@ export default function SetupAdmin() {
             />
             I have stored these somewhere safe
           </label>
-          <Button
-            variant="primary"
-            className="mt-5 w-full"
-            disabled={!stored}
-            onClick={() => navigate("/setup", { replace: true })}
-          >
-            Continue to setup
-          </Button>
+          <AuthActions>
+            <AuthPrimary type="button" disabled={!stored} onClick={() => navigate("/setup", { replace: true })}>
+              Continue to setup
+            </AuthPrimary>
+          </AuthActions>
         </AuthCard>
       </AuthShell>
     );
@@ -167,9 +166,11 @@ export default function SetupAdmin() {
               disabled={busy}
             />
             {failure && !failure.field ? <AuthNotice>{failure.message}</AuthNotice> : null}
-            <Button type="submit" variant="primary" className="w-full" disabled={!canSubmit || busy}>
-              {busy ? "Creating…" : "Create admin account"}
-            </Button>
+            <AuthActions>
+              <AuthPrimary disabled={!canSubmit || busy}>
+                {busy ? "Creating…" : "Create admin account"}
+              </AuthPrimary>
+            </AuthActions>
             <p className="text-center text-[11.5px] text-faint">Everything stays on this machine.</p>
           </form>
         </AuthCard>

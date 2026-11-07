@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
-import { SIGN_IN_REQUIRED_EVENT } from "../../lib/api";
+import { adminToken, SIGN_IN_REQUIRED_EVENT } from "../../lib/api";
 import { useAuthState, useSignOut } from "../../lib/queries";
 import { AuthCard, AuthNotice, AuthShell, AuthTitle } from "../../components/auth-form";
 import { Button } from "../../components/ui";
@@ -44,8 +44,10 @@ export function AuthGuard({ children }: { children: ReactNode }) {
   const data = state.data;
   if (!data) return null;
   if (!data.initialized) return <Navigate to="/setup/admin" replace />;
-  if (!data.user) return <Navigate to={signInPath(location)} replace />;
-  if (data.user.role !== "admin") return <LimitedAccount />;
+  // A stored admin token is break-glass access: the API accepts it, so let the shell
+  // render even though no user session exists.
+  if (!data.user && !adminToken()) return <Navigate to={signInPath(location)} replace />;
+  if (data.user && data.user.role !== "admin") return <LimitedAccount />;
   return <>{children}</>;
 }
 

@@ -1,13 +1,15 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { safeNext } from "./sign-in";
 import { useQuery } from "@tanstack/react-query";
 import { apiCode, inviteMeta, signUp } from "../../lib/auth";
 import {
+  AuthActions,
   AuthCard,
   AuthField,
-  AuthFooterLink,
   AuthInput,
   AuthNotice,
+  AuthPrimary,
   AuthShell,
   AuthTitle,
   PasswordField,
@@ -25,6 +27,7 @@ const ROLE_LEAD: Record<string, string> = {
 export default function Invite() {
   const { token = "" } = useParams();
   const navigate = useNavigate();
+  const [params] = useSearchParams();
   const meta = useQuery({
     queryKey: ["auth", "invite", token],
     queryFn: () => inviteMeta(token),
@@ -52,9 +55,11 @@ export default function Invite() {
             title="This invitation has expired"
             lead="Invitation links work once and expire. Ask an admin to send you a new one."
           />
-          <Button variant="primary" className="w-full" onClick={() => navigate("/sign-in", { replace: true })}>
-            Back to sign in
-          </Button>
+          <AuthActions>
+            <AuthPrimary type="button" onClick={() => navigate("/sign-in", { replace: true })}>
+              Back to sign in
+            </AuthPrimary>
+          </AuthActions>
         </AuthCard>
       </AuthShell>
     );
@@ -70,9 +75,11 @@ export default function Invite() {
             lead="There is no reset email here. Each code works once, and this is the only time they are shown."
           />
           <RecoveryCodes codes={codes} />
-          <Button variant="primary" className="mt-5 w-full" onClick={() => navigate("/", { replace: true })}>
-            Continue
-          </Button>
+          <AuthActions>
+            <AuthPrimary type="button" onClick={() => navigate(safeNext(params.get("next")), { replace: true })}>
+              Continue
+            </AuthPrimary>
+          </AuthActions>
         </AuthCard>
       </AuthShell>
     );
@@ -137,19 +144,18 @@ export default function Invite() {
             disabled={busy}
           />
           {failure ? <AuthNotice>{failure}</AuthNotice> : null}
-          <Button
-            type="submit"
-            variant="primary"
-            className="w-full"
-            disabled={busy || name.trim() === "" || password.length < 12}
+          <AuthActions
+            secondary={
+              <Button size="lg" onClick={() => navigate("/sign-in", { replace: true })}>
+                Sign in
+              </Button>
+            }
           >
-            {busy ? "Creating…" : "Create account"}
-          </Button>
-        </form>
-        <p className="mt-5 text-center text-[12px] text-muted">
-          Already have an account? <AuthFooterLink to="/sign-in">Sign in</AuthFooterLink>
-        </p>
-      </AuthCard>
+            <AuthPrimary disabled={busy || name.trim() === "" || password.length < 12}>
+              {busy ? "Creating…" : "Create account"}
+            </AuthPrimary>
+          </AuthActions>
+        </form>      </AuthCard>
     </AuthShell>
   );
 }

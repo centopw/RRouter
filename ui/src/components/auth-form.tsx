@@ -27,9 +27,6 @@ export function AuthShell({
           className="h-[26px] w-[26px] shrink-0 select-none"
         />
         <span className="text-[14px] font-semibold tracking-[-0.01em]">RRouter</span>
-        <span className="ml-auto rounded-md border border-line bg-surface px-2.5 py-1 font-mono text-[11.5px] text-muted">
-          {window.location.host}
-        </span>
       </header>
       <main className="flex flex-1 justify-center px-4 py-10 min-[560px]:py-16">
         <div className="w-full" style={{ maxWidth: width }}>
@@ -304,6 +301,39 @@ export function RecoveryCodes({ codes }: { codes: string[] }) {
         <Button onClick={() => window.print()}>Print</Button>
       </div>
     </div>
+  );
+}
+
+/**
+ * The action row shared by every auth screen: the secondary choice on the left in the
+ * normal button style, the primary action on the right in the accent fill. Same order on
+ * every screen, so muscle memory transfers.
+ */
+export function AuthActions({ secondary, children }: { secondary?: ReactNode; children: ReactNode }) {
+  return (
+    <div className="mt-6 flex items-center justify-between gap-3">
+      <div className="shrink-0">{secondary}</div>
+      <div className="ml-auto flex items-center gap-2">{children}</div>
+    </div>
+  );
+}
+
+/** The primary action of an auth card: 44px tall, centered label, no trailing arrow. */
+export function AuthPrimary({
+  children,
+  type = "submit",
+  disabled,
+  onClick,
+}: {
+  children: ReactNode;
+  type?: "button" | "submit";
+  disabled?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <Button type={type} variant="primary" size="lg" arrow={false} disabled={disabled} onClick={onClick}>
+      {children}
+    </Button>
   );
 }
 

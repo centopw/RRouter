@@ -63,6 +63,8 @@ const Setup = page(() => import("./pages/setup"));
 const Logs = page(() => import("./pages/logs"));
 const Users = page(() => import("./pages/users"));
 const SignIn = page(() => import("./pages/auth/sign-in"));
+const Register = page(() => import("./pages/auth/register"));
+const TokenSignIn = page(() => import("./pages/auth/token-signin"));
 const SetupAdmin = page(() => import("./pages/auth/setup-admin"));
 const Forgot = page(() => import("./pages/auth/forgot"));
 const Invite = page(() => import("./pages/auth/invite"));
@@ -72,6 +74,8 @@ const router = createBrowserRouter(
     // Signed-out surfaces. They own their chrome: no sidebar.
     { path: "setup/admin", element: <SetupAdmin />, errorElement: <RouteError /> },
     { path: "sign-in", element: <SignIn />, errorElement: <RouteError /> },
+    { path: "sign-in/token", element: <TokenSignIn />, errorElement: <RouteError /> },
+    { path: "register", element: <Register />, errorElement: <RouteError /> },
     { path: "forgot", element: <Forgot />, errorElement: <RouteError /> },
     { path: "invite/:token", element: <Invite />, errorElement: <RouteError /> },
     // The wizard and the app both need a signed-in admin.

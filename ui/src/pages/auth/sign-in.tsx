@@ -2,13 +2,14 @@ import { useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiCode, signIn } from "../../lib/auth";
-import { setAdminToken } from "../../lib/api";
 import {
+  AuthActions,
   AuthCard,
   AuthField,
   AuthFooterLink,
   AuthInput,
   AuthNotice,
+  AuthPrimary,
   AuthShell,
   AuthTitle,
   PasswordField,
@@ -31,8 +32,6 @@ export default function SignIn() {
   const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const [tokenOpen, setTokenOpen] = useState(false);
-  const [token, setToken] = useState("");
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -56,10 +55,12 @@ export default function SignIn() {
       .finally(() => setBusy(false));
   };
 
+  const registerTo = `/register${next !== "/" ? `?next=${encodeURIComponent(next)}` : ""}`;
+
   return (
     <AuthShell>
       <AuthCard>
-        <AuthTitle title="Sign in" lead={`to RRouter at ${window.location.host}`} />
+        <AuthTitle title="Sign in" lead="Welcome back. Sign in to continue." />
         <form onSubmit={submit} className="flex flex-col gap-5">
           <AuthField label="Email" htmlFor="signin-email">
             <AuthInput
@@ -91,46 +92,26 @@ export default function SignIn() {
             Keep me signed in on this device
           </label>
           {failure ? <AuthNotice>{failure}</AuthNotice> : null}
-          <Button type="submit" variant="primary" className="w-full" disabled={busy}>
-            {busy ? "Signing in…" : "Sign in"}
-          </Button>
+          <AuthActions
+            secondary={
+              <Button size="lg" onClick={() => navigate(registerTo)}>
+                Register
+              </Button>
+            }
+          >
+            <AuthPrimary disabled={busy}>{busy ? "Signing in…" : "Sign in"}</AuthPrimary>
+          </AuthActions>
         </form>
       </AuthCard>
 
-      <p className="mx-auto mt-7 max-w-[380px] text-center text-[12.5px] leading-relaxed text-muted">
-        Got an invitation? Open the link an admin sent you to create your account.
+      <p className="mt-6 text-center text-[12.5px] text-muted">
+        Signing up is by invitation. Register with the link an admin sent you.
       </p>
-
-      <div className="mt-5 text-center">
-        {tokenOpen ? (
-          <div className="mx-auto mt-3 flex max-w-[340px] flex-col gap-2 text-left">
-            <AuthField
-              label="Admin token"
-              htmlFor="admin-token"
-              hint="RROUTER_ADMIN_TOKEN. Stored for this tab only."
-            >
-              <AuthInput id="admin-token" value={token} onChange={setToken} />
-            </AuthField>
-            <Button
-              onClick={() => {
-                setAdminToken(token.trim() || null);
-                navigate(next, { replace: true });
-              }}
-              disabled={token.trim().length === 0}
-            >
-              Use token
-            </Button>
-          </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setTokenOpen(true)}
-            className="text-[11.5px] text-faint underline underline-offset-2 hover:text-muted"
-          >
-            Use an admin token instead
-          </button>
-        )}
-      </div>
+      <p className="mt-3 text-center">
+        <AuthFooterLink to={`/sign-in/token${next !== "/" ? `?next=${encodeURIComponent(next)}` : ""}`}>
+          Sign in with an admin token
+        </AuthFooterLink>
+      </p>
     </AuthShell>
   );
 }

@@ -126,7 +126,7 @@ export default function Setup() {
 
   return (
     <div className="min-h-full bg-bg text-fg">
-      <header className="flex h-16 shrink-0 items-center gap-3 border-b border-white/10 bg-[var(--color-sidebar)] px-4 min-[820px]:px-7">
+      <header className="flex h-16 shrink-0 items-center gap-3 border-b border-line bg-surface px-4 min-[820px]:px-7">
         <img
           src={`${import.meta.env.BASE_URL}logo-mark-light.svg`}
           alt=""
@@ -134,10 +134,10 @@ export default function Setup() {
           height={26}
           className="h-[26px] w-[26px] shrink-0 select-none"
         />
-        <span className="text-[14px] font-semibold tracking-[-0.01em] text-white">RRouter</span>
-        <span aria-hidden className="h-[18px] w-px bg-white/20" />
-        <span className="text-[14px] text-white/60">Setup</span>
-        <span className="ml-auto hidden text-[12.5px] text-white/50 min-[820px]:inline">
+        <span className="text-[14px] font-semibold tracking-[-0.01em] text-fg">RRouter</span>
+        <span aria-hidden className="h-[18px] w-px bg-line" />
+        <span className="text-[14px] text-muted">Setup</span>
+        <span className="ml-auto hidden text-[12.5px] text-faint min-[820px]:inline">
           About 2 minutes · finish whenever you like
         </span>
         <Button variant="quiet" onClick={skip}>
@@ -148,7 +148,7 @@ export default function Setup() {
       <div className="mx-auto flex w-full max-w-[1280px] flex-wrap items-stretch">
         <aside className="hidden w-[300px] shrink-0 border-r border-line bg-[var(--color-sidebar)] px-7 py-9 min-[820px]:block">
           <Rail step={step} account={account} keyCreated={key !== null} firstRequest={firstRequest} />
-          <p className="mt-8 text-[12.5px] leading-relaxed text-white/45">
+          <p className="mt-8 text-[12.5px] leading-relaxed text-faint">
             Self-hosted. RRouter runs on this machine and talks to your providers directly.
           </p>
         </aside>
@@ -913,9 +913,9 @@ function Rail({
               <span
                 className={cx(
                   "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border font-mono text-[12px]",
-                  done && "border-white bg-white text-[var(--color-sidebar)]",
-                  current && "border-[var(--color-nav-accent)] text-white",
-                  !done && !current && "border-white/25 text-white/50",
+                  done && "border-accent bg-accent text-[var(--color-accent-ink)]",
+                  current && "border-accent text-accent-text",
+                  !done && !current && "border-line text-muted",
                 )}
               >
                 {done ? <Check size={13} weight="bold" aria-hidden /> : n}
@@ -925,10 +925,10 @@ function Rail({
               ) : null}
             </div>
             <div className={cx("min-w-0 pb-6", n === 3 && "pb-0")}>
-              <div className={cx("text-[13.5px] font-medium", done || current ? "text-white" : "text-white/60")}>
+              <div className={cx("text-[13.5px] font-medium", done || current ? "text-fg" : "text-muted")}>
                 {STEP_TITLES[n - 1]}
               </div>
-              <div className="mt-0.5 text-[12.5px] text-white/45">{summaries[n - 1]}</div>
+              <div className="mt-0.5 text-[12.5px] text-faint">{summaries[n - 1]}</div>
             </div>
           </li>
         );

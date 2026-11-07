@@ -148,7 +148,7 @@ export function Shell() {
     <div className="flex h-full flex-col min-[820px]:flex-row">
       <aside
         className={cx(
-          "hidden shrink-0 flex-col border-r border-line bg-[var(--color-sidebar)] transition-[width] duration-[var(--motion-base)] min-[820px]:flex",
+          "hidden shrink-0 flex-col border-r border-line bg-[var(--color-sidebar)] transition-[width] duration-200 min-[820px]:flex",
           collapsed ? "w-[68px]" : "w-[236px]",
         )}
       >
@@ -375,7 +375,7 @@ function SidebarFooter({
       <div className="rounded-[8px] border border-line bg-surface-2 px-2.5 py-2">
         <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-faint">Endpoint</div>
         <div className="mt-1 flex min-w-0">
-          <CopyChip value={endpoint} display={endpoint.replace(/^https?:\/\//, "")} onDark />
+          <CopyChip value={endpoint} display={endpoint.replace(/^https?:\/\//, "")} />
         </div>
         <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
           <RunningDot running={running} />
