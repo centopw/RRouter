@@ -120,11 +120,6 @@ textarea,
   font-feature-settings: "tnum";
 }
 
-::selection {
-  background: var(--color-accent);
-  color: #04121a;
-}
-
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
