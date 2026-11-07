@@ -2,6 +2,14 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.2.3
+
+### Security
+- Every response carries `x-content-type-options: nosniff`, `x-frame-options: DENY`,
+  `referrer-policy: no-referrer` and a restrictive `permissions-policy`; HTML documents add a
+  same-origin CSP (https images and operator-configured extension-panel frames allowed,
+  scripts and fetches same-origin). Insert-only: headers already set upstream win.
+
 ## 0.2.2
 
 ### Added

@@ -36,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | s
 
 ```sh
 # pin a version / choose a directory
-RROUTER_VERSION=v0.2.2 RROUTER_INSTALL_DIR="$HOME/bin" \
+RROUTER_VERSION=v0.2.3 RROUTER_INSTALL_DIR="$HOME/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
 
 # see what it would do
