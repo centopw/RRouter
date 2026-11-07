@@ -532,6 +532,9 @@ pub struct UsageRecord {
     pub latency_ms: u32,
     /// Milliseconds from request start to the first model output; 0 when unmeasured.
     pub ttft_ms: u32,
+    /// Milliseconds from sending the upstream request to its response headers. `0` when
+    /// the transport was not measured (passthroughs, old rows).
+    pub upstream_ms: u32,
     pub status: u16,
     pub streamed: bool,
     pub error: Option<String>,
@@ -2147,8 +2150,8 @@ impl Store {
             "INSERT INTO usage \
              (ts, request_id, provider, model, connection_id, endpoint, key_id, input_tokens, \
               output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, \
-              streamed, error, cost_micros) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+              streamed, error, cost_micros, upstream_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 r.ts,
                 r.request_id.map(|u| u.to_string()).unwrap_or_default(),
@@ -2167,6 +2170,7 @@ impl Store {
                 r.streamed as i64,
                 r.error,
                 r.cost_micros,
+                r.upstream_ms,
             ],
         )
         .map_err(migrations::db_err)?;
@@ -2617,7 +2621,7 @@ fn uuid_col(s: String) -> rusqlite::Result<Uuid> {
 /// every reader so a new column cannot desynchronize one query from the rest.
 const USAGE_COLUMNS: &str = "id, ts, request_id, provider, model, connection_id, endpoint, \
      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, \
-     status, streamed, error, key_id, cost_micros";
+     status, streamed, error, key_id, cost_micros, upstream_ms";
 
 /// Empty `request_id` is the v8 "unknown" default written before request ids existed.
 fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
@@ -2643,6 +2647,7 @@ fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         error: r.get(15)?,
         key_id: kid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
         cost_micros: r.get(17)?,
+        upstream_ms: r.get(18)?,
     })
 }
 

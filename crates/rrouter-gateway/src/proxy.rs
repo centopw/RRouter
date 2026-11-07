@@ -264,6 +264,7 @@ async fn special_inner(
                 key: caller.key_id(),
                 request_id: trace.request_id,
                 started,
+                upstream_ms: 0,
                 ttft: None,
                 streamed: false,
                 status: 200,
@@ -934,6 +935,7 @@ fn record_passthrough(
             key,
             request_id: trace.request_id,
             started,
+            upstream_ms: trace.upstream_ms(),
             ttft: None,
             streamed: false,
             status: 200,
@@ -1043,6 +1045,7 @@ async fn handle(
                             key: key_id,
                             request_id: trace.request_id,
                             started,
+                            upstream_ms: 0,
                             ttft: None,
                             streamed: false,
                             status: 200,
@@ -1093,6 +1096,7 @@ async fn handle(
                 key: key_id,
                 request_id: trace.request_id,
                 started,
+                upstream_ms: trace.upstream_ms(),
                 ttft: None,
                 streamed: false,
                 status: 200,
@@ -1172,6 +1176,7 @@ async fn handle(
             candidate,
             model: plan.model.clone(),
             started,
+            upstream_ms: trace.upstream_ms(),
             key: key_id,
             request_id: trace.request_id,
             // The slot belongs to the stream, not to this handler: it is released when
@@ -1270,6 +1275,7 @@ async fn complete_traced(
             key,
             request_id: trace.request_id,
             started,
+            upstream_ms: trace.upstream_ms(),
             ttft: None,
             streamed: false,
             status: 200,
@@ -1299,6 +1305,7 @@ async fn complete_traced(
         key,
         request_id: trace.request_id,
         started,
+        upstream_ms: trace.upstream_ms(),
         ttft: None,
         streamed: false,
         status: 200,
@@ -1728,6 +1735,7 @@ fn record_cache_hit(
             cache_write_tokens: 0,
             latency_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
             ttft_ms: 0,
+            upstream_ms: 0,
             status: 200,
             streamed: false,
             error: None,
@@ -1855,6 +1863,7 @@ impl Attempt<'_> {
     async fn send_once_inner(&self, candidate: Candidate) -> Result<ChatResponse> {
         let (url, dialect, headers) = self.prepare(&candidate).await?;
         let wire = self.outbound(&candidate, dialect)?;
+        let sent = Instant::now();
         let resp = self
             .state
             .http
@@ -1865,6 +1874,7 @@ impl Attempt<'_> {
             .send()
             .await
             .map_err(transport_error)?;
+        self.trace.set_upstream_ms(sent.elapsed());
         let status = resp.status();
         if !status.is_success() {
             let bytes = resp.bytes().await.map_err(transport_error)?;
@@ -1886,6 +1896,7 @@ impl Attempt<'_> {
     async fn open_stream_inner(&self, candidate: Candidate) -> Result<ByteStream> {
         let (url, dialect, headers) = self.prepare(&candidate).await?;
         let wire = self.outbound(&candidate, dialect)?;
+        let sent = Instant::now();
         let resp = self
             .state
             .http
@@ -1896,6 +1907,7 @@ impl Attempt<'_> {
             .send()
             .await
             .map_err(transport_error)?;
+        self.trace.set_upstream_ms(sent.elapsed());
         let status = resp.status();
         if !status.is_success() {
             let bytes = resp.bytes().await.map_err(transport_error)?;
@@ -1966,6 +1978,9 @@ struct RequestTrace {
     request_id: Uuid,
     /// Next attempt number; also gives the label of the last one.
     attempts: AtomicU32,
+    /// Milliseconds from sending the upstream request to its response headers. Set by
+    /// every dispatch attempt and read once the winner is known.
+    upstream_ms: AtomicU32,
     inner: Mutex<TraceLabels>,
 }
 
@@ -1984,6 +1999,7 @@ impl RequestTrace {
         Self {
             request_id,
             attempts: AtomicU32::new(0),
+            upstream_ms: AtomicU32::new(0),
             inner: Mutex::new(TraceLabels::default()),
         }
     }
@@ -1995,6 +2011,18 @@ impl RequestTrace {
 
     fn set_key(&self, key: Option<Uuid>) {
         self.labels().key = key;
+    }
+
+    fn set_upstream_ms(&self, elapsed: std::time::Duration) {
+        // 0 means "not measured"; a sub-millisecond local answer still happened.
+        self.upstream_ms.store(
+            (elapsed.as_millis().min(u32::MAX as u128) as u32).max(1),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn upstream_ms(&self) -> u32 {
+        self.upstream_ms.load(Ordering::Relaxed)
     }
 
     fn set_model(&self, model: &str) {
@@ -2154,6 +2182,7 @@ impl RequestTrace {
             cache_write_tokens: 0,
             latency_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
             ttft_ms: 0,
+            upstream_ms: self.upstream_ms(),
             status: err.status(),
             streamed: false,
             error: Some(err.to_string()),
@@ -2378,6 +2407,8 @@ struct PendingRecord {
     candidate: Candidate,
     model: String,
     started: Instant,
+    /// Time to the winning attempt's response headers.
+    upstream_ms: u32,
     /// Gateway key that paid for the request; `None` for anonymous traffic.
     key: Option<Uuid>,
     /// Id already echoed to the client, so the usage row joins the attempt log.
@@ -2420,6 +2451,7 @@ impl ResponseStream {
                 key: pending.key,
                 request_id: pending.request_id,
                 started: pending.started,
+                upstream_ms: pending.upstream_ms,
                 ttft,
                 streamed: true,
                 status,
@@ -2514,6 +2546,8 @@ struct Recorded<'a> {
     /// Id already echoed to the client, so the row can be found from its header.
     request_id: Uuid,
     started: Instant,
+    /// Time to the winning attempt's upstream response headers.
+    upstream_ms: u32,
     /// Time to the first model output; `None` when the client got one JSON body.
     ttft: Option<std::time::Duration>,
     streamed: bool,
@@ -2553,6 +2587,7 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
             .ttft
             .map(|d| d.as_millis().min(u32::MAX as u128) as u32)
             .unwrap_or(0),
+        upstream_ms: r.upstream_ms,
         status: r.status,
         streamed: r.streamed,
         error: r.error.map(str::to_owned),
@@ -2758,6 +2793,7 @@ async fn embeddings_inner(
                     key: caller.key_id(),
                     request_id: trace.request_id,
                     started,
+                    upstream_ms: 0,
                     ttft: None,
                     streamed: false,
                     status: 200,
@@ -2862,6 +2898,7 @@ mod tests {
             cache_write_tokens: 0,
             latency_ms: 42,
             ttft_ms: 7,
+            upstream_ms: 0,
             status: 200,
             streamed: true,
             error: None,

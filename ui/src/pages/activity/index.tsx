@@ -25,10 +25,19 @@ import {
   type RangeId,
   type RangeSpec,
 } from "../../lib/activity";
-import { useKeys, useUsage, useUsageByModel, useUsageSeries, useUsageSummary } from "../../lib/queries";
+import {
+  useConnections,
+  useKeys,
+  useLiveUsage,
+  useUsage,
+  useUsageByModel,
+  useUsageSeries,
+  useUsageSummary,
+} from "../../lib/queries";
 import type { UsageBucket, UsageEvent, UsageModelBucket, UsageSummaryRow } from "../../lib/api";
 import { ModelTable, type ModelRow } from "./model-table";
 import { RequestDetailDialog, RequestLog } from "./request-log";
+import { LiveRoutingCard } from "../../components/live-routing";
 import { Onboarding } from "./onboarding";
 
 /** The one id the chart uses when the per-model split is unavailable. */
@@ -92,6 +101,13 @@ export default function Activity() {
   // One row proves the gateway has ever served traffic; the window-scoped
   // queries cannot tell "never used" from "quiet right now".
   const ever = useUsage(1);
+  const live = useLiveUsage(200);
+  const connections = useConnections();
+  const providerIds = useMemo(
+    () =>
+      [...new Set((connections.data ?? []).filter((c) => c.is_active).map((c) => c.provider))].sort(),
+    [connections.data],
+  );
 
   const currentBuckets = (series.data ?? []).filter((b) => b.start >= alignedFrom);
   const cur = totalsOf(currentBuckets);
@@ -421,6 +437,12 @@ export default function Activity() {
 
         {showPanels ? (
           <>
+            <LiveRoutingCard
+              events={live.data ?? []}
+              providers={providerIds}
+              loading={live.isLoading}
+            />
+
             <Card>
               <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-6 py-4">
                 <div className="flex flex-wrap items-baseline gap-2">

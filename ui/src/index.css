@@ -105,6 +105,28 @@ textarea,
   transition-timing-function: var(--ease-standard);
 }
 
+.route-grid {
+  background-image: radial-gradient(circle, var(--color-rule) 1px, transparent 1px);
+  background-size: 22px 22px;
+  opacity: 0.55;
+  mask-image: radial-gradient(ellipse at center, black 35%, transparent 80%);
+}
+
+@keyframes route-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+.route-edge {
+  stroke-dasharray: 3 7;
+  animation: route-flow 1.1s linear infinite;
+}
+
+.live-dot {
+  animation: rrouter-pulse 2s ease-in-out infinite;
+}
+
 @keyframes drawer-in {
   from {
     transform: translateX(16px);
@@ -174,6 +196,28 @@ h1[tabindex="-1"]:focus-visible {
   animation: rrouter-pulse 2s ease-in-out infinite;
 }
 
+.route-grid {
+  background-image: radial-gradient(circle, var(--color-rule) 1px, transparent 1px);
+  background-size: 22px 22px;
+  opacity: 0.55;
+  mask-image: radial-gradient(ellipse at center, black 35%, transparent 80%);
+}
+
+@keyframes route-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+.route-edge {
+  stroke-dasharray: 3 7;
+  animation: route-flow 1.1s linear infinite;
+}
+
+.live-dot {
+  animation: rrouter-pulse 2s ease-in-out infinite;
+}
+
 @keyframes drawer-in {
   from {
     transform: translateX(16px);
@@ -190,7 +234,9 @@ h1[tabindex="-1"]:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pulse {
+  .pulse,
+  .route-edge,
+  .live-dot {
     animation: none;
   }
   * {

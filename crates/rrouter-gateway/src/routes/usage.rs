@@ -29,7 +29,7 @@ const EXPORT_PAGE: usize = 1000;
 /// Exact column order of the export; clients parse this, so it is a contract.
 const CSV_HEADER: &str = "ts,iso_utc,provider,model,request_id,key_id,endpoint,\
 input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,latency_ms,ttft_ms,\
-status,streamed,cost_micros,cost_usd\n";
+upstream_ms,status,streamed,cost_micros,cost_usd\n";
 
 /// One usage row as the admin API exposes it. Shared by the list and the detail view so
 /// a client filtering by `request_id` sees exactly the row the attempt view links to.
@@ -50,6 +50,7 @@ fn row_json(r: &UsageRecord) -> Value {
         "cache_write_tokens": r.cache_write_tokens,
         "latency_ms": r.latency_ms,
         "ttft_ms": r.ttft_ms,
+        "upstream_ms": r.upstream_ms,
         "status": r.status,
         "streamed": r.streamed,
         "error": r.error,
@@ -314,6 +315,7 @@ fn csv_row(out: &mut String, r: &UsageRecord) {
         r.cache_write_tokens,
         r.latency_ms,
         r.ttft_ms,
+        r.upstream_ms,
     ] {
         out.push(',');
         out.push_str(&n.to_string());

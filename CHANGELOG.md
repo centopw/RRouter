@@ -57,6 +57,13 @@ All notable changes. Dates are local; versions follow semver once tagged.
   memory for debugging; it is off by default, never written to disk, and can be enabled or
   cleared at runtime.
 
+### Added
+- Activity has a **Live routing** map: the gateway in the centre, one node per provider
+  with an active connection, request/error counts for the last 15 minutes, and an animated
+  edge while a provider served traffic in the last 90 seconds. It refreshes every 5 seconds.
+- Request detail now records and draws the latency phases — connect + upstream headers,
+  model → first token, generation — instead of only inferring them from TTFT.
+
 ### Changed
 - In the collapsed sidebar the logo itself is the expand control: hovering swaps it for the
   expand icon, with no second button competing for the rail's width. Activity request rows

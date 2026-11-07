@@ -8,12 +8,19 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 19;
+pub(crate) const SCHEMA_VERSION: i64 = 20;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20,
 ];
+
+/// V20: request phase timing. Time to upstream response headers is transport information
+/// the gateway can measure but the model cannot report; storing it next to `ttft_ms`
+/// separates connect/queueing from model thinking and generation in the request drawer.
+const V20: &str = r#"
+ALTER TABLE usage ADD COLUMN upstream_ms INTEGER NOT NULL DEFAULT 0;
+"#;
 
 /// V19: security audit trail. One row per interesting identity/administration action —
 /// sign-in, failure, setup, invitation, role/disable change, password reset, session

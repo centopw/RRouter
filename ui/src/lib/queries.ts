@@ -263,6 +263,15 @@ export function useUsage(limit = 1000, hours?: number) {
   });
 }
 
+/** Newest N rows, polled fast for live routing. Kept separate from the history query. */
+export function useLiveUsage(limit = 200) {
+  return useQuery({
+    queryKey: ["usage-live", limit] as const,
+    queryFn: () => list<UsageEvent>(`/api/usage?limit=${limit}`),
+    refetchInterval: 5_000,
+  });
+}
+
 /** Rows per `/api/usage` page; the cursor walks back from the last row of each page. */
 export const USAGE_PAGE_SIZE = 100;
 

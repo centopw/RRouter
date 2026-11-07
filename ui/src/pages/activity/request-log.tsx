@@ -150,6 +150,9 @@ export function RequestDetail({
   // the stream ended; otherwise the split would be an invention.
   const measured = !failed && row.ttft_ms > 0 && row.ttft_ms < row.latency_ms;
   const generation = row.latency_ms - row.ttft_ms;
+  // The phases add up to the stored latency: upstream headers, model wait, generation.
+  const phased = measured && row.upstream_ms > 0 && row.upstream_ms <= row.ttft_ms;
+  const waitMs = phased ? row.ttft_ms - row.upstream_ms : 0;
 
   const detail = useUsageDetail(row.request_id || null);
   const { refetch } = detail;
@@ -221,22 +224,66 @@ export function RequestDetail({
               {row.streamed ? <span className="text-faint"> · streamed</span> : null}
             </div>
             {measured ? (
-              <div>
-                <div className="text-[12.5px] text-faint">
-                  First output <span className="font-mono tnum">{ms(row.ttft_ms)}</span> · generation{" "}
-                  <span className="font-mono tnum">{ms(generation)}</span>
-                </div>
-                <div
-                  className="mt-1.5 flex h-1.5 overflow-hidden rounded-full bg-[var(--color-rule)]"
-                  title="time to first output vs generation"
-                >
-                  <span
+              phased ? (
+                <div>
+                  <div className="text-[12.5px] text-faint">
+                    First output <span className="font-mono tnum">{ms(row.ttft_ms)}</span> ·
+                    generation <span className="font-mono tnum">{ms(generation)}</span>
+                  </div>
+                  <div
                     aria-hidden
-                    className="bg-accent"
-                    style={{ width: `${(row.ttft_ms / row.latency_ms) * 100}%` }}
-                  />
+                    className="mt-2 flex h-2 overflow-hidden rounded-full bg-[var(--color-rule)]"
+                    title="connect and headers, model wait, generation"
+                  >
+                    <span
+                      className="bg-[var(--color-series-3)]"
+                      style={{ width: `${(row.upstream_ms / row.latency_ms) * 100}%` }}
+                    />
+                    <span
+                      className="bg-accent"
+                      style={{ width: `${(waitMs / row.latency_ms) * 100}%` }}
+                    />
+                    <span
+                      className="bg-[var(--color-pos)]"
+                      style={{ width: `${(generation / row.latency_ms) * 100}%` }}
+                    />
+                  </div>
+                  <dl className="mt-2 grid grid-cols-[auto_1fr_auto] items-center gap-x-2 gap-y-1 text-[11.5px]">
+                    {[
+                      ["connect + headers", row.upstream_ms, "var(--color-series-3)"],
+                      ["model → first token", waitMs, "var(--color-accent)"],
+                      ["generation", generation, "var(--color-pos)"],
+                    ].map(([label, value, color]) => (
+                      <div key={String(label)} className="contents">
+                        <span
+                          aria-hidden
+                          className="h-2 w-2 rounded-full"
+                          style={{ backgroundColor: String(color) }}
+                        />
+                        <span className="text-muted">{label}</span>
+                        <span className="text-right font-mono text-fg tnum">{ms(Number(value))}</span>
+                      </div>
+                    ))}
+                  </dl>
                 </div>
-              </div>
+              ) : (
+                <div>
+                  <div className="text-[12.5px] text-faint">
+                    First output <span className="font-mono tnum">{ms(row.ttft_ms)}</span> · generation{" "}
+                    <span className="font-mono tnum">{ms(generation)}</span>
+                  </div>
+                  <div
+                    className="mt-1.5 flex h-1.5 overflow-hidden rounded-full bg-[var(--color-rule)]"
+                    title="time to first output vs generation"
+                  >
+                    <span
+                      aria-hidden
+                      className="bg-accent"
+                      style={{ width: `${(row.ttft_ms / row.latency_ms) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )
             ) : null}
           </>
         )}

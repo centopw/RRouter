@@ -384,6 +384,8 @@ export type UsageEvent = {
   latency_ms: number;
   /** Time to the first model output; 0 when unmeasured (non-streaming, failures). */
   ttft_ms: number;
+  /** Time from sending upstream to its response headers; 0 when unmeasured. */
+  upstream_ms: number;
   status: number;
   streamed: boolean;
   error: string | null;
