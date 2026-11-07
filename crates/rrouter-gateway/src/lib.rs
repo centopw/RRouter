@@ -190,6 +190,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/api/auth/setup", post(routes::auth::setup))
         .route("/api/auth/login", post(routes::auth::login))
         .route("/api/auth/logout", post(routes::auth::logout))
+        .route("/api/auth/refresh", post(routes::auth::refresh))
         .route("/api/auth/recover", post(routes::auth::recover))
         .route("/api/auth/invites/{token}", get(routes::auth::invite))
         .route(
@@ -344,28 +345,26 @@ async fn admin_gate(
     // non-admin is refused here rather than at each route; a cookie-authenticated write
     // must carry the CSRF header.
     if let Some(token) = auth::session_token(req.headers()) {
-        match state
-            .store
-            .session_user(&auth::session_key(&token), now_unix())
-            .await
-        {
-            Ok(Some(user)) if !user.is_admin() => {
-                return admin_forbidden(
-                    dialect,
-                    "role_required",
-                    "this account cannot administer the gateway",
-                )
+        if let Some(claims) = state.auth.verify_session(&token) {
+            match state.store.session_user(&claims.sid, now_unix()).await {
+                Ok(Some(user)) if !user.is_admin() => {
+                    return admin_forbidden(
+                        dialect,
+                        "role_required",
+                        "this account cannot administer the gateway",
+                    )
+                }
+                Ok(Some(_)) if !safe_method && !auth::csrf_ok(req.headers()) => {
+                    return admin_forbidden(
+                        dialect,
+                        "csrf_required",
+                        "the x-rrouter-csrf header is required for this request",
+                    )
+                }
+                Ok(Some(_)) => return next.run(req).await,
+                Ok(None) => {}
+                Err(e) => return error::error_response(dialect, &e),
             }
-            Ok(Some(_)) if !safe_method && !auth::csrf_ok(req.headers()) => {
-                return admin_forbidden(
-                    dialect,
-                    "csrf_required",
-                    "the x-rrouter-csrf header is required for this request",
-                )
-            }
-            Ok(Some(_)) => return next.run(req).await,
-            Ok(None) => {}
-            Err(e) => return error::error_response(dialect, &e),
         }
     }
     if state.config.admin_token.is_none() {

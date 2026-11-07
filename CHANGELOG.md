@@ -64,6 +64,14 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - Request detail now records and draws the latency phases — connect + upstream headers,
   model → first token, generation — instead of only inferring them from TTFT.
 
+### Security
+- Dashboard sessions are HS256 JWTs signed with a key stored beside the data volume.
+  The database still validates every session, so logout and password changes revoke a
+  mathematically valid token. A new `/api/auth/refresh` rotates the session id and the
+  client retries once on 401, invalidating the previous token. Sessions created without
+  “keep me signed in” are pruned on process start, so a redeploy ends them; remembered
+  sessions survive.
+
 ### Added
 - Community providers: the Add-provider → API key screen links to API and OAuth issue
   forms. The API form is parsed into `providers/community/<id>.json`, compiled into the

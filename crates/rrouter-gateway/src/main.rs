@@ -261,6 +261,10 @@ async fn serve(config: Config) -> Result<(), String> {
         .users_exist()
         .await
         .map_err(|e| format!("read users: {e}"))?;
+    // Browser-session logins do not survive a redeploy; remember-me sessions do.
+    if let Err(e) = store.prune_ephemeral_sessions().await {
+        tracing::warn!(error = %e, "could not prune non-persistent sessions");
+    }
 
     let http = build_http_client(&config)?;
     let state = Arc::new(AppState {

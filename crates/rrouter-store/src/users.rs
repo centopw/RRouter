@@ -456,15 +456,47 @@ impl Store {
         token_hash: &str,
         user_id: Uuid,
         expires_at: i64,
+        remember: bool,
     ) -> Result<()> {
         self.conn()
             .execute(
-                "INSERT INTO user_sessions (token_hash, user_id, created_at, expires_at) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![token_hash, user_id.to_string(), now(), expires_at],
+                "INSERT INTO user_sessions (token_hash, user_id, created_at, expires_at, remember) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![token_hash, user_id.to_string(), now(), expires_at, remember as i64],
             )
             .map_err(migrations::db_err)?;
         Ok(())
+    }
+
+    /// Delete every session that did not opt into "keep me signed in". Called once at
+    /// process start: the browser cookie may survive a redeploy, but its session cannot.
+    pub async fn prune_ephemeral_sessions(&self) -> Result<usize> {
+        self.conn()
+            .execute("DELETE FROM user_sessions WHERE remember = 0", [])
+            .map_err(migrations::db_err)
+    }
+
+    /// Rotate a session to a fresh hash, preserving its expiry and remember flag.
+    pub async fn rotate_session(&self, old_hash: &str, new_hash: &str) -> Result<bool> {
+        let changed = self
+            .conn()
+            .execute(
+                "UPDATE user_sessions SET token_hash = ?2 WHERE token_hash = ?1",
+                params![old_hash, new_hash],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(changed == 1)
+    }
+
+    pub async fn session_remember(&self, token_hash: &str) -> Result<Option<bool>> {
+        self.conn()
+            .query_row(
+                "SELECT remember FROM user_sessions WHERE token_hash = ?1",
+                params![token_hash],
+                |r| r.get::<_, i64>(0).map(|v| v != 0),
+            )
+            .optional()
+            .map_err(migrations::db_err)
     }
 
     /// The live session's user. Expired or disabled users authenticate as nobody.

@@ -51,6 +51,7 @@ flate2 = "1"
 tar = "0.4"
 hex = "0.4"
 hmac = "0.12"
+jsonwebtoken = "9"
 digest = "0.10"
 argon2 = "0.5"
 

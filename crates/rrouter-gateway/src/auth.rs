@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use axum::http::header::{COOKIE, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::Response;
-use rrouter_store::{hash_secret, random_setup_code};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use rrouter_store::{hash_secret, random_setup_code, random_token};
+use serde::{Deserialize, Serialize};
 
 /// The only cookie the dashboard sets.
 pub const SESSION_COOKIE: &str = "rrouter_session";
@@ -26,6 +28,8 @@ pub const SESSION_SECS: i64 = 12 * 60 * 60;
 pub const REMEMBER_SECS: i64 = 30 * 24 * 60 * 60;
 
 const SETUP_FILE: &str = "setup-code.txt";
+const JWT_KEY_FILE: &str = "jwt.key";
+const JWT_ISSUER: &str = "rrouter";
 const WINDOW: Duration = Duration::from_secs(60);
 const LIMIT: u32 = 5;
 
@@ -38,6 +42,10 @@ struct Attempt {
 /// throttle. Sessions themselves live in the store.
 pub struct Auth {
     setup_path: PathBuf,
+    /// HS256 signing key for dashboard session JWTs. Generated once per data directory
+    /// and never exposed; redeploying with the same volume keeps remember-me sessions,
+    /// while ephemeral sessions are dropped separately on boot.
+    jwt_key: Vec<u8>,
     setup_code: Mutex<Option<String>>,
     /// Set once a user exists (or setup consumed the code): a code must never be minted
     /// again after that, or setup would silently reopen.
@@ -51,6 +59,7 @@ impl Auth {
     pub fn load(data_dir: &Path, users_exist: bool) -> Self {
         let auth = Self {
             setup_path: data_dir.join(SETUP_FILE),
+            jwt_key: read_or_create_jwt_key(&data_dir.join(JWT_KEY_FILE)),
             setup_code: Mutex::new(read_code(&data_dir.join(SETUP_FILE))),
             retired: Mutex::new(false),
             attempts: Mutex::new(HashMap::new()),
@@ -122,12 +131,78 @@ impl Auth {
         entry.count += 1;
     }
 
+    /// Sign a dashboard session JWT. `sid` is the SHA-256 of the refresh secret stored in
+    /// the database, so the token is revocable server-side despite being stateless.
+    pub fn issue_session(&self, user_id: uuid::Uuid, sid: &str, expires_at: i64) -> Option<String> {
+        let claims = SessionClaims {
+            iss: JWT_ISSUER.to_string(),
+            sub: user_id.to_string(),
+            sid: sid.to_string(),
+            iat: crate::now_unix().max(0) as usize,
+            exp: expires_at.max(0) as usize,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(&self.jwt_key),
+        )
+        .ok()
+    }
+
+    /// Verify signature, issuer and expiry; the database lookup still decides whether the
+    /// session exists, so logout and password changes revoke even a mathematically valid JWT.
+    pub fn verify_session(&self, token: &str) -> Option<SessionClaims> {
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_issuer(&[JWT_ISSUER]);
+        validation.leeway = 5;
+        decode::<SessionClaims>(token, &DecodingKey::from_secret(&self.jwt_key), &validation)
+            .ok()
+            .map(|data| data.claims)
+    }
+
     pub fn clear_failures(&self, key: &str) {
         self.attempts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(key);
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionClaims {
+    pub iss: String,
+    pub sub: String,
+    pub sid: String,
+    pub iat: usize,
+    pub exp: usize,
+}
+
+fn read_or_create_jwt_key(path: &Path) -> Vec<u8> {
+    if let Ok(raw) = std::fs::read_to_string(path) {
+        let raw = raw.trim();
+        if raw.len() >= 32 {
+            return raw.as_bytes().to_vec();
+        }
+    }
+    let key = random_token();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true).mode(0o600);
+        if let Ok(mut file) = options.open(path) {
+            let _ = file.write_all(key.as_bytes());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::write(path, key.as_bytes());
+    }
+    key.into_bytes()
 }
 
 fn read_code(path: &Path) -> Option<String> {
@@ -303,6 +378,26 @@ mod tests {
         assert!(auth.throttle("other@b.c|1.2.3.4").is_none());
         auth.clear_failures("a@b.c|1.2.3.4");
         assert!(auth.throttle("a@b.c|1.2.3.4").is_none());
+    }
+
+    #[test]
+    fn session_jwt_is_signed_and_tamper_evident() {
+        let dir = std::env::temp_dir().join(format!("rrouter-jwt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let auth = Auth::load(&dir, true);
+        let user = uuid::Uuid::new_v4();
+        let token = auth
+            .issue_session(user, "sid-hash", crate::now_unix() + 60)
+            .expect("signed");
+        let claims = auth.verify_session(&token).expect("valid");
+        assert_eq!(claims.sub, user.to_string());
+        assert_eq!(claims.sid, "sid-hash");
+        assert!(auth.verify_session(&format!("{token}x")).is_none());
+        let expired = auth
+            .issue_session(user, "sid-hash", crate::now_unix() - 60)
+            .expect("signed");
+        assert!(auth.verify_session(&expired).is_none());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

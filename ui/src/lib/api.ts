@@ -53,17 +53,39 @@ function csrfHeader(method: string | undefined): Record<string, string> {
   return verb === "GET" || verb === "HEAD" ? {} : { "x-rrouter-csrf": "1" };
 }
 
+async function rotateSession(): Promise<boolean> {
+  try {
+    const res = await fetch("/api/auth/refresh", {
+      method: "POST",
+      headers: { "x-rrouter-csrf": "1" },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = isAdminPath(path) ? adminToken() : null;
-  const res = await fetch(path, {
-    ...init,
-    headers: {
-      ...(init?.body ? { "content-type": "application/json" } : {}),
-      ...csrfHeader(init?.method),
-      ...(token ? { "x-admin-token": token } : {}),
-      ...init?.headers,
-    },
-  });
+  const headers = {
+    ...(init?.body ? { "content-type": "application/json" } : {}),
+    ...csrfHeader(init?.method),
+    ...(token ? { "x-admin-token": token } : {}),
+    ...init?.headers,
+  };
+  const send = () => fetch(path, { ...init, headers });
+  let res = await send();
+  // A revoked/expired JWT gets one rotation attempt, then the original request is
+  // replayed with the new cookie. Auth endpoints are excluded so sign-in failures do
+  // not loop through refresh.
+  if (
+    res.status === 401 &&
+    isAdminPath(path) &&
+    !token &&
+    !path.startsWith("/api/auth/")
+  ) {
+    if (await rotateSession()) res = await send();
+  }
   const text = await res.text();
   const body: unknown = text ? safeJson(text) : null;
   if (!res.ok) throw apiError(res, body, path);

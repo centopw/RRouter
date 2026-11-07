@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use super::{admin_error, body_json, ok_json};
 use crate::auth::{
-    self, clear_session_cookie, is_secure, session_key, session_token, set_session_cookie,
+    self, clear_session_cookie, csrf_ok, is_secure, session_key, session_token, set_session_cookie,
     REMEMBER_SECS, SESSION_SECS,
 };
 use crate::state::AppState;
@@ -104,14 +104,24 @@ fn email_problem(email: &str) -> Option<&'static str> {
     None
 }
 
+/// Verify the JWT and return its database session id. A valid signature is not enough:
+/// the session row must still exist, which makes logout and password resets revoke old
+/// tokens immediately.
+pub fn current_session_id(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let token = session_token(headers)?;
+    state.auth.verify_session(&token).map(|claims| claims.sid)
+}
+
 pub async fn current_user(state: &AppState, headers: &HeaderMap) -> Option<User> {
     let token = session_token(headers)?;
-    state
+    let claims = state.auth.verify_session(&token)?;
+    let user = state
         .store
-        .session_user(&session_key(&token), crate::now_unix())
+        .session_user(&claims.sid, crate::now_unix())
         .await
         .ok()
-        .flatten()
+        .flatten()?;
+    (user.id.to_string() == claims.sub).then_some(user)
 }
 
 /// `GET /api/auth/state` — unauthenticated; decides every route on the client.
@@ -249,18 +259,23 @@ async fn start_session(
     user_id: &uuid::Uuid,
     remember: bool,
 ) -> rrouter_core::Result<Response> {
-    let token = random_token();
-    let lifetime = if remember {
-        REMEMBER_SECS
-    } else {
-        SESSION_SECS
-    };
+    let sid = session_key(&random_token());
+    let expires_at = crate::now_unix()
+        + if remember {
+            REMEMBER_SECS
+        } else {
+            SESSION_SECS
+        };
     state
         .store
-        .create_session(&session_key(&token), *user_id, crate::now_unix() + lifetime)
+        .create_session(&sid, *user_id, expires_at, remember)
         .await?;
+    let jwt = state
+        .auth
+        .issue_session(*user_id, &sid, expires_at)
+        .ok_or_else(|| rrouter_core::Error::Store("could not sign session token".into()))?;
     let mut resp = StatusCode::NO_CONTENT.into_response();
-    set_session_cookie(&mut resp, &token, remember, is_secure(headers));
+    set_session_cookie(&mut resp, &jwt, remember, is_secure(headers));
     Ok(resp)
 }
 
@@ -380,9 +395,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
             "sign in to continue",
         );
     };
-    let current = session_token(&headers)
-        .map(|token| session_key(&token))
-        .unwrap_or_default();
+    let current = current_session_id(&state, &headers).unwrap_or_default();
     let sessions = match state.store.sessions_for_user(user.id).await {
         Ok(rows) => rows,
         Err(e) => return admin_error(&e),
@@ -517,9 +530,7 @@ pub async fn revoke_session(
             "sign in to continue",
         );
     };
-    let current = session_token(&headers)
-        .map(|token| session_key(&token))
-        .unwrap_or_default();
+    let current = current_session_id(&state, &headers).unwrap_or_default();
     let sessions = match state.store.sessions_for_user(user.id).await {
         Ok(rows) => rows,
         Err(e) => return admin_error(&e),
@@ -577,18 +588,14 @@ pub async fn revoke_other_sessions(
             "sign in to continue",
         );
     };
-    let Some(token) = session_token(&headers) else {
+    let Some(sid) = current_session_id(&state, &headers) else {
         return fail(
             StatusCode::UNAUTHORIZED,
             "sign_in_required",
             "sign in to continue",
         );
     };
-    match state
-        .store
-        .delete_sessions_except(user.id, &session_key(&token))
-        .await
-    {
+    match state.store.delete_sessions_except(user.id, &sid).await {
         Ok(count) => {
             audit(
                 &state,
@@ -604,11 +611,89 @@ pub async fn revoke_other_sessions(
     }
 }
 
+/// `POST /api/auth/refresh` — rotate the session id and issue a fresh JWT. The old JWT
+/// stops matching the database row immediately, so a copied cookie is useless once the
+/// real client has reloaded its token.
+pub async fn refresh(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !csrf_ok(&headers) {
+        return fail(
+            StatusCode::FORBIDDEN,
+            "csrf_required",
+            "the x-rrouter-csrf header is required",
+        );
+    }
+    let Some(token) = session_token(&headers) else {
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "sign_in_required",
+            "sign in to continue",
+        );
+    };
+    let Some(claims) = state.auth.verify_session(&token) else {
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "sign_in_required",
+            "sign in to continue",
+        );
+    };
+    let Some(user) = state
+        .store
+        .session_user(&claims.sid, crate::now_unix())
+        .await
+        .ok()
+        .flatten()
+    else {
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "sign_in_required",
+            "sign in to continue",
+        );
+    };
+    if user.id.to_string() != claims.sub {
+        return fail(
+            StatusCode::UNAUTHORIZED,
+            "sign_in_required",
+            "sign in to continue",
+        );
+    }
+    let remember = match state.store.session_remember(&claims.sid).await {
+        Ok(Some(remember)) => remember,
+        Ok(None) => {
+            return fail(
+                StatusCode::UNAUTHORIZED,
+                "sign_in_required",
+                "sign in to continue",
+            )
+        }
+        Err(e) => return admin_error(&e),
+    };
+    let sid = session_key(&random_token());
+    match state.store.rotate_session(&claims.sid, &sid).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return fail(
+                StatusCode::UNAUTHORIZED,
+                "sign_in_required",
+                "sign in to continue",
+            )
+        }
+        Err(e) => return admin_error(&e),
+    }
+    let Some(jwt) = state.auth.issue_session(user.id, &sid, claims.exp as i64) else {
+        return admin_error(&rrouter_core::Error::Store(
+            "could not sign session token".into(),
+        ));
+    };
+    let mut resp = StatusCode::NO_CONTENT.into_response();
+    set_session_cookie(&mut resp, &jwt, remember, is_secure(&headers));
+    resp
+}
+
 /// `POST /api/auth/logout` — clears the session both server- and client-side.
 pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(token) = session_token(&headers) {
+    if let Some(sid) = current_session_id(&state, &headers) {
         let user = current_user(&state, &headers).await;
-        if let Err(e) = state.store.delete_session(&session_key(&token)).await {
+        if let Err(e) = state.store.delete_session(&sid).await {
             return admin_error(&e);
         }
         audit(
