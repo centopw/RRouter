@@ -24,8 +24,8 @@ fn main() {
             println!("cargo:rerun-if-changed={}", path.display());
             let raw = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            let value: Value = serde_json::from_str(&raw)
-                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let value: Value =
+                serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             entries.push(spec(&path, &value));
         }
     }
@@ -40,7 +40,12 @@ fn main() {
 }
 
 fn string(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn opt(value: &Value, key: &str) -> String {
@@ -53,7 +58,10 @@ fn opt(value: &Value, key: &str) -> String {
 fn spec(path: &Path, value: &Value) -> String {
     let fail = |msg: &str| -> ! { panic!("{}: {msg}", path.display()) };
     let id = string(value, "id").unwrap_or_else(|| fail("id is required"));
-    if !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         fail("id must be a lowercase slug");
     }
     let display = string(value, "display").unwrap_or_else(|| fail("display is required"));
@@ -61,7 +69,10 @@ fn spec(path: &Path, value: &Value) -> String {
     if !base_url.starts_with("https://") {
         fail("base_url must be an https URL");
     }
-    let dialect = match string(value, "default_dialect").as_deref().unwrap_or("chat") {
+    let dialect = match string(value, "default_dialect")
+        .as_deref()
+        .unwrap_or("chat")
+    {
         "chat" => "Dialect::OpenAiChat",
         "responses" => "Dialect::OpenAiResponses",
         "messages" | "anthropic" => "Dialect::AnthropicMessages",
@@ -78,7 +89,15 @@ fn spec(path: &Path, value: &Value) -> String {
         .and_then(Value::as_object)
         .map(|map| {
             map.iter()
-                .filter_map(|(k, v)| v.as_str().map(|v| format!("({}, {})", serde_json::to_string(k).unwrap(), serde_json::to_string(v).unwrap())))
+                .filter_map(|(k, v)| {
+                    v.as_str().map(|v| {
+                        format!(
+                            "({}, {})",
+                            serde_json::to_string(k).unwrap(),
+                            serde_json::to_string(v).unwrap()
+                        )
+                    })
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         })
@@ -87,7 +106,10 @@ fn spec(path: &Path, value: &Value) -> String {
         Some(n) => format!("Some({n})"),
         None => "None".to_string(),
     };
-    let stream_only = value.get("stream_only").and_then(Value::as_bool).unwrap_or(false);
+    let stream_only = value
+        .get("stream_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     format!(
         "    ProviderSpec {{\n\
          \x20       id: {id},\n\

@@ -703,7 +703,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn models_url_drops_operation_and_avoids_v1_v1() {
         assert_eq!(
             models_url("https://api.openai.com/v1/chat/completions"),

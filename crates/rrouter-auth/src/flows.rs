@@ -731,6 +731,7 @@ mod tests {
             kind: ProviderKind::OAuth,
             base_url: "https://mock.test/chat",
             responses_url: None,
+            models_url: None,
             messages_url: None,
             images_url: None,
             audio_speech_url: None,

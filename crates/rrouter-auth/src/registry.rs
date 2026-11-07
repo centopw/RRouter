@@ -643,7 +643,7 @@ mod tests {
         let all: Vec<_> = all().collect();
         for (i, spec) in all.iter().enumerate() {
             assert!(
-                get(spec.id).is_some_and(|s| std::ptr::eq(s, spec)),
+                get(spec.id).is_some_and(|s| std::ptr::eq(s, *spec)),
                 "{} not reachable",
                 spec.id
             );
