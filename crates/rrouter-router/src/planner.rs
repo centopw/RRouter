@@ -38,6 +38,7 @@ const KNOWN_PROVIDERS: &[&str] = &[
     "github",
     "openai",
     "anthropic",
+    "opencode",
     "deepseek",
     "gemini",
     "groq",

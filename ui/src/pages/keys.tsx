@@ -19,7 +19,7 @@ import {
 import { DataTable, type Column } from "../components/table";
 import { ModelPicker } from "../components/model-picker";
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
-import { qk, useKeyModels, useKeys, useModels, useUpdateKey, useUpdateKeyModels } from "../lib/queries";
+import { qk, useKeyModels, useKeys, useModels, useSystem, useUpdateKey, useUpdateKeyModels } from "../lib/queries";
 import {
   ApiError,
   api,
@@ -34,6 +34,7 @@ import {
 
 export default function Keys() {
   const keys = useKeys();
+  const system = useSystem();
   const client = useQueryClient();
   const [editing, setEditing] = useState<KeyResult | null>(null);
   const [creating, setCreating] = useState(false);
@@ -141,7 +142,15 @@ export default function Keys() {
           <span>endpoint</span>
           <CopyChip value={`${window.location.origin}/v1`} />
           <span className="ml-auto flex items-center gap-1.5">
-            enforcement is controlled by <Badge>require_api_key</Badge> in the server config
+            {system.data?.require_api_key ? (
+              <>
+                clients must present a key · <Badge>RROUTER_REQUIRE_API_KEY=true</Badge>
+              </>
+            ) : (
+              <>
+                enforcement is off · <Badge>RROUTER_REQUIRE_API_KEY=false</Badge>
+              </>
+            )}
           </span>
         </div>
       </Card>

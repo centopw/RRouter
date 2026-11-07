@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Badge,
   Button,
@@ -42,7 +44,7 @@ import {
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
 import { useToast } from "../components/toast";
 
-type AddStep = "kind" | "provider" | "key";
+type AddStep = "kind" | "provider" | "opencode" | "key";
 
 export default function Providers() {
   const connections = useConnections();
@@ -54,6 +56,9 @@ export default function Providers() {
   const [step, setStep] = useState<AddStep>("kind");
   const [kind, setKind] = useState<"subscription" | "api_key" | null>(null);
   const [signIn, setSignIn] = useState<OAuthProvider | null>(null);
+  const [keyProvider, setKeyProvider] = useState<string | null>(null);
+  const [customProtocol, setCustomProtocol] = useState<"openai" | "anthropic" | null>(null);
+  const [params, setParams] = useSearchParams();
   const [authWindow, setAuthWindow] = useState<Window | null>(null);
   const [notice, setNotice] = useState<{ tone: "pos" | "neg"; text: string } | null>(null);
   const [routing, setRouting] = useState<Connection | null>(null);
@@ -93,6 +98,8 @@ export default function Providers() {
     setAdding(true);
     setStep("kind");
     setKind(null);
+    setKeyProvider(null);
+    setCustomProtocol(null);
     setNotice(null);
   };
 
@@ -100,6 +107,33 @@ export default function Providers() {
     setKind(k);
     setStep("provider");
   };
+
+  const startKey = (provider: string) => {
+    setKeyProvider(provider);
+    setCustomProtocol(null);
+    setStep(provider === "opencode" ? "opencode" : "key");
+  };
+
+  const startCustom = (protocol: "openai" | "anthropic") => {
+    setAdding(true);
+    setKind("api_key");
+    setKeyProvider(protocol);
+    setCustomProtocol(protocol);
+    setStep("key");
+    setNotice(null);
+  };
+
+  // Sidebar shortcuts land here with `?custom=openai|anthropic`.
+  useEffect(() => {
+    const custom = params.get("custom");
+    if (custom !== "openai" && custom !== "anthropic") return;
+    startCustom(custom);
+    const next = new URLSearchParams(params);
+    next.delete("custom");
+    setParams(next, { replace: true });
+    // `startCustom` is stable for this effect's purpose: it only sets local state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params, setParams]);
 
   const startSignIn = (provider: OAuthProvider) => {
     // The popup must be opened during the click to survive popup blockers.
@@ -362,7 +396,10 @@ export default function Providers() {
         }}
         onChooseKind={chooseKind}
         onChooseOAuth={startSignIn}
-        onChooseKey={() => setStep("key")}
+        onChooseKey={startKey}
+        onOpenCodeContinue={() => setStep("key")}
+        selectedKeyProvider={keyProvider}
+        customProtocol={customProtocol}
         subscriptionProviders={subscriptionProviders}
         keyProviders={keyProviders}
         connected={connectedIds}
@@ -553,6 +590,9 @@ function AddProviderFlow({
   onChooseKind,
   onChooseOAuth,
   onChooseKey,
+  onOpenCodeContinue,
+  selectedKeyProvider,
+  customProtocol,
   subscriptionProviders,
   keyProviders,
   connected,
@@ -565,7 +605,10 @@ function AddProviderFlow({
   onBack: () => void;
   onChooseKind: (kind: "subscription" | "api_key") => void;
   onChooseOAuth: (provider: OAuthProvider) => void;
-  onChooseKey: () => void;
+  onChooseKey: (provider: string) => void;
+  onOpenCodeContinue: () => void;
+  selectedKeyProvider: string | null;
+  customProtocol: "openai" | "anthropic" | null;
   subscriptionProviders: Array<OAuthProvider & { display: string }>;
   keyProviders: ModelProvider[];
   connected: Set<string>;
@@ -573,7 +616,19 @@ function AddProviderFlow({
 }) {
   return (
     <Modal
-      title={step === "kind" ? "Add a provider" : kind === "subscription" ? "Sign in with a subscription" : "Add an API key"}
+      title={
+        step === "kind"
+          ? "Add a provider"
+          : step === "opencode"
+            ? "Add OpenCode"
+            : kind === "subscription"
+              ? "Sign in with a subscription"
+              : customProtocol === "openai"
+                ? "Custom OpenAI-compatible endpoint"
+                : customProtocol === "anthropic"
+                  ? "Custom Anthropic endpoint"
+                  : "Add an API key"
+      }
       open={open}
       onClose={onClose}
       footer={
@@ -620,13 +675,20 @@ function AddProviderFlow({
             title: p.display,
             meta: p.listed ? "lists its models" : "add models manually",
             connected: connected.has(p.id),
-            onClick: onChooseKey,
+            onClick: () => onChooseKey(p.id),
           }))}
         />
       ) : null}
 
+      {step === "opencode" ? <OpenCodeGuide onContinue={onOpenCodeContinue} /> : null}
+
       {step === "key" && kind === "api_key" ? (
-        <ApiKeyForm providers={keyProviders} onConnected={onConnected} />
+        <ApiKeyForm
+          providers={keyProviders}
+          fixedProvider={selectedKeyProvider}
+          customProtocol={customProtocol}
+          onConnected={onConnected}
+        />
       ) : null}
     </Modal>
   );
@@ -673,19 +735,95 @@ function ProviderList({
   );
 }
 
+function OpenCodeGuide({ onContinue }: { onContinue: () => void }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-[12.5px] leading-relaxed text-muted">
+        OpenCode exposes its models through an OpenAI-compatible endpoint. Pick the plan you
+        use — all three reuse one OpenCode API key, created in the Console.
+      </p>
+      <div className="grid gap-2">
+        {[
+          {
+            title: "Free",
+            meta: "limited-time free models",
+            body: "Free endpoints are available inside the OpenCode client only; from another client use a Go or pay-as-you-go key. You can still add the key here and route paid/Go models.",
+          },
+          {
+            title: "Pay as you go",
+            meta: "Console credits",
+            body: "Buy credits in the OpenCode Console and create an API key. Billing is per request, with no monthly subscription.",
+          },
+          {
+            title: "Go / Go Plus / Go Teams",
+            meta: "$10 / $40 / $20 per member monthly",
+            body: "Subscription access to the Go model list with 5-hour, weekly and monthly allowances. Upgrade or manage members in the Console.",
+          },
+        ].map((plan) => (
+          <div key={plan.title} className="rounded-lg border border-line bg-surface-2 px-3 py-2.5">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="text-[13px] font-medium">{plan.title}</span>
+              <span className="text-[11px] text-faint">{plan.meta}</span>
+            </div>
+            <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted">{plan.body}</p>
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-3 text-[12px]">
+        <a
+          className="font-medium text-[var(--color-accent-text)] hover:underline"
+          href="https://opencode.ai/console"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Create an OpenCode API key →
+        </a>
+        <a
+          className="text-muted hover:text-fg hover:underline"
+          href="https://opencode.ai/docs/go"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Go plans and limits
+        </a>
+      </div>
+      <p className="text-[11.5px] leading-relaxed text-faint">
+        The OpenCode key authorises RRouter upstream. Clients calling RRouter still need a
+        gateway key from API Keys unless the server runs with RROUTER_REQUIRE_API_KEY=false.
+      </p>
+      <div className="flex justify-end">
+        <Button variant="primary" onClick={onContinue}>
+          continue with API key →
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function ApiKeyForm({
   providers,
+  fixedProvider,
+  customProtocol,
   onConnected,
 }: {
   providers: ModelProvider[];
+  fixedProvider: string | null;
+  customProtocol: "openai" | "anthropic" | null;
   onConnected: (label: string, warning: string | null) => void;
 }) {
   const client = useQueryClient();
-  const [provider, setProvider] = useState(providers[0]?.id ?? "");
+  const [provider, setProvider] = useState(fixedProvider ?? providers[0]?.id ?? "");
   const [name, setName] = useState("");
   const [key, setKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    if (fixedProvider) setProvider(fixedProvider);
+  }, [fixedProvider]);
+
+  const fixedDisplay = providers.find((p) => p.id === (fixedProvider ?? provider))?.display;
+  const needsBaseUrl = customProtocol !== null && baseUrl.trim() === "";
 
   const save = useMutation({
     mutationFn: () =>
@@ -695,7 +833,7 @@ function ApiKeyForm({
         name: name || null,
         credentials: {
           api_key: key,
-          ...(baseUrl ? { base_url_override: baseUrl } : {}),
+          ...(baseUrl.trim() ? { base_url_override: baseUrl.trim() } : {}),
         },
       }),
     onSuccess: (conn) => {
@@ -707,6 +845,7 @@ function ApiKeyForm({
     },
     onError: setError,
   });
+  const ready = provider !== "" && key !== "" && !needsBaseUrl && !save.isPending;
 
   return (
     <form
@@ -716,14 +855,29 @@ function ApiKeyForm({
         save.mutate();
       }}
     >
-      <Field label="provider">
-        <Select value={provider} onChange={setProvider} ariaLabel="api key provider">
-          {providers.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.display}
-            </option>
-          ))}
-        </Select>
+      <Field
+        label="provider"
+        hint={
+          customProtocol
+            ? `Talks the ${customProtocol === "openai" ? "OpenAI chat" : "Anthropic messages"} protocol; models are added on the Models page.`
+            : fixedProvider === "opencode"
+              ? "OpenCode Console key — Free, pay-as-you-go and Go keys all work."
+              : undefined
+        }
+      >
+        {fixedProvider ? (
+          <div className="flex h-9 items-center rounded-lg border border-line bg-surface-2 px-3 text-[13px] text-muted">
+            {fixedDisplay ?? fixedProvider}
+          </div>
+        ) : (
+          <Select value={provider} onChange={setProvider} ariaLabel="api key provider">
+            {providers.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.display}
+              </option>
+            ))}
+          </Select>
+        )}
       </Field>
       <Field label="label" hint="how this account appears in the table">
         <Input value={name} onChange={setName} placeholder="production-key" ariaLabel="account label" />
@@ -731,12 +885,24 @@ function ApiKeyForm({
       <Field label="api key" hint="stored encrypted; never returned by the API">
         <Input value={key} onChange={setKey} type="password" placeholder="sk-…" ariaLabel="api key" />
       </Field>
-      <Field label="base url override" hint="optional, for a self-hosted or proxy endpoint">
-        <Input value={baseUrl} onChange={setBaseUrl} placeholder="https://…/v1" ariaLabel="base url override" />
+      <Field
+        label="base url"
+        hint={
+          customProtocol
+            ? "required; the endpoint root that serves this protocol"
+            : "optional, for a self-hosted or proxy endpoint"
+        }
+      >
+        <Input
+          value={baseUrl}
+          onChange={setBaseUrl}
+          placeholder={customProtocol === "anthropic" ? "https://api.example.com/v1" : "https://api.example.com/v1"}
+          ariaLabel="base url override"
+        />
       </Field>
       {error ? <ErrorNote error={error} /> : null}
       <div className="flex justify-end">
-        <Button type="submit" variant="primary" disabled={!provider || !key || save.isPending}>
+        <Button type="submit" variant="primary" disabled={!ready}>
           save provider
         </Button>
       </div>

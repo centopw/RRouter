@@ -20,7 +20,7 @@ import {
   UsersThree,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
 import { useAuthState, useHealth, useModels, useSignOut, useSystem } from "./lib/queries";
 import { Button, CopyChip, Dot, cx } from "./components/ui";
@@ -232,6 +232,30 @@ export function Shell() {
             </div>
           ))}
         </nav>
+
+        <div className={cx("space-y-1 border-t border-line py-2", collapsed ? "px-2" : "px-2.5")}>
+          {[
+            { protocol: "openai", label: "Custom OpenAI" },
+            { protocol: "anthropic", label: "Custom Anthropic" },
+          ].map((item) => (
+            <Link
+              key={item.protocol}
+              to={`/providers?custom=${item.protocol}`}
+              title={`Add a custom ${item.protocol === "openai" ? "OpenAI-compatible" : "Anthropic"} endpoint`}
+              className={cx(
+                "flex items-center rounded-lg text-[11.5px] text-muted transition-colors hover:bg-surface-2 hover:text-fg",
+                collapsed ? "h-9 justify-center" : "gap-2 px-2 py-1.5",
+              )}
+            >
+              <PlugsConnected size={14} aria-hidden />
+              {collapsed ? (
+                <span className="sr-only">Custom {item.protocol} endpoint</span>
+              ) : (
+                <span className="truncate">{item.label}</span>
+              )}
+            </Link>
+          ))}
+        </div>
 
         <SessionFooter collapsed={collapsed} />
 

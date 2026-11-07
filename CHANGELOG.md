@@ -64,6 +64,18 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - Request detail now records and draws the latency phases — connect + upstream headers,
   model → first token, generation — instead of only inferring them from TTFT.
 
+### Added
+- OpenCode is a native provider (`https://opencode.ai/inference/openai/v1`), with its shared
+  model catalogue and an add-provider guide for the Free, pay-as-you-go, Go/Go Plus/Go Teams
+  plans, including direct API-key links.
+- The sidebar has two custom-endpoint shortcuts (OpenAI-compatible and Anthropic) that open
+  the key form with the protocol fixed and a required base URL.
+
+### Fixed
+- Choosing a provider in the API-key flow now carries that selection into the form instead of
+  always opening with the first registered provider.
+- Activity model rows select on a click anywhere, not only on the model name.
+
 ### Changed
 - In the collapsed sidebar the logo itself is the expand control: hovering swaps it for the
   expand icon, with no second button competing for the rail's width. Activity request rows

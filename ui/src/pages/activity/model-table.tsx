@@ -54,9 +54,17 @@ export function ModelTable({
               <div
                 role="row"
                 key={row.ref}
+                tabIndex={0}
                 aria-selected={on}
+                onClick={() => onSelect(row.ref)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect(row.ref);
+                  }
+                }}
                 className={cx(
-                  "grid grid-cols-[minmax(0,1fr)_90px_190px_88px_96px_72px] items-center gap-3 border-b border-[var(--color-rule)] py-2.5 pl-5 pr-6 text-[13.5px] last:border-0",
+                  "grid cursor-pointer grid-cols-[minmax(0,1fr)_90px_190px_88px_96px_72px] items-center gap-3 border-b border-[var(--color-rule)] py-2.5 pl-5 pr-6 text-[13.5px] last:border-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text",
                   on ? "bg-[var(--color-surface-2)]" : "hover:bg-[var(--color-row-hover)]",
                 )}
               >
@@ -67,11 +75,7 @@ export function ModelTable({
                     className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
                     style={{ background: colorOf(row.ref) }}
                   />
-                  <ModelName
-                    ref_={row.ref}
-                    on={on}
-                    onClick={() => onSelect(row.ref)}
-                  />
+                  <ModelName ref_={row.ref} on={on} />
                 </span>
                 <span role="cell" className="text-right font-mono text-[12.5px] text-muted tnum">
                   {compact(row.requests)}
@@ -120,19 +124,17 @@ export function ModelTable({
   );
 }
 
-/** `provider/id` as the registry stores it: provider faint, id legible. */
-function ModelName({ ref_, on, onClick }: { ref_: string; on: boolean; onClick: () => void }) {
+/** `provider/id` as the registry stores it: provider faint, id legible. The row owns the
+ *  click target, so every cell selects the model rather than only this label. */
+function ModelName({ ref_, on }: { ref_: string; on: boolean }) {
   const { provider, id } = splitRef(ref_);
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={on}
+    <span
       title={on ? "clear the model filter" : `filter the log to ${ref_}`}
-      className="min-w-0 truncate text-left hover:text-accent"
+      className="min-w-0 truncate text-left"
     >
       {provider ? <span className="font-mono text-[12px] text-faint">{provider}/</span> : null}
       <span className="text-fg">{id}</span>
-    </button>
+    </span>
   );
 }
