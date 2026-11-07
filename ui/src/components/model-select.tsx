@@ -126,7 +126,7 @@ export function ModelChain({
             type="button"
             aria-label={`remove model ${index + 1}`}
             onClick={() => onChange(models.filter((_, i) => i !== index))}
-            className="h-8 w-7 rounded-md text-muted hover:bg-[#ef4444]/10 hover:text-neg"
+            className="h-8 w-7 rounded-md text-muted hover:bg-[var(--color-neg-tint)] hover:text-neg"
           >
             ×
           </button>

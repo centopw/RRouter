@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Check } from "@phosphor-icons/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
@@ -124,7 +125,7 @@ export default function Setup() {
 
   return (
     <div className="min-h-full bg-bg text-fg">
-      <header className="flex h-16 shrink-0 items-center gap-3 border-b border-line bg-[var(--color-sidebar)] px-4 min-[820px]:px-7">
+      <header className="flex h-16 shrink-0 items-center gap-3 border-b border-white/10 bg-[var(--color-sidebar)] px-4 min-[820px]:px-7">
         <img
           src={`${import.meta.env.BASE_URL}logo-mark.png`}
           alt=""
@@ -132,10 +133,10 @@ export default function Setup() {
           height={26}
           className="h-[26px] w-[26px] shrink-0 select-none"
         />
-        <span className="text-[14px] font-semibold tracking-[-0.01em]">RRouter</span>
-        <span aria-hidden className="h-[18px] w-px bg-line" />
-        <span className="text-[14px] text-muted">Setup</span>
-        <span className="ml-auto hidden text-[12.5px] text-faint min-[820px]:inline">
+        <span className="text-[14px] font-semibold tracking-[-0.01em] text-white">RRouter</span>
+        <span aria-hidden className="h-[18px] w-px bg-white/20" />
+        <span className="text-[14px] text-white/60">Setup</span>
+        <span className="ml-auto hidden text-[12.5px] text-white/50 min-[820px]:inline">
           About 2 minutes · finish whenever you like
         </span>
         <Button variant="quiet" onClick={skip}>
@@ -146,7 +147,7 @@ export default function Setup() {
       <div className="mx-auto flex w-full max-w-[1280px] flex-wrap items-stretch">
         <aside className="hidden w-[300px] shrink-0 border-r border-line bg-[var(--color-sidebar)] px-7 py-9 min-[820px]:block">
           <Rail step={step} account={account} keyCreated={key !== null} firstRequest={firstRequest} />
-          <p className="mt-8 text-[12.5px] leading-relaxed text-faint">
+          <p className="mt-8 text-[12.5px] leading-relaxed text-white/45">
             Self-hosted. RRouter runs on this machine and talks to your providers directly.
           </p>
         </aside>
@@ -634,7 +635,7 @@ function KeyCreatedStep({
 }) {
   return (
     <div className="max-w-[640px]">
-      <div className="rounded-[var(--radius-card)] border border-[var(--color-warn)]/35 bg-[var(--color-warn)]/10 px-5 py-4 text-[13.5px] text-[#fbbf24]">
+      <div className="rounded-[var(--radius-card)] border border-[var(--color-warn)]/35 bg-[var(--color-warn)]/10 px-5 py-4 text-[13.5px] text-[var(--color-warn-ink)]">
         Copy the key now. It cannot be shown again.
       </div>
 
@@ -910,28 +911,22 @@ function Rail({
               <span
                 className={cx(
                   "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border font-mono text-[12px]",
-                  done && "border-fg bg-fg text-bg",
-                  current && "border-fg text-fg",
-                  !done && !current && "border-line text-muted",
+                  done && "border-white bg-white text-[var(--color-sidebar)]",
+                  current && "border-[var(--color-nav-accent)] text-white",
+                  !done && !current && "border-white/25 text-white/50",
                 )}
               >
-                {done ? (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                    <path d="M5 12.5l4.5 4.5L19 7.5" />
-                  </svg>
-                ) : (
-                  n
-                )}
+                {done ? <Check size={13} weight="bold" aria-hidden /> : n}
               </span>
               {n < 3 ? (
                 <span aria-hidden className={cx("my-1.5 min-h-5 w-px flex-1", done ? "bg-fg" : "bg-line")} />
               ) : null}
             </div>
             <div className={cx("min-w-0 pb-6", n === 3 && "pb-0")}>
-              <div className={cx("text-[13.5px] font-medium", done || current ? "text-fg" : "text-muted")}>
+              <div className={cx("text-[13.5px] font-medium", done || current ? "text-white" : "text-white/60")}>
                 {STEP_TITLES[n - 1]}
               </div>
-              <div className="mt-0.5 text-[12.5px] text-faint">{summaries[n - 1]}</div>
+              <div className="mt-0.5 text-[12.5px] text-white/45">{summaries[n - 1]}</div>
             </div>
           </li>
         );

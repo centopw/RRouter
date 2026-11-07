@@ -101,14 +101,14 @@ export default function Settings() {
               <input
                 type="color"
                 aria-label="accent colour picker"
-                value={colorOk ? color : "#00d4ff"}
+                value={colorOk ? color : ""}
                 onChange={(e) => set("brand_color")(e.target.value)}
                 className="h-8 w-10 shrink-0 cursor-pointer rounded-lg border border-line bg-surface-2"
               />
               <Input
                 value={draft.brand_color ?? ""}
                 onChange={set("brand_color")}
-                placeholder="#00d4ff"
+                placeholder="#1c2b42"
                 ariaLabel="accent colour hex"
               />
             </div>

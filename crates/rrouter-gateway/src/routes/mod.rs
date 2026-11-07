@@ -1,5 +1,6 @@
 //! Admin + public JSON API. Nothing here touches the `/v1` hot path.
 
+pub mod auth;
 pub mod combos;
 pub mod connections;
 pub mod health;
@@ -11,6 +12,7 @@ pub mod settings;
 pub mod system;
 pub mod templates;
 pub mod usage;
+pub mod users;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -21,7 +23,12 @@ use serde_json::{json, Value};
 /// client, so it never gets a dialect envelope.
 pub fn admin_error(err: &Error) -> Response {
     let status = StatusCode::from_u16(err.status()).unwrap_or(StatusCode::BAD_GATEWAY);
-    (status, axum::Json(json!({ "error": crate::error::error_object(err.status(), &err.to_string()) })))
+    (
+        status,
+        axum::Json(json!({
+            "error": crate::error::error_object_with(err.status(), &err.to_string(), err.code()),
+        })),
+    )
         .into_response()
 }
 

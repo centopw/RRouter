@@ -261,6 +261,7 @@ fn harness_with(config: Config) -> Harness {
 
 fn build_state(config: Config) -> AppState {
     let concurrency = rrouter_gateway::state::concurrency_for(config.max_concurrency);
+    let data_dir = config.data_dir.clone();
     AppState {
         store: Arc::new(Store::open_in_memory().expect("store")),
         catalog: Arc::new(Catalog::builtin()),
@@ -283,6 +284,7 @@ fn build_state(config: Config) -> AppState {
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
         concurrency,
+        auth: rrouter_gateway::auth::Auth::load(&data_dir, false),
     }
 }
 

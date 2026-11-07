@@ -9,6 +9,7 @@
 //! Every handler returns either the proxy's translated response or an error body in
 //! the inbound dialect's shape (see [`error`]).
 
+pub mod auth;
 pub mod config;
 pub mod error;
 pub mod headers;
@@ -117,6 +118,19 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/accounts/quotas/{id}",
             put(routes::quotas::update).delete(routes::quotas::remove),
         )
+        .route("/users", get(routes::users::list))
+        .route(
+            "/users/{id}",
+            put(routes::users::update).delete(routes::users::remove),
+        )
+        .route(
+            "/users/invites",
+            get(routes::auth::list_invites).post(routes::auth::create_invite),
+        )
+        .route(
+            "/users/invites/{id}",
+            axum::routing::delete(routes::auth::revoke_invite),
+        )
         .route("/usage", get(routes::usage::list))
         .route("/usage/export.csv", get(routes::usage::export_csv))
         .route("/usage/{request_id}", get(routes::usage::detail))
@@ -141,6 +155,17 @@ pub fn app(state: Arc<AppState>) -> Router {
     // Prometheus scrapes `/metrics`, not `/api/metrics`, so it needs its own gate: the
     // same loopback-only rule as the admin API, and no API key — a scraper is not a
     // model client and must not need a virtual key to read counters.
+    // Signed-out surfaces: creating the first user, signing in, accepting an invitation
+    // and recovering a password. They sit outside `admin_gate` by design.
+    let auth_api = Router::new()
+        .route("/api/auth/state", get(routes::auth::state))
+        .route("/api/auth/setup", post(routes::auth::setup))
+        .route("/api/auth/login", post(routes::auth::login))
+        .route("/api/auth/logout", post(routes::auth::logout))
+        .route("/api/auth/recover", post(routes::auth::recover))
+        .route("/api/auth/invites/{token}", get(routes::auth::invite))
+        .route("/api/auth/signup", post(routes::auth::signup));
+
     let ops = Router::new()
         .route("/metrics", get(metrics::scrape))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -149,6 +174,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         ));
 
     Router::new()
+        .merge(auth_api)
         .route("/health", get(routes::health::health))
         .route("/v1/models", get(v1_models))
         .route("/v1/models/{*id}", get(v1_model))
@@ -260,6 +286,7 @@ async fn admin_gate(
     next: Next,
 ) -> Response {
     let dialect = state::dialect_of(req.uri());
+    let safe_method = matches!(req.method(), &axum::http::Method::GET | &axum::http::Method::HEAD | &axum::http::Method::OPTIONS);
     let presented = admin_credential(req.headers());
     if let Some(expected) = state.config.admin_token.as_deref() {
         if presented
@@ -268,7 +295,37 @@ async fn admin_gate(
         {
             return next.run(req).await;
         }
-    } else {
+    }
+    // A dashboard session identifies a person, so it works even when
+    // `RROUTER_ADMIN_TOKEN` is configured (that token is for automation). A signed-in
+    // non-admin is refused here rather than at each route; a cookie-authenticated write
+    // must carry the CSRF header.
+    if let Some(token) = auth::session_token(req.headers()) {
+        match state
+            .store
+            .session_user(&auth::session_key(&token), now_unix())
+            .await
+        {
+            Ok(Some(user)) if !user.is_admin() => {
+                return admin_forbidden(
+                    dialect,
+                    "role_required",
+                    "this account cannot administer the gateway",
+                )
+            }
+            Ok(Some(_)) if !safe_method && !auth::csrf_ok(req.headers()) => {
+                return admin_forbidden(
+                    dialect,
+                    "csrf_required",
+                    "the x-rrouter-csrf header is required for this request",
+                )
+            }
+            Ok(Some(_)) => return next.run(req).await,
+            Ok(None) => {}
+            Err(e) => return error::error_response(dialect, &e),
+        }
+    }
+    if state.config.admin_token.is_none() {
         let peer_is_loopback = req
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -387,6 +444,15 @@ fn admin_required(dialect: rrouter_core::Dialect) -> Response {
             code: "admin_required",
             message: "admin API requires an admin-scoped key or RROUTER_ADMIN_TOKEN".into(),
         },
+    )
+}
+
+/// `403` with an explicit machine code (role and CSRF refusals name themselves so the
+/// dashboard can show the right message).
+fn admin_forbidden(dialect: rrouter_core::Dialect, code: &'static str, message: &str) -> Response {
+    error::error_response(
+        dialect,
+        &rrouter_core::Error::Forbidden { code, message: message.to_string() },
     )
 }
 

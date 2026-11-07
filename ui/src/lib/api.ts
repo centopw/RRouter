@@ -21,6 +21,9 @@ type Json = Record<string, unknown>;
 const ADMIN_TOKEN_KEY = "rrouter:admin-token";
 
 export const ADMIN_REQUIRED_EVENT = "rrouter:admin-token-required";
+/** Fired when the admin API answers 401 and no admin token is stored: the guard sends
+ *  the operator to `/sign-in`. */
+export const SIGN_IN_REQUIRED_EVENT = "rrouter:sign-in-required";
 
 export function adminToken(): string | null {
   try {
@@ -43,12 +46,20 @@ function isAdminPath(path: string): boolean {
   return path.startsWith("/api/") || path.startsWith("/metrics");
 }
 
+/** Methods that mutate state need the CSRF header when the caller is a dashboard
+ *  session; adding it unconditionally is harmless for token and loopback callers. */
+function csrfHeader(method: string | undefined): Record<string, string> {
+  const verb = (method ?? "GET").toUpperCase();
+  return verb === "GET" || verb === "HEAD" ? {} : { "x-rrouter-csrf": "1" };
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = isAdminPath(path) ? adminToken() : null;
   const res = await fetch(path, {
     ...init,
     headers: {
       ...(init?.body ? { "content-type": "application/json" } : {}),
+      ...csrfHeader(init?.method),
       ...(token ? { "x-admin-token": token } : {}),
       ...init?.headers,
     },
@@ -69,7 +80,7 @@ function apiError(res: Response, body: unknown, path: string): ApiError {
       ? body.error.message
       : null) ?? `${res.status} ${res.statusText}`;
   if (res.status === 401 && isAdminPath(path)) {
-    window.dispatchEvent(new Event(ADMIN_REQUIRED_EVENT));
+    window.dispatchEvent(new Event(adminToken() ? ADMIN_REQUIRED_EVENT : SIGN_IN_REQUIRED_EVENT));
   }
   return new ApiError(res.status, message, body);
 }

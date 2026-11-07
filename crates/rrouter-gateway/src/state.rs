@@ -44,6 +44,8 @@ pub struct AppState {
     /// Caps concurrent `/v1/*` proxy requests; `None` when `RROUTER_MAX_CONCURRENCY`
     /// is 0. One permit spans a whole request, streamed body included.
     pub concurrency: Option<Arc<tokio::sync::Semaphore>>,
+    /// Dashboard auth: the setup code and sign-in throttle.
+    pub auth: crate::auth::Auth,
 }
 
 /// One `/v1/*` concurrency slot handed out by [`AppState::try_slot`].
@@ -129,10 +131,23 @@ impl AppState {
                 0
             }
         };
+        let deleted_sessions = match self.store.prune_sessions(now).await {
+            Ok(deleted) => deleted,
+            Err(e) => {
+                tracing::warn!(error = %e, "expired session delete failed");
+                0
+            }
+        };
         if let Err(e) = self.store.optimize().await {
             tracing::warn!(error = %e, "pragma optimize failed");
         }
-        tracing::info!(deleted_usage, deleted_attempts, deleted_cache, "retention sweep");
+        tracing::info!(
+            deleted_usage,
+            deleted_attempts,
+            deleted_cache,
+            deleted_sessions,
+            "retention sweep"
+        );
     }
 
     pub fn request_timeout(&self) -> std::time::Duration {

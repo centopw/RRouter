@@ -212,7 +212,7 @@ export function RequestDetail({
         <StatusPill status={row.status} title={row.error ?? undefined} />
 
         {failed ? (
-          <div className="rounded-lg border border-[var(--color-neg)]/30 bg-[var(--color-neg)]/10 px-3 py-2 text-[12.5px] text-[#fca5a5]">
+          <div className="rounded-lg border border-[var(--color-neg)]/30 bg-[var(--color-neg)]/10 px-3 py-2 text-[12.5px] text-[var(--color-neg-ink)]">
             {row.error ?? `upstream answered ${row.status} ${statusText(row.status)}`}
           </div>
         ) : (

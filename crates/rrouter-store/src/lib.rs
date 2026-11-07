@@ -23,6 +23,7 @@
 mod crypto;
 mod migrations;
 mod store;
+mod users;
 
 pub use crypto::KEY_FILE_NAME;
 pub use store::{
@@ -31,5 +32,9 @@ pub use store::{
     Guardrails, KeyModel, KeyScope, ModelAlias, ModelCost, ModelRow, PromptTemplate,
     PromptTemplateVersion, PruneReport, StatusFilter, Store, UsageBucket, UsageModelBucket,
     UsageQuery, UsageRecord, UsageSummary, API_KEY_PREFIX,
+};
+pub use users::{
+    hash_password, hash_secret, normalize_email, random_recovery_codes, random_setup_code,
+    random_token, verify_password, Invite, User, UserRole,
 };
 pub use rrouter_auth::{CredentialStore, Credentials};

@@ -753,7 +753,7 @@ impl Store {
 
     /// Lock the connection. A panicking writer would poison the mutex; the underlying SQLite
     /// connection is still valid (rusqlite does not unwind mid-statement here), so recover.
-    fn conn(&self) -> MutexGuard<'_, Sql> {
+    pub(crate) fn conn(&self) -> MutexGuard<'_, Sql> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
 

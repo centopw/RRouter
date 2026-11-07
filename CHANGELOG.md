@@ -5,6 +5,15 @@ All notable changes. Dates are local; versions follow semver once tagged.
 ## Unreleased
 
 ### Added
+- Dashboard accounts: first-run owner creation with the one-time setup code printed at startup,
+  argon2id passwords, HttpOnly session cookies, ten single-use recovery codes, invite-only
+  sign-up, and the admin/member/viewer roles (`/api/auth/*`, `/api/users`, `/api/users/invites`).
+  The owner cannot be demoted, disabled or deleted; role and CSRF refusals name their reason.
+  Automation keeps working: `RROUTER_ADMIN_TOKEN` and admin-scoped keys are unchanged, and
+  `rrouter admin show-setup-code` / `rrouter admin reset-password <email>` run locally.
+- A light, flat dashboard system: near-black navigation rail, off-white canvas, white surfaces,
+  a single muted navy accent, pill buttons, 4px inputs, 8px cards, hairline borders instead of
+  shadows, Phosphor icons, and 75/400/500ms ease-out motion that respects reduced motion.
 - Guardrails per key: prompt-size cap, case-insensitive blocked phrases, and response scanning
   (streams are cut with one error frame). Blocks return 403 and are counted per stage.
 - `RROUTER_STRATEGY=cheapest` orders equal-priority accounts by the model's catalog price.
@@ -23,6 +32,8 @@ All notable changes. Dates are local; versions follow semver once tagged.
   log, so nothing counts, resets or repairs a counter.
 
 ### Changed
+- The dashboard now signs you in as a user. The pasted admin token moved behind "Use an admin
+  token instead" on the sign-in screen, and loopback/break-glass access is unchanged for the API.
 - The request detail opens as a dialog when a row is clicked (Activity and Logs) instead of
   occupying a column of the page; nothing is selected until you click, and Escape or the
   backdrop closes it.

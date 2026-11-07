@@ -121,10 +121,10 @@ export default function Keys() {
       ) : null}
 
       {issued ? (
-        <Card className="mb-3 border-[#00d4ff]/35 bg-[#00d4ff]/10 px-5 py-4">
+        <Card className="mb-3 border-[var(--color-accent)]/35 bg-[var(--color-accent)]/10 px-5 py-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[12px] text-[#67e8f9]">Copy this key now — it is not shown again.</div>
+              <div className="text-[12px] text-[var(--color-accent-text)]">Copy this key now — it is not shown again.</div>
               <code className="mt-1 block truncate font-mono text-[13px] text-fg">{issued.key}</code>
             </div>
             <Button
@@ -776,7 +776,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
                     disabled={busy}
                     aria-label={`remove mapping ${index + 1}`}
                     onClick={() => setPairs(pairs.filter((_, i) => i !== index))}
-                    className="h-8 w-7 rounded-md text-muted hover:bg-[#ef4444]/10 hover:text-neg"
+                    className="h-8 w-7 rounded-md text-muted hover:bg-[var(--color-neg-tint)] hover:text-neg"
                   >
                     ×
                   </button>

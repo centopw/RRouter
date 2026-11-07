@@ -242,8 +242,8 @@ export default function Providers() {
           className={cx(
             "mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[13px]",
             notice.tone === "pos"
-              ? "border-[#22c55e]/35 bg-[#22c55e]/10 text-[#4ade80]"
-              : "border-[#ef4444]/35 bg-[#ef4444]/10 text-[#f87171]",
+              ? "border-[var(--color-pos)]/35 bg-[var(--color-pos-tint)] text-[var(--color-pos)]"
+              : "border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)]",
           )}
         >
           <span className="min-w-0 flex-1 break-words">{notice.text}</span>
@@ -589,7 +589,7 @@ function Choice({ title, body, onClick }: { title: string; body: string; onClick
   return (
     <button
       onClick={onClick}
-      className="rounded-[var(--radius-card)] border border-line-strong bg-surface-2 p-4 text-left transition-colors hover:border-[var(--color-line-strong)] hover:bg-[#232b3a]"
+      className="rounded-[var(--radius-card)] border border-line-strong bg-surface-2 p-4 text-left transition-colors hover:border-[var(--color-line-strong)] hover:bg-[var(--color-selected)]"
     >
       <span className="block text-[14px] font-medium">{title}</span>
       <span className="mt-1 block text-[12px] leading-relaxed text-muted">{body}</span>

@@ -54,11 +54,14 @@ cargo build --release
 # listening on http://127.0.0.1:20128
 ```
 
-Open <http://127.0.0.1:20128> — it redirects to the dashboard at `/app`. A first run with no
-accounts and no keys lands on **Setup**, which walks the three steps in order: connect an
-account (Claude browser sign-in, Codex device code, or a pasted API key), create a gateway
-key, then send a request while the page waits for it to arrive. The wizard can be reopened
-from **Health**.
+Open <http://127.0.0.1:20128> — it redirects to the dashboard at `/app`. The first visit on a
+fresh instance asks for the **setup code printed in the terminal** (`Setup code: XXXX-XXXX`),
+then creates the owner account: that person administers the gateway. The ten recovery codes
+shown next are the only password reset path besides the local CLI, so store them.
+
+After that, **Setup** walks the three steps in order: connect an account (Claude browser
+sign-in, Codex device code, or a pasted API key), create a gateway key, then send a request
+while the page waits for it to arrive. The wizard can be reopened from **Health**.
 
 ```sh
 # Anthropic-shaped client
@@ -235,13 +238,21 @@ inferred from the bill.
 - The admin API never returns token material, only `has_*` booleans.
 - `RROUTER_ALLOW_REMOTE_ADMIN=false` by default: admin routes are loopback-only unless the
   operator says otherwise. `RROUTER_CORS_ORIGINS=*` is rejected at startup.
+- Dashboard accounts hash passwords with argon2id; session cookies, recovery codes and
+  invitation tokens are stored only as hashes. The owner cannot be demoted, disabled or
+  deleted. Cookie-authenticated writes require the `x-rrouter-csrf` header, sign-in is
+  rate-limited, and the owner's setup code is printed once and consumed on use.
 - Upstream payloads are never persisted; usage rows record tokens, latency, status, and the
   model — not prompts or completions.
 
 ## Dashboard
 
 The dashboard is a Vite + React app served at `/app`, embedded in the binary at build time.
-It needs Node only to build, never to run.
+It needs Node only to build, never to run. The light design system lives in
+`ui/src/index.css` (tokens only: near-black rail, off-white canvas, navy accent, pill
+buttons, 4px inputs, 8px cards, 75/400/500ms ease-out motion). Sign-in, first-run setup,
+invitation join and password recovery are pages outside the app shell; the design for them is
+in `docs/redesign/AUTH.md`.
 
 ```sh
 cd ui && npm install

@@ -57,6 +57,7 @@ fn test_state() -> Arc<AppState> {
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
         concurrency: None,
+        auth: rrouter_gateway::auth::Auth::load(&std::env::temp_dir(), false),
     })
 }
 

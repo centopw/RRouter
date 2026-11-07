@@ -40,7 +40,7 @@ export function DataTable<T>({
                 scope="col"
                 style={c.width ? { width: c.width } : undefined}
                 className={cx(
-                  "px-4 py-2 text-[11px] font-medium uppercase tracking-[0.06em] text-faint",
+                  "px-4 py-2.5 text-[12px] font-semibold text-ink-soft",
                   c.align === "right" && "text-right",
                 )}
               >

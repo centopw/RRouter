@@ -8,6 +8,8 @@ checklist at the end.
 - Live mockup: https://claude.ai/artifact/1aKvVZsTfKbdNRv17DvGh4 (private, owner only)
 - Stack: React 19, Tailwind v4 (`@theme` tokens in `ui/src/index.css`), TanStack Query, no chart library
 
+> **Theme update:** the look is now light, not dark. All colour values come from [THEME.md](./THEME.md); the dark hexes named in section 4 are historical. Accounts and sign-in are specified in [AUTH.md](./AUTH.md).
+>
 > **Status:** the Activity page was implemented in commit `5877d33`, and the backend gaps listed in section 6 were closed in that commit
 > (per-model series, 5m buckets, `hours=` scoping, request ids). Treat section 6 as history. First-run setup is specified separately in [ONBOARDING.md](./ONBOARDING.md).
 

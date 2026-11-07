@@ -8,12 +8,56 @@ use rusqlite::Connection;
 use rrouter_core::{Error, Result};
 
 /// Schema version this build expects. Bump when appending to [`MIGRATIONS`].
-pub(crate) const SCHEMA_VERSION: i64 = 17;
+pub(crate) const SCHEMA_VERSION: i64 = 18;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
 ];
+
+/// V18: dashboard users. Identity is a dashboard concept only — `/v1` clients still
+/// authenticate with gateway keys, and the admin token and admin keys remain the
+/// automation credential. `email` is stored lowercased so the unique index is the
+/// case-insensitive rule; sessions persist as SHA-256 hashes of the cookie token, so a
+/// database copy cannot be replayed as a live session. Recovery codes and invitation
+/// tokens are hashed the same way.
+const V18: &str = r#"
+CREATE TABLE IF NOT EXISTS users (
+  id               TEXT PRIMARY KEY,
+  name             TEXT NOT NULL,
+  email            TEXT NOT NULL UNIQUE,
+  password_hash    TEXT NOT NULL,
+  role             TEXT NOT NULL DEFAULT 'member',
+  is_owner         INTEGER NOT NULL DEFAULT 0,
+  disabled         INTEGER NOT NULL DEFAULT 0,
+  created_at       INTEGER NOT NULL,
+  last_sign_in_at  INTEGER
+);
+CREATE TABLE IF NOT EXISTS user_sessions (
+  token_hash TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+CREATE TABLE IF NOT EXISTS user_recovery_codes (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id   TEXT NOT NULL,
+  code_hash TEXT NOT NULL UNIQUE,
+  used_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_user_recovery_user ON user_recovery_codes(user_id);
+CREATE TABLE IF NOT EXISTS invites (
+  id         TEXT PRIMARY KEY,
+  email      TEXT NOT NULL,
+  role       TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used_at    INTEGER
+);
+"#;
 
 /// V17: per-account quotas. Each upstream connection can carry one row of limits — requests,
 /// tokens, cost — measured over a `BudgetWindow` (`daily`/`weekly`/`monthly`, UTC calendar

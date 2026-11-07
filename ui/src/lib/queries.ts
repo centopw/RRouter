@@ -28,6 +28,16 @@ import {
   type UsageModelBucket,
   type UsageSummaryRow,
 } from "./api";
+import {
+  authState,
+  createInvite,
+  listInvites,
+  listUsers,
+  removeUser,
+  revokeInvite,
+  signOut,
+  updateUser,
+} from "./auth";
 
 /** Query keys live here so invalidation after a mutation is always exact. */
 export const qk = {
@@ -35,6 +45,9 @@ export const qk = {
   system: ["system"] as const,
   connections: ["connections"] as const,
   accountQuotas: ["accounts", "quotas"] as const,
+  authState: ["auth", "state"] as const,
+  users: ["users"] as const,
+  invites: ["users", "invites"] as const,
   keys: ["keys"] as const,
   keyModels: (id: string) => ["key-models", id] as const,
   models: ["models"] as const,
@@ -350,5 +363,76 @@ export function useOAuthStatus(provider: string | null, id: string | null, inter
     refetchInterval: intervalMs,
     retry: false,
     staleTime: 0,
+  });
+}
+
+// ---------------------------------------------------------------- dashboard identity
+
+export function useAuthState() {
+  return useQuery({
+    queryKey: qk.authState,
+    queryFn: authState,
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+export function useSignOut() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: signOut,
+    onSettled: () => {
+      client.setQueryData(qk.authState, { initialized: true, setup_code_required: false, signup: "invite_only", user: null });
+      void client.invalidateQueries({ queryKey: qk.authState });
+    },
+  });
+}
+
+export function useUsers(enabled: boolean) {
+  return useQuery({
+    queryKey: qk.users,
+    queryFn: listUsers,
+    enabled,
+  });
+}
+
+export function useInvites(enabled: boolean) {
+  return useQuery({
+    queryKey: qk.invites,
+    queryFn: listInvites,
+    enabled,
+  });
+}
+
+export function useUpdateUser() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: Parameters<typeof updateUser>[1] }) =>
+      updateUser(id, patch),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.users }),
+  });
+}
+
+export function useRemoveUser() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: removeUser,
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.users }),
+  });
+}
+
+export function useCreateInvite() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: createInvite,
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.invites }),
+  });
+}
+
+export function useRevokeInvite() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: revokeInvite,
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.invites }),
   });
 }

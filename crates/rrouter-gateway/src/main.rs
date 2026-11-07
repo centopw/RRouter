@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rrouter_gateway::auth::Auth;
 use rrouter_gateway::{
     app,
     config::{Config, LogFormat},
@@ -11,7 +12,7 @@ use rrouter_gateway::{
     AppState,
 };
 use rrouter_router::Catalog;
-use rrouter_store::Store;
+use rrouter_store::{hash_password, random_token, Store};
 use tracing_subscriber::EnvFilter;
 
 const BANNER: &str = "rrouter";
@@ -32,6 +33,9 @@ fn main() -> ExitCode {
     }
     if args.iter().any(|a| a == "--healthcheck") {
         return healthcheck();
+    }
+    if args.first().map(String::as_str) == Some("admin") {
+        return admin(&args[1..]);
     }
 
     let config = match Config::from_env() {
@@ -77,6 +81,83 @@ fn healthcheck() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("rrouter: healthcheck: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Local operator commands. They open the store exactly like the server does and never
+/// speak HTTP, so they work on a stopped instance.
+fn admin(args: &[String]) -> ExitCode {
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(problem) => {
+            eprintln!("rrouter: invalid configuration: {problem}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("rrouter: runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let store = match Store::open(&config.db_path(), config.master_key.clone()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("rrouter: open store: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match args {
+        [command] if command == "show-setup-code" => {
+            let users_exist = runtime.block_on(store.users_exist()).unwrap_or(true);
+            if users_exist {
+                eprintln!("rrouter: this instance already has a user; the setup code is gone");
+                return ExitCode::FAILURE;
+            }
+            let auth = Auth::load(&config.data_dir, false);
+            match auth.code() {
+                Some(code) => {
+                    println!("{code}");
+                    ExitCode::SUCCESS
+                }
+                None => ExitCode::FAILURE,
+            }
+        }
+        [command, email] if command == "reset-password" => {
+            let user = match runtime.block_on(store.user_by_email(email)) {
+                Ok(Some(user)) => user,
+                Ok(None) => {
+                    eprintln!("rrouter: no user with email {email}");
+                    return ExitCode::FAILURE;
+                }
+                Err(e) => {
+                    eprintln!("rrouter: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let password = &random_token()[..20];
+            let hash = match hash_password(password) {
+                Ok(hash) => hash,
+                Err(e) => {
+                    eprintln!("rrouter: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Err(e) = runtime.block_on(store.set_user_password(user.id, &hash)) {
+                eprintln!("rrouter: {e}");
+                return ExitCode::FAILURE;
+            }
+            println!("New password for {}: {password}", user.email);
+            println!("Every session for that account was signed out.");
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!(
+                "usage: rrouter admin show-setup-code | admin reset-password <email>"
+            );
             ExitCode::FAILURE
         }
     }
@@ -141,6 +222,10 @@ async fn serve(config: Config) -> Result<(), String> {
         .map_err(|e| format!("create data dir {}: {e}", config.data_dir.display()))?;
     let store = Store::open(&config.db_path(), config.master_key.clone())
         .map_err(|e| format!("open store: {e}"))?;
+    let users_exist = store
+        .users_exist()
+        .await
+        .map_err(|e| format!("read users: {e}"))?;
 
     let http = build_http_client(&config)?;
     let state = Arc::new(AppState {
@@ -155,6 +240,7 @@ async fn serve(config: Config) -> Result<(), String> {
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
         concurrency: concurrency_for(config.max_concurrency),
+        auth: rrouter_gateway::auth::Auth::load(&config.data_dir, users_exist),
     });
 
     // Retention lives on its own task: the first pass waits a few seconds, so startup

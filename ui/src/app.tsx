@@ -1,28 +1,29 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
+import {
+  Pulse,
+  ArrowsLeftRight,
+  ChatCircleText,
+  Cube,
+  FileText,
+  GearSix,
+  Heartbeat,
+  Key,
+  ListBullets,
+  MagnifyingGlass,
+  PlugsConnected,
+  Shuffle,
+  UsersThree,
+} from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
-import { useHealth, useModels, useSystem } from "./lib/queries";
-import { CopyChip, Dot, cx } from "./components/ui";
+import { useAuthState, useHealth, useModels, useSignOut, useSystem } from "./lib/queries";
+import { Button, CopyChip, Dot, cx } from "./components/ui";
 import { uptime } from "./lib/format";
 
 type NavItem = { to: string; label: string; icon: React.ReactNode; group: string };
 
-const icon = (path: string) => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.6"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden
-  >
-    <path d={path} />
-  </svg>
-);
+const glyph = (Icon: typeof Pulse) => <Icon size={17} weight="regular" aria-hidden />;
 
 /** White-label settings written through `/api/settings`; every field is optional. */
 type Brand = {
@@ -35,17 +36,18 @@ type Brand = {
 const DEFAULT_NAME = "RRouter";
 
 const NAV: NavItem[] = [
-  { to: "/activity", label: "Activity", icon: icon("M3 12h4l2-6 3 12 2-6h5"), group: "Gateway" },
-  { to: "/logs", label: "Logs", icon: icon("M4 6h16M4 12h16M4 18h10"), group: "Gateway" },
-  { to: "/playground", label: "Playground", icon: icon("M4 5h16v11H8l-4 4V5z"), group: "Gateway" },
-  { to: "/templates", label: "Templates", icon: icon("M6 4h9l3 3v13H6zM15 4v4h3M9 12h6M9 16h4"), group: "Gateway" },
-  { to: "/providers", label: "Providers", icon: icon("M9 15l6-6M8 7H6a4 4 0 000 8h2M16 17h2a4 4 0 000-8h-2"), group: "Gateway" },
-  { to: "/models", label: "Models", icon: icon("M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3zM4 7.5l8 4.5 8-4.5M12 12v9"), group: "Gateway" },
-  { to: "/keys", label: "API Keys", icon: icon("M15 7a4 4 0 11-3.5 5.9L4 20H2v-3l8.1-8.1A4 4 0 0115 7z"), group: "Access" },
-  { to: "/aliases", label: "Aliases", icon: icon("M4 8h13l-3-3M20 16H7l3 3"), group: "Routing" },
-  { to: "/combos", label: "Combos", icon: icon("M4 7h4l8 10h4M20 7h-4L8 17H4"), group: "Routing" },
-  { to: "/health", label: "Health", icon: icon("M3 12h4l2-5 3 10 2-5h7"), group: "System" },
-  { to: "/settings", label: "Settings", icon: icon("M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M16 4v4M8 10v4M16 16v4"), group: "System" },
+  { to: "/activity", label: "Activity", icon: glyph(Pulse), group: "Gateway" },
+  { to: "/logs", label: "Logs", icon: glyph(ListBullets), group: "Gateway" },
+  { to: "/playground", label: "Playground", icon: glyph(ChatCircleText), group: "Gateway" },
+  { to: "/templates", label: "Templates", icon: glyph(FileText), group: "Gateway" },
+  { to: "/providers", label: "Providers", icon: glyph(PlugsConnected), group: "Gateway" },
+  { to: "/models", label: "Models", icon: glyph(Cube), group: "Gateway" },
+  { to: "/keys", label: "API Keys", icon: glyph(Key), group: "Access" },
+  { to: "/users", label: "Users", icon: glyph(UsersThree), group: "Access" },
+  { to: "/aliases", label: "Aliases", icon: glyph(ArrowsLeftRight), group: "Routing" },
+  { to: "/combos", label: "Combos", icon: glyph(Shuffle), group: "Routing" },
+  { to: "/health", label: "Health", icon: glyph(Heartbeat), group: "System" },
+  { to: "/settings", label: "Settings", icon: glyph(GearSix), group: "System" },
 ];
 
 /** A first run (no accounts, no keys) lands on the wizard once; the flag is set by the
@@ -133,7 +135,7 @@ export function Shell() {
               height={30}
               className="h-[30px] w-[30px] shrink-0 select-none object-contain"
             />
-            <span className="truncate text-[14px] font-semibold tracking-[-0.01em]">{name}</span>
+            <span className="truncate text-[14px] font-semibold tracking-[-0.01em] text-white">{name}</span>
           </div>
         </div>
 
@@ -144,7 +146,7 @@ export function Shell() {
         <nav className="mt-3 flex-1 overflow-y-auto px-2 pb-3" aria-label="Dashboard">
           {groups.map(([group, items]) => (
             <div key={group} className="mb-4">
-              <div className="px-2 pb-1.5 text-[10px] font-medium uppercase tracking-[0.12em] text-faint">
+              <div className="px-2 pb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-white/45">
                 {group}
               </div>
               <ul className="space-y-0.5">
@@ -158,6 +160,8 @@ export function Shell() {
           ))}
         </nav>
 
+        <SessionFooter />
+
         <SidebarFooter
           endpoint={endpoint}
           running={running}
@@ -167,7 +171,7 @@ export function Shell() {
         />
       </aside>
 
-      <header className="shrink-0 border-b border-line bg-[var(--color-sidebar)] min-[820px]:hidden">
+      <header className="shrink-0 border-b border-white/10 bg-[var(--color-sidebar)] min-[820px]:hidden">
         <div className="flex h-14 items-center gap-3 px-3">
           <img
             src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-mark.png`}
@@ -176,7 +180,7 @@ export function Shell() {
             height={24}
             className="h-6 w-6 shrink-0 select-none object-contain"
           />
-          <span className="text-[13px] font-semibold">{name}</span>
+          <span className="text-[13px] font-semibold text-white">{name}</span>
           <span className="flex items-center gap-1.5">
             <RunningDot running={running} />
             <span className="sr-only">{running ? "Gateway running" : "Gateway unreachable"}</span>
@@ -185,9 +189,9 @@ export function Shell() {
             type="button"
             onClick={() => setPaletteOpen(true)}
             aria-label="Jump to a page or model"
-            className="ml-auto flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-surface text-muted transition-colors hover:text-fg"
+            className="ml-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-white/5 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
           >
-            <SearchIcon size={18} />
+            <MagnifyingGlass size={18} aria-hidden />
           </button>
         </div>
         <nav className="flex gap-1 overflow-x-auto px-2 pb-2" aria-label="Dashboard">
@@ -210,24 +214,6 @@ export function Shell() {
   );
 }
 
-function SearchIcon({ size = 14 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      aria-hidden
-      className="shrink-0"
-    >
-      <circle cx="11" cy="11" r="7" />
-      <path d="M20 20l-3.5-3.5" />
-    </svg>
-  );
-}
 
 /** The sidebar's palette affordance. It is a button, not an input: the real field lives
  *  in the dialog, so ⌘K and the click share one entry point. */
@@ -237,11 +223,11 @@ function JumpButton({ onClick }: { onClick: () => void }) {
       type="button"
       onClick={onClick}
       aria-label="Jump to a page or model"
-      className="flex h-9 w-full items-center gap-2 rounded-lg border border-line bg-surface px-2.5 text-left text-[13px] text-faint transition-colors hover:border-line-strong hover:text-fg"
+      className="flex h-9 w-full items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 text-left text-[13px] text-white/60 transition-colors hover:bg-white/10 hover:text-white"
     >
-      <SearchIcon />
+      <MagnifyingGlass size={14} aria-hidden />
       <span className="truncate">Jump to…</span>
-      <kbd className="ml-auto shrink-0 rounded border border-line bg-surface-2 px-1 py-0.5 font-sans text-[10px] text-muted">
+      <kbd className="ml-auto shrink-0 rounded border border-white/20 px-1 py-0.5 font-sans text-[10px] text-white/50">
         ⌘K
       </kbd>
     </button>
@@ -260,6 +246,35 @@ function RunningDot({ running }: { running: boolean }) {
 
 /** Endpoint, liveness and version in one card. `CopyChip` carries its own aria-label,
  *  and truncates rather than widening the 236px rail. */
+/** The signed-in person, and the way out. */
+function SessionFooter() {
+  const state = useAuthState();
+  const signOut = useSignOut();
+  const navigate = useNavigate();
+  const user = state.data?.user;
+  if (!user) return null;
+  return (
+    <div className="flex items-center gap-2 border-t border-white/10 px-3 py-2.5">
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[12px] font-medium text-white">{user.name}</div>
+        <div className="truncate text-[11px] text-white/50">{user.email}</div>
+      </div>
+      <Button
+        variant="quiet"
+        className="text-white/60 hover:bg-white/10 hover:text-white"
+        disabled={signOut.isPending}
+        onClick={() =>
+          signOut.mutate(undefined, {
+            onSettled: () => navigate("/sign-in", { replace: true }),
+          })
+        }
+      >
+        sign out
+      </Button>
+    </div>
+  );
+}
+
 function SidebarFooter({
   endpoint,
   running,
@@ -274,19 +289,19 @@ function SidebarFooter({
   note?: string;
 }) {
   return (
-    <div className="border-t border-line px-3 py-3">
-      <div className="rounded-lg border border-line bg-surface px-2.5 py-2">
-        <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-faint">Endpoint</div>
+    <div className="border-t border-white/10 px-3 py-3">
+      <div className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-2">
+        <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-white/45">Endpoint</div>
         <div className="mt-1 flex min-w-0">
-          <CopyChip value={endpoint} display={endpoint.replace(/^https?:\/\//, "")} />
+          <CopyChip value={endpoint} display={endpoint.replace(/^https?:\/\//, "")} onDark />
         </div>
-        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
+        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-white/70">
           <RunningDot running={running} />
           <span className="truncate">
             {running ? `Running · up ${uptime(uptimeSecs)}` : "unreachable"}
           </span>
         </div>
-        <div className="mt-0.5 truncate text-[11px] text-faint">
+        <div className="mt-0.5 truncate text-[11px] text-white/45">
           v{version ?? "—"} · {note?.trim() || "MIT"}
         </div>
       </div>
@@ -306,8 +321,13 @@ function NavItemLink({ item, variant }: { item: NavItem; variant: "sidebar" | "t
           variant === "tab"
             ? "h-11 shrink-0 gap-2 whitespace-nowrap rounded-lg px-3"
             : "gap-2.5 rounded-lg px-2.5 py-2",
-          isActive ? "font-medium text-fg" : "text-muted hover:bg-row-hover hover:text-fg",
-          variant === "sidebar" && isActive && "bg-surface-2",
+          variant === "sidebar"
+            ? isActive
+              ? "bg-white/10 font-medium text-white"
+              : "text-white/70 hover:bg-white/10 hover:text-white"
+            : isActive
+              ? "bg-accent font-medium text-[var(--color-accent-ink)]"
+              : "text-muted hover:bg-surface-3 hover:text-fg",
         )
       }
     >
@@ -317,7 +337,7 @@ function NavItemLink({ item, variant }: { item: NavItem; variant: "sidebar" | "t
             <span
               aria-hidden
               className={cx(
-                "absolute rounded-full bg-accent",
+                "absolute rounded-full bg-[var(--color-nav-accent)]",
                 variant === "tab"
                   ? "inset-x-2 bottom-0 h-[2px]"
                   : "left-0 top-1.5 h-[calc(100%-12px)] w-[2px]",

@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Check, Copy } from "@phosphor-icons/react";
 
 /** Shared primitives. Every page composes these; none of them fetches. */
 
@@ -42,8 +43,8 @@ export function PageHeader({
     <div className="mb-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-[28px] font-bold tracking-[-0.02em] text-fg">{title}</h1>
-          {subtitle ? <p className="mt-1 text-sm font-medium text-muted">{subtitle}</p> : null}
+          <h1 className="text-[32px] font-bold tracking-[-0.02em] text-fg">{title}</h1>
+          {subtitle ? <p className="mt-1.5 text-[13.5px] text-muted">{subtitle}</p> : null}
         </div>
         {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
       </div>
@@ -110,12 +111,12 @@ export function Button({
 }) {
   const styles: Record<ButtonVariant, string> = {
     primary:
-      "bg-accent text-[var(--color-accent-ink)] font-semibold border border-transparent hover:brightness-110",
+      "bg-accent text-[var(--color-accent-ink)] font-semibold border border-transparent hover:bg-fg active:translate-y-[1px]",
     ghost:
-      "border border-line bg-surface-2 text-fg hover:border-line-strong hover:bg-[#232b3a]",
-    quiet: "border border-transparent text-muted hover:bg-surface-2 hover:text-fg",
+      "border border-line-strong bg-surface text-fg hover:bg-surface-3 active:translate-y-[1px]",
+    quiet: "border border-transparent text-muted hover:bg-surface-3 hover:text-fg",
     danger:
-      "border border-[#ef4444]/35 bg-[#ef4444]/10 text-[#f87171] hover:border-[#ef4444]/55 hover:bg-[#ef4444]/15",
+      "border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)] hover:border-[var(--color-neg)]",
   };
   return (
     <button
@@ -124,7 +125,7 @@ export function Button({
       onClick={onClick}
       disabled={disabled}
       className={cx(
-        "inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-3 text-[13px] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+        "inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 text-[13px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed disabled:opacity-40",
         styles[variant],
         className,
       )}
@@ -146,16 +147,16 @@ export function Badge({
 }) {
   const tones = {
     neutral: "border-line-strong bg-surface-2 text-muted",
-    pos: "border-[#22c55e]/35 bg-[#22c55e]/10 text-[#4ade80]",
-    neg: "border-[#ef4444]/35 bg-[#ef4444]/10 text-[#f87171]",
-    warn: "border-[#f59e0b]/35 bg-[#f59e0b]/10 text-[#fbbf24]",
-    accent: "border-[#8a2bff]/40 bg-[#8a2bff]/12 text-[#c4b5fd]",
+    pos: "border-[var(--color-pos)]/35 bg-[var(--color-pos-tint)] text-[var(--color-pos)]",
+    neg: "border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)]",
+    warn: "border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] text-[var(--color-warn-ink)]",
+    accent: "border-[var(--color-accent-text)]/35 bg-[var(--color-accent)]/10 text-[var(--color-accent-text)]",
   } as const;
   return (
     <span
       title={title}
       className={cx(
-        "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] leading-4",
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] leading-4",
         tones[tone],
       )}
     >
@@ -183,7 +184,7 @@ export function Segmented<T extends string>({
       role="group"
       aria-label={ariaLabel}
       className={cx(
-        "inline-flex items-center gap-0.5 rounded-[10px] border border-line bg-surface-2 p-0.5",
+        "inline-flex items-center gap-0.5 rounded-full border border-line bg-surface-3 p-0.5",
         className,
       )}
     >
@@ -196,8 +197,8 @@ export function Segmented<T extends string>({
             aria-pressed={on}
             onClick={() => onChange(o.id)}
             className={cx(
-              "h-[26px] rounded-lg px-2.5 text-[12px] transition-colors max-[820px]:h-9",
-              on ? "bg-fg font-medium text-bg" : "text-muted hover:text-fg",
+              "h-[26px] rounded-full px-2.5 text-[12px] transition-colors max-[820px]:h-9",
+              on ? "bg-accent font-medium text-[var(--color-accent-ink)]" : "text-muted hover:text-fg",
             )}
           >
             {o.label}
@@ -231,9 +232,9 @@ export function FilterChip({
       className={cx(
         "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[12px] transition-colors max-[820px]:h-10",
         on
-          ? "border-fg bg-fg font-medium text-bg"
+          ? "border-accent bg-accent font-medium text-[var(--color-accent-ink)]"
           : bad
-            ? "border-[var(--color-neg)]/45 bg-[var(--color-neg)]/10 text-[#fca5a5] hover:border-[var(--color-neg)]/70"
+            ? "border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)] hover:border-[var(--color-neg)]"
             : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-fg",
       )}
     >
@@ -290,11 +291,11 @@ export function AlertBanner({
   return (
     <div
       role="alert"
-      className="mb-5 rounded-[var(--radius-card)] border border-[var(--color-neg)]/30 bg-[var(--color-neg)]/8 px-5 py-4"
+      className="mb-5 rounded-[var(--radius-card)] border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] px-5 py-4"
     >
       <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-[14px] font-semibold text-[#fca5a5]">
+          <div className="flex items-center gap-2 text-[14px] font-semibold text-[var(--color-neg-ink)]">
             <Dot tone="neg" />
             {title}
           </div>
@@ -314,7 +315,7 @@ export function Dot({ tone = "pos" }: { tone?: "pos" | "neg" | "warn" | "muted" 
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <label className="flex min-w-0 flex-col gap-1.5">
-      <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-faint">{label}</span>
+      <span className="text-[12px] font-semibold text-ink-soft">{label}</span>
       {children}
       {hint ? <span className="text-[11px] text-faint">{hint}</span> : null}
     </label>
@@ -322,7 +323,7 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
 }
 
 const control =
-  "h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 text-[13px] text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none";
+  "h-8 w-full min-w-0 rounded-[var(--radius-input)] border border-line-strong bg-surface px-2.5 text-[13px] text-fg placeholder:text-faint hover:border-[var(--color-fg)]/40 focus:border-[var(--color-accent-text)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-text)]/25 disabled:bg-surface-3 disabled:text-muted";
 
 export function Input({
   value,
@@ -400,12 +401,15 @@ export function CopyChip({
   value,
   prefix,
   display,
+  onDark = false,
 }: {
   value: string;
   prefix?: string;
   /** Shown instead of `value` when the full string cannot fit; the clipboard still gets
    *  the full value. */
   display?: string;
+  /** On the near-black rail the light border would glow; use a hairline white one. */
+  onDark?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | null>(null);
@@ -439,30 +443,22 @@ export function CopyChip({
       onClick={copy}
       title={`copy ${value}`}
       aria-label={`copy ${value}`}
-      className="group inline-flex h-7 min-w-0 items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-2 font-mono text-[11px] text-muted hover:border-line-strong hover:text-fg"
+      className={cx(
+        "group inline-flex h-7 min-w-0 items-center gap-1.5 rounded-full border px-2 font-mono text-[11px]",
+        onDark
+          ? "border-white/15 bg-white/5 text-white/70 hover:border-white/25 hover:text-white"
+          : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-fg",
+      )}
     >
-      {prefix ? <span className="shrink-0 text-faint">{prefix}</span> : null}
+      {prefix ? (
+        <span className={cx("shrink-0", onDark ? "text-white/45" : "text-faint")}>{prefix}</span>
+      ) : null}
       <span className="truncate">{copied ? "copied" : (display ?? value)}</span>
-      <svg
-        width="12"
-        height="12"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        aria-hidden
-        className="shrink-0 opacity-60 group-hover:opacity-100"
-      >
-        {copied ? (
-          <path d="M4 12l5 5L20 6" />
-        ) : (
-          <>
-            <rect x="9" y="9" width="11" height="11" rx="2" />
-            <path d="M15 5H6a2 2 0 00-2 2v9" />
-          </>
-        )}
-      </svg>
+      {copied ? (
+        <Check size={12} weight="bold" aria-hidden className="shrink-0" />
+      ) : (
+        <Copy size={12} aria-hidden className="shrink-0 opacity-60 group-hover:opacity-100" />
+      )}
     </button>
   );
 }
@@ -525,9 +521,9 @@ export function EmptyState({ children }: { children: ReactNode }) {
 export function ErrorNote({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   const message = error instanceof Error ? error.message : String(error);
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-[#ef4444]/35 bg-[#ef4444]/10 px-3 py-2 text-[13px] text-neg">
+    <div className="flex items-start gap-3 rounded-lg border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] px-3 py-2 text-[13px] text-[var(--color-neg-ink)]">
       <span className="font-medium">Request failed</span>
-      <span className="min-w-0 flex-1 break-words text-[#fca5a5]">{message}</span>
+      <span className="min-w-0 flex-1 break-words">{message}</span>
       {onRetry ? (
         <button onClick={onRetry} className="text-[12px] underline underline-offset-2">
           retry
@@ -541,7 +537,7 @@ export function ErrorNote({ error, onRetry }: { error: unknown; onRetry?: () => 
 export function CardHeader({ title, action }: { title: string; action?: ReactNode }) {
   return (
     <div className="flex items-center justify-between px-5 pt-4 pb-3">
-      <h2 className="text-[15px] font-medium text-fg">{title}</h2>
+      <h2 className="text-[16px] font-semibold text-fg">{title}</h2>
       {action}
     </div>
   );
