@@ -17,11 +17,11 @@ logging, metrics) and 9router (dashboard, providers, combos, usage).
 | 9 | Guardrails | prompt/response hooks (blocklists, max tokens per request, redaction) | LiteLLM guardrails |
 | 10 | Ops polish | structured JSON logs, OpenTelemetry export, quota reset schedules | production gateways |
 
-Status: phases 1–10 landed and verified live (key governance, observability, ops knobs,
+Status: phases 1–12 landed and verified live (key governance, observability, ops knobs,
 routing strategies, UX, cost accounting, protocol breadth, cache, budget windows, JSON
 logs + access line). Release 0.2.0 is published with all four binaries, and the installer
-was verified against it. Phase 11 (log pagination + Logs page) is in progress; 0.2.1 will
-ship it with the cache, budget windows and admin-token UI.
+was verified against it. 0.2.1 is published (cache, budget windows, admin-token UI, JSON logs, Logs page with server
+filters). Phase 13 (CSV export) is in progress.
 
 ## Phase 1 — key governance (contract)
 
