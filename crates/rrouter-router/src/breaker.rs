@@ -17,9 +17,12 @@ const OPEN_SERVER_ERROR: Duration = Duration::from_secs(30);
 /// (or the auth refresher) replaces it, so back off hard.
 const OPEN_AUTH_ERROR: Duration = Duration::from_secs(300);
 /// Rate-limit backoff is exponential in the consecutive-429 count, starting here.
-const BACKOFF_BASE: Duration = Duration::from_secs(1);
-/// Never park an account longer than this on 429s.
-const BACKOFF_CAP: Duration = Duration::from_secs(240);
+/// Subscription quota windows outlive a one-second retry, so the first cooldown is
+/// already long enough to send the next request to another sub-account.
+const BACKOFF_BASE: Duration = Duration::from_secs(30);
+/// Never park an account longer than this on 429s; repeated strikes escalate to an
+/// hour instead of hammering an exhausted quota every four minutes.
+const BACKOFF_CAP: Duration = Duration::from_secs(3600);
 /// Reported wait when a half-open connection's single probe slot is in use.
 const PROBE_TAKEN: Duration = Duration::from_secs(3600);
 
@@ -190,7 +193,7 @@ impl Breaker {
         }
     }
 
-    /// 429 → exponential backoff (1,2,4,8,… capped 240 s, honoring `Retry-After`);
+    /// 429 → exponential backoff (30,60,120,… capped 3600 s, honoring `Retry-After`);
     /// 5xx → 30 s; 401/403 → 300 s; anything else counts toward tripping.
     pub fn record_failure(&self, conn: Uuid, status: u16, retry_after: Option<Duration>) {
         self.record_failure_at(conn, status, retry_after, Instant::now());

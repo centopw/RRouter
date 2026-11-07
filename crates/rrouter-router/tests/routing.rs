@@ -759,7 +759,7 @@ fn rate_limit_backoff_is_exponential_and_honors_retry_after() {
     let id = Uuid::new_v4();
     let now = Instant::now();
     let mut last = Duration::ZERO;
-    for expected in [1u64, 2, 4] {
+    for expected in [30u64, 60, 120] {
         breaker.record_failure_at(id, 429, None, now);
         let wait = breaker.check_at(id, now).expect("429 opens");
         assert_eq!(wait.as_secs(), expected);
@@ -767,12 +767,12 @@ fn rate_limit_backoff_is_exponential_and_honors_retry_after() {
         last = wait;
     }
 
-    // Retry-After wins over the computed backoff, capped at 240 s.
+    // Retry-After wins over the computed backoff, capped at one hour.
     breaker.record_failure_at(id, 429, Some(Duration::from_secs(7)), now);
     assert_eq!(breaker.check_at(id, now).unwrap().as_secs(), 7);
     breaker.record_success(id);
     breaker.record_failure_at(id, 429, Some(Duration::from_secs(9_000)), now);
-    assert_eq!(breaker.check_at(id, now).unwrap().as_secs(), 240);
+    assert_eq!(breaker.check_at(id, now).unwrap().as_secs(), 3600);
 
     // Auth failures take the long window.
     breaker.record_failure_at(id, 401, None, now);
@@ -1143,6 +1143,51 @@ async fn rate_limited_candidate_does_not_block_an_eligible_one() {
         started.elapsed()
     );
     assert_eq!(outcome.candidate.connection, healthy);
+}
+
+#[tokio::test]
+async fn rate_limited_account_is_not_retried_before_failing_over() {
+    let breaker = Arc::new(Breaker::new());
+    let dispatcher = Dispatcher::with_shared_breaker(Arc::clone(&breaker));
+    let plan = plan_of(2);
+    let limited = plan.candidates[0].connection;
+    let healthy = plan.candidates[1].connection;
+    let first_sends = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&first_sends);
+
+    let started = Instant::now();
+    let outcome = dispatcher
+        .run(&plan, move |c| {
+            let first_sends = Arc::clone(&counter);
+            async move {
+                if c.connection == limited {
+                    first_sends.fetch_add(1, Ordering::SeqCst);
+                    Err(upstream(429))
+                } else if c.connection == healthy {
+                    Ok(resp("m"))
+                } else {
+                    unreachable!()
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.candidate.connection, healthy);
+    assert_eq!(
+        first_sends.load(Ordering::SeqCst),
+        1,
+        "a 429 must not be retried on the same account"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        !breaker.is_available(limited),
+        "the rate-limited account must be parked"
+    );
 }
 
 #[tokio::test]

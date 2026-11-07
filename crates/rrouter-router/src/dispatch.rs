@@ -400,6 +400,11 @@ pub(crate) fn retry_wait(
     if retries >= retry.attempts || sends >= max_attempts {
         return None;
     }
+    // A rate-limited account is benched by its breaker; retrying it on the same
+    // request buys nothing and delays the next sub-account. Fail over immediately.
+    if err.is_rate_limited() {
+        return None;
+    }
     let wait = retry.delay(retries, retry_after(err), clock_fraction());
     within_budget(deadline, wait).then_some(wait)
 }

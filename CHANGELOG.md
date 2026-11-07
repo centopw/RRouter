@@ -57,6 +57,12 @@ All notable changes. Dates are local; versions follow semver once tagged.
   memory for debugging; it is off by default, never written to disk, and can be enabled or
   cleared at runtime.
 
+### Changed
+- Rate-limited accounts fail over immediately: a 429 is no longer retried on the same
+  sub-account before trying the next one, and the breaker's 429 cooldown now starts at 30 s
+  and escalates to one hour instead of expiring after four minutes. Providers shows an
+  explicit **quota exhausted** badge when a subscription window reports 100%.
+
 ### Fixed
 - Codex rejects `temperature` and `top_p` instead of ignoring them, failing every
   Playground turn; the gateway strips those sampling controls for the codex provider on

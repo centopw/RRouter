@@ -834,6 +834,7 @@ function WindowBar({ window }: { window: SubscriptionWindow }) {
 }
 
 function SubscriptionRow({ account }: { account: AccountSubscription }) {
+  const exhausted = account.windows.find((window) => window.used_percent >= 100);
   return (
     <div className="border-b border-rule px-5 py-3 last:border-0">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
@@ -848,6 +849,11 @@ function SubscriptionRow({ account }: { account: AccountSubscription }) {
         </span>
         <span className="min-w-0 truncate text-[12px] text-muted">{account.name ?? ""}</span>
         {account.plan ? <Badge tone="neutral">{account.plan}</Badge> : null}
+        {exhausted ? (
+          <Badge tone="neg" title={exhausted.resets_at ? `resets ${when(exhausted.resets_at)}` : undefined}>
+            quota exhausted
+          </Badge>
+        ) : null}
         {account.error ? (
           <span
             className="max-w-full truncate text-[11.5px] text-faint"
