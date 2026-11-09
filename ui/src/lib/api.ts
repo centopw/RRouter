@@ -241,6 +241,12 @@ export type Connection = {
   has_refresh_token: boolean;
   has_api_key: boolean;
   last_error: string | null;
+  /**
+   * Cloud project an Antigravity (Cloud Code Assist) sign-in was provisioned with. The
+   * gateway stores it in `credentials.extra.project_id`; a build that does not project it
+   * simply omits the field, and the row shows no project line.
+   */
+  project_id?: string | null;
 };
 
 /** The UTC calendar window a quota resets on; `total` (all time) is API-only. */
@@ -799,9 +805,24 @@ export type ModelTest = {
   error?: string;
 };
 
-export type OAuthProvider = { id: string; display: string; flow: string };
+export type OAuthProvider = {
+  id: string;
+  display: string;
+  flow: string;
+  /**
+   * This gateway accepts `{ manual: true }` for the provider: a sign-in whose callback is
+   * pasted back instead of received on the loopback. Absent on older builds.
+   */
+  manual?: boolean;
+};
 export type OAuthChallenge =
-  | { kind: "pkce"; authorize_url: string; redirect_uri: string }
+  | {
+      kind: "pkce";
+      authorize_url: string;
+      redirect_uri: string;
+      /** Echoed as `true` when the attempt was started in manual mode. */
+      manual?: boolean;
+    }
   | {
       kind: "device_code";
       verification_uri: string;

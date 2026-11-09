@@ -1,0 +1,6 @@
+data: {"response":{"responseId":"r","candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}}
+
+data: {"response":{"candidates":[{"content":{"parts":[{"text":"lo","thought":false}]},"finishReason":"STOP"}]}}
+
+data: {"response":{"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":2}}}
+

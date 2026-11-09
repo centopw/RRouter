@@ -221,10 +221,10 @@ export function SortableTable({
       empty={empty}
     >
       <div
-        className="table-scroll overflow-auto"
+        className={cx("table-scroll", maxBodyHeight && "overflow-auto")}
         role="region"
         aria-label={scrollLabel}
-        tabIndex={0}
+        tabIndex={maxBodyHeight ? 0 : undefined}
         style={maxBodyHeight ? { maxHeight: maxBodyHeight } : undefined}
       >
         <table className="w-full table-fixed border-separate border-spacing-0 text-body">

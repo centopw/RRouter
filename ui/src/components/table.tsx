@@ -93,14 +93,18 @@ export function DataTable<T>({
 
   const label = scrollLabel ?? caption ?? "table";
 
+  // A bounded table is its own scrollport; an unbounded one must not be, or a page ends
+  // up with two vertical scrollbars (the table's and the shell's).
+  const bounded = Boolean(maxBodyHeight);
+
   return (
     <div>
       <div
-        className="table-scroll overflow-auto"
-        tabIndex={0}
+        className={cx("table-scroll", bounded && "overflow-auto")}
+        tabIndex={bounded ? 0 : undefined}
         role="region"
         aria-label={label}
-        style={maxBodyHeight ? { maxHeight: maxBodyHeight } : undefined}
+        style={bounded ? { maxHeight: maxBodyHeight } : undefined}
       >
         <table
           className="w-full border-separate border-spacing-0 text-body"

@@ -15,6 +15,10 @@ pub enum Dialect {
     AnthropicMessages,
     /// OpenAI Embeddings (`/v1/embeddings`).
     OpenAiEmbeddings,
+    /// Google Code Assist (`/v1internal:generateContent`), the upstream-only wire used
+    /// by the Antigravity desktop client. Never an inbound route: [`Self::from_path`]
+    /// does not yield it.
+    GoogleCodeAssist,
 }
 
 impl Dialect {
@@ -36,6 +40,7 @@ impl Dialect {
             Self::OpenAiResponses => "openai_responses",
             Self::AnthropicMessages => "anthropic_messages",
             Self::OpenAiEmbeddings => "openai_embeddings",
+            Self::GoogleCodeAssist => "google_code_assist",
         }
     }
 
@@ -66,5 +71,12 @@ mod tests {
             Some(Dialect::OpenAiChat)
         );
         assert_eq!(Dialect::from_path("/v1/models"), None);
+    }
+
+    #[test]
+    fn google_code_assist_is_upstream_only() {
+        assert_eq!(Dialect::GoogleCodeAssist.as_str(), "google_code_assist");
+        assert_eq!(Dialect::from_path("/v1internal:generateContent"), None);
+        assert!(!Dialect::GoogleCodeAssist.is_event_framed());
     }
 }

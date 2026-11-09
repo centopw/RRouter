@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,57 +28,68 @@ struct OAuthMock {
     device_polls: Arc<AtomicUsize>,
 }
 
-static MOCK: OnceLock<OAuthMock> = OnceLock::new();
-
-fn mock() -> &'static OAuthMock {
-    MOCK.get_or_init(|| {
-        let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("mock listener");
-        let addr = std_listener.local_addr().expect("mock address");
-        std_listener
-            .set_nonblocking(true)
-            .expect("mock nonblocking");
-        let device_polls = Arc::new(AtomicUsize::new(0));
-        let state = Arc::clone(&device_polls);
-        let router = Router::new()
-            .route("/device", post(device))
-            .route("/token", post(token))
-            .route("/authorize", get(authorize))
-            .route("/verify", get(verify))
-            .route("/user", get(user))
-            .route("/copilot_internal/v2/token", get(copilot))
-            .with_state(state);
-        thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("mock runtime");
-            runtime.block_on(async move {
-                let listener = TcpListener::from_std(std_listener).expect("tokio listener");
-                axum::serve(listener, router).await.expect("mock server");
-            });
+static MOCK: LazyLock<OAuthMock> = LazyLock::new(|| {
+    let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("mock listener");
+    let addr = std_listener.local_addr().expect("mock address");
+    std_listener
+        .set_nonblocking(true)
+        .expect("mock nonblocking");
+    let device_polls = Arc::new(AtomicUsize::new(0));
+    let code_exchanges = Arc::new(AtomicUsize::new(0));
+    let state = (Arc::clone(&device_polls), Arc::clone(&code_exchanges));
+    let router = Router::new()
+        .route("/device", post(device))
+        .route("/token", post(token))
+        .route("/authorize", get(authorize))
+        .route("/verify", get(verify))
+        .route("/user", get(user))
+        .route("/copilot_internal/v2/token", get(copilot))
+        .with_state(state);
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("mock runtime");
+        runtime.block_on(async move {
+            let listener = TcpListener::from_std(std_listener).expect("tokio listener");
+            axum::serve(listener, router).await.expect("mock server");
         });
+    });
 
-        std::env::set_var("RROUTER_ALLOW_INSECURE_OAUTH", "1");
-        std::env::set_var(
-            "RROUTER_OAUTH_OVERRIDE_GITHUB_DEVICE",
-            format!("http://{addr}/device"),
-        );
-        std::env::set_var(
-            "RROUTER_OAUTH_OVERRIDE_GITHUB_TOKEN",
-            format!("http://{addr}/token"),
-        );
-        std::env::set_var(
-            "RROUTER_OAUTH_OVERRIDE_CLAUDE_AUTHORIZE",
-            format!("http://{addr}/authorize"),
-        );
-        std::env::set_var(
-            "RROUTER_OAUTH_OVERRIDE_CLAUDE_TOKEN",
-            format!("http://{addr}/token"),
-        );
+    std::env::set_var("RROUTER_ALLOW_INSECURE_OAUTH", "1");
+    std::env::set_var(
+        "RROUTER_OAUTH_OVERRIDE_GITHUB_DEVICE",
+        format!("http://{addr}/device"),
+    );
+    std::env::set_var(
+        "RROUTER_OAUTH_OVERRIDE_GITHUB_TOKEN",
+        format!("http://{addr}/token"),
+    );
+    std::env::set_var(
+        "RROUTER_OAUTH_OVERRIDE_CLAUDE_AUTHORIZE",
+        format!("http://{addr}/authorize"),
+    );
+    std::env::set_var(
+        "RROUTER_OAUTH_OVERRIDE_CLAUDE_TOKEN",
+        format!("http://{addr}/token"),
+    );
+    std::env::set_var(
+        "RROUTER_OAUTH_OVERRIDE_CODEX_AUTHORIZE",
+        format!("http://{addr}/authorize"),
+    );
+    std::env::set_var(
+        "RROUTER_OAUTH_OVERRIDE_CODEX_TOKEN",
+        format!("http://{addr}/token"),
+    );
 
-        OAuthMock { device_polls }
-    })
-}
+    OAuthMock { device_polls }
+});
+
+/// Exchanges of the manual test's unique code, so assertions cannot race other tests.
+static MANUAL_EXCHANGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Serializes the Google credential-env test (the start path reads env per call).
+static GOOGLE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 async fn device() -> Json<Value> {
     Json(json!({
@@ -90,7 +101,10 @@ async fn device() -> Json<Value> {
     }))
 }
 
-async fn token(State(device_polls): State<Arc<AtomicUsize>>, body: String) -> impl IntoResponse {
+async fn token(
+    State((device_polls, code_exchanges)): State<(Arc<AtomicUsize>, Arc<AtomicUsize>)>,
+    body: String,
+) -> impl IntoResponse {
     if body.contains("device_code=LIVE-DEVICE-CODE") {
         let poll = device_polls.fetch_add(1, Ordering::SeqCst) + 1;
         if poll == 1 {
@@ -102,6 +116,10 @@ async fn token(State(device_polls): State<Arc<AtomicUsize>>, body: String) -> im
             "id_token": ID_TOKEN,
             "expires_in": 3600,
         }));
+    }
+    code_exchanges.fetch_add(1, Ordering::SeqCst);
+    if body.contains("code=MANUAL-CODE") {
+        MANUAL_EXCHANGES.fetch_add(1, Ordering::SeqCst);
     }
     Json(json!({
         "access_token": PKCE_ACCESS_TOKEN,
@@ -225,6 +243,29 @@ impl Harness {
         )
         .await
     }
+
+    /// A start call with no body at all, as the current dashboard sends it.
+    async fn post_empty(&self, uri: &str) -> (StatusCode, Value) {
+        self.call(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+    }
+
+    async fn delete(&self, uri: &str) -> (StatusCode, Value) {
+        self.call(
+            Request::builder()
+                .method("DELETE")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+    }
 }
 
 fn pkce_details(body: &Value) -> (String, String, String) {
@@ -275,22 +316,29 @@ async fn complete_in_task(
 }
 
 async fn visit_callback(uri: &str, code: &str, state: &str) -> StatusCode {
+    callback_response(uri, code, state).await.0
+}
+
+/// Play the browser and keep the page body, for brand/content assertions.
+async fn callback_response(uri: &str, code: &str, state: &str) -> (StatusCode, String) {
     let mut callback = reqwest::Url::parse(uri).expect("callback URI");
     callback
         .query_pairs_mut()
         .append_pair("code", code)
         .append_pair("state", state);
-    reqwest::Client::new()
+    let response = reqwest::Client::new()
         .get(callback)
         .send()
         .await
-        .expect("callback request")
-        .status()
+        .expect("callback request");
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    (status, body)
 }
 
 #[tokio::test]
 async fn device_flow_ends_in_stored_connection() {
-    let mock = mock();
+    let mock = &*MOCK;
     let harness = harness();
     let (status, start) = harness.post("/api/oauth/github/start", Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{start}");
@@ -330,7 +378,7 @@ async fn device_flow_ends_in_stored_connection() {
 
 #[tokio::test]
 async fn pkce_flow_includes_loopback_redirect() {
-    let _mock = mock();
+    let _mock = &*MOCK;
     let harness = harness();
     let (status, start) = harness.post("/api/oauth/claude/start", Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{start}");
@@ -347,7 +395,7 @@ async fn pkce_flow_includes_loopback_redirect() {
 
 #[tokio::test]
 async fn state_mismatch_fails_without_storing_connection() {
-    let _mock = mock();
+    let _mock = &*MOCK;
     let harness = harness();
     let (status, start) = harness.post("/api/oauth/claude/start", Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{start}");
@@ -366,7 +414,7 @@ async fn state_mismatch_fails_without_storing_connection() {
 
 #[tokio::test]
 async fn connection_view_contains_no_token_material() {
-    let _mock = mock();
+    let _mock = &*MOCK;
     let harness = harness();
     let (status, start) = harness.post("/api/oauth/claude/start", Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{start}");
@@ -385,4 +433,187 @@ async fn connection_view_contains_no_token_material() {
     assert!(text.contains("has_refresh_token"));
     assert!(!text.contains(PKCE_ACCESS_TOKEN));
     assert!(!text.contains(PKCE_REFRESH_TOKEN));
+}
+
+/// Manual mode is the remote-VPS path: no listener is bound, the authorize URL still
+/// carries a registered redirect, and completion accepts the pasted final URL.
+#[tokio::test]
+async fn manual_pkce_start_completes_from_the_pasted_callback() {
+    let _mock = &*MOCK;
+    let harness = harness();
+    let (status, start) = harness
+        .post("/api/oauth/codex/start", json!({"manual": true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    assert_eq!(start["flow"], "pkce");
+    assert_eq!(start["challenge"]["manual"], true);
+    assert_eq!(
+        start["challenge"]["redirect_uri"],
+        "http://127.0.0.1:1455/auth/callback"
+    );
+    // The registered port is free: manual mode never bound it.
+    let free = std::net::TcpListener::bind(("127.0.0.1", 1455));
+    assert!(
+        free.is_ok(),
+        "manual start must not bind the registered port"
+    );
+    drop(free);
+
+    let (id, _redirect, state) = pkce_details(&start);
+    let before = MANUAL_EXCHANGES.load(Ordering::SeqCst);
+    let callback = format!("http://127.0.0.1:1455/auth/callback?code=MANUAL-CODE&state={state}");
+    let (status, done) = harness
+        .post(
+            "/api/oauth/codex/complete",
+            json!({"id": id, "callback_url": callback}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert!(done["id"].as_str().is_some());
+    assert_eq!(
+        MANUAL_EXCHANGES.load(Ordering::SeqCst),
+        before + 1,
+        "the pasted code was exchanged exactly once"
+    );
+
+    // Duplicate completion replays and must not spend the code again.
+    let (status, _again) = harness
+        .post(
+            "/api/oauth/codex/complete",
+            json!({"id": id, "callback_url": callback}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        MANUAL_EXCHANGES.load(Ordering::SeqCst),
+        before + 1,
+        "no second exchange"
+    );
+
+    let (status, connections) = harness.get("/api/connections").await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    let rows = connections["data"].as_array().expect("rows");
+    assert!(rows.iter().any(|row| row["provider"] == "codex"));
+    assert!(!connections.to_string().contains(PKCE_ACCESS_TOKEN));
+}
+
+#[tokio::test]
+async fn manual_pkce_start_requires_a_fixed_redirect_port() {
+    let _mock = &*MOCK;
+    let harness = harness();
+    let (status, body) = harness
+        .post("/api/oauth/claude/start", json!({"manual": true}))
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(
+        body.to_string()
+            .contains("manual callback requires a fixed redirect port"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn manual_complete_rejects_a_foreign_state() {
+    let _mock = &*MOCK;
+    let harness = harness();
+    let (status, start) = harness
+        .post("/api/oauth/codex/start", json!({"manual": true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    let (id, _, _) = pkce_details(&start);
+    let (status, body) = harness
+        .post(
+            "/api/oauth/codex/complete",
+            json!({
+                "id": id,
+                "callback_url": "http://127.0.0.1:1455/auth/callback?code=STOLEN&state=ATTACKER"
+            }),
+        )
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(body.to_string().contains("state mismatch"), "{body}");
+
+    let (status, connections) = harness.get("/api/connections").await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    assert_eq!(connections["data"].as_array().expect("rows").len(), 0);
+}
+
+/// Empty start bodies remain valid for the current dashboard, and imply loopback mode.
+#[tokio::test]
+async fn start_with_an_empty_body_stays_loopback() {
+    let _mock = &*MOCK;
+    let harness = harness();
+    let (status, start) = harness.post_empty("/api/oauth/claude/start").await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    assert_eq!(start["challenge"]["manual"], false);
+    let id = start["id"].as_str().expect("id");
+    let (status, _) = harness.delete(&format!("/api/oauth/claude/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// The loopback pages are branded, accessible and never echo token material.
+#[tokio::test]
+async fn loopback_pages_are_branded_and_token_free() {
+    let _mock = &*MOCK;
+    let harness = harness();
+    let (status, start) = harness.post("/api/oauth/claude/start", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    let (id, redirect, state) = pkce_details(&start);
+    let complete = complete_in_task(harness.router.clone(), id).await;
+    let (status, body) = callback_response(&redirect, "PKCE-CODE", &state).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for needle in ["RRouter", "Signed in", "Claude", "You can close this tab."] {
+        assert!(body.contains(needle), "page missing {needle}: {body}");
+    }
+    assert!(!body.contains(PKCE_ACCESS_TOKEN), "{body}");
+    assert!(!body.contains(PKCE_REFRESH_TOKEN), "{body}");
+    assert_eq!(complete.await.expect("complete task").0, StatusCode::OK);
+}
+
+/// A mismatched redirect renders the failure card, not the success card.
+#[tokio::test]
+async fn loopback_failure_page_is_branded() {
+    let _mock = &*MOCK;
+    let harness = harness();
+    let (status, start) = harness.post("/api/oauth/claude/start", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    let (id, redirect, _state) = pkce_details(&start);
+    let complete = complete_in_task(harness.router.clone(), id).await;
+    let (status, body) = callback_response(&redirect, "PKCE-CODE", "ATTACKER").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("RRouter"), "{body}");
+    assert!(body.contains("Sign-in failed"), "{body}");
+    assert!(!body.contains(PKCE_ACCESS_TOKEN), "{body}");
+    assert!(complete.await.expect("complete task").0.is_client_error());
+}
+
+/// No Google OAuth client ships in the repository: start must refuse with a 400 naming
+/// both required variables instead of building a placeholder authorize URL.
+#[allow(clippy::await_holding_lock)] // serializes the credential env mutation
+#[tokio::test]
+async fn google_antigravity_start_requires_client_env() {
+    let _guard = GOOGLE_ENV
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    for name in [
+        "GOOGLE_ANTIGRAVITY_CLIENT_ID",
+        "GOOGLE_ANTIGRAVITY_CLIENT_SECRET",
+        "RROUTER_OAUTH_CLIENT_ID_GOOGLE_ANTIGRAVITY",
+        "RROUTER_OAUTH_CLIENT_SECRET_GOOGLE_ANTIGRAVITY",
+    ] {
+        std::env::remove_var(name);
+    }
+
+    let harness = harness();
+    let (status, body) = harness
+        .post(
+            "/api/oauth/google-antigravity/start",
+            json!({"manual": true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let text = body.to_string();
+    assert!(text.contains("GOOGLE_ANTIGRAVITY_CLIENT_ID"), "{text}");
+    assert!(text.contains("GOOGLE_ANTIGRAVITY_CLIENT_SECRET"), "{text}");
+    assert!(!text.contains("authorize_url"), "{text}");
 }

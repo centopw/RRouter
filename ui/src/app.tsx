@@ -110,6 +110,13 @@ export function Shell() {
   // unexplained gradient. The gutter keeps labels from shifting when it grows.
   const navRef = useRef<HTMLElement | null>(null);
   const [navEdges, setNavEdges] = useState({ top: false, bottom: false });
+  // The phone tab strip is a horizontal scroller with no visible bar: the active route has
+  // to bring itself into view, or a deep link lands on a tab that is off-screen.
+  const tabStrip = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const active = tabStrip.current?.querySelector<HTMLElement>('[aria-current="page"]');
+    active?.scrollIntoView({ inline: "center", block: "nearest" });
+  }, [location.pathname]);
   // A collapsed rail keeps the icons and drops the labels; the choice survives reloads.
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -201,7 +208,10 @@ export function Shell() {
   }
 
   return (
-    <div className="flex h-full flex-col min-[820px]:flex-row">
+    // A fixed shell removes the document's own scroll area: `main` is the only scrollport
+    // and `document.scrollHeight` equals the viewport. `h-dvh` alone still let a scrollable
+    // `main` report its overflow upward in Chromium (41px of phantom document scroll).
+    <div className="fixed inset-0 flex flex-col overflow-hidden min-[820px]:flex-row">
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-full focus:bg-accent focus:px-4 focus:py-2 focus:text-body focus:font-semibold focus:text-[var(--color-accent-ink)]"
@@ -335,7 +345,11 @@ export function Shell() {
             <MagnifyingGlass size={18} aria-hidden />
           </button>
         </div>
-        <nav className="flex gap-1 overflow-x-auto px-2 pb-2" aria-label="Dashboard">
+        <nav
+          ref={tabStrip}
+          className="tab-strip flex gap-1 overflow-x-auto px-2 pb-2"
+          aria-label="Dashboard"
+        >
           {nav.map((item) => (
             <NavItemLink key={item.to} item={item} variant="tab" />
           ))}
@@ -345,7 +359,7 @@ export function Shell() {
       <main
         id="main-content"
         tabIndex={-1}
-        className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 focus:outline-none min-[820px]:px-10 min-[820px]:pb-14 min-[820px]:pt-8"
+        className="main-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 focus:outline-none min-[820px]:px-10 min-[820px]:pb-14 min-[820px]:pt-8"
       >
         <div className="mx-auto w-full max-w-[1160px]">
           {/* Keyed by path, not by query: a filter change inside a page must not remount

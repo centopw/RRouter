@@ -243,6 +243,64 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
     assert!(providers.contains(&"codex"));
 }
 
+/// Antigravity is registered but has no builtin catalog: its ids are operator-defined.
+/// Naming the provider must still resolve the model explicitly (never widened to every
+/// active account), carry the CCA dialect, and stay behind the key's allowlist.
+#[tokio::test]
+async fn antigravity_explicit_id_resolves_with_the_cca_dialect() {
+    let store = Store::open_in_memory().unwrap();
+    let antigravity = conn(&store, "google-antigravity", "gemini-3-pro", 0).await;
+    let _openai = conn(&store, "openai", "gpt-4.1", 0).await;
+    let planner = Planner::new();
+    let plan = planner
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            PlanRequest {
+                model: "google-antigravity/gemini-3-pro",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
+        )
+        .await
+        .expect("explicit antigravity id resolves");
+    assert_eq!(plan.candidates.len(), 1);
+    assert_eq!(plan.candidates[0].provider, "google-antigravity");
+    assert_eq!(plan.candidates[0].model, "gemini-3-pro");
+    assert_eq!(plan.candidates[0].connection, antigravity);
+    assert_eq!(
+        plan.candidates[0].dialect,
+        rrouter_core::Dialect::GoogleCodeAssist
+    );
+
+    let allowed = [String::from("openai/gpt-4.1")];
+    let denied = planner
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            PlanRequest {
+                model: "google-antigravity/gemini-3-pro",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: Some(&allowed),
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
+        )
+        .await
+        .expect_err("the allowlist excludes antigravity");
+    assert!(matches!(denied, Error::Forbidden { .. }), "{denied}");
+}
+
 #[tokio::test]
 async fn explicit_provider_wins_over_catalog_guess() {
     let store = Store::open_in_memory().unwrap();

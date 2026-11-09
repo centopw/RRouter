@@ -49,6 +49,59 @@ const CACHE_HEADER: &str = "x-rrouter-cache";
 
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 
+/// Registry id of the Antigravity (Google Cloud Code Assist) provider.
+const GOOGLE_ANTIGRAVITY: &str = "google-antigravity";
+
+fn is_google_cca(provider: &str) -> bool {
+    provider == GOOGLE_ANTIGRAVITY
+}
+
+/// Project id the CCA envelope must carry, from the credential's provider-specific data.
+///
+/// A missing project is a configuration error the operator can fix; answer `400` with the
+/// field's name instead of sending an envelope the backend will reject.
+fn cca_project(creds: &Credentials) -> Result<String> {
+    creds
+        .extra
+        .get("project_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|project| !project.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::BadRequest(
+                "google-antigravity connection is missing credentials.extra.project_id".into(),
+            )
+        })
+}
+
+/// One attempt's outbound target: primary URL, the CCA production fallback (when the
+/// primary is not already it), the dialect that URL speaks, its headers and, for CCA, the
+/// project id the envelope needs.
+struct Prepared {
+    urls: Vec<String>,
+    dialect: Dialect,
+    headers: HeaderMap,
+    project: Option<String>,
+}
+
+fn google_cca_headers(
+    spec: &ProviderSpec,
+    creds: &Credentials,
+    client: Option<&HeaderMap>,
+) -> Result<HeaderMap> {
+    let mut headers = outbound_headers(spec, creds, client)?;
+    headers.insert(
+        header::USER_AGENT,
+        HeaderValue::from_static(rrouter_translate::google_cca::USER_AGENT),
+    );
+    headers.insert(
+        "x-goog-api-client",
+        HeaderValue::from_static(rrouter_translate::google_cca::CLIENT_HEADER),
+    );
+    Ok(headers)
+}
+
 /// The request's provider policy: the body's `provider` object with the `x-rrouter-*`
 /// headers laid over it. `None` means the request expressed no preference.
 ///
@@ -1171,7 +1224,15 @@ async fn handle(
     // client (a stream has no body to store), no explicit bypass, and a candidate to
     // key the canonical upstream body against. The exact cache and its semantic
     // fallback share this key; the semantic cache additionally needs an embedding model.
-    let caching = !client_stream && !cache_bypassed(headers) && !plan.candidates.is_empty();
+    let caching = !client_stream
+        && !cache_bypassed(headers)
+        && !plan.candidates.is_empty()
+        // CCA's envelope carries a per-attempt request id and a credential project, so
+        // its exact bytes are neither stable nor cacheable across accounts.
+        && !plan
+            .candidates
+            .iter()
+            .any(|candidate| is_google_cca(&candidate.provider));
     let cache_key = if caching
         && (config.cache == CacheMode::Sqlite || config.semantic_cache == CacheMode::Sqlite)
     {
@@ -1848,6 +1909,8 @@ fn same_dialect_body(
             }
         }
         Dialect::AnthropicMessages | Dialect::OpenAiEmbeddings => {}
+        // Upstream-only: the proxy never forwards an inbound CCA body.
+        Dialect::GoogleCodeAssist => {}
     }
     obj.insert("stream".into(), Value::Bool(stream));
     out
@@ -1874,6 +1937,7 @@ fn native_url(spec: &ProviderSpec, inbound: Dialect) -> Option<&'static str> {
         Dialect::OpenAiChat if spec.default_dialect == Dialect::OpenAiChat => Some(spec.base_url),
         Dialect::OpenAiChat => None,
         Dialect::OpenAiEmbeddings => None,
+        Dialect::GoogleCodeAssist => None,
     }
 }
 
@@ -2241,6 +2305,9 @@ impl Attempt<'_> {
 
     /// Dialect the upstream speaks for this candidate and inbound path.
     fn route_dialect(&self, candidate: &Candidate) -> Dialect {
+        if is_google_cca(&candidate.provider) {
+            return Dialect::GoogleCodeAssist;
+        }
         match rrouter_auth::get(&candidate.provider) {
             Some(spec) => endpoint(spec, None, self.inbound).1,
             None => candidate.dialect,
@@ -2249,7 +2316,24 @@ impl Attempt<'_> {
 
     /// Build the upstream body for one attempt. Never mutates the canonical request, so
     /// concurrent attempts all see the client's original values.
-    fn outbound(&self, candidate: &Candidate, dialect: Dialect) -> Result<Value> {
+    fn outbound(
+        &self,
+        candidate: &Candidate,
+        dialect: Dialect,
+        project: Option<&str>,
+    ) -> Result<Value> {
+        if dialect == Dialect::GoogleCodeAssist {
+            let project = project.ok_or_else(|| {
+                Error::BadRequest(
+                    "google-antigravity connection is missing credentials.extra.project_id".into(),
+                )
+            })?;
+            return rrouter_translate::google_cca::build_request(
+                &self.canonical,
+                &candidate.model,
+                project,
+            );
+        }
         let mut body = if dialect == self.inbound {
             same_dialect_body(
                 dialect,
@@ -2285,7 +2369,12 @@ impl Attempt<'_> {
     /// to the same upstream request.
     fn cache_key(&self, candidate: &Candidate) -> Result<CacheKey> {
         let dialect = self.route_dialect(candidate);
-        let body = self.outbound(candidate, dialect)?;
+        if dialect == Dialect::GoogleCodeAssist {
+            return Err(Error::Translation(
+                "google code assist envelopes are request-scoped and not cacheable".into(),
+            ));
+        }
+        let body = self.outbound(candidate, dialect, None)?;
         let mut canonical = String::with_capacity(1024);
         canonical.push_str(self.inbound.as_str());
         canonical.push('\n');
@@ -2300,21 +2389,95 @@ impl Attempt<'_> {
         })
     }
 
-    async fn prepare(
-        &self,
-        candidate: &Candidate,
-        trace: &AttemptTrace,
-    ) -> Result<(String, Dialect, axum::http::HeaderMap)> {
+    async fn prepare(&self, candidate: &Candidate, trace: &AttemptTrace) -> Result<Prepared> {
         let spec = self.provider(candidate)?;
         let creds = self
             .state
             .refresher
             .fresh(self.state.store.as_ref(), spec, candidate.connection)
             .await?;
+        if is_google_cca(&candidate.provider) {
+            let project = cca_project(&creds)?;
+            // A credential override is a deployment/test statement about where this
+            // account goes; the env override applies only to the built-in daily host.
+            let daily = match creds.base_url_override.as_deref() {
+                Some(base) => base.trim_end_matches('/').to_string(),
+                None => rrouter_translate::google_cca::daily_host(spec.base_url),
+            };
+            let prod = rrouter_translate::google_cca::prod_host();
+            let mut urls = vec![rrouter_translate::google_cca::endpoint(
+                &daily,
+                self.upstream_stream,
+            )];
+            if prod != daily {
+                urls.push(rrouter_translate::google_cca::endpoint(
+                    &prod,
+                    self.upstream_stream,
+                ));
+            }
+            let mut headers = google_cca_headers(spec, &creds, self.client_headers)?;
+            inject_trace_headers(&mut headers, trace);
+            return Ok(Prepared {
+                urls,
+                dialect: Dialect::GoogleCodeAssist,
+                headers,
+                project: Some(project),
+            });
+        }
         let (url, dialect) = endpoint(spec, creds.base_url_override.as_deref(), self.inbound);
         let mut headers = outbound_headers(spec, &creds, self.client_headers)?;
         inject_trace_headers(&mut headers, trace);
-        Ok((url, dialect, headers))
+        Ok(Prepared {
+            urls: vec![url],
+            dialect,
+            headers,
+            project: None,
+        })
+    }
+
+    /// POST one attempt, trying the CCA production fallback after a transport failure or
+    /// a 5xx. Only safe before any successful response body was consumed: the streaming
+    /// path has committed nothing at this point, so the retry cannot duplicate output.
+    async fn post_with_fallback(
+        &self,
+        candidate: &Candidate,
+        prepared: &Prepared,
+        wire: &Value,
+    ) -> Result<reqwest::Response> {
+        let mut transport: Option<Error> = None;
+        let mut last_server_error: Option<(u16, Bytes)> = None;
+        for url in &prepared.urls {
+            let sent = Instant::now();
+            match self
+                .state
+                .http
+                .post(url)
+                .headers(prepared.headers.clone())
+                .json(wire)
+                .timeout(self.state.request_timeout())
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    self.trace.set_upstream_ms(sent.elapsed());
+                    let status = resp.status();
+                    if status.is_success() {
+                        return Ok(resp);
+                    }
+                    let bytes = resp.bytes().await.map_err(transport_error)?;
+                    if status.as_u16() < 500 {
+                        return Err(self.upstream_error(candidate, status.as_u16(), &bytes));
+                    }
+                    last_server_error = Some((status.as_u16(), bytes));
+                    transport = None;
+                }
+                Err(e) => transport = Some(transport_error(e)),
+            }
+        }
+        if let Some((status, bytes)) = last_server_error {
+            return Err(self.upstream_error(candidate, status, &bytes));
+        }
+        Err(transport.unwrap_or_else(|| Error::Transport("no upstream endpoint".into())))
     }
 
     /// Non-streaming attempt.
@@ -2331,28 +2494,14 @@ impl Attempt<'_> {
         candidate: Candidate,
         trace: std::sync::Arc<AttemptTrace>,
     ) -> Result<ChatResponse> {
-        let (url, dialect, headers) = self.prepare(&candidate, &trace).await?;
-        let wire = self.outbound(&candidate, dialect)?;
-        let sent = Instant::now();
+        let prepared = self.prepare(&candidate, &trace).await?;
+        let wire = self.outbound(&candidate, prepared.dialect, prepared.project.as_deref())?;
         let resp = self
-            .state
-            .http
-            .post(&url)
-            .headers(headers)
-            .json(&wire)
-            .timeout(self.state.request_timeout())
-            .send()
-            .await
-            .map_err(transport_error)?;
-        self.trace.set_upstream_ms(sent.elapsed());
-        let status = resp.status();
-        if !status.is_success() {
-            let bytes = resp.bytes().await.map_err(transport_error)?;
-            return Err(self.upstream_error(&candidate, status.as_u16(), &bytes));
-        }
+            .post_with_fallback(&candidate, &prepared, &wire)
+            .await?;
         let bytes = resp.bytes().await.map_err(transport_error)?;
         let value: Value = serde_json::from_slice(&bytes)?;
-        rrouter_translate::parse_response(dialect, &value)
+        rrouter_translate::parse_response(prepared.dialect, &value)
     }
 
     /// Streaming attempt. A non-2xx upstream fails before any byte is committed, so the
@@ -2370,40 +2519,40 @@ impl Attempt<'_> {
         candidate: Candidate,
         trace: std::sync::Arc<AttemptTrace>,
     ) -> Result<ByteStream> {
-        let (url, dialect, headers) = self.prepare(&candidate, &trace).await?;
-        let wire = self.outbound(&candidate, dialect)?;
-        let sent = Instant::now();
+        let prepared = self.prepare(&candidate, &trace).await?;
+        let wire = self.outbound(&candidate, prepared.dialect, prepared.project.as_deref())?;
         let resp = self
-            .state
-            .http
-            .post(&url)
-            .headers(headers)
-            .json(&wire)
-            .timeout(self.state.request_timeout())
-            .send()
-            .await
-            .map_err(transport_error)?;
-        self.trace.set_upstream_ms(sent.elapsed());
-        let status = resp.status();
-        if !status.is_success() {
-            let bytes = resp.bytes().await.map_err(transport_error)?;
-            return Err(self.upstream_error(&candidate, status.as_u16(), &bytes));
-        }
+            .post_with_fallback(&candidate, &prepared, &wire)
+            .await?;
+        let dialect = prepared.dialect;
+        let content_type = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
         // Some OpenAI-compatible providers ignore `stream: true` and answer with one JSON
         // body. Forwarding those bytes to the SSE decoder produces an empty, successful
-        // stream; convert the body to chat-completion chunks instead. Dialects with a
-        // different event grammar keep the old behaviour rather than inventing frames.
-        if dialect == Dialect::OpenAiChat
-            && resp
-                .headers()
-                .get(axum::http::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|value| value.starts_with("application/json"))
+        // stream; convert the body to chat-completion chunks instead. CCA gets the same
+        // treatment by wrapping its JSON as one `data:` frame for its own decoder.
+        if content_type.starts_with("application/json")
+            && matches!(dialect, Dialect::OpenAiChat | Dialect::GoogleCodeAssist)
         {
             let body: Value = resp.json().await.map_err(transport_error)?;
-            let frames = json_chat_as_sse(&body, &candidate.model);
+            if dialect == Dialect::OpenAiChat {
+                let frames = json_chat_as_sse(&body, &candidate.model);
+                return Ok(Box::pin(OpenStream {
+                    bytes: Box::pin(futures_util::stream::once(async move { Ok(frames) })),
+                }));
+            }
+            let frame = format!(
+                "data: {}\n\n",
+                serde_json::to_string(&body).unwrap_or_else(|_| "{}".into())
+            );
             return Ok(Box::pin(OpenStream {
-                bytes: Box::pin(futures_util::stream::once(async move { Ok(frames) })),
+                bytes: Box::pin(futures_util::stream::once(
+                    async move { Ok(Bytes::from(frame)) },
+                )),
             }));
         }
         Ok(Box::pin(OpenStream {
@@ -3342,6 +3491,7 @@ fn endpoint_of(dialect: Dialect) -> &'static str {
         Dialect::OpenAiResponses => "/v1/responses",
         Dialect::OpenAiChat => "/v1/chat/completions",
         Dialect::OpenAiEmbeddings => "/v1/embeddings",
+        Dialect::GoogleCodeAssist => "/v1internal:generateContent",
     }
 }
 
@@ -4127,5 +4277,48 @@ mod tests {
         let body = serde_json::json!({"provider": {"allow_fallbacks": "sometimes"}});
         let err = provider_policy(&body, &HeaderMap::new()).expect_err("bad value");
         assert_eq!(err.status(), 400);
+    }
+
+    #[test]
+    fn google_cca_requires_a_project_and_sends_its_own_headers() {
+        let mut creds = Credentials {
+            access_token: Some("antigravity-token".into()),
+            ..Credentials::default()
+        };
+        let err = cca_project(&creds).expect_err("no project");
+        assert_eq!(err.status(), 400);
+        assert!(err.to_string().contains("project_id"), "{err}");
+
+        creds
+            .extra
+            .insert("project_id".into(), Value::from("  proj-1  "));
+        assert_eq!(cca_project(&creds).expect("project"), "proj-1");
+
+        let spec = rrouter_auth::get("claude").expect("claude");
+        let headers = google_cca_headers(spec, &creds, None).expect("headers");
+        assert_eq!(
+            headers
+                .get(header::USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+            Some("antigravity")
+        );
+        assert_eq!(
+            headers
+                .get("x-goog-api-client")
+                .and_then(|value| value.to_str().ok()),
+            Some("google-cloud-sdk vscode_cloudshelleditor/0.1")
+        );
+        assert_eq!(
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer antigravity-token")
+        );
+        assert_eq!(
+            headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
     }
 }

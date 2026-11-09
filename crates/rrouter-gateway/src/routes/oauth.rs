@@ -10,6 +10,25 @@
 //!
 //! `DELETE /api/oauth/{provider}/{id}` abandons a login and releases its port.
 //!
+//! # Request/response shapes (manual/remote sign-in)
+//!
+//! ```text
+//! POST /api/oauth/{provider}/start        body: {} | {"manual":true}
+//! 200 {"id":"<uuid>","provider":"claude","flow":"pkce",
+//!      "challenge":{"kind":"pkce","authorize_url":"<url>",
+//!                   "redirect_uri":"http://localhost:51121/oauth-callback",
+//!                   "manual":true}}
+//! 400 {"error":{"message":"manual callback requires a fixed redirect port; ..."}}
+//!
+//! POST /api/oauth/{provider}/complete     body: {"id":"<uuid>",
+//!                                                "callback_url":"<final browser URL>"}
+//! 200 {"id":"<connection-uuid>","provider":"claude","name":"...","warning":null}
+//! 400/401 {"error":{"message":"OAuth state mismatch: ..."}}
+//! ```
+//!
+//! Omitting `manual` (or sending no body) keeps the loopback behavior; omitting
+//! `callback_url` keeps the existing loopback wait.
+//!
 //! These never return credentials: a sign-in produces a stored connection, and the
 //! existing `/api/connections` view already reports only booleans about it.
 
@@ -30,10 +49,17 @@ pub async fn providers() -> Response {
         .iter()
         .filter_map(|spec| {
             spec.login_flow().map(|flow| {
+                // Manual (paste-the-callback) mode needs a registered fixed port; a
+                // dynamic loopback port cannot be reached from the browser host.
+                let manual = matches!(
+                    flow,
+                    rrouter_auth::LoginFlow::Pkce(pkce) if pkce.fixed_port.is_some()
+                );
                 json!({
                     "id": spec.id,
                     "display": spec.display,
                     "flow": flow.kind(),
+                    "manual": manual,
                 })
             })
         })
@@ -41,12 +67,29 @@ pub async fn providers() -> Response {
     ok_json(json!({ "data": data }))
 }
 
-/// `POST /api/oauth/{provider}/start`
-pub async fn start(State(state): State<Arc<AppState>>, Path(provider): Path<String>) -> Response {
+/// `POST /api/oauth/{provider}/start` with optional `{manual:true}`.
+pub async fn start(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+    body: Body,
+) -> Response {
     let Some(spec) = rrouter_auth::get(&provider) else {
         return admin_error(&Error::NotFound(format!("unknown provider {provider}")));
     };
-    match state.oauth.start(&state.http, spec).await {
+    let value = match body_json(body).await {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let manual = value
+        .get("manual")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let started = if manual {
+        state.oauth.start_manual(&state.http, spec).await
+    } else {
+        state.oauth.start(&state.http, spec).await
+    };
+    match started {
         Ok((id, challenge)) => ok_json(json!({
             "id": id,
             "provider": spec.id,
@@ -72,7 +115,11 @@ pub async fn status(
     }))
 }
 
-/// `POST /api/oauth/{provider}/complete` with `{id}`.
+/// `POST /api/oauth/{provider}/complete` with `{id, callback_url?}`.
+///
+/// `callback_url` is the full URL the browser landed on after consent. It is required
+/// for a manual start (no loopback listener) and also accepted for a loopback start
+/// whose redirect could not reach this host.
 pub async fn complete(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
@@ -88,7 +135,16 @@ pub async fn complete(
     let Some(id) = value.get("id").and_then(|v| v.as_str()) else {
         return admin_error(&Error::BadRequest("id is required".into()));
     };
-    let signed_in = match state.oauth.complete(&state.http, id).await {
+    let callback_url = value
+        .get("callback_url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
+    let signed_in = match callback_url {
+        Some(url) => state.oauth.complete_manual(&state.http, id, url).await,
+        None => state.oauth.complete(&state.http, id).await,
+    };
+    let signed_in = match signed_in {
         Ok(done) => done,
         Err(e) => return admin_error(&e),
     };

@@ -9,3 +9,4 @@ rrouter-core.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true

@@ -142,9 +142,10 @@ export function Select({
           align="start"
           side="bottom"
           sideOffset={6}
-          collisionPadding={8}
-          className="z-[70] overflow-hidden rounded-[10px] border border-line-strong bg-surface shadow-[0_16px_40px_rgba(16,18,20,0.18)] focus:outline-none"
-          style={{ width: "max(220px, var(--radix-popover-trigger-width))" }}
+          collisionPadding={12}
+          sticky="always"
+          className="z-[70] max-w-[min(360px,calc(100vw-24px))] overflow-hidden rounded-[10px] border border-line-strong bg-surface shadow-[0_16px_40px_rgba(16,18,20,0.18)] focus:outline-none"
+          style={{ width: "min(360px, max(220px, var(--radix-popover-trigger-width)))" }}
         >
           <div id={listId} role="listbox" aria-label={ariaLabel}>
             {options.length > 4 ? (

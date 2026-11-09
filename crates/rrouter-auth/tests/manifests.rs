@@ -197,8 +197,9 @@ fn every_manifest_compiles_field_for_field() {
 
 #[test]
 fn the_core_table_is_unchanged_and_community_providers_are_added() {
-    // Wave 1 shipped these 15; a manifest may add providers but never rewrite one.
-    assert_eq!(registry::PROVIDERS.len(), 15, "core provider count");
+    // Wave 1 shipped 15; Wave 15B added the Antigravity OAuth row. A manifest may add
+    // providers but never rewrite one.
+    assert_eq!(registry::PROVIDERS.len(), 16, "core provider count");
     let community = registry::all().count() - registry::PROVIDERS.len();
     assert_eq!(
         community,

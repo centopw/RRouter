@@ -22,12 +22,17 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::credentials::Credentials;
-use crate::overrides::{override_for, OverrideKind};
+use crate::overrides::{oauth_client, override_for, OverrideKind};
 use crate::registry::{ProviderKind, ProviderSpec, RefreshBody, RefreshSpec};
 
 /// Credentials are considered stale this many seconds before they actually expire, so a
 /// token cannot die mid-flight between the freshness check and the upstream request.
 pub const LEAD_SECS: i64 = 300;
+
+/// Total attempts for one refresh when the token endpoint answers 429 or 5xx.
+const REFRESH_RETRIES: u32 = 3;
+/// First retry delay; doubled per attempt.
+const REFRESH_RETRY_BASE: Duration = Duration::from_millis(250);
 
 /// GitHub Copilot session-token endpoint. Not a `RefreshSpec`: the long-lived GitHub token
 /// is the credential and the copilot token is derived from it.
@@ -159,7 +164,11 @@ impl Refresher {
         self.exchange_oauth(provider.id, spec, refresh_token).await
     }
 
-    /// RFC 6749 refresh for `claude` (JSON), `codex` (form) and any future OAuth provider.
+    /// RFC 6749 refresh for `claude` (JSON), `codex`/Google (form) and any future OAuth
+    /// provider.
+    ///
+    /// Transient upstream failures (429, 5xx) are retried twice with exponential backoff;
+    /// a 4xx is the credential's fault (`invalid_grant`) and is surfaced immediately.
     async fn exchange_oauth(
         &self,
         provider_id: &str,
@@ -167,52 +176,85 @@ impl Refresher {
         refresh_token: &str,
     ) -> Result<Credentials> {
         let token_url = override_for(provider_id, OverrideKind::Token).unwrap_or(spec.token_url);
-        let mut req = self
-            .http
-            .post(token_url)
-            .timeout(REQUEST_TIMEOUT)
-            .header("accept", "application/json");
+        // Google Antigravity has no static client: missing env fails before any request.
+        let (client_id, client_secret) =
+            oauth_client(provider_id, spec.client_id, spec.client_secret)?;
 
-        req = match spec.body {
-            RefreshBody::Json => {
-                let mut body = serde_json::Map::with_capacity(4);
-                body.insert("grant_type".into(), "refresh_token".into());
-                body.insert("refresh_token".into(), refresh_token.into());
-                body.insert("client_id".into(), spec.client_id.into());
-                if provider_id == "codex" {
-                    body.insert("scope".into(), "openid profile email offline_access".into());
+        let mut attempt = 0;
+        loop {
+            let mut req = self
+                .http
+                .post(token_url)
+                .timeout(REQUEST_TIMEOUT)
+                .header("accept", "application/json");
+
+            req = match spec.body {
+                RefreshBody::Json => {
+                    let mut body = serde_json::Map::with_capacity(6);
+                    body.insert("grant_type".into(), "refresh_token".into());
+                    body.insert("refresh_token".into(), refresh_token.into());
+                    body.insert("client_id".into(), client_id.as_ref().into());
+                    if let Some(secret) = client_secret.as_deref() {
+                        body.insert("client_secret".into(), secret.into());
+                    }
+                    if provider_id == "codex" {
+                        body.insert("scope".into(), "openid profile email offline_access".into());
+                    }
+                    req.json(&serde_json::Value::Object(body))
                 }
-                req.json(&serde_json::Value::Object(body))
+                RefreshBody::Form => {
+                    let mut form: Vec<(&str, &str)> = vec![
+                        ("grant_type", "refresh_token"),
+                        ("refresh_token", refresh_token),
+                        ("client_id", client_id.as_ref()),
+                    ];
+                    if let Some(secret) = client_secret.as_deref() {
+                        form.push(("client_secret", secret));
+                    }
+                    // Google rejects a scope it did not issue (it has no `offline_access`
+                    // scope); only the Codex client sends one.
+                    if provider_id == "codex" {
+                        form.push(("scope", "openid profile email offline_access"));
+                    }
+                    req.form(&form)
+                }
+            };
+
+            let resp = req.send().await.map_err(transport)?;
+            let status = resp.status();
+            let transient = status.as_u16() == 429 || status.is_server_error();
+            if transient && attempt + 1 < REFRESH_RETRIES {
+                let delay = REFRESH_RETRY_BASE * (1 << attempt);
+                attempt += 1;
+                tracing::debug!(
+                    provider = provider_id,
+                    status = status.as_u16(),
+                    attempt,
+                    "retrying OAuth refresh after a transient failure"
+                );
+                tokio::time::sleep(delay).await;
+                continue;
             }
-            RefreshBody::Form => req.form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_token),
-                ("client_id", spec.client_id),
-                ("scope", "openid profile email offline_access"),
-            ]),
-        };
+            if !status.is_success() {
+                let body = resp.text().await.map_err(transport)?;
+                return Err(refresh_error(provider_id, status.as_u16(), &body));
+            }
+            let tokens: TokenResponse = resp.json().await.map_err(transport)?;
+            if tokens.access_token.is_empty() {
+                return Err(Error::Unauthorized(format!(
+                    "provider {provider_id} refresh returned an empty access token"
+                )));
+            }
 
-        let resp = req.send().await.map_err(transport)?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.map_err(transport)?;
-            return Err(refresh_error(provider_id, status.as_u16(), &body));
+            let mut patch = Credentials {
+                access_token: Some(tokens.access_token),
+                refresh_token: tokens.refresh_token.filter(|t| !t.is_empty()),
+                ..Credentials::default()
+            };
+            patch.expires_at = tokens.expires_in.map(|secs| now_unix() + i64::from(secs));
+            tracing::debug!(provider = provider_id, "refreshed OAuth credential");
+            return Ok(patch);
         }
-        let tokens: TokenResponse = resp.json().await.map_err(transport)?;
-        if tokens.access_token.is_empty() {
-            return Err(Error::Unauthorized(format!(
-                "provider {provider_id} refresh returned an empty access token"
-            )));
-        }
-
-        let mut patch = Credentials {
-            access_token: Some(tokens.access_token),
-            refresh_token: tokens.refresh_token.filter(|t| !t.is_empty()),
-            ..Credentials::default()
-        };
-        patch.expires_at = tokens.expires_in.map(|secs| now_unix() + i64::from(secs));
-        tracing::debug!(provider = provider_id, "refreshed OAuth credential");
-        Ok(patch)
     }
 
     /// `github`: derive a short-lived copilot session token from the long-lived GitHub
@@ -431,6 +473,7 @@ mod tests {
             refresh: Some(RefreshSpec {
                 token_url,
                 client_id: "test-client",
+                client_secret: None,
                 body,
             }),
             ..*registry::get(id).expect("registered provider")
@@ -640,6 +683,167 @@ mod tests {
         assert_eq!(store.merges.load(Ordering::SeqCst), 1);
     }
 
+    #[allow(clippy::await_holding_lock)] // serializes env mutation against the override test
+    #[tokio::test]
+    async fn google_refresh_sends_the_env_client_secret_and_no_scope() {
+        use std::sync::Mutex as StdMutex;
+
+        let _guard = crate::TEST_ENV
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let names = [
+            "GOOGLE_ANTIGRAVITY_CLIENT_ID",
+            "GOOGLE_ANTIGRAVITY_CLIENT_SECRET",
+            "RROUTER_OAUTH_CLIENT_ID_GOOGLE_ANTIGRAVITY",
+            "RROUTER_OAUTH_CLIENT_SECRET_GOOGLE_ANTIGRAVITY",
+        ];
+        let saved: Vec<(&str, Option<String>)> = names
+            .iter()
+            .map(|name| (*name, std::env::var(name).ok()))
+            .collect();
+        for name in names {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("GOOGLE_ANTIGRAVITY_CLIENT_ID", "env-refresh-id");
+        std::env::set_var("GOOGLE_ANTIGRAVITY_CLIENT_SECRET", "env-refresh-secret");
+
+        let server = wiremock::MockServer::start().await;
+        let seen = Arc::new(StdMutex::new(String::new()));
+        let seen_for_handler = seen.clone();
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(move |req: &wiremock::Request| {
+                *seen_for_handler.lock().expect("body") =
+                    String::from_utf8_lossy(&req.body).into_owned();
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "at-google",
+                    "expires_in": 3600
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let google = *registry::get("google-antigravity").expect("google-antigravity");
+        let spec = ProviderSpec {
+            refresh: Some(RefreshSpec {
+                token_url: mock_url(&server),
+                ..google.refresh.expect("refresh")
+            }),
+            ..google
+        };
+        let store = FakeStore::new(expired("at-old"));
+
+        let fresh = Refresher::new(client())
+            .fresh(store.as_ref(), &spec, Uuid::new_v4())
+            .await
+            .expect("refresh");
+        assert_eq!(fresh.access_token.as_deref(), Some("at-google"));
+
+        let body = seen.lock().expect("body").clone();
+        assert!(body.contains("grant_type=refresh_token"), "{body}");
+        assert!(body.contains("refresh_token=rt-old"), "{body}");
+        assert!(body.contains("client_id=env-refresh-id"), "{body}");
+        assert!(
+            body.contains("client_secret=env-refresh-secret"),
+            "the env secret must ride the refresh: {body}"
+        );
+        assert!(
+            !body.contains(crate::antigravity::PLACEHOLDER_CLIENT),
+            "the placeholder must never reach the wire: {body}"
+        );
+        assert!(
+            !body.contains("scope="),
+            "Google rejects a scope it did not issue: {body}"
+        );
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    /// Missing credentials fail before the token endpoint is contacted.
+    #[allow(clippy::await_holding_lock)] // serializes env mutation against the override test
+    #[tokio::test]
+    async fn google_refresh_refuses_missing_env_without_http() {
+        let _guard = crate::TEST_ENV
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for name in [
+            "GOOGLE_ANTIGRAVITY_CLIENT_ID",
+            "GOOGLE_ANTIGRAVITY_CLIENT_SECRET",
+            "RROUTER_OAUTH_CLIENT_ID_GOOGLE_ANTIGRAVITY",
+            "RROUTER_OAUTH_CLIENT_SECRET_GOOGLE_ANTIGRAVITY",
+        ] {
+            std::env::remove_var(name);
+        }
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let google = *registry::get("google-antigravity").expect("google-antigravity");
+        let spec = ProviderSpec {
+            refresh: Some(RefreshSpec {
+                token_url: mock_url(&server),
+                ..google.refresh.expect("refresh")
+            }),
+            ..google
+        };
+        let store = FakeStore::new(expired("at-old"));
+        let err = Refresher::new(client())
+            .fresh(store.as_ref(), &spec, Uuid::new_v4())
+            .await
+            .expect_err("missing env");
+        assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
+        let message = err.to_string();
+        assert!(
+            message.contains("GOOGLE_ANTIGRAVITY_CLIENT_ID"),
+            "{message}"
+        );
+        assert!(
+            message.contains("GOOGLE_ANTIGRAVITY_CLIENT_SECRET"),
+            "{message}"
+        );
+        assert_eq!(store.merges.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn transient_refresh_failures_are_retried_then_succeed() {
+        let server = wiremock::MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_handler = hits.clone();
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(move |_req: &wiremock::Request| {
+                let n = hits_for_handler.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    return wiremock::ResponseTemplate::new(500)
+                        .set_body_json(serde_json::json!({"error": "backend"}));
+                }
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "at-after-retry",
+                    "expires_in": 3600
+                }))
+            })
+            .mount(&server)
+            .await;
+
+        let store = FakeStore::new(expired("at-old"));
+        let spec = claude_spec("claude", mock_url(&server), RefreshBody::Form);
+
+        let fresh = Refresher::new(client())
+            .fresh(store.as_ref(), &spec, Uuid::new_v4())
+            .await
+            .expect("refresh");
+        assert_eq!(fresh.access_token.as_deref(), Some("at-after-retry"));
+        assert_eq!(hits.load(Ordering::SeqCst), 3, "two 500s, then success");
+    }
+
     #[tokio::test]
     async fn refresh_failure_is_unauthorized_and_not_persisted() {
         let server = wiremock::MockServer::start().await;
@@ -648,6 +852,7 @@ mod tests {
                 wiremock::ResponseTemplate::new(400)
                     .set_body_json(serde_json::json!({"error": "invalid_grant"})),
             )
+            .expect(1)
             .mount(&server)
             .await;
 

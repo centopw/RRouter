@@ -54,6 +54,10 @@ pub struct RefreshSpec {
     pub token_url: &'static str,
     /// Public OAuth client id of the CLI whose flow issued the token.
     pub client_id: &'static str,
+    /// Client secret for endpoints that authenticate a confidential client (Google).
+    /// `None` for public PKCE-only clients. `GOOGLE_ANTIGRAVITY_CLIENT_SECRET` overrides
+    /// the registered value at runtime.
+    pub client_secret: Option<&'static str>,
     /// Body encoding the endpoint expects.
     pub body: RefreshBody,
 }
@@ -75,6 +79,9 @@ pub enum LoginFlow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PkceFlow {
     pub client_id: &'static str,
+    /// Client secret sent with the code exchange, when the registered client is
+    /// confidential (Google). `None` for public PKCE clients.
+    pub client_secret: Option<&'static str>,
     pub authorize_url: &'static str,
     pub token_url: &'static str,
     /// Space-joined scope string.
@@ -231,12 +238,24 @@ const CODEX_OAUTH_CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CLAUDE_REFRESH: RefreshSpec = RefreshSpec {
     token_url: "https://api.anthropic.com/v1/oauth/token",
     client_id: ANTHROPIC_OAUTH_CLIENT,
+    client_secret: None,
     body: RefreshBody::Json,
 };
 
 const CODEX_REFRESH: RefreshSpec = RefreshSpec {
     token_url: "https://auth.openai.com/oauth/token",
     client_id: CODEX_OAUTH_CLIENT,
+    client_secret: None,
+    body: RefreshBody::Form,
+};
+
+/// Google Antigravity: the Google token endpoint authenticates both the code exchange
+/// and the refresh with an operator-supplied confidential client. The static fields are
+/// a non-secret placeholder; the runtime values come from `GOOGLE_ANTIGRAVITY_*`.
+const GOOGLE_ANTIGRAVITY_REFRESH: RefreshSpec = RefreshSpec {
+    token_url: crate::antigravity::TOKEN_URL,
+    client_id: crate::antigravity::PLACEHOLDER_CLIENT,
+    client_secret: Some(crate::antigravity::PLACEHOLDER_CLIENT),
     body: RefreshBody::Form,
 };
 
@@ -270,6 +289,7 @@ const ANTHROPIC_HEADERS: &[(&str, &str)] = &[("anthropic-version", "2023-06-01")
 /// [CC] sign-in: authorization code + PKCE on an ephemeral loopback port.
 pub const CLAUDE_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
     client_id: ANTHROPIC_OAUTH_CLIENT,
+    client_secret: None,
     authorize_url: "https://claude.ai/oauth/authorize",
     token_url: "https://api.anthropic.com/v1/oauth/token",
     scope: "org:create_api_key user:profile user:inference",
@@ -286,6 +306,7 @@ pub const CLAUDE_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
 /// Codex CLI sign-in: authorization code + PKCE on the port its client registered.
 pub const CODEX_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
     client_id: CODEX_OAUTH_CLIENT,
+    client_secret: None,
     authorize_url: "https://auth.openai.com/oauth/authorize",
     token_url: "https://auth.openai.com/oauth/token",
     scope: "openid profile email offline_access",
@@ -309,6 +330,27 @@ pub const GITHUB_LOGIN: LoginFlow = LoginFlow::DeviceCode(DeviceFlow {
     device_code_url: "https://github.com/login/device/code",
     token_url: "https://github.com/login/oauth/access_token",
     scope: "read:user",
+});
+
+/// Google Antigravity sign-in: authorization code + PKCE on the registered fixed port.
+///
+/// The client id/secret are operator-supplied (`GOOGLE_ANTIGRAVITY_CLIENT_ID`,
+/// `GOOGLE_ANTIGRAVITY_CLIENT_SECRET`) and replace these placeholders at runtime; a
+/// missing value is a 400 before any listener or request exists. `access_type=offline`
+/// is what makes Google issue a refresh token; `prompt=consent` forces it on a repeat
+/// sign-in.
+pub const GOOGLE_ANTIGRAVITY_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
+    client_id: crate::antigravity::PLACEHOLDER_CLIENT,
+    client_secret: Some(crate::antigravity::PLACEHOLDER_CLIENT),
+    authorize_url: crate::antigravity::AUTHORIZE_URL,
+    token_url: crate::antigravity::TOKEN_URL,
+    scope: crate::antigravity::SCOPES,
+    fixed_port: Some(crate::antigravity::CALLBACK_PORT),
+    redirect_host: "localhost",
+    callback_path: crate::antigravity::CALLBACK_PATH,
+    extra_params: &[("access_type", "offline"), ("prompt", "consent")],
+    send_state: false,
+    body: RefreshBody::Form,
 });
 
 /// Every provider this build can route to.
@@ -393,6 +435,41 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         refresh: None,
         login: Some(GITHUB_LOGIN),
         profile_url: Some("https://api.github.com/user"),
+        stream_only: false,
+    },
+    ProviderSpec {
+        id: crate::antigravity::PROVIDER_ID,
+        display: "Google Antigravity",
+        kind: ProviderKind::OAuth,
+        // Daily origin. The proxy appends the CCA streaming/buffered path and retries on
+        // the production host; `RROUTER_ANTIGRAVITY_DAILY_HOST` overrides it.
+        base_url: rrouter_translate::google_cca::DAILY_HOST,
+        base_url_requires_override: false,
+        responses_url: None,
+        // Model discovery is `POST /v1internal:fetchAvailableModels` behind a project and
+        // an OAuth token, not a `GET /models` surface, so no URL can be derived here.
+        // Model ids come from the router catalog; see docs/PROVIDERS.md.
+        models_url: None,
+        messages_url: None,
+        images_url: None,
+        audio_speech_url: None,
+        audio_transcriptions_url: None,
+        audio_voices_url: None,
+        default_dialect: Dialect::GoogleCodeAssist,
+        auth: AuthStyle::Bearer,
+        // The proxy sets `user-agent: antigravity` and `x-goog-api-client` on every CCA
+        // call; the OAuth endpoints need no extra headers.
+        extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        // CCA spells the cap `maxOutputTokens` inside `generationConfig`; WireProfile is
+        // only read for canonical chat dialects, so this value never reaches the wire.
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
+        default_max_tokens: None,
+        refresh: Some(GOOGLE_ANTIGRAVITY_REFRESH),
+        login: Some(GOOGLE_ANTIGRAVITY_LOGIN),
+        profile_url: Some(crate::antigravity::PROFILE_URL),
         stream_only: false,
     },
     ProviderSpec {
@@ -853,6 +930,7 @@ mod tests {
         assert!(is_oauth("claude"));
         assert!(is_oauth("codex"));
         assert!(is_oauth("github"));
+        assert!(is_oauth("google-antigravity"));
         assert!(!is_oauth("openai"));
         assert!(!is_oauth("anthropic"));
         assert!(!is_oauth("ollama"));
@@ -899,6 +977,61 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn google_antigravity_is_a_cca_oauth_provider() {
+        let spec = get("google-antigravity").expect("google-antigravity");
+        assert_eq!(spec.display, "Google Antigravity");
+        assert_eq!(spec.kind, ProviderKind::OAuth);
+        assert_eq!(spec.auth, AuthStyle::Bearer);
+        assert_eq!(spec.default_dialect, Dialect::GoogleCodeAssist);
+        assert_eq!(spec.base_url, "https://daily-cloudcode-pa.googleapis.com");
+        assert_eq!(spec.profile_url, Some(crate::antigravity::PROFILE_URL));
+        assert_eq!(spec.models_url, None);
+
+        let LoginFlow::Pkce(login) = spec.login.expect("login") else {
+            panic!("antigravity signs in with PKCE");
+        };
+        assert_eq!(
+            login.authorize_url,
+            "https://accounts.google.com/o/oauth2/v2/auth"
+        );
+        assert_eq!(login.token_url, "https://oauth2.googleapis.com/token");
+        assert_eq!(login.fixed_port, Some(51121));
+        assert_eq!(login.redirect_host, "localhost");
+        assert_eq!(login.callback_path, "/oauth-callback");
+        assert_eq!(login.body, RefreshBody::Form);
+        // The static row must never carry a real credential.
+        assert_eq!(login.client_id, crate::antigravity::PLACEHOLDER_CLIENT);
+        assert_eq!(
+            login.client_secret,
+            Some(crate::antigravity::PLACEHOLDER_CLIENT)
+        );
+        for scope in [
+            "cloud-platform",
+            "userinfo.email",
+            "userinfo.profile",
+            "cclog",
+            "experimentsandconfigs",
+        ] {
+            assert!(
+                login.scope.contains(scope),
+                "missing scope {scope}: {}",
+                login.scope
+            );
+        }
+        assert!(login.extra_params.contains(&("access_type", "offline")));
+        assert!(login.extra_params.contains(&("prompt", "consent")));
+
+        let refresh = spec.refresh.expect("refresh");
+        assert_eq!(refresh.token_url, "https://oauth2.googleapis.com/token");
+        assert_eq!(refresh.client_id, crate::antigravity::PLACEHOLDER_CLIENT);
+        assert_eq!(
+            refresh.client_secret,
+            Some(crate::antigravity::PLACEHOLDER_CLIENT)
+        );
+        assert_eq!(refresh.body, RefreshBody::Form);
     }
 
     #[test]

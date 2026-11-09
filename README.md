@@ -52,16 +52,16 @@ curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | s
 ```
 
 ```sh
-# pin the newest published release (v0.4.2) / choose a directory
-RROUTER_VERSION=v0.4.2 RROUTER_INSTALL_DIR="$HOME/bin" \
+# pin the newest published release (v0.4.3) / choose a directory
+RROUTER_VERSION=v0.4.3 RROUTER_INSTALL_DIR="$HOME/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
 
 # see what it would do
 RROUTER_DRY_RUN=1 curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | sh
 ```
 
-`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.2 is
-the newest. The workspace is 0.4.2 — tag artifacts are published by the release workflow.
+`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.3 is
+the newest. The workspace is 0.4.3 — tag artifacts are published by the release workflow.
 
 ## Quick start
 
@@ -237,15 +237,18 @@ inactive or expired is always rejected.
 
 | Kind | Providers |
 | --- | --- |
-| Subscription sign-in (OAuth) | Claude, Codex (ChatGPT), GitHub Copilot |
+| Subscription sign-in (OAuth) | Claude, Codex (ChatGPT), GitHub Copilot, Google Antigravity (Cloud Code Assist; Google account, not a Gemini API key) |
 | API key | OpenAI, Anthropic, Google Gemini, DeepSeek, Groq, OpenRouter, xAI, Mistral, Together, Cerebras |
 | API key, provider-native surface | Azure OpenAI (`api-key` header, chat on the v1 surface, per-resource base URL, deployment name as the model id), Cohere (chat through the OpenAI-compatibility API plus `/v1/rerank`), Fireworks AI (chat, ids stored as `accounts/fireworks/models/<name>`), Jina AI (rerank only — no chat API) |
 | Local / custom | Ollama, or anything reachable through `base_url_override` |
 
 OAuth tokens refresh ahead of expiry with a per-account lock, so concurrent requests never
-race two refreshes and invalidate the session. Per-provider auth headers, native endpoints,
+race two refreshes and invalidate the session. Google Antigravity signs in a Google account
+(fixed OAuth callback on port 51121), discovers the Cloud project with `loadCodeAssist` /
+`onboardUser`, and needs the exact Cloud Code Assist model ids added as custom rows (it has no
+`GET /models`); it is chat/streaming only. Per-provider auth headers, native endpoints,
 model-list behaviour and the community-manifest provenance are in
-[`docs/PROVIDERS.md`](docs/PROVIDERS.md).
+[`docs/PROVIDERS.md`](docs/PROVIDERS.md#google-antigravity-cloud-code-assist).
 
 ## Models
 
@@ -569,9 +572,9 @@ from the matching `## <version>` section of `CHANGELOG.md` by
 `ubuntu-24.04-arm` instead of QEMU. The docker workflow builds `linux/amd64` and
 `linux/arm64` on native runners and merges the digests into
 `ghcr.io/centopw/rrouter:0.2.0`, `:0.2`, `:latest`, and a `:sha-…` manifest, cutting the
-v0.4.2 31-minute QEMU path to an expected ~12–16 minutes cold. The installer verifies the
+v0.4.3 31-minute QEMU path to an expected ~12–16 minutes cold. The installer verifies the
 checksum before installing, so a corrupted download never lands in `$PATH`. Verify notes
-before tagging with `python3 scripts/release-notes.py v0.4.2 --check`; the full flow and
+before tagging with `python3 scripts/release-notes.py v0.4.3 --check`; the full flow and
 timings are in [`docs/RELEASES.md`](docs/RELEASES.md#5-the-pipeline).
 
 ## License

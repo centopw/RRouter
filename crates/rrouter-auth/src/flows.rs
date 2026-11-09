@@ -17,10 +17,13 @@ use std::time::{Duration, Instant};
 use rrouter_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::Mutex as AsyncMutex;
 
+use crate::antigravity;
 use crate::credentials::Credentials;
 use crate::fresh::TokenResponse;
-use crate::loopback::LoopbackServer;
+use crate::loopback::{self, LoopbackServer, PageContext};
+use crate::overrides::oauth_client;
 use crate::pkce;
 use crate::registry::{
     get, login_flow_for, DeviceFlow, LoginFlow, PkceFlow, ProviderSpec, RefreshBody,
@@ -41,6 +44,9 @@ pub enum Challenge {
     Pkce {
         authorize_url: String,
         redirect_uri: String,
+        /// `true` when no listener was bound: the browser cannot reach the gateway, so
+        /// the operator pastes the final redirect URL into `complete.callback_url`.
+        manual: bool,
     },
     /// Show `user_code`, open `verification_uri`, then call `complete`.
     DeviceCode {
@@ -74,13 +80,30 @@ pub enum PendingState {
 struct Pending {
     provider: &'static str,
     profile_url: Option<&'static str>,
+    /// Provider transport base, needed by a manual/remote completion.
+    base_url: &'static str,
     device: Option<DeviceFlowState>,
+    /// Present for PKCE sign-ins: everything the exchange needs after the redirect.
+    pkce: Option<PkceState>,
+    /// Serializes exchanges for one pending login, so a loopback redirect racing a
+    /// pasted callback cannot spend the single-use code twice.
+    exchange: Option<Arc<AsyncMutex<()>>>,
     created: Instant,
     status: PendingState,
     outcome: Option<std::result::Result<SignedIn, String>>,
     /// The task that owns the loopback listener and exchanges the code as soon as the
     /// browser redirects. Aborted on cancel so a forgotten dialog cannot hold a port.
     task: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct PkceState {
+    flow: PkceFlow,
+    verifier: String,
+    state: String,
+    redirect_uri: String,
+    /// Manual sign-ins have no listener; `complete` must carry `callback_url`.
+    manual: bool,
 }
 
 struct DeviceFlowState {
@@ -113,18 +136,44 @@ impl OAuthFlows {
         http: &reqwest::Client,
         spec: &'static ProviderSpec,
     ) -> Result<(String, Challenge)> {
-        let flow = if get(spec.id).is_some_and(|registered| std::ptr::eq(registered, spec)) {
+        let flow = self.resolve_flow(spec)?;
+        self.sweep();
+        match flow {
+            LoginFlow::Pkce(p) => self.start_pkce(http, spec, p, false).await,
+            LoginFlow::DeviceCode(d) => self.start_device(http, spec, d).await,
+        }
+    }
+
+    /// Begin a PKCE sign-in that never binds a loopback listener.
+    ///
+    /// For a gateway on a remote host: the browser redirects to the browser machine's
+    /// localhost, which the gateway cannot reach. The caller gives the human
+    /// `authorize_url`, then posts the final redirect URL to
+    /// [`complete_manual`](Self::complete_manual).
+    pub async fn start_manual(
+        &self,
+        http: &reqwest::Client,
+        spec: &'static ProviderSpec,
+    ) -> Result<(String, Challenge)> {
+        let flow = self.resolve_flow(spec)?;
+        self.sweep();
+        match flow {
+            LoginFlow::Pkce(p) => self.start_pkce(http, spec, p, true).await,
+            LoginFlow::DeviceCode(_) => Err(Error::BadRequest(format!(
+                "provider {} uses a device code; manual callback is only for PKCE sign-ins",
+                spec.id
+            ))),
+        }
+    }
+
+    fn resolve_flow(&self, spec: &'static ProviderSpec) -> Result<LoginFlow> {
+        if get(spec.id).is_some_and(|registered| std::ptr::eq(registered, spec)) {
             login_flow_for(spec.id)
         } else {
             None
         }
         .or(spec.login)
-        .ok_or_else(|| Error::BadRequest(format!("provider {} has no OAuth sign-in", spec.id)))?;
-        self.sweep();
-        match flow {
-            LoginFlow::Pkce(p) => self.start_pkce(http, spec, p).await,
-            LoginFlow::DeviceCode(d) => self.start_device(http, spec, d).await,
-        }
+        .ok_or_else(|| Error::BadRequest(format!("provider {} has no OAuth sign-in", spec.id)))
     }
 
     async fn start_pkce(
@@ -132,17 +181,28 @@ impl OAuthFlows {
         http: &reqwest::Client,
         spec: &'static ProviderSpec,
         p: PkceFlow,
+        manual: bool,
     ) -> Result<(String, Challenge)> {
-        let server =
-            LoopbackServer::bind(p.fixed_port.unwrap_or(0), p.callback_path, p.redirect_host)
-                .await?;
-        let redirect_uri = server.redirect_uri();
+        // Resolve first: a provider that requires operator-supplied credentials
+        // (google-antigravity) must fail with a clear 400 before binding a port or
+        // building an authorize URL from a placeholder.
+        let (client_id, _client_secret) = oauth_client(spec.id, p.client_id, p.client_secret)?;
+        // Manual mode must not touch the registered port: the whole point is that this
+        // host cannot receive the browser redirect.
+        let (redirect_uri, server) = if manual {
+            (fixed_redirect_uri(spec.id, &p)?, None)
+        } else {
+            let server =
+                LoopbackServer::bind(p.fixed_port.unwrap_or(0), p.callback_path, p.redirect_host)
+                    .await?;
+            (server.redirect_uri(), Some(server))
+        };
         let verifier = pkce::generate_verifier();
         let challenge = pkce::challenge_for(&verifier);
         let state = pkce::generate_state();
         let authorize_url = pkce::authorize_url(
             p.authorize_url,
-            p.client_id,
+            &client_id,
             &redirect_uri,
             p.scope,
             &state,
@@ -150,49 +210,49 @@ impl OAuthFlows {
             p.extra_params,
         );
         let id = uuid::Uuid::new_v4().to_string();
-        // The browser redirect *is* the completion signal: accept it now and exchange
-        // the code in the background, so the callback page answers immediately and the
-        // login finishes without waiting for someone to press a button.
-        let task = {
+        let exchange = Arc::new(AsyncMutex::new(()));
+
+        let task = server.map(|server| {
+            // The browser redirect *is* the completion signal: accept it now and exchange
+            // the code in the background, so the callback page answers immediately.
             let flows = self.clone();
             let http = http.clone();
             let waiter_id = id.clone();
-            let state = state.clone();
-            let redirect_uri = redirect_uri.clone();
-            let verifier = verifier.clone();
-            let server = server;
+            let expected_state = state.clone();
+            let context = PageContext::for_provider(spec.display);
             tokio::spawn(async move {
-                let outcome = match server.wait(&state, PENDING_TTL).await {
-                    Ok(cb) => {
-                        Self::exchange_code(
-                            &http,
-                            ExchangeCode {
-                                provider: spec.id,
-                                flow: p,
-                                profile_url: spec.profile_url,
-                                code: &cb.code,
-                                redirect_uri: &redirect_uri,
-                                verifier: &verifier,
-                                state: &state,
-                            },
-                        )
-                        .await
+                match server
+                    .wait_with(&expected_state, PENDING_TTL, &context)
+                    .await
+                {
+                    Ok(callback) => {
+                        // The shared exchange lock makes a pasted callback and this
+                        // redirect mutually exclusive; the loser replays the outcome.
+                        let _ = flows.exchange_pkce(&http, &waiter_id, &callback.code).await;
                     }
-                    Err(e) => Err(e),
-                };
-                flows.finish(&waiter_id, outcome.map_err(|e| e.to_string()));
+                    Err(e) => flows.finish(&waiter_id, Err(e.to_string())),
+                }
             })
-        };
+        });
         self.insert(
             id.clone(),
             Pending {
                 provider: spec.id,
                 profile_url: spec.profile_url,
+                base_url: spec.base_url,
                 device: None,
+                pkce: Some(PkceState {
+                    flow: p,
+                    verifier,
+                    state,
+                    redirect_uri: redirect_uri.clone(),
+                    manual,
+                }),
+                exchange: Some(exchange),
                 created: Instant::now(),
                 status: PendingState::Waiting,
                 outcome: None,
-                task: Some(task),
+                task,
             },
         );
         Ok((
@@ -200,6 +260,7 @@ impl OAuthFlows {
             Challenge::Pkce {
                 authorize_url,
                 redirect_uri,
+                manual,
             },
         ))
     }
@@ -241,11 +302,14 @@ impl OAuthFlows {
             Pending {
                 provider: spec.id,
                 profile_url: spec.profile_url,
+                base_url: spec.base_url,
                 device: Some(DeviceFlowState {
                     flow: d,
                     device_code: grant.device_code,
                     interval,
                 }),
+                pkce: None,
+                exchange: None,
                 created: Instant::now(),
                 status: PendingState::Waiting,
                 outcome: None,
@@ -277,7 +341,7 @@ impl OAuthFlows {
     /// its outcome; device logins still poll here because the provider, not a redirect,
     /// decides when the user has approved.
     pub async fn complete(&self, http: &reqwest::Client, id: &str) -> Result<SignedIn> {
-        let device = {
+        let (device, manual) = {
             let map = self.lock();
             let Some(p) = map.get(id) else {
                 return Err(Error::NotFound(format!("no pending OAuth login {id}")));
@@ -292,10 +356,20 @@ impl OAuthFlows {
             if p.status == PendingState::Finished {
                 return replay(&p.outcome);
             }
-            p.device
-                .as_ref()
-                .map(|d| (d.flow, d.device_code.clone(), d.interval))
+            (
+                p.device
+                    .as_ref()
+                    .map(|d| (d.flow, d.device_code.clone(), d.interval)),
+                p.pkce.as_ref().is_some_and(|k| k.manual),
+            )
         };
+
+        if manual {
+            // No listener exists to wait on; the caller must send the pasted URL.
+            return Err(Error::BadRequest(format!(
+                "manual sign-in {id} has no loopback listener; call complete with callback_url"
+            )));
+        }
 
         if let Some((flow, device_code, interval)) = device {
             let (provider, profile_url) = {
@@ -334,6 +408,129 @@ impl OAuthFlows {
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
+    }
+
+    /// Finish a PKCE sign-in from the final redirect URL the browser reached.
+    ///
+    /// Works for a manual login (no listener) and also completes a loopback login whose
+    /// listener could not see the redirect: any waiting listener is cancelled first.
+    /// The URL's `state` must match this pending login, and a code is exchanged at most
+    /// once because every path shares the pending login's exchange lock.
+    pub async fn complete_manual(
+        &self,
+        http: &reqwest::Client,
+        id: &str,
+        callback_url: &str,
+    ) -> Result<SignedIn> {
+        let expected_state = {
+            let map = self.lock();
+            let Some(p) = map.get(id) else {
+                return Err(Error::NotFound(format!("no pending OAuth login {id}")));
+            };
+            if p.expired() {
+                drop(map);
+                self.lock().remove(id);
+                return Err(Error::Timeout(
+                    "this sign-in expired; start a new one".into(),
+                ));
+            }
+            if p.status == PendingState::Finished {
+                return replay(&p.outcome);
+            }
+            let Some(pkce) = p.pkce.as_ref() else {
+                return Err(Error::BadRequest(format!(
+                    "login {id} is not an authorization-code sign-in; complete it without callback_url"
+                )));
+            };
+            pkce.state.clone()
+        };
+
+        // Cancel a loopback waiter before exchanging: a second consumer of the
+        // single-use code must never run in parallel with this call.
+        if let Some(task) = self.take_task(id) {
+            task.abort();
+        }
+
+        let callback = match loopback::parse_callback_url(callback_url, &expected_state) {
+            Ok(callback) => callback,
+            Err(error) => {
+                // Record the failure so a retry replays it instead of re-parsing a URL
+                // whose code may already be unusable.
+                self.finish(id, Err(error.to_string()));
+                return Err(error);
+            }
+        };
+        self.exchange_pkce(http, id, &callback.code).await
+    }
+
+    /// Exchange one PKCE code for `id` exactly once, whoever supplied it.
+    async fn exchange_pkce(
+        &self,
+        http: &reqwest::Client,
+        id: &str,
+        code: &str,
+    ) -> Result<SignedIn> {
+        let (provider, profile_url, base_url, lock, pkce) = {
+            let map = self.lock();
+            let Some(p) = map.get(id) else {
+                return Err(Error::NotFound(format!("no pending OAuth login {id}")));
+            };
+            if p.status == PendingState::Finished {
+                return replay(&p.outcome);
+            }
+            let Some(pkce) = p.pkce.clone() else {
+                return Err(Error::BadRequest(format!(
+                    "login {id} is not an authorization-code sign-in"
+                )));
+            };
+            let Some(lock) = p.exchange.clone() else {
+                return Err(Error::BadRequest(format!(
+                    "login {id} has no exchange lock"
+                )));
+            };
+            (p.provider, p.profile_url, p.base_url, lock, pkce)
+        };
+
+        let _guard = lock.lock().await;
+        {
+            // The peer we queued behind may have exchanged and stored the outcome, or
+            // the login may have been cancelled.
+            let map = self.lock();
+            let Some(p) = map.get(id) else {
+                return Err(Error::NotFound(format!("no pending OAuth login {id}")));
+            };
+            if p.status == PendingState::Finished {
+                return replay(&p.outcome);
+            }
+        }
+
+        let outcome = Self::exchange_code(
+            http,
+            ExchangeCode {
+                provider,
+                flow: pkce.flow,
+                profile_url,
+                base_url,
+                code,
+                redirect_uri: &pkce.redirect_uri,
+                verifier: &pkce.verifier,
+                state: &pkce.state,
+            },
+        )
+        .await;
+        self.finish(
+            id,
+            outcome
+                .as_ref()
+                .map(|signed_in| signed_in.clone())
+                .map_err(|e| e.to_string()),
+        );
+        outcome
+    }
+
+    /// Remove and return the login's listener task, if one is still attached.
+    fn take_task(&self, id: &str) -> Option<tokio::task::JoinHandle<()>> {
+        self.lock().get_mut(id)?.task.take()
     }
 
     /// Store the outcome of a background exchange so `complete` can replay it.
@@ -392,12 +589,13 @@ impl OAuthFlows {
             provider,
             flow: p,
             profile_url,
+            base_url,
             code,
             redirect_uri,
             verifier,
             state,
         } = e;
-        let params = authorization_params(&p, code, redirect_uri, verifier, state);
+        let params = authorization_params(&p, provider, code, redirect_uri, verifier, state)?;
         let req = match p.body {
             RefreshBody::Json => {
                 let object: serde_json::Map<String, serde_json::Value> = params
@@ -437,16 +635,32 @@ impl OAuthFlows {
             Some(label) => Some(label),
             None => profile_label(http, provider, profile_url, &tokens.access_token).await,
         };
+        let mut credentials = Credentials {
+            access_token: Some(tokens.access_token),
+            refresh_token: tokens.refresh_token.filter(|t| !t.is_empty()),
+            id_token: tokens.id_token.filter(|t| !t.is_empty()),
+            expires_at: tokens.expires_in.map(|s| now_unix() + i64::from(s)),
+            account_label: account_label.clone(),
+            ..Credentials::default()
+        };
+
+        // A Google Antigravity account is not usable until its Cloud project is known:
+        // every CCA envelope carries it. Resolve it here, while the access token is
+        // fresh, and persist it as provider-specific data.
+        if provider == antigravity::PROVIDER_ID {
+            let project = antigravity::discover_project(
+                http,
+                credentials.access_token.as_deref().unwrap_or_default(),
+                &antigravity::prod_base(),
+                &antigravity::daily_base(base_url),
+            )
+            .await?;
+            attach_project(&mut credentials, project);
+        }
+
         Ok(SignedIn {
             provider: provider.to_string(),
-            credentials: Credentials {
-                access_token: Some(tokens.access_token),
-                refresh_token: tokens.refresh_token.filter(|t| !t.is_empty()),
-                id_token: tokens.id_token.filter(|t| !t.is_empty()),
-                expires_at: tokens.expires_in.map(|s| now_unix() + i64::from(s)),
-                account_label: account_label.clone(),
-                ..Credentials::default()
-            },
+            credentials,
             account_label,
         })
     }
@@ -554,34 +768,65 @@ struct ExchangeCode<'a> {
     provider: &'a str,
     flow: PkceFlow,
     profile_url: Option<&'static str>,
+    /// Provider transport base. Antigravity uses it as the daily CCA origin when no
+    /// `RROUTER_ANTIGRAVITY_DAILY_HOST` override is set.
+    base_url: &'a str,
     code: &'a str,
     redirect_uri: &'a str,
     verifier: &'a str,
     state: &'a str,
 }
 
+/// Redirect URI a manual sign-in must quote to the provider.
+///
+/// Without a registered fixed port the provider accepts a per-process ephemeral port,
+/// which no other machine can reach; manual mode has no way to receive that redirect, so
+/// it fails before creating a pending login.
+fn fixed_redirect_uri(provider: &str, p: &PkceFlow) -> Result<String> {
+    let port = p.fixed_port.ok_or_else(|| {
+        Error::BadRequest(format!(
+            "manual callback requires a fixed redirect port; {provider} registers an \
+             ephemeral loopback port"
+        ))
+    })?;
+    let path = if p.callback_path.starts_with('/') {
+        p.callback_path.to_string()
+    } else {
+        format!("/{}", p.callback_path)
+    };
+    Ok(format!("http://{}:{}{}", p.redirect_host, port, path))
+}
+
 /// Token-exchange fields for an authorization-code grant.
 ///
 /// Anthropic rejects the body without `state` (it answers "Invalid request format"),
-/// while OpenAI's endpoint does not expect it, so the echo is per provider.
+/// while OpenAI's endpoint does not expect it, so the echo is per provider. Google's
+/// registered client is confidential, so its exchange also carries `client_secret`.
 fn authorization_params(
     p: &PkceFlow,
+    provider: &str,
     code: &str,
     redirect_uri: &str,
     verifier: &str,
     state: &str,
-) -> Vec<(&'static str, String)> {
+) -> Result<Vec<(&'static str, String)>> {
+    // Google Antigravity has no static client: its id/secret come from the environment,
+    // and a missing one is refused here rather than sending a placeholder upstream.
+    let (client_id, client_secret) = oauth_client(provider, p.client_id, p.client_secret)?;
     let mut params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code.to_string()),
-        ("client_id", p.client_id.to_string()),
+        ("client_id", client_id.into_owned()),
         ("redirect_uri", redirect_uri.to_string()),
         ("code_verifier", verifier.to_string()),
     ];
+    if let Some(secret) = client_secret {
+        params.push(("client_secret", secret.into_owned()));
+    }
     if p.send_state {
         params.push(("state", state.to_string()));
     }
-    params
+    Ok(params)
 }
 
 /// Replay a stored outcome, keeping failure messages verbatim.
@@ -616,6 +861,17 @@ fn default_expiry() -> u64 {
 
 fn default_interval() -> u64 {
     5
+}
+
+/// Persist the discovered Cloud project where the CCA transport reads it.
+///
+/// The key is a cross-crate contract: `rrouter-gateway` refuses a CCA request without
+/// `credentials.extra.project_id`.
+fn attach_project(credentials: &mut Credentials, project: String) {
+    credentials.extra.insert(
+        antigravity::PROJECT_ID_KEY.to_string(),
+        Value::String(project),
+    );
 }
 
 /// Best-effort human label from the id token, then the token response's own fields.
@@ -666,6 +922,14 @@ async fn profile_label(
         return None;
     }
     let value: Value = response.json().await.ok()?;
+    profile_value_label(provider, &value)
+}
+
+/// Label member for one provider's profile payload.
+///
+/// Pure so every shape is testable without a mock server; `None` means the provider
+/// answered with something this build does not recognize, never an error.
+fn profile_value_label(provider: &str, value: &Value) -> Option<String> {
     let candidate = match provider {
         "claude" => value
             .pointer("/account/email_address")
@@ -675,6 +939,8 @@ async fn profile_label(
         } else {
             "login"
         }),
+        // Google userinfo: the email is the account label the dashboard shows.
+        "google-antigravity" => value.get("email"),
         _ => None,
     };
     candidate
@@ -760,11 +1026,22 @@ mod tests {
         let LoginFlow::Pkce(claude) = crate::registry::CLAUDE_LOGIN else {
             panic!("claude is a PKCE flow");
         };
-        let params =
-            authorization_params(&claude, "code", "http://localhost:1/callback", "v", "st");
+        let params = authorization_params(
+            &claude,
+            "claude",
+            "code",
+            "http://localhost:1/callback",
+            "v",
+            "st",
+        )
+        .expect("params");
         assert!(
             params.iter().any(|(k, v)| *k == "state" && v == "st"),
             "claude must echo state: {params:?}"
+        );
+        assert!(
+            !params.iter().any(|(k, _)| *k == "client_secret"),
+            "claude is a public client: {params:?}"
         );
 
         let LoginFlow::Pkce(codex) = crate::registry::CODEX_LOGIN else {
@@ -772,11 +1049,13 @@ mod tests {
         };
         let params = authorization_params(
             &codex,
+            "codex",
             "code",
             "http://127.0.0.1:1455/auth/callback",
             "v",
             "st",
-        );
+        )
+        .expect("params");
         assert!(
             !params.iter().any(|(k, _)| *k == "state"),
             "codex must not send state: {params:?}"
@@ -1003,6 +1282,7 @@ mod tests {
             "claude",
             LoginFlow::Pkce(P {
                 client_id: "cid",
+                client_secret: None,
                 authorize_url: Box::leak(format!("{base}/authorize").into_boxed_str()),
                 token_url: Box::leak(format!("{base}/token").into_boxed_str()),
                 scope: "openid profile",
@@ -1021,6 +1301,7 @@ mod tests {
             Challenge::Pkce {
                 authorize_url,
                 redirect_uri,
+                ..
             } => (authorize_url, redirect_uri),
             other => panic!("expected pkce, got {other:?}"),
         };
@@ -1078,6 +1359,372 @@ mod tests {
         );
     }
 
+    /// Google's token endpoint authenticates an operator-supplied client, so the exchange
+    /// must carry the env values and no `state`; the static row is only a placeholder.
+    #[test]
+    fn google_exchange_carries_the_env_client_secret() {
+        let _guard = crate::TEST_ENV
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let LoginFlow::Pkce(google) = crate::registry::GOOGLE_ANTIGRAVITY_LOGIN else {
+            panic!("antigravity is a PKCE flow");
+        };
+        for name in [
+            "GOOGLE_ANTIGRAVITY_CLIENT_ID",
+            "GOOGLE_ANTIGRAVITY_CLIENT_SECRET",
+            "RROUTER_OAUTH_CLIENT_ID_GOOGLE_ANTIGRAVITY",
+            "RROUTER_OAUTH_CLIENT_SECRET_GOOGLE_ANTIGRAVITY",
+        ] {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("GOOGLE_ANTIGRAVITY_CLIENT_ID", "env-client-id");
+        std::env::set_var("GOOGLE_ANTIGRAVITY_CLIENT_SECRET", "env-client-secret");
+        let params = authorization_params(
+            &google,
+            antigravity::PROVIDER_ID,
+            "code",
+            "http://localhost:51121/oauth-callback",
+            "v",
+            "st",
+        )
+        .expect("params");
+        let param = |name: &str| {
+            params
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(param("client_id"), Some("env-client-id"));
+        assert_eq!(param("client_secret"), Some("env-client-secret"));
+        assert_eq!(
+            param("redirect_uri"),
+            Some("http://localhost:51121/oauth-callback")
+        );
+        assert_eq!(param("state"), None, "Google does not expect state back");
+        assert_eq!(param("scope"), None, "the exchange sends no scope");
+
+        for name in [
+            "GOOGLE_ANTIGRAVITY_CLIENT_ID",
+            "GOOGLE_ANTIGRAVITY_CLIENT_SECRET",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
+
+    /// The placeholder is never used on the wire: without both env variables the exchange
+    /// is refused before any request.
+    #[test]
+    fn google_exchange_refuses_missing_env_credentials() {
+        let _guard = crate::TEST_ENV
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let LoginFlow::Pkce(google) = crate::registry::GOOGLE_ANTIGRAVITY_LOGIN else {
+            panic!("antigravity is a PKCE flow");
+        };
+        for name in [
+            "GOOGLE_ANTIGRAVITY_CLIENT_ID",
+            "GOOGLE_ANTIGRAVITY_CLIENT_SECRET",
+            "RROUTER_OAUTH_CLIENT_ID_GOOGLE_ANTIGRAVITY",
+            "RROUTER_OAUTH_CLIENT_SECRET_GOOGLE_ANTIGRAVITY",
+        ] {
+            std::env::remove_var(name);
+        }
+        let err = authorization_params(
+            &google,
+            antigravity::PROVIDER_ID,
+            "code",
+            "http://localhost:51121/oauth-callback",
+            "v",
+            "st",
+        )
+        .expect_err("missing env");
+        assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
+        let message = err.to_string();
+        assert!(
+            message.contains("GOOGLE_ANTIGRAVITY_CLIENT_ID"),
+            "{message}"
+        );
+        assert!(
+            message.contains("GOOGLE_ANTIGRAVITY_CLIENT_SECRET"),
+            "{message}"
+        );
+        assert!(
+            !message.contains(antigravity::PLACEHOLDER_CLIENT),
+            "{message}"
+        );
+    }
+
+    /// Google userinfo is the only label source: the authorization request does not ask
+    /// for `openid`, so no id token is returned.
+    #[test]
+    fn google_userinfo_email_becomes_the_label() {
+        assert_eq!(
+            profile_value_label(
+                "google-antigravity",
+                &serde_json::json!({"email": "user@example.test", "sub": "1"})
+            )
+            .as_deref(),
+            Some("user@example.test")
+        );
+        assert_eq!(
+            profile_value_label("google-antigravity", &serde_json::json!({"email": ""})),
+            None
+        );
+    }
+
+    /// The proxy reads `credentials.extra.project_id`; the exchange writes the same key.
+    #[test]
+    fn discovered_project_lands_under_the_cca_key() {
+        let mut creds = Credentials::default();
+        attach_project(&mut creds, "proj-abc".to_string());
+        assert_eq!(
+            creds.extra.get(antigravity::PROJECT_ID_KEY),
+            Some(&serde_json::Value::String("proj-abc".to_string()))
+        );
+        assert_eq!(antigravity::PROJECT_ID_KEY, "project_id");
+    }
+
+    fn authorize_state(authorize_url: &str) -> String {
+        reqwest::Url::parse(authorize_url)
+            .expect("authorize URL")
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value.into_owned())
+            .expect("state")
+    }
+
+    fn manual_spec(base: &str) -> &'static ProviderSpec {
+        spec_with_profile_id(
+            "mock",
+            LoginFlow::Pkce(P {
+                client_id: "cid",
+                client_secret: None,
+                authorize_url: Box::leak(format!("{base}/authorize").into_boxed_str()),
+                token_url: Box::leak(format!("{base}/token").into_boxed_str()),
+                scope: "openid",
+                fixed_port: Some(1455),
+                redirect_host: "127.0.0.1",
+                callback_path: "/auth/callback",
+                extra_params: &[],
+                send_state: false,
+                body: RefreshBody::Form,
+            }),
+            None,
+        )
+    }
+
+    /// Manual mode must never bind the registered port: on a remote host that listener
+    /// cannot receive the browser redirect. The env client id reaches the authorize URL,
+    /// the secret does not.
+    #[allow(clippy::await_holding_lock)] // serializes the process-wide env override
+    #[tokio::test]
+    async fn manual_start_returns_the_registered_redirect_without_binding() {
+        let _guard = crate::TEST_ENV
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        std::env::set_var("GOOGLE_ANTIGRAVITY_CLIENT_ID", "env-manual-id");
+        std::env::set_var("GOOGLE_ANTIGRAVITY_CLIENT_SECRET", "env-manual-secret");
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let spec = crate::registry::get("google-antigravity").expect("provider");
+        let (id, challenge) = flows.start_manual(&http, spec).await.expect("manual start");
+        match &challenge {
+            Challenge::Pkce {
+                authorize_url,
+                redirect_uri,
+                manual,
+            } => {
+                assert!(manual);
+                assert_eq!(redirect_uri, "http://localhost:51121/oauth-callback");
+                assert!(authorize_url.contains("client_id=env-manual-id"));
+                assert!(!authorize_url.contains(antigravity::PLACEHOLDER_CLIENT));
+                assert!(authorize_url.contains("code_challenge_method=S256"));
+                assert!(authorize_url.contains("access_type=offline"));
+                assert!(authorize_url.contains("prompt=consent"));
+            }
+            other => panic!("expected PKCE, got {other:?}"),
+        }
+        let serialized = serde_json::to_string(&challenge).expect("challenge JSON");
+        assert!(
+            !serialized.contains("env-manual-secret"),
+            "the secret must never leave the server: {serialized}"
+        );
+        assert!(flows.is_pending(&id));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 51121)).await;
+        assert!(
+            listener.is_ok(),
+            "manual start must not bind the registered redirect port"
+        );
+        drop(listener);
+        assert!(flows.cancel(&id));
+        std::env::remove_var("GOOGLE_ANTIGRAVITY_CLIENT_ID");
+        std::env::remove_var("GOOGLE_ANTIGRAVITY_CLIENT_SECRET");
+    }
+
+    /// No listener, no authorize URL and no pending login when the required env is absent.
+    #[allow(clippy::await_holding_lock)] // serializes the process-wide env override
+    #[tokio::test]
+    async fn manual_start_refuses_missing_google_client_env() {
+        let _guard = crate::TEST_ENV
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for name in [
+            "GOOGLE_ANTIGRAVITY_CLIENT_ID",
+            "GOOGLE_ANTIGRAVITY_CLIENT_SECRET",
+            "RROUTER_OAUTH_CLIENT_ID_GOOGLE_ANTIGRAVITY",
+            "RROUTER_OAUTH_CLIENT_SECRET_GOOGLE_ANTIGRAVITY",
+        ] {
+            std::env::remove_var(name);
+        }
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let spec = crate::registry::get("google-antigravity").expect("provider");
+        let err = flows
+            .start_manual(&http, spec)
+            .await
+            .expect_err("missing env");
+        assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
+        let message = err.to_string();
+        for name in [
+            "GOOGLE_ANTIGRAVITY_CLIENT_ID",
+            "GOOGLE_ANTIGRAVITY_CLIENT_SECRET",
+        ] {
+            assert!(message.contains(name), "{message}");
+        }
+        assert!(flows.pending_ids().is_empty(), "no pending login created");
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 51121)).await;
+        assert!(listener.is_ok(), "no listener was bound");
+    }
+
+    #[tokio::test]
+    async fn manual_start_requires_a_fixed_redirect_port() {
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let spec = crate::registry::get("claude").expect("claude");
+        let err = flows
+            .start_manual(&http, spec)
+            .await
+            .expect_err("claude uses an ephemeral port");
+        assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
+        assert!(
+            err.to_string()
+                .contains("manual callback requires a fixed redirect port"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_sign_in_rejects_manual_mode() {
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let spec = crate::registry::get("github").expect("github");
+        let err = flows
+            .start_manual(&http, spec)
+            .await
+            .expect_err("device flow has no redirect");
+        assert!(err.to_string().contains("device code"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn manual_complete_exchanges_the_pasted_code_once() {
+        let (base, hits) = oauth_server().await;
+        let spec = manual_spec(&base);
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let (id, challenge) = flows.start_manual(&http, spec).await.expect("start");
+        let Challenge::Pkce { authorize_url, .. } = challenge else {
+            panic!("expected PKCE");
+        };
+        let state = authorize_state(&authorize_url);
+        let callback = format!("http://127.0.0.1:1455/auth/callback?code=MANUAL&state={state}");
+
+        let done = flows
+            .complete_manual(&http, &id, &callback)
+            .await
+            .expect("manual complete");
+        assert_eq!(done.provider, "mock");
+        assert_eq!(done.credentials.access_token.as_deref(), Some("pkce-token"));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "one exchange");
+
+        // Replay must not spend the code a second time.
+        let again = flows
+            .complete_manual(&http, &id, &callback)
+            .await
+            .expect("replay");
+        assert_eq!(
+            again.credentials.access_token.as_deref(),
+            Some("pkce-token")
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "no second exchange");
+    }
+
+    #[tokio::test]
+    async fn manual_complete_rejects_a_foreign_state_without_exchanging() {
+        let (base, hits) = oauth_server().await;
+        let spec = manual_spec(&base);
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let (id, _) = flows.start_manual(&http, spec).await.expect("start");
+
+        let err = flows
+            .complete_manual(
+                &http,
+                &id,
+                "http://127.0.0.1:1455/auth/callback?code=STOLEN&state=ATTACKER",
+            )
+            .await
+            .expect_err("state mismatch");
+        assert!(matches!(err, Error::Unauthorized(_)), "{err:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "no token request");
+
+        // The failure is recorded: a later correct URL replays it, still no exchange.
+        let err = flows
+            .complete_manual(
+                &http,
+                &id,
+                "http://127.0.0.1:1455/auth/callback?code=OK&state=whatever",
+            )
+            .await
+            .expect_err("replayed failure");
+        assert!(err.to_string().contains("state mismatch"), "{err}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn completing_a_manual_login_without_callback_url_is_a_clear_error() {
+        let (base, _hits) = oauth_server().await;
+        let spec = manual_spec(&base);
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let (id, _) = flows.start_manual(&http, spec).await.expect("start");
+        let err = flows.complete(&http, &id).await.expect_err("no listener");
+        assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
+        assert!(err.to_string().contains("callback_url"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn manual_callback_error_redirect_is_reported() {
+        let (base, hits) = oauth_server().await;
+        let spec = manual_spec(&base);
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let (id, challenge) = flows.start_manual(&http, spec).await.expect("start");
+        let Challenge::Pkce { authorize_url, .. } = challenge else {
+            panic!("expected PKCE");
+        };
+        let state = authorize_state(&authorize_url);
+        let callback = format!(
+            "http://127.0.0.1:1455/auth/callback?error=access_denied\
+&error_description=user%20refused&state={state}"
+        );
+        let err = flows
+            .complete_manual(&http, &id, &callback)
+            .await
+            .expect_err("denied");
+        assert!(matches!(err, Error::Unauthorized(_)), "{err:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test]
     async fn unknown_login_id_is_not_found() {
         let flows = OAuthFlows::new();
@@ -1092,6 +1739,7 @@ mod tests {
         let http = reqwest::Client::new();
         let leaked = spec(LoginFlow::Pkce(P {
             client_id: "cid",
+            client_secret: None,
             authorize_url: "https://mock.test/authorize",
             token_url: "https://mock.test/token",
             scope: "s",

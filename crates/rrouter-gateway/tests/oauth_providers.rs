@@ -89,7 +89,7 @@ async fn providers_lists_only_registered_login_flows() {
         .to_bytes();
     let value: Value = serde_json::from_slice(&body).expect("json");
     let providers = value["data"].as_array().expect("provider list");
-    assert_eq!(providers.len(), 3);
+    assert_eq!(providers.len(), 4);
 
     let flow = |id: &str| {
         providers
@@ -102,5 +102,19 @@ async fn providers_lists_only_registered_login_flows() {
     assert_eq!(flow("claude"), "pkce");
     assert_eq!(flow("codex"), "pkce");
     assert_eq!(flow("github"), "device_code");
+    assert_eq!(flow("google-antigravity"), "pkce");
+
+    let manual = |id: &str| {
+        providers
+            .iter()
+            .find(|provider| provider["id"] == id)
+            .unwrap_or_else(|| panic!("missing provider {id}"))["manual"]
+            .as_bool()
+            .expect("manual")
+    };
+    assert!(!manual("claude"), "dynamic loopback cannot be pasted");
+    assert!(manual("codex"));
+    assert!(manual("google-antigravity"));
+    assert!(!manual("github"), "device flow has no redirect");
     assert!(!providers.iter().any(|provider| provider["id"] == "openai"));
 }

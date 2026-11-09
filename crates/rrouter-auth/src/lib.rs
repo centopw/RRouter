@@ -17,6 +17,7 @@
 //! - [`base_url`]: [`effective_base_url`], the per-account endpoint — and the refusal when a
 //!   provider's declared host is only a placeholder (`RESOURCE.openai.azure.com`).
 
+pub mod antigravity;
 pub mod base_url;
 pub mod credentials;
 pub mod endpoint;
@@ -43,3 +44,9 @@ pub use registry::{
     all, get, is_oauth, login_flow_for, AuthStyle, DeviceFlow, LoginFlow, PkceFlow, ProviderKind,
     ProviderSpec, RefreshBody, RefreshSpec, PROVIDERS,
 };
+
+/// Serializes tests that mutate process environment. Rust tests share one process, and
+/// the Google overrides are read per call, so a concurrent set/remove would make those
+/// tests observe another test's value.
+#[cfg(test)]
+pub(crate) static TEST_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());

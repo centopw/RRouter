@@ -2,6 +2,17 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.4.3 — 2026-11-09
+
+### Added
+- Google Antigravity / Cloud Code Assist provider: Google OAuth + PKCE, project discovery/onboarding, `project_id` credential metadata, email label, CCA envelope and SSE translation, provider model discovery.
+- Remote OAuth deployments: manual start without a loopback listener and paste-the-callback completion; branded loopback success/failure pages.
+- Webhook/audit, session device metadata and model preset follow-ups from the 0.4.2 line.
+
+### Changed
+- Provider connection table no longer overflows its card; names wrap, auth is one badge with a tooltip, and row actions live in a keyboard menu.
+- Shell/sidebar/content scroll ownership and provider marks/shell layout fixes; number-input spinners removed; quiet buttons outlined.
+
 ## 0.4.2 — 2026-11-09
 
 ### Added

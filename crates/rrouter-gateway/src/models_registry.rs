@@ -613,14 +613,14 @@ pub fn parse_model_ids(body: &Value) -> Vec<String> {
     ids
 }
 
-/// Whether a provider can enumerate its models over HTTP. Codex has no such endpoint
-/// (its models arrive through the ChatGPT OAuth session), so the UI offers the custom
-/// form instead of a fetch button.
+/// Whether a provider can enumerate its models over HTTP.
+///
+/// Codex has no catalog behind its Responses backend and Azure exposes deployments per
+/// resource rather than models, so both are hidden from the fetch button and skipped by
+/// the connection-added background fetch. Google Antigravity enumerates through
+/// `POST /v1internal:fetchAvailableModels` (project-scoped) rather than `GET /models`, so
+/// it is listable: `routes::models` recognizes the provider and posts the catalogue.
 pub fn can_list(provider: &str) -> bool {
-    // Neither publishes a plain model list: Codex answers through a Responses backend
-    // with no catalog, and Azure exposes deployments per resource, not a model list
-    // (each deployment is registered as a custom model instead). The dashboard hides
-    // the fetch button for these, so it cannot promise something the API never returns.
     !matches!(provider, "codex" | "azure")
 }
 
@@ -680,6 +680,8 @@ mod tests {
     fn providers_without_a_plain_model_list_cannot_be_fetched() {
         assert!(!can_list("codex"));
         assert!(!can_list("azure"));
+        // Enumerated through a project-scoped POST, not GET /models.
+        assert!(can_list("google-antigravity"));
         assert!(can_list("openai"));
         assert!(can_list("mistral"));
         assert!(can_list("claude"));

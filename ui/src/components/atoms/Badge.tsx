@@ -21,11 +21,11 @@ export function Badge({
     <span
       title={title}
       className={cx(
-        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-caption leading-4",
+        "inline-flex max-w-full min-w-0 items-center gap-1 rounded-full border px-2 py-0.5 text-caption leading-4",
         tones[tone],
       )}
     >
-      {children}
+      <span className="min-w-0 truncate">{children}</span>
     </span>
   );
 }

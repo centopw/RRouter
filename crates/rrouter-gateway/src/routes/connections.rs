@@ -39,6 +39,9 @@ pub struct ConnectionView {
     /// Dashboard attribution: the account that added this connection. Not an access grant.
     pub owner_user_id: Option<String>,
     pub base_url_override: Option<String>,
+    /// Cloud project an Antigravity (Cloud Code Assist) sign-in was provisioned with.
+    /// Read from `credentials.extra.project_id`; `None` for every other provider.
+    pub project_id: Option<String>,
     pub has_access_token: bool,
     pub has_refresh_token: bool,
     pub has_api_key: bool,
@@ -65,6 +68,7 @@ impl From<&Connection> for ConnectionView {
             team_id: c.team_id.map(|team| team.to_string()),
             owner_user_id: c.owner_user_id.map(|user| user.to_string()),
             base_url_override: creds.base_url_override.clone(),
+            project_id: rrouter_auth::antigravity::project_id(creds).map(str::to_string),
             has_access_token: creds.access_token.as_deref().is_some_and(|t| !t.is_empty()),
             has_refresh_token: creds
                 .refresh_token
@@ -536,12 +540,49 @@ async fn probe(
     req.max_tokens = Some(16);
     // The probe speaks the provider's own dialect at its own endpoint. Building the
     // body for Chat and posting it to a Responses URL (codex) is a guaranteed 400.
-    let (url, dialect) = crate::proxy::endpoint_for(
-        spec,
-        creds.base_url_override.as_deref(),
-        spec.default_dialect,
-    );
-    let body = rrouter_translate::build_request(dialect, &req, spec.stream_only)?;
+    // CCA is upstream-only, so it has no generic body builder: the project and envelope
+    // come from the same helpers the proxy uses.
+    let is_cca = spec.default_dialect == rrouter_core::Dialect::GoogleCodeAssist;
+    let project = if is_cca {
+        Some(
+            creds
+                .extra
+                .get("project_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|project| !project.is_empty())
+                .ok_or_else(|| {
+                    Error::BadRequest(
+                        "google-antigravity connection is missing credentials.extra.project_id"
+                            .into(),
+                    )
+                })?
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let (url, dialect) = match &project {
+        Some(_) => {
+            let base = match creds.base_url_override.as_deref() {
+                Some(base) => base.trim_end_matches('/').to_string(),
+                None => rrouter_translate::google_cca::daily_host(spec.base_url),
+            };
+            (
+                rrouter_translate::google_cca::endpoint(&base, spec.stream_only),
+                rrouter_core::Dialect::GoogleCodeAssist,
+            )
+        }
+        None => crate::proxy::endpoint_for(
+            spec,
+            creds.base_url_override.as_deref(),
+            spec.default_dialect,
+        ),
+    };
+    let body = match &project {
+        Some(project) => rrouter_translate::google_cca::build_request(&req, &req.model, project)?,
+        None => rrouter_translate::build_request(dialect, &req, spec.stream_only)?,
+    };
 
     let mut headers = axum::http::HeaderMap::new();
     for (name, value) in rrouter_auth::build_headers(spec, &creds)? {
@@ -556,6 +597,16 @@ async fn probe(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json"),
     );
+    if is_cca {
+        headers.insert(
+            axum::http::header::USER_AGENT,
+            axum::http::HeaderValue::from_static(rrouter_translate::google_cca::USER_AGENT),
+        );
+        headers.insert(
+            "x-goog-api-client",
+            axum::http::HeaderValue::from_static(rrouter_translate::google_cca::CLIENT_HEADER),
+        );
+    }
     let resp = state
         .http
         .post(url)
@@ -910,6 +961,50 @@ mod tests {
         let encoded = serde_json::to_string(&ConnectionView::from(&conn)).expect("serialize");
         assert!(!encoded.contains("SECRET"));
         assert!(encoded.contains("\"has_access_token\":true"));
+    }
+
+    #[test]
+    fn views_project_the_cloud_project_without_token_material() {
+        let mut creds = Credentials {
+            access_token: Some("SECRET-A".into()),
+            refresh_token: Some("SECRET-R".into()),
+            ..Credentials::default()
+        };
+        creds.extra.insert(
+            "project_id".into(),
+            serde_json::Value::String("  proj-antigravity  ".into()),
+        );
+        let mut conn = Connection {
+            id: Uuid::nil(),
+            provider: "google-antigravity".into(),
+            auth_type: "oauth".into(),
+            name: Some("Antigravity account".into()),
+            email: Some("user@example.test".into()),
+            priority: 0,
+            weight: 100,
+            is_active: true,
+            credentials: creds,
+            backoff_level: 0,
+            last_error: None,
+            last_error_code: None,
+            last_error_at: None,
+            team_id: None,
+            owner_user_id: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let view = ConnectionView::from(&conn);
+        assert_eq!(view.project_id.as_deref(), Some("proj-antigravity"));
+        let encoded = serde_json::to_string(&view).expect("serialize");
+        assert!(encoded.contains("\"project_id\":\"proj-antigravity\""));
+        assert!(!encoded.contains("SECRET"));
+
+        // Providers without a project serialize the field as null, which the UI treats
+        // as "no project line".
+        conn.provider = "openai".into();
+        conn.credentials.extra.clear();
+        let view = ConnectionView::from(&conn);
+        assert_eq!(view.project_id, None);
     }
 
     #[test]

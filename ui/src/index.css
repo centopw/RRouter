@@ -105,6 +105,10 @@ html,
 body,
 #root {
   height: 100%;
+  /* The shell owns the viewport: only <main> scrolls, so the document never grows a
+     second scrollbar and nothing shifts when a page gets shorter or taller. */
+  height: 100dvh;
+  overflow: hidden;
 }
 
 /* System selection colors follow the OS accent (often graphite), which can paint black on
@@ -217,8 +221,23 @@ button:disabled,
   animation: page-in var(--motion-page) var(--ease-standard);
 }
 
-/* The rail keeps its width whether or not the list overflows, so labels never shift. */
-.nav-scroll {
+/* The rail scrolls with the wheel and the keyboard, but never draws a scrollbar: the
+   10px gutter it reserved read as a permanent second scrollbar in the shell. */
+.nav-scroll,
+.tab-strip {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  overscroll-behavior: contain;
+}
+
+.nav-scroll::-webkit-scrollbar,
+.tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
+/* The one content scrollport. Reserving the gutter keeps the page from shifting when a
+   route is short enough not to scroll and the next one is not. */
+.main-scroll {
   scrollbar-gutter: stable;
   overscroll-behavior: contain;
 }
@@ -286,4 +305,15 @@ h1[tabindex="-1"]:focus-visible {
   animation: rrouter-pulse 2s ease-in-out infinite;
 }
 
+/* Number fields: no spinner. Chromium paints a black square for the inner spin button on
+   a dark surface, and the value is free text here (0 means unlimited). */
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
 
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}

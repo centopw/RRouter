@@ -1,8 +1,15 @@
-import { useMemo, useState } from "react";
+import {
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
+import * as Popover from "@radix-ui/react-popover";
 import { ProviderIcon, providerBrand } from "../components/provider-icon";
+import { DotsThree, Sliders } from "@phosphor-icons/react";
 import { Grid, SectionLabel, Stack } from "../components/atoms";
 import {
   Badge,
@@ -47,7 +54,6 @@ import {
   type OAuthProvider,
 } from "../lib/api";
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
-import { useToast } from "../components/toast";
 import { Heading } from "../components/atoms";
 
 type AddStep = "kind" | "provider" | "opencode" | "key";
@@ -127,6 +133,20 @@ export default function Providers() {
     onError: (e) => setNotice({ tone: "neg", text: e instanceof Error ? e.message : String(e) }),
   });
 
+  const test = useMutation({
+    mutationFn: (id: string) =>
+      api.post<{ ok: boolean; status: number; latency_ms: number; error?: string }>(
+        `/api/connections/${id}/test`,
+      ),
+    onSuccess: (res) => {
+      if (res.ok) setNotice({ tone: "pos", text: `Connection works · ${res.status} · ${res.latency_ms}ms` });
+      else setNotice({ tone: "neg", text: `Connection failed · ${res.status}${res.error ? ` · ${res.error}` : ""}` });
+    },
+    onError: (error) =>
+      setNotice({ tone: "neg", text: `Connection test failed: ${error instanceof Error ? error.message : String(error)}` }),
+  });
+  const testingId = test.isPending ? (test.variables ?? null) : null;
+
   const openAdd = () => {
     setAdding(true);
     setStep("kind");
@@ -194,11 +214,12 @@ export default function Providers() {
       key: "account",
       title: "account",
       render: (r) => (
-        <span className="flex min-w-0 items-center gap-2">
+        <span className="flex min-w-0 flex-wrap items-center gap-2">
           <Dot tone={r.exhausted ? "neg" : r.is_active ? "pos" : "muted"} />
           <ProviderIcon provider={r.provider} size={17} />
           <span className="font-medium">{displayOf(r.provider)}</span>
           <span className="truncate text-muted">{r.name ?? <span className="text-faint">unnamed</span>}</span>
+          <span className="text-caption text-faint md:hidden">{WINDOW_LABEL[r.window]}</span>
           {r.exhausted ? <Badge tone="neg">over quota</Badge> : null}
         </span>
       ),
@@ -206,6 +227,7 @@ export default function Providers() {
     {
       key: "window",
       title: "window",
+      className: "hidden md:table-cell",
       render: (r) => <span className="text-muted">{WINDOW_LABEL[r.window]}</span>,
     },
     { key: "usage", title: "usage", render: (r) => <QuotaUsage row={r} /> },
@@ -213,10 +235,17 @@ export default function Providers() {
       key: "quota",
       title: "",
       align: "right",
+      width: "3rem",
       render: (r) => (
-        <Button onClick={() => setQuotaFor(r)} title="requests, tokens and spend this account may use per window">
-          quota
-        </Button>
+        <button
+          type="button"
+          onClick={() => setQuotaFor(r)}
+          aria-label={`Edit limits for ${r.name ?? displayOf(r.provider)}`}
+          title="requests, tokens and spend this account may use per window"
+          className="flex h-8 w-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+        >
+          <Sliders size={16} aria-hidden />
+        </button>
       ),
     },
   ];
@@ -226,10 +255,14 @@ export default function Providers() {
       key: "provider",
       title: "provider",
       render: (r) => (
-        <span className="flex items-center gap-2">
+        <span className="flex min-w-0 items-center gap-2" title={displayOf(r.provider)}>
           <Dot tone={!r.is_active ? "muted" : r.backoff_level > 0 ? "warn" : "pos"} />
           <ProviderIcon provider={r.provider} size={17} />
-          <span className="font-medium">{displayOf(r.provider)}</span>
+          {/* Phones have no room for a 24-character provider name on one line; it wraps
+              there and truncates only once the column is wide enough to ellipsize. */}
+          <span className="min-w-0 break-words font-medium sm:truncate">
+            {displayOf(r.provider)}
+          </span>
         </span>
       ),
     },
@@ -237,6 +270,7 @@ export default function Providers() {
       key: "owner",
       title: "owner",
       width: "9rem",
+      className: "hidden xl:table-cell",
       render: (r) => {
         const name = teamName(r.team_id);
         return name === null ? (
@@ -258,9 +292,22 @@ export default function Providers() {
       title: "account",
       render: (r) => (
         <div className="min-w-0">
-          <span className="text-muted">
+          <span
+            className="block min-w-0 truncate text-muted"
+            title={r.name ?? r.email ?? undefined}
+          >
             {r.name ?? r.email ?? <span className="text-faint">unnamed</span>}
           </span>
+          {r.email && r.email !== r.name ? (
+            <div className="truncate text-caption text-faint" title={r.email}>
+              {r.email}
+            </div>
+          ) : null}
+          {r.project_id ? (
+            <div className="truncate font-mono text-caption text-faint" title={r.project_id}>
+              project {r.project_id}
+            </div>
+          ) : null}
           {r.base_url_override ? (
             <div
               className="truncate font-mono text-caption text-faint"
@@ -275,20 +322,40 @@ export default function Providers() {
     {
       key: "auth",
       title: "auth",
-      render: (r) => (
-        <span className="flex gap-1">
-          <Badge tone={r.auth_type === "oauth" ? "accent" : "neutral"}>{r.auth_type}</Badge>
-          {r.has_access_token ? <Badge tone="neutral">access</Badge> : null}
-          {r.has_refresh_token ? <Badge tone="neutral">refresh</Badge> : null}
-          {r.has_api_key ? <Badge tone="neutral">key</Badge> : null}
-        </span>
-      ),
+      width: "6.5rem",
+      // One badge whose tooltip carries the credential shape: three pills said the same
+      // thing, needed 150px, and truncated to "o… a… re…" at 1440.
+      className: "hidden xl:table-cell",
+      render: (r) => {
+        const shape = [
+          r.auth_type,
+          r.has_access_token ? "access token" : null,
+          r.has_refresh_token ? "refresh token" : null,
+          r.has_api_key ? "api key" : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return (
+          <Badge tone={r.auth_type === "oauth" ? "accent" : "neutral"} title={shape}>
+            {r.auth_type}
+          </Badge>
+        );
+      },
     },
-    { key: "priority", title: "priority", align: "right", render: (r) => r.priority },
+    {
+      key: "priority",
+      title: "priority",
+      align: "right",
+      width: "5rem",
+      className: "hidden xl:table-cell",
+      render: (r) => r.priority,
+    },
     {
       key: "weight",
       title: "weight",
       align: "right",
+      width: "5rem",
+      className: "hidden xl:table-cell",
       render: (r) => (
         <span
           className={r.weight === 100 ? "text-faint" : "text-fg"}
@@ -301,6 +368,10 @@ export default function Providers() {
     {
       key: "state",
       title: "state",
+      width: "7rem",
+      // The status dot in the provider cell already carries active/backoff; the badges
+      // return from sm up, where there is room for them.
+      className: "hidden sm:table-cell",
       render: (r) => (
         <span className="flex flex-wrap gap-1">
           {needsOverride(r) ? (
@@ -325,34 +396,20 @@ export default function Providers() {
           key: "actions",
           title: "",
           align: "right",
+          width: "3.5rem",
           render: (r) => (
-            <span className="flex justify-end gap-1.5">
-              <Button
-                onClick={() => setTeamFor(r)}
-                title="move this account between a team and the shared pool"
-              >
-                team
-              </Button>
-              <Button
-                onClick={() => setBaseUrlFor(r)}
-                title="edit the base URL this account dispatches to"
-              >
-                base url
-              </Button>
-              <Button onClick={() => setRouting(r)} title="edit routing priority and weight">
-                edit
-              </Button>
-              <TestButton id={r.id} />
-              <Button
-                onClick={() => toggle.mutate({ id: r.id, active: !r.is_active })}
-                title={r.is_active ? "stop routing through this account" : "route through this account again"}
-              >
-                {r.is_active ? "disable" : "enable"}
-              </Button>
-              <Button variant="danger" onClick={() => setRemoving(r)}>
-                remove
-              </Button>
-            </span>
+            <ConnectionMenu
+              connection={r}
+              display={displayOf(r.provider)}
+              scope={teamName(r.team_id) ?? "shared"}
+              testing={testingId === r.id}
+              onTeam={() => setTeamFor(r)}
+              onBaseUrl={() => setBaseUrlFor(r)}
+              onRouting={() => setRouting(r)}
+              onTest={() => test.mutate(r.id)}
+              onToggle={() => toggle.mutate({ id: r.id, active: !r.is_active })}
+              onRemove={() => setRemoving(r)}
+            />
           ),
         } as Column<Connection>,
       ]
@@ -470,13 +527,17 @@ export default function Providers() {
               </span>
             }
           />
-          <DataTable
-            columns={columns}
-            rows={connections.data}
-            rowKey={(r) => r.id}
-            loading={connections.isLoading}
-            empty="No accounts yet."
-          />
+          <div id="providers-connected">
+            <DataTable
+              columns={columns}
+              rows={connections.data}
+              rowKey={(r) => r.id}
+              loading={connections.isLoading}
+              tableLayout="fixed"
+              stickyRight="actions"
+              empty="No accounts yet."
+            />
+          </div>
         </Card>
       )}
 
@@ -529,6 +590,8 @@ export default function Providers() {
               rows={quotas.data}
               rowKey={(r) => r.connection_id}
               loading={quotas.isLoading}
+              tableLayout="fixed"
+              stickyRight="quota"
               empty="No accounts yet."
             />
           </Card>
@@ -605,6 +668,13 @@ export default function Providers() {
               tone: warning ? "neg" : "pos",
               text: warning ? `${label} connected, with a warning: ${warning}` : `${label} connected`,
             });
+          }}
+          onViewProviders={() => {
+            setSignIn(null);
+            setAuthWindow(null);
+            window.requestAnimationFrame(() =>
+              document.getElementById("providers-connected")?.scrollIntoView({ block: "start" }),
+            );
           }}
         />
       ) : null}
@@ -1054,11 +1124,26 @@ function AddProviderFlow({
           items={subscriptionProviders.map((p) => ({
             id: p.id,
             title: p.display,
-            meta: p.flow === "device_code" ? "device code" : "browser sign-in",
+            meta: isAntigravity(p.id)
+              ? "Google Cloud Code Assist · browser sign-in"
+              : p.flow === "device_code"
+                ? "device code"
+                : "browser sign-in",
             scope: providers.find((row) => row.id === p.id)?.scope ?? "none",
             onClick: () => onChooseOAuth(p),
           }))}
         />
+      ) : null}
+
+      {step === "provider" &&
+      kind === "subscription" &&
+      subscriptionProviders.some((p) => isAntigravity(p.id)) ? (
+        <p className="mt-3 text-caption leading-relaxed text-faint">
+          Google Antigravity signs in to{" "}
+          <span className="text-fg">Google Cloud Code Assist</span>, not the Gemini API. Your
+          account email and Cloud project are discovered during sign-in — there is no project
+          id to enter, and nothing pasted here becomes a key.
+        </p>
       ) : null}
 
       {step === "provider" && kind === "api_key" ? (
@@ -1157,6 +1242,11 @@ function Choice({ title, body, onClick }: { title: string; body: string; onClick
       <span className="mt-1 block text-small leading-relaxed text-muted">{body}</span>
     </button>
   );
+}
+
+/** Both spellings render the same: the spec id and the short alias. */
+function isAntigravity(id: string): boolean {
+  return id === "google-antigravity" || id === "antigravity";
 }
 
 function ProviderList({
@@ -1414,35 +1504,6 @@ function ApiKeyForm({
         </Button>
       </div>
     </form>
-  );
-}
-
-function TestButton({ id }: { id: string }) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  return (
-    <Button
-      disabled={busy}
-      onClick={async () => {
-        setBusy(true);
-        try {
-          const res = await api.post<{ ok: boolean; status: number; latency_ms: number; error?: string }>(
-            `/api/connections/${id}/test`,
-          );
-          if (res.ok) {
-            toast.success(`Connection works · ${res.status} · ${res.latency_ms}ms`);
-          } else {
-            toast.error(`Connection failed · ${res.status}`, res.error ?? undefined);
-          }
-        } catch (e) {
-          toast.error("Connection test failed", e instanceof Error ? e.message : String(e));
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
-      {busy ? "testing…" : "test"}
-    </Button>
   );
 }
 
@@ -1745,5 +1806,122 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
         {failure ? <ErrorNote error={failure} /> : null}
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Every per-row action behind one trigger.
+ *
+ * Six pill buttons widened the connected table past its card at every width; the menu is
+ * one 32px target, keeps the same actions, and carries menu keyboard semantics (arrows,
+ * Home/End, Escape from the popover) so nothing is pointer-only.
+ */
+function ConnectionMenu({
+  connection,
+  display,
+  scope,
+  testing,
+  onTeam,
+  onBaseUrl,
+  onRouting,
+  onTest,
+  onToggle,
+  onRemove,
+}: {
+  connection: Connection;
+  display: string;
+  /** Owner scope, priority and weight live in columns that collapse on narrow screens. */
+  scope: string;
+  testing: boolean;
+  onTeam: () => void;
+  onBaseUrl: () => void;
+  onRouting: () => void;
+  onTest: () => void;
+  onToggle: () => void;
+  onRemove: () => void;
+}) {
+  const surface = useRef<HTMLDivElement>(null);
+  const items = () =>
+    [...(surface.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
+  const focusItem = (index: number) => {
+    const list = items();
+    if (list.length === 0) return;
+    list[(index + list.length) % list.length]?.focus();
+  };
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const index = items().indexOf(document.activeElement as HTMLElement);
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusItem(index + 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusItem(index <= 0 ? -1 : index - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      focusItem(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      focusItem(-1);
+    }
+  };
+  const row = "flex h-8 items-center rounded-[var(--radius-input)] px-2 text-left text-small text-fg hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent-text";
+  const label = connection.name ?? connection.email ?? display;
+  const entry = (text: string, onClick: () => void, danger = false, disabled = false) => (
+    <Popover.Close asChild>
+      <button
+        type="button"
+        role="menuitem"
+        tabIndex={-1}
+        onClick={onClick}
+        disabled={disabled}
+        className={cx(
+          row,
+          danger && "text-[var(--color-neg-ink)] hover:bg-[var(--color-neg-tint)]",
+          disabled && "opacity-60",
+        )}
+      >
+        {text}
+      </button>
+    </Popover.Close>
+  );
+  return (
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          aria-label={`Actions for ${label}`}
+          aria-haspopup="menu"
+          className="flex h-8 w-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+        >
+          <DotsThree size={18} weight="bold" aria-hidden />
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          ref={surface}
+          role="menu"
+          aria-label={`Actions for ${label}`}
+          side="bottom"
+          align="end"
+          sideOffset={4}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            window.requestAnimationFrame(() => focusItem(0));
+          }}
+          onKeyDown={onKeyDown}
+          className="popover-panel z-50 flex w-56 flex-col rounded-[var(--radius-card)] border border-line bg-surface p-1 shadow-lg focus:outline-none"
+        >
+          <div className="px-2 pb-1.5 pt-1 text-caption leading-relaxed text-faint">
+            {scope} · priority {connection.priority} · weight {connection.weight}
+          </div>
+          {entry("Team…", onTeam)}
+          {entry("Routing…", onRouting)}
+          {entry("Base URL…", onBaseUrl)}
+          {entry(testing ? "Testing…" : "Test", onTest, false, testing)}
+          {entry(connection.is_active ? "Disable" : "Enable", onToggle)}
+          {entry("Remove…", onRemove, true)}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }

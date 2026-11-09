@@ -375,6 +375,36 @@ async fn fetch_upstream(
         .refresher
         .fresh(state.store.as_ref(), spec, conn.id)
         .await?;
+
+    // Google Antigravity publishes no `GET /models`: its catalogue is a project-scoped
+    // `POST /v1internal:fetchAvailableModels` on the production Cloud Code Assist host.
+    if spec.id == rrouter_auth::antigravity::PROVIDER_ID {
+        let project = rrouter_auth::antigravity::project_id(&creds).ok_or_else(|| {
+            Error::BadRequest(
+                "google-antigravity connection is missing credentials.extra.project_id".into(),
+            )
+        })?;
+        let token = creds
+            .access_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                Error::Unauthorized("google-antigravity connection has no access token".to_string())
+            })?;
+        let (status, models) = fetch_cca_models(
+            &state.http,
+            &rrouter_auth::antigravity::prod_base(),
+            token,
+            project,
+        )
+        .await?;
+        let items = models
+            .into_iter()
+            .map(|model| (model.id, model.display))
+            .collect();
+        return store_fetched(state, conn, status, items).await;
+    }
+
     let base = creds.base_url_override.as_deref().unwrap_or(spec.base_url);
     let mut url = match (creds.base_url_override.as_deref(), spec.models_url) {
         // An override points at a different deployment, so its catalogue wins.
@@ -414,8 +444,71 @@ async fn fetch_upstream(
         });
     }
     let body: Value = response.json().await.map_err(transport_error)?;
-    let mut ids = models_registry::parse_model_ids(&body);
-    ids.truncate(models_registry::MAX_FETCHED_IDS);
+    let items = models_registry::parse_model_ids(&body)
+        .into_iter()
+        .map(|id| (id, None))
+        .collect();
+    store_fetched(state, conn, status, items).await
+}
+
+/// `POST <prod>/v1internal:fetchAvailableModels` with the account's Cloud project.
+///
+/// Kept independent of `AppState` so the request shape and parser are testable against a
+/// mock host. `quotaInfo` is parsed past (the registry has no quota column); ids and
+/// `displayName` become upstream rows.
+async fn fetch_cca_models(
+    http: &reqwest::Client,
+    base: &str,
+    access_token: &str,
+    project: &str,
+) -> rrouter_core::Result<(u16, Vec<rrouter_auth::antigravity::AvailableModel>)> {
+    let url = format!(
+        "{}{}",
+        base.trim_end_matches('/'),
+        rrouter_auth::antigravity::FETCH_MODELS_PATH
+    );
+    let response = http
+        .post(&url)
+        .bearer_auth(access_token)
+        .header("accept", "application/json")
+        .header("user-agent", rrouter_translate::google_cca::USER_AGENT)
+        .header(
+            "x-goog-api-client",
+            rrouter_translate::google_cca::CLIENT_HEADER,
+        )
+        .json(&json!({ "project": project }))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(transport_error)?;
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        let body: String = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(512)
+            .collect();
+        return Err(Error::Upstream {
+            provider: rrouter_auth::antigravity::PROVIDER_ID.to_string(),
+            status,
+            body,
+            payload: None,
+        });
+    }
+    let body: Value = response.json().await.map_err(transport_error)?;
+    Ok((status, rrouter_auth::antigravity::available_models(&body)))
+}
+
+/// Persist one connection's fetched catalogue as `upstream` rows and echo the result.
+async fn store_fetched(
+    state: &AppState,
+    conn: &Connection,
+    status: u16,
+    mut items: Vec<(String, Option<String>)>,
+) -> rrouter_core::Result<Value> {
+    items.truncate(models_registry::MAX_FETCHED_IDS);
 
     let known: BTreeSet<(String, String)> = state
         .store
@@ -424,17 +517,17 @@ async fn fetch_upstream(
         .into_iter()
         .map(|row| (row.provider, row.model))
         .collect();
-    let added = ids
+    let added = items
         .iter()
-        .filter(|id| !known.contains(&(conn.provider.clone(), (*id).clone())))
+        .filter(|(id, _)| !known.contains(&(conn.provider.clone(), id.clone())))
         .count();
-    for id in &ids {
+    for (id, display) in &items {
         state
             .store
             .upsert_model(&ModelRow {
                 provider: conn.provider.clone(),
                 model: id.clone(),
-                display: None,
+                display: display.clone(),
                 context: None,
                 max_output: None,
                 caps: Value::Object(Map::new()),
@@ -445,6 +538,7 @@ async fn fetch_upstream(
             })
             .await?;
     }
+    let ids: Vec<String> = items.into_iter().map(|(id, _)| id).collect();
     Ok(json!({
         "provider": conn.provider,
         "status": status,
@@ -682,5 +776,82 @@ mod tests {
         );
         assert_eq!(query_param("alias=", "alias").as_deref(), Some(""));
         assert_eq!(query_param("x=1", "alias"), None);
+    }
+
+    /// The CCA catalogue is a project-scoped POST, not `GET /models`: the request must
+    /// carry the Bearer token and `{project}`, and the `models` map keys become ids.
+    #[tokio::test]
+    async fn cca_fetch_posts_the_project_and_parses_the_catalogue() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1internal:fetchAvailableModels"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer at-antigravity",
+            ))
+            .and(wiremock::matchers::header(
+                "user-agent",
+                rrouter_translate::google_cca::USER_AGENT,
+            ))
+            .and(wiremock::matchers::body_json(json!({"project": "proj-1"})))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "models": {
+                    "gemini-3-pro": {
+                        "displayName": "Gemini 3 Pro",
+                        "quotaInfo": {"remainingFraction": 0.75}
+                    },
+                    "gemini-2.5-flash": {"displayName": "Gemini 2.5 Flash"}
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (status, models) = fetch_cca_models(
+            &reqwest::Client::new(),
+            &server.uri(),
+            "at-antigravity",
+            "proj-1",
+        )
+        .await
+        .expect("catalogue");
+        assert_eq!(status, 200);
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["gemini-2.5-flash", "gemini-3-pro"]);
+        assert_eq!(
+            models[1].display.as_deref(),
+            Some("Gemini 3 Pro"),
+            "displayName is carried into the upstream row"
+        );
+    }
+
+    /// A rejected catalogue is an upstream error the dashboard can show, and it never
+    /// carries the access token in the message.
+    #[tokio::test]
+    async fn cca_fetch_reports_upstream_rejection() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1internal:fetchAvailableModels"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(403)
+                    .set_body_json(json!({"error": {"message": "denied"}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = fetch_cca_models(
+            &reqwest::Client::new(),
+            &server.uri(),
+            "at-secret",
+            "proj-1",
+        )
+        .await
+        .expect_err("rejected");
+        assert!(
+            matches!(err, Error::Upstream { status: 403, .. }),
+            "{err:?}"
+        );
+        assert!(!err.to_string().contains("at-secret"), "{err}");
     }
 }

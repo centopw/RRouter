@@ -708,7 +708,6 @@ export default function Models() {
                 reducedMotion={reduceMotion}
                 canHide={!layoutDraft.conflict}
                 scrollLabel="Active models"
-                maxBodyHeight="clamp(18rem, calc(100vh - 27rem), 52rem)"
                 empty={emptyState}
               />
             )}
@@ -804,7 +803,6 @@ export default function Models() {
               rowHeaderKey="model"
               stickyRight="actions"
               tableLayout="fixed"
-              maxBodyHeight="clamp(18rem, calc(100vh - 21rem), 52rem)"
               scrollLabel="Models registry"
               caption="Models registry: every model this gateway can route"
               empty={emptyState}

@@ -7,6 +7,7 @@
 
 mod anthropic;
 pub mod error;
+pub mod google_cca;
 mod openai_chat;
 pub mod rerank;
 mod responses;
@@ -31,6 +32,9 @@ pub fn parse_request(dialect: Dialect, body: &Value) -> Result<ChatRequest> {
         Dialect::AnthropicMessages => anthropic::parse_request(body),
         Dialect::OpenAiResponses => responses::parse_request(body),
         Dialect::OpenAiEmbeddings => Ok(openai_chat::parse_embeddings_request(body)),
+        Dialect::GoogleCodeAssist => Err(Error::Translation(
+            "google code assist is an upstream-only dialect".into(),
+        )),
     }
 }
 
@@ -61,6 +65,11 @@ pub fn build_request_with(
         Dialect::AnthropicMessages => anthropic::build_request(req, stream, wire),
         Dialect::OpenAiResponses => responses::build_request(req, stream, wire),
         Dialect::OpenAiEmbeddings => Ok(openai_chat::build_embeddings_request(req)),
+        Dialect::GoogleCodeAssist => Err(Error::Translation(
+            "google code assist needs a project and request id; \
+             call google_cca::build_request"
+                .into(),
+        )),
     }
 }
 
@@ -73,6 +82,7 @@ pub fn parse_response(dialect: Dialect, body: &Value) -> Result<ChatResponse> {
         Dialect::OpenAiEmbeddings => Err(Error::Translation(
             "embeddings responses have no canonical chat form".into(),
         )),
+        Dialect::GoogleCodeAssist => google_cca::parse_response(body),
     }
 }
 
@@ -85,6 +95,9 @@ pub fn build_response(dialect: Dialect, resp: &ChatResponse) -> Result<Value> {
         Dialect::OpenAiEmbeddings => Err(Error::Translation(
             "embeddings bodies have no canonical chat form".into(),
         )),
+        Dialect::GoogleCodeAssist => Err(Error::Translation(
+            "google code assist is an upstream-only dialect".into(),
+        )),
     }
 }
 
@@ -93,6 +106,7 @@ pub enum StreamDecoder {
     OpenAiChat(OpenAiChatDecoder),
     Anthropic(AnthropicDecoder),
     Responses(ResponsesDecoder),
+    GoogleCodeAssist(google_cca::GoogleCcaDecoder),
 }
 
 impl StreamDecoder {
@@ -102,6 +116,9 @@ impl StreamDecoder {
             Dialect::AnthropicMessages => Self::Anthropic(AnthropicDecoder::new(model)),
             Dialect::OpenAiResponses => Self::Responses(ResponsesDecoder::new(model)),
             Dialect::OpenAiEmbeddings => Self::OpenAiChat(OpenAiChatDecoder::new(model)),
+            Dialect::GoogleCodeAssist => {
+                Self::GoogleCodeAssist(google_cca::GoogleCcaDecoder::new(model))
+            }
         }
     }
 
@@ -113,6 +130,7 @@ impl StreamDecoder {
             Self::OpenAiChat(d) => d.push(chunk, &mut out)?,
             Self::Anthropic(d) => d.push(chunk, &mut out)?,
             Self::Responses(d) => d.push(chunk, &mut out)?,
+            Self::GoogleCodeAssist(d) => d.push(chunk, &mut out)?,
         }
         Ok(out)
     }
@@ -124,6 +142,7 @@ impl StreamDecoder {
             Self::OpenAiChat(d) => d.finish(&mut out)?,
             Self::Anthropic(d) => d.finish(&mut out)?,
             Self::Responses(d) => d.finish(&mut out)?,
+            Self::GoogleCodeAssist(d) => d.finish(&mut out)?,
         }
         Ok(out)
     }
@@ -143,6 +162,8 @@ impl StreamEncoder {
             Dialect::AnthropicMessages => Self::Anthropic(AnthropicEncoder::new(model)),
             Dialect::OpenAiResponses => Self::Responses(ResponsesEncoder::new(model)),
             Dialect::OpenAiEmbeddings => Self::OpenAiChat(OpenAiChatEncoder::new(model)),
+            // CCA is upstream-only; the gateway never encodes a client response in it.
+            Dialect::GoogleCodeAssist => Self::OpenAiChat(OpenAiChatEncoder::new(model)),
         }
     }
 
