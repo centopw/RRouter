@@ -3,3 +3,6 @@ data/
 .env
 .orca-specs/
 backups/
+
+__pycache__/
+*.pyc
