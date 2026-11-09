@@ -6,14 +6,25 @@ upgrades, and the failure modes that look like gateway bugs but are not.
 
 ## 1. Install
 
-Pick one:
+Choose a deployment guide first; each has exact commands, volumes, probes and auth notes:
+
+| Method | Guide |
+| --- | --- |
+| Docker / Compose | [Docker](deploy/docker.md) |
+| Kubernetes | [Kubernetes](deploy/kubernetes.md) |
+| Helm | [Helm](deploy/helm.md) |
+| systemd | [systemd](deploy/systemd.md) |
+| Release binary / installer | [README install](../README.md#install) |
+
+Quick comparison:
 
 | Method | Command |
 | --- | --- |
 | Installer | `curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh \| sh` |
 | Release tarball | download `rrouter-<os>-<arch>.tar.gz` + `.sha256`, verify, unpack to `/usr/local/bin` |
-| Docker | `docker compose up -d` (see `docker-compose.yml`) |
-| Kubernetes | `kubectl apply -f deploy/k8s.yaml` (one replica, PVC, probes) |
+| Docker | `docker compose up -d` ([details](deploy/docker.md)) |
+| Kubernetes | `kubectl apply -f deploy/k8s.yaml` ([details](deploy/kubernetes.md)) |
+| Helm | `helm install rrouter deploy/helm/rrouter -n rrouter --create-namespace` ([details](deploy/helm.md)) |
 | From source | `cargo build --release`, copy `target/release/rrouter` |
 
 Keep the binary and the data directory on the same host. Do not run two processes against

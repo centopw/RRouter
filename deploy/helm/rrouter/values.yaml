@@ -1,0 +1,84 @@
+# RRouter Helm values.
+#
+# SQLite is single-writer: the chart always runs one replica with Recreate. Do not add a
+# replicaCount value without a storage backend that supports multiple writers.
+
+image:
+  repository: ghcr.io/centopw/rrouter
+  # Defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# The data directory holds SQLite, master.key and /ext assets. Back it up.
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+  # Use an existing claim instead of creating one.
+  existingClaim: ""
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: rrouter.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 1Gi
+
+# The admin API is gated by loopback; inside a pod an Ingress arrives from the pod
+# network, so remote admin is enabled and must be authenticated at the Ingress or with
+# an admin token. Never expose the Service publicly without one of those.
+admin:
+  # Set existingSecret to a Secret containing the admin token; or set value to have the
+  # chart create one. Empty means no token: authenticate /api and /metrics at the Ingress.
+  existingSecret: ""
+  existingSecretKey: admin-token
+  value: ""
+
+masterKey:
+  # Optional 64-hex master key. Empty means RRouter creates <data>/master.key on the PVC.
+  existingSecret: ""
+  existingSecretKey: master-key
+  value: ""
+
+requireApiKey: true
+allowRemoteAdmin: true
+rustLog: "rrouter=info"
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

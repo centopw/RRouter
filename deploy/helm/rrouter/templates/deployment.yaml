@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rrouter.fullname" . }}
+  labels:
+    {{- include "rrouter.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "rrouter.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rrouter.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: rrouter
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 20128
+              protocol: TCP
+          env:
+            - name: RROUTER_HOST
+              value: "0.0.0.0"
+            - name: RROUTER_PORT
+              value: "20128"
+            - name: RROUTER_DATA_DIR
+              value: /data
+            - name: RROUTER_ALLOW_REMOTE_ADMIN
+              value: {{ .Values.allowRemoteAdmin | quote }}
+            - name: RROUTER_REQUIRE_API_KEY
+              value: {{ .Values.requireApiKey | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.rustLog | quote }}
+            {{- if or .Values.admin.existingSecret .Values.admin.value }}
+            - name: RROUTER_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.admin.existingSecret | default (printf "%s-admin" (include "rrouter.fullname" .)) }}
+                  key: {{ .Values.admin.existingSecretKey }}
+            {{- end }}
+            {{- if or .Values.masterKey.existingSecret .Values.masterKey.value }}
+            - name: RROUTER_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.masterKey.existingSecret | default (printf "%s-master" (include "rrouter.fullname" .)) }}
+                  key: {{ .Values.masterKey.existingSecretKey }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/rrouter", "--healthcheck"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/rrouter", "--ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "rrouter.fullname" .) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

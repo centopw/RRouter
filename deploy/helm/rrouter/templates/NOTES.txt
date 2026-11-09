@@ -1,0 +1,20 @@
+RRouter is deployed as a single replica. SQLite requires one writer, so do not scale it.
+
+{{- if .Values.ingress.enabled }}
+Ingress hosts:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+The Service is {{ .Values.service.type }} on port {{ .Values.service.port }}. Port-forward:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "rrouter.fullname" . }} 20128:{{ .Values.service.port }}
+{{- end }}
+
+{{- if not (or .Values.admin.existingSecret .Values.admin.value) }}
+WARNING: no RROUTER_ADMIN_TOKEN is configured. If the admin API is reachable through
+an Ingress, authenticate /api and /metrics at the Ingress. Otherwise set
+admin.existingSecret or admin.value.
+{{- end }}
+
+The first visit needs the setup code printed in the pod log:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "rrouter.fullname" . }} | grep "Setup code"
