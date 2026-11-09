@@ -1,1 +1,0 @@
-import{Ct as e,Tt as t}from"./ui-aEt4qH8T.js";var n=t(e(),1),r=`(max-width: 639px)`;function i(){let[e,t]=(0,n.useState)(()=>window.matchMedia(r).matches);return(0,n.useEffect)(()=>{let e=window.matchMedia(r),n=()=>t(e.matches);return n(),e.addEventListener(`change`,n),()=>e.removeEventListener(`change`,n)},[]),e}export{i as t};

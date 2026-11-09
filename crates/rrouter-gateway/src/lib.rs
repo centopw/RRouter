@@ -89,6 +89,11 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/usage/series", get(routes::usage::series))
         .route("/usage/{request_id}", get(routes::usage::detail))
         .route("/models", get(routes::models::registry_list))
+        // The preset library: metadata for every preset plus each account's active choice.
+        // Mutations live on the admin router; activation is a session preference (below).
+        .route("/model-presets", get(routes::model_presets::list))
+        .route("/model-presets/active", get(routes::model_presets::active))
+        .route("/model-presets/{id}", get(routes::model_presets::get))
         .route("/models/providers", get(routes::models::providers))
         .route("/templates", get(routes::templates::list))
         .route("/templates/{id}", get(routes::templates::get))
@@ -154,6 +159,25 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/disabled/{model}", put(routes::models::disable))
         .route("/disabled/{model}/enable", put(routes::models::enable))
+        // Preset administration. Activation is a per-account preference, not library
+        // administration, so that one POST lives on the session router below.
+        .route("/model-presets", post(routes::model_presets::create))
+        .route(
+            "/model-presets/{id}",
+            patch(routes::model_presets::update).delete(routes::model_presets::remove),
+        )
+        .route(
+            "/model-presets/{id}/duplicate",
+            post(routes::model_presets::duplicate),
+        )
+        .route(
+            "/model-presets/{id}/layout",
+            put(routes::model_presets::save_layout),
+        )
+        .route(
+            "/model-presets/{id}/default",
+            post(routes::model_presets::set_default),
+        )
         .route("/models/sync", post(routes::models::sync))
         .route("/models/fetch", post(routes::models::fetch))
         .route(
@@ -277,7 +301,12 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/api/auth/me/sessions/{id}",
             axum::routing::delete(routes::auth::revoke_session),
         )
-        .route("/api/auth/signup", post(routes::auth::signup));
+        .route("/api/auth/signup", post(routes::auth::signup))
+        // One account's active preset: session-scoped, CSRF-checked in the handler.
+        .route(
+            "/api/model-presets/{id}/activate",
+            post(routes::model_presets::activate),
+        );
 
     let ops = Router::new()
         .route("/metrics", get(metrics::scrape))

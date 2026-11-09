@@ -76,6 +76,8 @@ fn creds(token: &str) -> Credentials {
 /// must remove these too, or the replay runs `ALTER TABLE … ADD COLUMN` on a column the
 /// file still has. Indexes go first: SQLite refuses to drop a column an index covers.
 const UNDO_AFTER_V24: &str = "\
+    DROP TABLE IF EXISTS user_model_preferences; \
+    DROP TABLE IF EXISTS model_preset_versions; DROP TABLE IF EXISTS model_presets; \
     DROP TABLE IF EXISTS semantic_cache; \
     DROP TABLE IF EXISTS eval_results; DROP TABLE IF EXISTS eval_runs; \
     DROP TABLE IF EXISTS eval_cases; DROP TABLE IF EXISTS eval_suites; \

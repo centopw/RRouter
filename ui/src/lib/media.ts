@@ -8,13 +8,25 @@ export const PHONE = "(max-width: 639px)";
 
 /** True while the viewport is narrower than `PHONE`. Re-renders on rotation or resize. */
 export function usePhone(): boolean {
-  const [phone, setPhone] = useState(() => window.matchMedia(PHONE).matches);
+  return useMedia(PHONE);
+}
+
+/**
+ * True while the operator asked the OS for less motion. Drag previews and transitions that
+ * move on their own must respect it.
+ */
+export function useReducedMotion(): boolean {
+  return useMedia("(prefers-reduced-motion: reduce)");
+}
+
+function useMedia(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
   useEffect(() => {
-    const query = window.matchMedia(PHONE);
-    const update = () => setPhone(query.matches);
+    const list = window.matchMedia(query);
+    const update = () => setMatches(list.matches);
     update();
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, []);
-  return phone;
+    list.addEventListener("change", update);
+    return () => list.removeEventListener("change", update);
+  }, [query]);
+  return matches;
 }

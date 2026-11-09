@@ -27,14 +27,38 @@ import {
   cx,
 } from "../components/ui";
 import { DataTable, PaginationBar, type Column } from "../components/table";
+import { PresetBar } from "../components/model-presets";
+import { InactiveList, SortableCards, SortableTable, type LayoutRow } from "../components/sortable-list";
+import { layoutFor, useLayoutDraft } from "../lib/layout-draft";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS, CapabilityChips } from "../components/capability-chips";
 import { Checkbox, Heading, Toggle } from "../components/atoms";
 import { compact } from "../lib/format";
-import { usePhone } from "../lib/media";
+import { usePhone, useReducedMotion } from "../lib/media";
 import { compareModels } from "../lib/models";
 import { useToast } from "../components/toast";
-import { qk, useIsAdmin, useModelProviders, useModels } from "../lib/queries";
-import { api, type Capabilities, type Model, type ModelProvider, type ModelTest, type SyncResult } from "../lib/api";
+import {
+  qk,
+  useCreatePreset,
+  useDeletePreset,
+  useDuplicatePreset,
+  useIsAdmin,
+  useModelProviders,
+  useModels,
+  usePatchPreset,
+  usePresetIndex,
+  usePresetLayout,
+  useActivatePreset,
+  useMakeDefaultPreset,
+} from "../lib/queries";
+import {
+  ApiError,
+  api,
+  type Capabilities,
+  type Model,
+  type ModelProvider,
+  type ModelTest,
+  type SyncResult,
+} from "../lib/api";
 
 const ALL = "all";
 /** Page sizes the registry offers; 50 is the default because it fills a laptop viewport. */
@@ -46,6 +70,7 @@ export default function Models() {
   const providers = useModelProviders();
   const isAdmin = useIsAdmin();
   const phone = usePhone();
+  const reduceMotion = useReducedMotion();
   const client = useQueryClient();
   const [params, setParams] = useSearchParams();
 
@@ -71,7 +96,8 @@ export default function Models() {
           value === "" ||
           (key === "provider" && value === ALL) ||
           (key === "size" && Number(value) === DEFAULT_SIZE) ||
-          (key === "page" && Number(value) === 1);
+          (key === "page" && Number(value) === 1) ||
+          (key === "ipage" && Number(value) === 1);
         if (defaulted) next.delete(key);
         else next.set(key, value);
       }
@@ -79,6 +105,39 @@ export default function Models() {
     },
     [params, setParams],
   );
+
+  // ---- preset layout ---------------------------------------------------------------
+  // `?preset=` is the addressable layout; without it the server's active preset applies.
+  const presets = usePresetIndex(isAdmin);
+  const presetId =
+    params.get("preset") ??
+    presets.data?.active_id ??
+    presets.data?.default_id ??
+    presets.data?.data[0]?.id ??
+    null;
+  const layout = usePresetLayout(presetId);
+  const layoutDraft = useLayoutDraft(layout.data, () =>
+    // Only the list: refreshing the open document would reset the saved-at indicator.
+    void client.invalidateQueries({ queryKey: qk.modelPresets, exact: true }),
+  );
+  const presetsReady = Boolean(presets.data && layout.data);
+  const createPreset = useCreatePreset();
+  const patchPreset = usePatchPreset();
+  const duplicatePreset = useDuplicatePreset();
+  const deletePreset = useDeletePreset();
+  // One activation endpoint: it stores this account's choice, not a global default.
+  const activatePreset = useActivatePreset();
+  const makeDefaultPreset = useMakeDefaultPreset();
+  // The default endpoint is pending in this build: probe once per session and stop
+  // offering the control when the gateway says the route is not there.
+  const [defaultBlocked, setDefaultBlocked] = useState(false);
+  const [undo, setUndo] = useState<{ ref: string } | null>(null);
+
+  const selectPreset = (id: string) => {
+    if (id === presetId) return;
+    setFilters({ preset: id, page: "1", ipage: null });
+    activatePreset.mutate(id);
+  };
 
   // One history entry per pause, not per keystroke: typing replaces, navigation pushes.
   useEffect(() => {
@@ -175,6 +234,81 @@ export default function Models() {
     () => filtered.slice((page - 1) * size, page * size),
     [filtered, page, size],
   );
+
+  // A preset row is a registry model plus its place in the layout; a ref the registry no
+  // longer lists is still shown, as unavailable, so ordering never silently drops.
+  const byRef = useMemo(() => new Map(all.map((model) => [model.ref, model] as const)), [all]);
+  const entryRefs = useMemo(
+    () => new Set(layoutDraft.entries.map((entry) => entry.ref)),
+    [layoutDraft.entries],
+  );
+  const matchesRow = (row: LayoutRow) => {
+    const needle = appliedQuery.trim().toLowerCase();
+    const owner = row.model?.provider ?? row.ref.split("/")[0];
+    if (provider !== ALL && owner !== provider) return false;
+    return (
+      !needle ||
+      row.ref.toLowerCase().includes(needle) ||
+      (row.model?.display ?? "").toLowerCase().includes(needle)
+    );
+  };
+  const activeRows = layoutDraft.entries
+    .filter((entry) => entry.visible)
+    .map<LayoutRow>((entry) => ({
+      ref: entry.ref,
+      model: byRef.get(entry.ref) ?? null,
+      visible: true,
+      isNew: false,
+    }))
+    .filter(matchesRow);
+  const newRows = all
+    .filter((model) => !entryRefs.has(model.ref))
+    .map<LayoutRow>((model) => ({ ref: model.ref, model, visible: false, isNew: true }))
+    .filter(matchesRow);
+  const hiddenRows = layoutDraft.entries
+    .filter((entry) => !entry.visible)
+    .map<LayoutRow>((entry) => ({
+      ref: entry.ref,
+      model: byRef.get(entry.ref) ?? null,
+      visible: false,
+      isNew: false,
+    }))
+    .filter(matchesRow);
+  const hiddenCount = layoutDraft.entries.filter((entry) => !entry.visible).length;
+  const activePage = Math.min(
+    Math.max(1, Number(params.get("page") ?? "1") || 1),
+    Math.max(1, Math.ceil(activeRows.length / size)),
+  );
+  const inactivePage = Math.min(
+    Math.max(1, Number(params.get("ipage") ?? "1") || 1),
+    Math.max(1, Math.ceil((hiddenRows.length + newRows.length) / size)),
+  );
+  const activeSlice = activeRows.slice((activePage - 1) * size, activePage * size);
+  const inactiveSlice = [...hiddenRows, ...newRows].slice(
+    (inactivePage - 1) * size,
+    inactivePage * size,
+  );
+
+  // Auto-include is a policy, not a button: a preset that opts in adopts every registry
+  // model it has never stored, and the debounced save persists them.
+  const newRefKey = newRows.map((row) => row.ref).join("|");
+  useEffect(() => {
+    if (!presetsReady || !layoutDraft.autoInclude || newRefKey === "") return;
+    layoutDraft.adopt(newRefKey.split("|"));
+  }, [presetsReady, layoutDraft.autoInclude, newRefKey]);
+
+  // Undo is a local affordance: hiding is a layout change, so there is nothing to undo on
+  // the server once the debounced save has run, and the toast would lie after a reload.
+  useEffect(() => {
+    if (!undo) return;
+    const timer = window.setTimeout(() => setUndo(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [undo]);
+  const hideRow = useRef<(ref: string) => void>(() => {});
+  hideRow.current = (ref) => {
+    layoutDraft.hide(ref);
+    setUndo({ ref });
+  };
 
   // Pending ids rather than whole mutation objects: the column list must keep the same
   // identity while the toolbar is being typed into.
@@ -321,6 +455,7 @@ export default function Models() {
               pendingDelete={removeTarget === m.ref}
               onEdit={() => setEditing(m)}
               onDelete={() => setDeleting(m)}
+              onHide={presetId ? () => hideRow.current(m.ref) : undefined}
             />
           </div>
         ),
@@ -328,7 +463,7 @@ export default function Models() {
     ];
     // A reader sees the registry, not the controls that change it.
     return isAdmin ? list : list.filter((column) => column.key !== "actions");
-  }, [isAdmin, testTarget, toggleTarget, removeTarget]);
+  }, [isAdmin, testTarget, toggleTarget, removeTarget, presetId]);
 
   const filteredOut = appliedQuery.trim() !== "" || provider !== ALL;
   const providerName = providers.data?.find((p) => p.id === provider)?.display ?? provider;
@@ -425,7 +560,211 @@ export default function Models() {
         </div>
       ) : null}
 
-      {!models.isLoading && all.length === 0 ? (
+      {presets.isError ? (
+        <Card className="mb-4">
+          {/* The library is shipped with this binary; an error here is a real failure, not a
+              missing feature, so name it and keep the plain registry usable. */}
+          <div className="flex flex-col gap-2 px-5 py-3">
+            <p className="text-caption text-faint">
+              Presets could not be loaded; the registry below is the plain list.
+            </p>
+            <ErrorNote error={presets.error} onRetry={() => void presets.refetch()} />
+          </div>
+        </Card>
+      ) : presetsReady && presetId ? (
+        <>
+          <PresetBar
+            presets={presets.data?.data ?? []}
+            activeId={presetId}
+            defaultId={presets.data?.default_id ?? ""}
+            draftState={layoutDraft.state}
+            savedAt={layoutDraft.savedAt}
+            conflict={Boolean(layoutDraft.conflict)}
+            error={layoutDraft.error}
+            autoInclude={layoutDraft.autoInclude}
+            counts={`${activeRows.length.toLocaleString()} active · ${hiddenCount.toLocaleString()} hidden${
+              newRows.length > 0 && !layoutDraft.autoInclude
+                ? ` · ${newRows.length.toLocaleString()} new`
+                : ""
+            }`}
+            updatedAt={layout.data?.updated_at ?? 0}
+            busy={
+              createPreset.isPending ||
+              patchPreset.isPending ||
+              duplicatePreset.isPending ||
+              deletePreset.isPending ||
+              activatePreset.isPending ||
+              makeDefaultPreset.isPending
+            }
+            onSelect={selectPreset}
+            onSave={() => void layoutDraft.saveNow()}
+            onDiscard={layoutDraft.discard}
+            onSaveAndSwitch={async (id) => {
+              if (await layoutDraft.saveNow()) selectPreset(id);
+            }}
+            onSaveCopy={(name) =>
+              createPreset.mutate(
+                { name, layout: layoutFor(layoutDraft.entries, layoutDraft.autoInclude) },
+                { onSuccess: (created) => selectPreset(created.id) },
+              )
+            }
+            onAutoInclude={layoutDraft.setAutoInclude}
+            onMakeDefault={(id) =>
+              makeDefaultPreset.mutate(id, {
+                onError: (failure) => {
+                  if (
+                    failure instanceof ApiError &&
+                    (failure.status === 404 || failure.status === 405)
+                  ) {
+                    setDefaultBlocked(true);
+                  }
+                },
+              })
+            }
+            defaultBlocked={defaultBlocked || makeDefaultPreset.isError}
+            onLoadLatest={layoutDraft.loadLatest}
+            manage={{
+              create: (name) =>
+                createPreset.mutate(
+                  { name, layout: layoutFor(layoutDraft.entries, layoutDraft.autoInclude) },
+                  { onSuccess: (created) => selectPreset(created.id) },
+                ),
+              rename: (id, name) => patchPreset.mutate({ id, patch: { name } }),
+              duplicate: (id, name) => duplicatePreset.mutate({ id, name }),
+              remove: (id) =>
+                deletePreset.mutate(id, {
+                  onSuccess: () => {
+                    if (id === presetId) {
+                      setFilters({ preset: presets.data?.default_id ?? null, page: "1" });
+                    }
+                  },
+                }),
+            }}
+          />
+
+          {undo ? (
+            <div
+              role="status"
+              className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-[8px] border border-line bg-surface px-4 py-2 text-small text-fg"
+            >
+              <span>
+                <span className="font-mono">{undo.ref}</span> hidden from this preset. It still
+                routes; only this list changed.
+              </span>
+              <span className="flex gap-1.5">
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    layoutDraft.restore(undo.ref);
+                    setUndo(null);
+                  }}
+                >
+                  Undo
+                </Button>
+                <Button variant="quiet" onClick={() => setUndo(null)}>
+                  dismiss
+                </Button>
+              </span>
+            </div>
+          ) : null}
+
+          <Card>
+            <CardHeader
+              title="Active models"
+              action={
+                <span className="text-caption text-faint">
+                  drag a row, or focus its handle and press space
+                </span>
+              }
+            />
+            {phone ? (
+              <SortableCards
+                rows={activeSlice}
+                onReorder={layoutDraft.reorder}
+                reducedMotion={reduceMotion}
+                canHide={!layoutDraft.conflict}
+                onHide={(ref) => hideRow.current(ref)}
+                render={(model) => (
+                  <ModelCardBody
+                    model={model}
+                    isAdmin={isAdmin}
+                    testTarget={testTarget}
+                    toggleTarget={toggleTarget}
+                    removeTarget={removeTarget}
+                    onTest={(m) => test.mutate(m)}
+                    onToggle={(m) => toggle.mutate(m)}
+                    onEdit={setEditing}
+                    onDelete={setDeleting}
+                    onHide={(ref) => hideRow.current(ref)}
+                  />
+                )}
+              />
+            ) : (
+              <SortableTable
+                rows={activeSlice}
+                columns={columns}
+                onReorder={layoutDraft.reorder}
+                onHide={(ref) => hideRow.current(ref)}
+                reducedMotion={reduceMotion}
+                canHide={!layoutDraft.conflict}
+                scrollLabel="Active models"
+                maxBodyHeight="clamp(18rem, calc(100vh - 27rem), 52rem)"
+                empty={emptyState}
+              />
+            )}
+            <PaginationBar
+              pagination={{
+                page: activePage,
+                size,
+                total: activeRows.length,
+                label: "models",
+                onPage: (next) => setFilters({ page: String(next) }),
+                onSize: (next) => setFilters({ size: String(next), page: "1" }),
+              }}
+            />
+          </Card>
+
+          {hiddenCount + newRows.length > 0 ? (
+            <Card className="mt-4">
+              <CardHeader
+                title="Hidden from this preset"
+                action={
+                  <span className="text-caption text-faint tnum">
+                    {hiddenCount.toLocaleString()} hidden
+                    {newRows.length > 0 && !layoutDraft.autoInclude
+                      ? ` · ${newRows.length.toLocaleString()} not in this preset`
+                      : ""}
+                  </span>
+                }
+              />
+              <InactiveList
+                rows={inactiveSlice}
+                onRestore={(ref) => layoutDraft.restore(ref)}
+                onRestoreAll={() =>
+                  layoutDraft.restoreAll(
+                    layoutDraft.autoInclude ? [] : newRows.map((row) => row.ref),
+                  )
+                }
+                note="Hide a model to keep it out of this preset's order. It stays routable."
+              />
+              {hiddenRows.length + newRows.length > size ? (
+                <div className="border-t border-line">
+                  <PaginationBar
+                    pagination={{
+                      page: inactivePage,
+                      size,
+                      total: hiddenRows.length + newRows.length,
+                      label: "hidden",
+                      onPage: (next) => setFilters({ ipage: String(next) }),
+                      onSize: (next) => setFilters({ size: String(next), ipage: "1" }),
+                    }}
+                  />
+                </div>
+              ) : null}
+            </Card>
+          ) : null}
+        </>
+      ) : !models.isLoading && all.length === 0 ? (
         <EmptyRegistry onSync={() => sync.mutate()} syncing={sync.isPending} canAdmin={isAdmin} />
       ) : (
         <Card>
@@ -540,11 +879,14 @@ function RowMenu({
   pendingDelete,
   onEdit,
   onDelete,
+  onHide,
 }: {
   model: Model;
   pendingDelete: boolean;
   onEdit: () => void;
   onDelete: () => void;
+  /** Only while a preset is active: hides the row here, not from routing. */
+  onHide?: () => void;
 }) {
   const surface = useRef<HTMLDivElement>(null);
   const items = () =>
@@ -611,6 +953,13 @@ function RowMenu({
               Edit limits and price
             </button>
           </Popover.Close>
+          {onHide ? (
+            <Popover.Close asChild>
+              <button type="button" role="menuitem" tabIndex={-1} onClick={onHide} className={item}>
+                Hide from this list
+              </button>
+            </Popover.Close>
+          ) : null}
           {model.source === "custom" ? (
             <Popover.Close asChild>
               <button
@@ -660,6 +1009,48 @@ function ModelCards({
           key={m.ref}
           className="border-b border-[var(--color-rule)] px-4 py-3 last:border-b-0"
         >
+          <ModelCardBody
+            model={m}
+            isAdmin={isAdmin}
+            testTarget={testTarget}
+            toggleTarget={toggleTarget}
+            removeTarget={removeTarget}
+            onTest={onTest}
+            onToggle={onToggle}
+            onEdit={onEdit}
+            onDelete={onDelete}
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** One model as a phone card. Shared by the registry and the sortable active list. */
+function ModelCardBody({
+  model: m,
+  isAdmin,
+  testTarget,
+  toggleTarget,
+  removeTarget,
+  onTest,
+  onToggle,
+  onEdit,
+  onDelete,
+  onHide,
+}: {
+  model: Model;
+  isAdmin: boolean;
+  testTarget: string | null;
+  toggleTarget: string | null;
+  removeTarget: string | null;
+  onTest: (model: Model) => void;
+  onToggle: (model: Model) => void;
+  onEdit: (model: Model) => void;
+  onDelete: (model: Model) => void;
+  onHide?: (ref: string) => void;
+}) {
+  return (
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex min-w-0 flex-wrap items-center gap-1.5">
@@ -725,14 +1116,12 @@ function ModelCards({
                     pendingDelete={removeTarget === m.ref}
                     onEdit={() => onEdit(m)}
                     onDelete={() => onDelete(m)}
+                    onHide={onHide ? () => onHide(m.ref) : undefined}
                   />
                 </div>
               ) : null}
             </div>
           </div>
-        </li>
-      ))}
-    </ul>
   );
 }
 

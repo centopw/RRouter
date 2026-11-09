@@ -52,16 +52,16 @@ curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | s
 ```
 
 ```sh
-# pin the newest published release (v0.4.1) / choose a directory
-RROUTER_VERSION=v0.4.1 RROUTER_INSTALL_DIR="$HOME/bin" \
+# pin the newest published release (v0.4.2) / choose a directory
+RROUTER_VERSION=v0.4.2 RROUTER_INSTALL_DIR="$HOME/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
 
 # see what it would do
 RROUTER_DRY_RUN=1 curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | sh
 ```
 
-`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.1 is
-the newest. The workspace is 0.4.1 — tag artifacts are published by the release workflow.
+`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.2 is
+the newest. The workspace is 0.4.2 — tag artifacts are published by the release workflow.
 
 ## Quick start
 
@@ -117,7 +117,7 @@ where it goes, not the protocol.
 | `POST /v1/rerank` | canonical rerank, forwarded to providers with a rerank endpoint |
 | `POST/GET /v1/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content` | provider file API forwarded verbatim (multipart boundary preserved; content streamed); only the built-in OpenAI provider declares these today (`501` otherwise; a community manifest can declare them), uploads buffered under a 64 MiB cap |
 | `POST/GET /v1/batches`, `GET /v1/batches/{id}`, `POST /v1/batches/{id}/cancel` | provider batch API forwarded byte-identically; execution stays with the provider; only the built-in OpenAI provider declares these today (`501` otherwise; a community manifest can declare them); pin one provider when a batch references an uploaded file |
-| `GET/POST /api/*` | admin: providers, keys, models, teams, webhooks, evals, usage, settings |
+| `GET/POST /api/*` | admin: providers, keys, models, model presets, teams, webhooks, evals, usage, settings |
 
 `/v1/messages/count_tokens` and `/v1/responses/compact` are forwarded to the provider that
 implements them (Anthropic and OpenAI/GitHub respectively), because both are provider-native
@@ -239,10 +239,13 @@ inactive or expired is always rejected.
 | --- | --- |
 | Subscription sign-in (OAuth) | Claude, Codex (ChatGPT), GitHub Copilot |
 | API key | OpenAI, Anthropic, Google Gemini, DeepSeek, Groq, OpenRouter, xAI, Mistral, Together, Cerebras |
+| API key, provider-native surface | Azure OpenAI (`api-key` header, chat on the v1 surface, per-resource base URL, deployment name as the model id), Cohere (chat through the OpenAI-compatibility API plus `/v1/rerank`), Fireworks AI (chat, ids stored as `accounts/fireworks/models/<name>`), Jina AI (rerank only — no chat API) |
 | Local / custom | Ollama, or anything reachable through `base_url_override` |
 
 OAuth tokens refresh ahead of expiry with a per-account lock, so concurrent requests never
-race two refreshes and invalidate the session.
+race two refreshes and invalidate the session. Per-provider auth headers, native endpoints,
+model-list behaviour and the community-manifest provenance are in
+[`docs/PROVIDERS.md`](docs/PROVIDERS.md).
 
 ## Models
 
@@ -263,6 +266,21 @@ connected. Disconnect the last account and the list is empty.
 
 Every place the dashboard asks for a model is a select grouped by provider — no free-text
 model fields, so a typo cannot silently route to nothing.
+
+### Model presets
+
+Presets are named, ordered **layouts** of the Models page: reorder, hide and restore rows,
+and switch between saved layouts. They are instance-wide admin configuration and never
+change routing — hiding a row only removes it from that preset's active list, while routing
+is controlled separately by `disabled_models`. Every layout save is a full-layout `PUT`
+carrying the revision it read; a stale revision answers `409 preset_conflict` with the
+current revision instead of overwriting another tab's work, and the default preset cannot be
+deleted.
+
+The workflow, JSON shape, endpoints, keyboard/drag accessibility and the manual browser
+checklist are in [`docs/MODEL_PRESETS.md`](docs/MODEL_PRESETS.md). API acceptance:
+`python3 scripts/model_presets_smoke.py` (it exits `3` with `BLOCKED-BY-API` only against a
+build that does not serve the routes).
 
 ## Prompt caching
 
@@ -511,6 +529,16 @@ and can download the release archive. Checking is enabled daily by default; auto
 downloading is opt-in. Archives are verified against the published SHA-256 and staged under
 `<data_dir>/updates/<version>/`.
 
+Set `RROUTER_UPDATE_TOKEN` (or `GITHUB_TOKEN`) to a fine-grained, read-only token for
+`centopw/RRouter` to raise GitHub’s per-IP API limit; it is sent only as a bearer header and
+never logged or returned. Without a token, routine checks avoid the API entirely and follow
+`github.com/centopw/RRouter/releases/latest` to `/releases/tag/vX`; notes then come from the
+last cached check, and archives use the constructed release-download URL with the same
+SHA-256 verification. On a `403`/`429` exhaustion, the gateway records
+`rate_limited_until` from `x-ratelimit-reset` (+ jitter), stops automatic API checks until
+then, keeps the last known release, and shows the retry time in the status screen; a restart
+does not immediately re-check. Details and quota behaviour: [`docs/DEPLOY.md`](docs/DEPLOY.md#52-update-checks-and-github-rate-limits).
+
 The detected deployment decides how the upgrade is applied:
 
 | Deployment | Detection | Upgrade |
@@ -533,10 +561,18 @@ instead. A staged binary is never applied automatically; an operator chooses the
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-That tag drives both workflows: the release job publishes
-`rrouter-{linux,darwin}-{amd64,arm64}.tar.gz` with `.sha256` files, and the docker job pushes
-`ghcr.io/centopw/rrouter:0.2.0`, `:0.2`, `:latest`, and a `:sha-…` tag. The installer verifies
-the checksum before installing, so a corrupted download never lands in `$PATH`.
+That tag drives both workflows. The release publishes
+`rrouter-{linux,darwin}-{amd64,arm64}.tar.gz` with `.sha256` files; its body is rendered once
+from the matching `## <version>` section of `CHANGELOG.md` by
+`scripts/release-notes.py` (build legs only attach assets, so there are no duplicated
+“Full Changelog” blocks), and the matrix builds each target natively — arm64 Linux on
+`ubuntu-24.04-arm` instead of QEMU. The docker workflow builds `linux/amd64` and
+`linux/arm64` on native runners and merges the digests into
+`ghcr.io/centopw/rrouter:0.2.0`, `:0.2`, `:latest`, and a `:sha-…` manifest, cutting the
+v0.4.2 31-minute QEMU path to an expected ~12–16 minutes cold. The installer verifies the
+checksum before installing, so a corrupted download never lands in `$PATH`. Verify notes
+before tagging with `python3 scripts/release-notes.py v0.4.2 --check`; the full flow and
+timings are in [`docs/RELEASES.md`](docs/RELEASES.md#5-the-pipeline).
 
 ## License
 

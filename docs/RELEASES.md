@@ -1,8 +1,9 @@
 # Releasing and verifying RRouter
 
 A release is four platform tarballs plus, for every tarball, a checksum, a dependency
-inventory, and a GitHub build-provenance attestation. This page says exactly what each
-piece proves, what the installer checks, and what a human still has to do.
+inventory, and a GitHub build-provenance attestation. The release **body is rendered once**
+from `CHANGELOG.md`; build legs only attach assets. This page says exactly what each piece
+proves, what the installer checks, and what a human still has to do.
 
 ## 1. What a release contains
 
@@ -98,12 +99,51 @@ linux-amd64,linux-arm64,darwin-arm64,darwin-amd64` (update when the matrix chang
 
 ## 5. The pipeline
 
-`release.yml` has two jobs:
+`release.yml` has four jobs:
 
 | Job | Permissions | Steps |
 | --- | --- | --- |
-| `binaries` (matrix, 4 targets) | `contents: write`, `id-token: write`, `attestations: write` | checkout the tag → `cargo build --release --locked` → package (stable names) → SBOM → attest → publish |
+| `prepare` | none | validate the tag is `v*`; publish `tag`/`version` outputs |
+| `create-release` (once) | `contents: write` | checkout the tag → `python3 scripts/release-notes.py <tag> --check` → render `.release-notes.md` → create/update the release with `body_path` and `generate_release_notes: false` |
+| `binaries` (matrix, 4 targets) | `contents: write`, `id-token: write`, `attestations: write` | checkout the tag → `cargo build --release --locked` → package (stable names) → SBOM → attest → `gh release upload --clobber` (assets only) |
 | `verify` (after the matrix) | `contents: read`, `attestations: read` | download the published assets → completeness, checksums, SBOM shape, SBOM reproducibility, provenance |
+
+The body has exactly one writer. Before this change every matrix leg called
+`generate_release_notes: true`, so a release contained one “Full Changelog” comparison
+block per leg (four for `v0.4.1`). Now the matrix never touches the body.
+
+### 5.1 Release notes from the changelog
+
+`scripts/release-notes.py` takes the `## <version>` section of `CHANGELOG.md` up to the next
+level-2 heading, removes HTML comments, trims blank lines, and prints Markdown:
+
+```sh
+python3 scripts/release-notes.py v0.4.1 --check   # validate before pushing a tag
+python3 scripts/release-notes.py v0.4.1           # body on stdout
+```
+
+Exit codes: `0` ok, `2` missing/empty section, `1` I/O or bad version. `--check` prints a
+line count/byte summary instead of the body, so it is safe in CI and locally.
+
+### 5.2 Docker images (native, no QEMU)
+
+`docker.yml` builds each architecture on its own runner: `linux/amd64` on
+`ubuntu-latest`, `linux/arm64` on `ubuntu-24.04-arm`. Each leg pushes an image **by
+digest** (`provenance: false`, GHA cache scoped per architecture); a single `merge` job
+downloads the two digest files and runs `docker buildx imagetools create` for the version,
+major-minor, branch/PR, short-sha and `latest` tags. Pull requests build both platforms
+without pushing and skip the merge. The `smoke` job builds a local amd64 image from the
+same GHA cache scope and runs the existing health/volume checks.
+
+Measured vs expected:
+
+| Flow | Wall clock |
+| --- | --- |
+| v0.4.1 (old): one QEMU job, `linux/amd64,linux/arm64` | **31m54s** |
+| New: two native legs in parallel (~8–12 min cold each, overlapping) + merge inspection (~1 min) + cache-hit smoke (~2–4 min) | expected ~12–16 min cold; lower with warm GHA cache. Measure the next tag and update this row. |
+
+Workflow files are linted by `actionlint` in CI (`.github/workflows/ci.yml`, pinned image
+`rhysd/actionlint:1.7.12`); run it locally before pushing a workflow change.
 
 Notes:
 

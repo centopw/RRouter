@@ -9,6 +9,7 @@ pub mod evals;
 pub mod files;
 pub mod health;
 pub mod keys;
+pub mod model_presets;
 pub mod models;
 pub(crate) mod native;
 pub mod oauth;

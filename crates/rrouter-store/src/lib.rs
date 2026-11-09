@@ -29,6 +29,7 @@ mod audit;
 mod crypto;
 mod evals;
 mod migrations;
+mod presets;
 mod store;
 mod teams;
 mod users;
@@ -41,6 +42,12 @@ pub use evals::{
     EVAL_RUN_PAGE, MAX_EVAL_CASES, MAX_EVAL_MODEL, MAX_EVAL_NAME, MAX_EVAL_TEXT,
 };
 pub use migrations::SCHEMA_VERSION;
+pub use presets::{
+    LayoutDocument, LayoutItem, ModelPreset, ModelPresetVersion, PresetUpdateOutcome,
+    DEFAULT_MODEL_PRESET_ID, LAYOUT_SCHEMA_VERSION, MAX_LAYOUT_ITEMS, MAX_LAYOUT_MODEL_ID,
+    MAX_LAYOUT_PROVIDER, MAX_PRESET_ACTOR, MAX_PRESET_DESCRIPTION, MAX_PRESET_NAME,
+    MAX_PRESET_VERSIONS,
+};
 pub use rrouter_auth::{CredentialStore, Credentials};
 pub use store::{
     cache_key, window_reset, window_start, AccountQuota, AccountQuotaState, AccountUsage, ApiKey,

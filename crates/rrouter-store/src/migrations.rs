@@ -12,13 +12,78 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 29;
+pub const SCHEMA_VERSION: i64 = 30;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30,
 ];
+
+/// V30: model presets. A preset is a named layout of the model catalog — one row holds
+/// the live document and its optimistic-concurrency `revision`; a version row holds each
+/// accepted layout, so an undo is an index hit instead of an event replay.
+///
+/// `scope`/`owner_user_id`/`team_id` reserve per-user and per-team sharing; this release
+/// writes `global` only, and the indexes are the lookups that filtering will use. They
+/// are plain nullable columns rather than CHECKs, following v26's choice: widening the
+/// vocabulary later is not a migration.
+///
+/// `user_model_preferences` is one row per user, not a session: a selection follows the
+/// account across devices. It has no foreign key (same reason V15 gives), so
+/// [`Store::delete_model_preset`] removes the rows that pointed at a deleted preset in
+/// the same transaction and the read side still falls back to the default if one dangles.
+///
+/// The seed is the compatibility promise: `Default` has an empty item list and
+/// `auto_include_new`, which the client merges against the live catalog, so every model a
+/// database had before v30 is active immediately after the upgrade. Its revision-1
+/// snapshot is inserted too, so history starts from the same document the live row holds.
+const V30: &str = r#"
+CREATE TABLE IF NOT EXISTS model_presets (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  description   TEXT,
+  scope         TEXT NOT NULL DEFAULT 'global',
+  owner_user_id TEXT,
+  team_id       TEXT,
+  is_default    INTEGER NOT NULL DEFAULT 0,
+  revision      INTEGER NOT NULL DEFAULT 1,
+  layout_json   TEXT NOT NULL,
+  created_by    TEXT,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_model_presets_scope ON model_presets(scope);
+CREATE INDEX IF NOT EXISTS idx_model_presets_owner ON model_presets(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_model_presets_team ON model_presets(team_id);
+CREATE TABLE IF NOT EXISTS model_preset_versions (
+  preset_id   TEXT NOT NULL,
+  revision    INTEGER NOT NULL,
+  layout_json TEXT NOT NULL,
+  created_by  TEXT,
+  created_at  INTEGER NOT NULL,
+  PRIMARY KEY (preset_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_model_preset_versions_preset
+  ON model_preset_versions(preset_id, revision DESC);
+CREATE TABLE IF NOT EXISTS user_model_preferences (
+  user_id          TEXT PRIMARY KEY,
+  active_preset_id TEXT NOT NULL,
+  updated_at       INTEGER NOT NULL
+);
+INSERT INTO model_presets (
+  id, name, description, scope, owner_user_id, team_id, is_default, revision,
+  layout_json, created_by, created_at, updated_at
+) VALUES (
+  '00000000-0000-0000-0000-000000000001', 'Default', NULL, 'global', NULL, NULL, 1, 1,
+  '{"schema_version":1,"auto_include_new":true,"items":[]}', NULL,
+  CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER)
+) ON CONFLICT(id) DO NOTHING;
+INSERT INTO model_preset_versions (preset_id, revision, layout_json, created_by, created_at)
+SELECT id, revision, layout_json, created_by, created_at FROM model_presets
+WHERE id = '00000000-0000-0000-0000-000000000001'
+ON CONFLICT(preset_id, revision) DO NOTHING;
+"#;
 
 /// V29: semantic response cache. One row is one stored response plus the prompt
 /// embedding that justified it; a lookup scans the rows of one `(embedding_model,
@@ -676,12 +741,13 @@ mod tests {
                  ('connections','api_keys','model_aliases','disabled_models','combos','usage',\
                   'attempts','connection_stats','key_models','response_cache',\
                   'prompt_templates','prompt_template_versions','events_outbox',\
-                  'webhook_endpoints','eval_suites','eval_cases','eval_runs','eval_results')",
+                  'webhook_endpoints','eval_suites','eval_cases','eval_runs','eval_results',\
+                  'model_presets','model_preset_versions','user_model_preferences')",
                 [],
                 |r| r.get(0),
             )
             .expect("count");
-        assert_eq!(tables, 18);
+        assert_eq!(tables, 21);
     }
 
     #[test]
@@ -1267,5 +1333,164 @@ mod tests {
             (None, None, None, None),
             "a queued result has no answer yet"
         );
+    }
+
+    /// v29 → v30: preset tables land, the default preset is seeded with the
+    /// all-models layout, and a hand insert picks up the column defaults.
+    #[test]
+    fn upgrades_from_v29_landing_v30_model_presets() {
+        let mut c = Connection::open_in_memory().expect("open");
+        at_version(&mut c, 29);
+        assert_eq!(user_version(&c), 29);
+        for table in [
+            "model_presets",
+            "model_preset_versions",
+            "user_model_preferences",
+        ] {
+            assert!(!has_table(&c, table), "{table} does not exist before v30");
+        }
+
+        migrate(&mut c).expect("upgrade");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+
+        for column in [
+            "id",
+            "name",
+            "description",
+            "scope",
+            "owner_user_id",
+            "team_id",
+            "is_default",
+            "revision",
+            "layout_json",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                has_column(&c, "model_presets", column),
+                "model_presets.{column}"
+            );
+        }
+        for index in [
+            "idx_model_presets_scope",
+            "idx_model_presets_owner",
+            "idx_model_presets_team",
+        ] {
+            assert!(has_index(&c, "model_presets", index), "{index}");
+        }
+        for column in [
+            "preset_id",
+            "revision",
+            "layout_json",
+            "created_by",
+            "created_at",
+        ] {
+            assert!(
+                has_column(&c, "model_preset_versions", column),
+                "model_preset_versions.{column}"
+            );
+        }
+        assert!(has_index(
+            &c,
+            "model_preset_versions",
+            "idx_model_preset_versions_preset"
+        ));
+        for column in ["user_id", "active_preset_id", "updated_at"] {
+            assert!(
+                has_column(&c, "user_model_preferences", column),
+                "user_model_preferences.{column}"
+            );
+        }
+
+        // The seed is the compatibility promise: one default, empty explicit items,
+        // auto-include on.
+        let seed_layout = "{\"schema_version\":1,\"auto_include_new\":true,\"items\":[]}";
+        let (name, scope, is_default, revision, layout, created_by): (
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            Option<String>,
+        ) = c
+            .query_row(
+                "SELECT name, scope, is_default, revision, layout_json, created_by \
+                 FROM model_presets WHERE id = '00000000-0000-0000-0000-000000000001'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .expect("seeded default preset");
+        assert_eq!(name, "Default");
+        assert_eq!(scope, "global");
+        assert_eq!((is_default, revision), (1, 1));
+        assert_eq!(layout, seed_layout);
+        assert_eq!(created_by, None);
+        let defaults: i64 = c
+            .query_row(
+                "SELECT count(*) FROM model_presets WHERE is_default = 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("one default");
+        assert_eq!(defaults, 1);
+
+        // The seed's revision-1 snapshot starts history from the same document.
+        let (snapshot_revision, snapshot_layout): (i64, String) = c
+            .query_row(
+                "SELECT revision, layout_json FROM model_preset_versions \
+                 WHERE preset_id = '00000000-0000-0000-0000-000000000001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("seed snapshot");
+        assert_eq!(snapshot_revision, 1);
+        assert_eq!(snapshot_layout, seed_layout);
+
+        // Required columns are only id/name/layout/timestamps; the rest default.
+        c.execute(
+            "INSERT INTO model_presets (id, name, layout_json, created_at, updated_at) \
+             VALUES ('p2', 'Writing', '{}', 1, 1)",
+            [],
+        )
+        .expect("insert with defaults");
+        let (scope, is_default, revision): (String, i64, i64) = c
+            .query_row(
+                "SELECT scope, is_default, revision FROM model_presets WHERE id = 'p2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("defaults");
+        assert_eq!((scope.as_str(), is_default, revision), ("global", 0, 1));
+
+        // One selection per user, and its preset id is required.
+        c.execute(
+            "INSERT INTO user_model_preferences (user_id, active_preset_id, updated_at) \
+             VALUES ('u', 'p2', 1)",
+            [],
+        )
+        .expect("preference");
+        assert!(c
+            .execute(
+                "INSERT INTO user_model_preferences (user_id, active_preset_id, updated_at) \
+                 VALUES ('u', 'p2', 2)",
+                [],
+            )
+            .is_err());
+        assert!(c
+            .execute(
+                "INSERT INTO user_model_preferences (user_id, updated_at) VALUES ('v', 1)",
+                [],
+            )
+            .is_err());
     }
 }

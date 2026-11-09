@@ -20,6 +20,9 @@ import {
   type OAuthStatus,
   type SystemInfo,
   type Webhook,
+  type LayoutDocument,
+  type ModelPreset,
+  type PresetIndex,
   type WebhookList,
   type WebhookStatus,
   type EvalRun,
@@ -71,6 +74,9 @@ export const qk = {
   keys: ["keys"] as const,
   teams: ["teams"] as const,
   evals: ["evals"] as const,
+  /** Index and every layout document share this prefix so one invalidation covers both. */
+  modelPresets: ["model-presets"] as const,
+  modelPreset: (id: string) => ["model-presets", id] as const,
   webhooks: ["webhooks"] as const,
   webhookStatus: ["webhooks", "status"] as const,
   evalSuite: (id: string) => ["evals", "suite", id] as const,
@@ -217,6 +223,99 @@ export function useUpdateKeyModels(id: string) {
       void client.invalidateQueries({ queryKey: qk.keys });
       void client.invalidateQueries({ queryKey: qk.keyModels(id) });
     },
+  });
+}
+
+
+// --------------------------------------------------------------- model presets
+//
+// The library is global; which preset an account is looking at is a session preference, so
+// activation is its own call and the list's `active_id` is already per-caller.
+
+export function usePresetIndex(enabled = true) {
+  return useQuery({
+    queryKey: qk.modelPresets,
+    queryFn: () => api.get<PresetIndex>("/api/model-presets"),
+    enabled,
+    retry: false,
+  });
+}
+
+/** One preset including its layout and the revision its next save must carry. */
+export function usePresetLayout(id: string | null) {
+  return useQuery({
+    queryKey: qk.modelPreset(id ?? "none"),
+    queryFn: () => api.get<ModelPreset>(`/api/model-presets/${encodeURIComponent(id ?? "")}`),
+    enabled: Boolean(id),
+    retry: false,
+    staleTime: 5_000,
+  });
+}
+
+/** This account's choice. A caller with no session gets the default back, unpersisted. */
+export function useActivatePreset() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.post<{ active_id: string; persisted: boolean }>(
+        `/api/model-presets/${encodeURIComponent(id)}/activate`,
+      ),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.modelPresets }),
+  });
+}
+
+export function useCreatePreset() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { name: string; description?: string; layout?: LayoutDocument }) =>
+      api.post<ModelPreset>("/api/model-presets", input),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.modelPresets }),
+  });
+}
+
+export function useDuplicatePreset() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) =>
+      api.post<ModelPreset>(`/api/model-presets/${encodeURIComponent(id)}/duplicate`, { name }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.modelPresets }),
+  });
+}
+
+/** Name and description only: neither touches the layout or its revision. */
+export function usePatchPreset() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      patch,
+    }: {
+      id: string;
+      patch: { name?: string; description?: string | null };
+    }) => api.patch<ModelPreset>(`/api/model-presets/${encodeURIComponent(id)}`, patch),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.modelPresets }),
+  });
+}
+
+/** Pending endpoint: the bar disables the control once this answers 404/405. */
+export function useMakeDefaultPreset() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.post<ModelPreset>(`/api/model-presets/${encodeURIComponent(id)}/default`),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: qk.modelPresets });
+      void client.invalidateQueries({ queryKey: qk.modelPreset("none") });
+    },
+  });
+}
+
+export function useDeletePreset() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.del<{ deleted: boolean }>(`/api/model-presets/${encodeURIComponent(id)}`),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.modelPresets }),
   });
 }
 

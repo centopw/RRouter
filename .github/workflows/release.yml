@@ -3,6 +3,10 @@ name: release
 # Tagged builds: the installer downloads these tarballs and verifies their `.sha256`
 # before installing. Every release also carries a CycloneDX SBOM per artifact and a
 # GitHub build-provenance attestation; see docs/RELEASES.md for what that proves.
+#
+# The release body is written ONCE from CHANGELOG.md by `create-release`; the matrix legs
+# only attach files to that existing release, so four legs cannot publish four bodies or
+# four duplicated "Full Changelog" blocks.
 
 on:
   push:
@@ -10,14 +14,68 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to publish (for a re-run)"
+        description: "Existing v* tag to publish (required for a re-run)"
         required: false
 
 permissions:
   contents: write
 
 jobs:
+  # One place decides which tag this run publishes; every later job reads its outputs.
+  prepare:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Validate the tag
+        id: tag
+        # workflow_dispatch needs an explicit v* tag; a branch name would publish a
+        # release nobody can install from.
+        run: |
+          set -eu
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          case "$tag" in
+            v*) ;;
+            *) echo "publish needs a v* tag, got '$tag'" >&2; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+  # The only job that writes the release body. It runs before the binaries so the
+  # release exists when the matrix uploads assets, and a notes failure stops the publish
+  # before any artifact is attached.
+  create-release:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Validate CHANGELOG notes (dry run)
+        run: python3 scripts/release-notes.py "${{ needs.prepare.outputs.tag }}" --check
+
+      - name: Render release notes
+        run: |
+          set -eu
+          python3 scripts/release-notes.py "${{ needs.prepare.outputs.tag }}" > .release-notes.md
+          test -s .release-notes.md
+
+      - name: Create or update the release once
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          body_path: .release-notes.md
+          # The body comes from CHANGELOG.md; GitHub's auto-generated comparison list
+          # would append a second, per-leg copy and duplicate it on every matrix run.
+          generate_release_notes: false
+
   binaries:
+    needs: [prepare, create-release]
     strategy:
       fail-fast: false
       matrix:
@@ -44,24 +102,11 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - name: Require a tag
-        id: tag
-        # workflow_dispatch needs an explicit tag; a branch name would publish a
-        # release nobody can install from.
-        run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          case "$tag" in
-            v*) ;;
-            *) echo "publish needs a v* tag, got '$tag'" >&2; exit 1 ;;
-          esac
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v4
         with:
           # A re-run for an old tag must build that tag, not the branch it is dispatched
           # from — otherwise the provenance would name the wrong source.
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Resolve source commit
         id: source
@@ -105,7 +150,7 @@ jobs:
         run: |
           python3 scripts/sbom.py \
             --artifact "rrouter-${{ matrix.asset }}" \
-            --version "${{ steps.tag.outputs.version }}" \
+            --version "${{ needs.prepare.outputs.version }}" \
             --commit "${{ steps.source.outputs.commit }}" \
             --output "dist/rrouter-${{ matrix.asset }}.tar.gz.sbom.cdx.json"
 
@@ -116,20 +161,24 @@ jobs:
         with:
           subject-path: dist/rrouter-${{ matrix.asset }}.tar.gz
 
-      - name: Publish
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          files: |
-            dist/rrouter-${{ matrix.asset }}.tar.gz
-            dist/rrouter-${{ matrix.asset }}.tar.gz.sha256
-            dist/rrouter-${{ matrix.asset }}.tar.gz.sbom.cdx.json
-          generate_release_notes: true
+      - name: Upload assets to the existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        # `gh release upload` attaches files only: it never touches the body that
+        # `create-release` already wrote. `--clobber` makes a re-run idempotent.
+        run: |
+          set -eu
+          gh release upload "$TAG" \
+            "dist/rrouter-${{ matrix.asset }}.tar.gz" \
+            "dist/rrouter-${{ matrix.asset }}.tar.gz.sha256" \
+            "dist/rrouter-${{ matrix.asset }}.tar.gz.sbom.cdx.json" \
+            --clobber
 
   # Post-publish check: verify what users actually download, not what the build workspace
   # happened to contain. A missing or swapped asset fails the workflow here.
   verify:
-    needs: binaries
+    needs: [prepare, binaries]
     runs-on: ubuntu-latest
     permissions:
       # Read-only: download the release assets and read the attestation store.
@@ -138,7 +187,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Verify published release
         env:
@@ -147,6 +196,6 @@ jobs:
         # On a workflow_dispatch re-run the provenance statement's source ref is the
         # dispatch commit (a GitHub limitation); a tag push is the authoritative path.
         run: |
-          bash scripts/verify-release.sh "${{ github.event.inputs.tag || github.ref_name }}" \
+          bash scripts/verify-release.sh "${{ needs.prepare.outputs.tag }}" \
             --repo "$GITHUB_REPOSITORY" \
             --commit "$(git rev-parse HEAD)"

@@ -699,6 +699,89 @@ export type ModelProvider = {
   base_url_example: string | null;
 };
 
+// ---------------------------------------------------------------- model presets
+//
+// `/api/model-presets` (landed in the gateway): a preset is a named layout document. The
+// list omits `layout`; a single GET includes it. Metadata edits never bump `revision`;
+// a layout write does, and is guarded by the revision the client edited.
+//
+//   GET    /api/model-presets                 -> { data, active_id, default_id }
+//   GET    /api/model-presets/{id}            -> ModelPreset (layout included)
+//   GET    /api/model-presets/active          -> ModelPreset (this account's choice)
+//   POST   /api/model-presets                 { name, description?, layout? } -> 201
+//   PATCH  /api/model-presets/{id}            { name?, description? }
+//   DELETE /api/model-presets/{id}            409 preset_is_default for the default
+//   POST   /api/model-presets/{id}/duplicate  { name } -> 201
+//   PUT    /api/model-presets/{id}/layout     { revision, layout } -> ModelPreset
+//          409 preset_conflict + error.current_revision
+//   POST   /api/model-presets/{id}/activate   -> { active_id, persisted }   (session)
+//   POST   /api/model-presets/{id}/default    -> ModelPreset (demotes the old default)
+//
+// A list row carries `entry_count`/`visible_count` instead of the layout, so a picker can
+// say how big a board is without loading it. The UI enables the default control and still
+// degrades to a disabled state if a 404/405 says the route is absent.
+
+/** The only layout format this build reads and writes. */
+export const LAYOUT_SCHEMA_VERSION = 1;
+
+/** One model on a preset's board. `position` is dense and zero-based inside its group. */
+export type LayoutItem = {
+  provider: string;
+  id: string;
+  position: number;
+  /** `false` keeps the model on the board but out of the active list; it still routes. */
+  visible: boolean;
+  /**
+   * Restore memory, owned by the client and stored with the document: where the item sat
+   * in the visible group before it was hidden. Omitted for items that were never visible.
+   */
+  last_visible_position?: number;
+  /** Unix seconds when the item was hidden; omitted while it is visible. */
+  hidden_at?: number;
+};
+
+export type LayoutDocument = {
+  schema_version: number;
+  /** Merge registry models the document does not name, instead of leaving them unlisted. */
+  auto_include_new: boolean;
+  items: LayoutItem[];
+};
+
+export type ModelPreset = {
+  id: string;
+  name: string;
+  description: string | null;
+  /** `global` in this release. */
+  scope: string;
+  owner_user_id: string | null;
+  team_id: string | null;
+  is_default: boolean;
+  /** Bumped only by a layout write. */
+  revision: number;
+  layout: LayoutDocument;
+  created_by: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+/**
+ * A list row: the same preset without its layout document, plus counts. Both counts are 0
+ * for a document with no explicit items — the seeded default merges the live catalog and
+ * stores no rows of its own.
+ */
+export type PresetSummary = Omit<ModelPreset, "layout"> & {
+  entry_count: number;
+  visible_count: number;
+};
+
+export type PresetIndex = {
+  data: PresetSummary[];
+  /** This caller's resolved choice; a caller with no session resolves to the default. */
+  active_id: string | null;
+  /** The instance default; `null` only when the library is empty. */
+  default_id: string | null;
+};
+
 export type SyncResult = { ok: boolean; models: number; providers: number; synced_at: number };
 export type FetchResult = {
   provider: string;

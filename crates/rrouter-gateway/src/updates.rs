@@ -18,8 +18,185 @@ use sha2::{Digest, Sha256};
 use crate::state::AppState;
 
 const RELEASE_API: &str = "https://api.github.com/repos/centopw/RRouter/releases/latest";
+const RELEASES_LATEST: &str = "https://github.com/centopw/RRouter/releases/latest";
+const RELEASE_TAG_BASE: &str = "https://github.com/centopw/RRouter/releases/tag";
+const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/centopw/RRouter/releases/download";
 const RELEASE_PAGE: &str = "https://github.com/centopw/RRouter/releases";
 const BREW_FORMULA: &str = "rrouter";
+/// Settings key holding the last check so a restart does not immediately re-check.
+const STATE_KEY: &str = "update_check";
+/// Routine automatic checks are due once a day; manual checks ignore this.
+const CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
+/// Used when a 403/429 carries no usable `x-ratelimit-reset`.
+const RATE_LIMIT_FALLBACK_SECS: i64 = 15 * 60;
+
+/// Where a check sends its requests. Production uses [`Default`]; tests point every URL
+/// at a local mock so no request ever reaches GitHub.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct Endpoints {
+    pub api: String,
+    pub releases_latest: String,
+    pub release_tag_base: String,
+    pub download_base: String,
+}
+
+impl Default for Endpoints {
+    fn default() -> Self {
+        Self {
+            api: RELEASE_API.to_string(),
+            releases_latest: RELEASES_LATEST.to_string(),
+            release_tag_base: RELEASE_TAG_BASE.to_string(),
+            download_base: RELEASE_DOWNLOAD_BASE.to_string(),
+        }
+    }
+}
+
+/// The operator's optional GitHub token. `RROUTER_UPDATE_TOKEN` wins, then `GITHUB_TOKEN`;
+/// an empty value is unset. The value is never logged or returned.
+fn update_token() -> Option<String> {
+    for name in ["RROUTER_UPDATE_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(value) = std::env::var(name) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Check state persisted in the settings blob. Only metadata: never a token or URL query.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct Persisted {
+    checked_at: Option<i64>,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    latest: Option<String>,
+    release_url: Option<String>,
+    notes: Option<String>,
+    published_at: Option<String>,
+    rate_limited_until: Option<i64>,
+    last_error: Option<String>,
+}
+
+/// Whether a URL is a plain `http(s)` URL this build is willing to request. Overrides used
+/// by tests are loopback; production constants are https.
+fn valid_endpoint(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// Constructed asset URL for a tag, used when the API metadata is unavailable.
+pub fn download_url(tag: &str, asset: &str, base: &str) -> String {
+    format!("{}/{}/{}", base.trim_end_matches('/'), tag, asset)
+}
+
+/// `true` when `checked_at` is recent enough that a routine check may skip the network.
+fn freshness_ok(now: i64, persisted: &Persisted) -> bool {
+    persisted
+        .checked_at
+        .is_some_and(|at| now.saturating_sub(at) < CHECK_INTERVAL_SECS)
+}
+
+/// What a completed check should do for the download step.
+enum Discovery {
+    /// API metadata (assets included): download from the exact URLs.
+    Api(Value),
+    /// Redirect/tag discovery: downloads are constructed from the tag.
+    Tag(String),
+}
+
+fn rate_limit_until(status: u16, headers: &reqwest::header::HeaderMap, now: i64) -> Option<i64> {
+    if status != 403 && status != 429 {
+        return None;
+    }
+    let remaining = headers
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let exhausted = status == 429 || remaining == Some(0);
+    if !exhausted {
+        return None;
+    }
+    let reset = headers
+        .get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|reset| *reset > now);
+    let until = reset.unwrap_or(now + RATE_LIMIT_FALLBACK_SECS);
+    // Small deterministic jitter so a NAT full of gateways does not all retry in the same
+    // second after the reset.
+    Some(until + 5 + until.rem_euclid(25))
+}
+
+/// Test hook: clear the in-memory status and re-enable hydration. Integration tests share
+/// one process, and each scenario starts from a fresh server state.
+#[doc(hidden)]
+pub fn reset_for_tests() {
+    *STATUS.lock().unwrap_or_else(|e| e.into_inner()) = State::default();
+    HYDRATED.store(false, Ordering::SeqCst);
+    BUSY.store(false, Ordering::SeqCst);
+}
+
+static HYDRATED: AtomicBool = AtomicBool::new(false);
+
+/// Read the persisted check state once per process.
+async fn hydrate(state: &std::sync::Arc<AppState>) {
+    if HYDRATED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Ok(settings) = crate::settings::load(state).await else {
+        return;
+    };
+    let Some(value) = settings.get(STATE_KEY) else {
+        return;
+    };
+    let Ok(persisted) = serde_json::from_value::<Persisted>(value.clone()) else {
+        return;
+    };
+    let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+    if status.latest.is_none() && persisted.latest.is_some() {
+        status.latest = persisted.latest;
+        status.release_url = persisted.release_url;
+        status.notes = persisted.notes;
+        status.published_at = persisted.published_at;
+    }
+    status.checked_at = status.checked_at.or(persisted.checked_at);
+    status.etag = persisted.etag;
+    status.last_modified = persisted.last_modified;
+    status.rate_limited_until = persisted.rate_limited_until;
+    status.last_error = persisted.last_error.clone();
+    status.error = persisted.last_error;
+}
+
+/// Write the check state to the settings blob. Best effort: a failed write must not fail
+/// the check itself, and it is logged without any token or body.
+async fn persist(state: &std::sync::Arc<AppState>) {
+    let persisted = {
+        let status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+        Persisted {
+            checked_at: status.checked_at,
+            etag: status.etag.clone(),
+            last_modified: status.last_modified.clone(),
+            latest: status.latest.clone(),
+            release_url: status.release_url.clone(),
+            notes: status.notes.clone(),
+            published_at: status.published_at.clone(),
+            rate_limited_until: status.rate_limited_until,
+            last_error: status.last_error.clone(),
+        }
+    };
+    let value = match serde_json::to_value(&persisted) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(error = %e, "update: cannot serialize check state");
+            return;
+        }
+    };
+    if let Err(e) = crate::settings::merge(state, json!({ STATE_KEY: value })).await {
+        tracing::warn!(error = %e, "update: cannot persist check state");
+    }
+}
 
 static STATUS: LazyLock<Mutex<State>> = LazyLock::new(|| Mutex::new(State::default()));
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -34,6 +211,13 @@ struct State {
     downloaded: Option<PathBuf>,
     phase: Option<String>,
     error: Option<String>,
+    /// HTTP validators for conditional requests (`If-None-Match` / `If-Modified-Since`).
+    etag: Option<String>,
+    last_modified: Option<String>,
+    /// When the GitHub API may be called again after a 403/429 exhaustion.
+    rate_limited_until: Option<i64>,
+    /// Last failure in operator terms; never an upstream body.
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -173,6 +357,8 @@ fn status_json(status: &State, options: &Value) -> Value {
         "checked_at": status.checked_at,
         "phase": status.phase.clone().unwrap_or_else(|| "idle".into()),
         "error": status.error,
+        "last_error": status.last_error,
+        "rate_limited_until": status.rate_limited_until,
         "downloaded": status.downloaded.is_some(),
         "deployment": deployment,
         "options": {
@@ -184,12 +370,6 @@ fn status_json(status: &State, options: &Value) -> Value {
 
 fn set_phase(phase: &str) {
     STATUS.lock().unwrap_or_else(|e| e.into_inner()).phase = Some(phase.to_string());
-}
-
-fn set_error(error: &str) {
-    let mut state = STATUS.lock().unwrap_or_else(|e| e.into_inner());
-    state.phase = Some("error".into());
-    state.error = Some(error.to_string());
 }
 
 /// Compare release tags (`v1.2.3`) and semver-ish versions; pre-releases sort below the
@@ -220,48 +400,89 @@ pub fn newer(current: &str, candidate: &str) -> bool {
     !a_suffix.is_empty() && b_suffix.is_empty()
 }
 
-/// Check GitHub and optionally download the matching release archive.
+/// Operator-triggered check (the `/api/update/*` routes). Ignores the daily freshness
+/// cache, but never calls the GitHub API before its reset: it falls back to the release
+/// redirect and reports when the API will be available again.
 pub async fn check(state: &std::sync::Arc<AppState>, download: bool) -> Result<Value> {
-    if BUSY.swap(true, Ordering::SeqCst) {
-        return Err(Error::BadRequest(
-            "an update operation is already running".into(),
-        ));
-    }
-    set_phase("checking");
-    {
-        let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
-        status.error = None;
-    }
-    let result = check_inner(state, download).await;
-    BUSY.store(false, Ordering::SeqCst);
-    if let Err(error) = &result {
-        set_error(&error.to_string());
-    }
-    match result {
-        Ok(()) => Ok(snapshot(state).await),
-        Err(e) => Err(e),
-    }
+    check_with(
+        state,
+        &Endpoints::default(),
+        update_token().as_deref(),
+        download,
+        true,
+    )
+    .await
 }
 
-async fn check_inner(state: &AppState, download: bool) -> Result<()> {
-    let response = state
+/// The scheduler entry point: no network while fresh or rate-limited, and no noisy warn
+/// on every restart.
+async fn check_automatic(state: &std::sync::Arc<AppState>, download: bool) -> Result<()> {
+    check_with(
+        state,
+        &Endpoints::default(),
+        update_token().as_deref(),
+        download,
+        false,
+    )
+    .await
+    .map(|_| ())
+}
+
+enum ApiResult {
+    Fresh { release: Value, version: String },
+    NotModified,
+    RateLimited { until: i64 },
+}
+
+async fn check_api(
+    state: &AppState,
+    endpoints: &Endpoints,
+    token: &str,
+    persisted: &Persisted,
+    now: i64,
+) -> Result<ApiResult> {
+    let mut request = state
         .http
-        .get(RELEASE_API)
+        .get(&endpoints.api)
         .header("accept", "application/vnd.github+json")
         .header("user-agent", "rrouter")
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(20));
+    // A token raises the per-IP limit; it is sent only as a header and never logged.
+    request = request.bearer_auth(token);
+    if let Some(etag) = &persisted.etag {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    if let Some(modified) = &persisted.last_modified {
+        request = request.header(reqwest::header::IF_MODIFIED_SINCE, modified);
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| Error::Transport(format!("update check: {e}")))?;
     let status = response.status();
-    if !status.is_success() {
-        return Err(Error::Upstream {
-            provider: "github".into(),
-            status: status.as_u16(),
-            body: response.text().await.unwrap_or_default(),
-            payload: None,
-        });
+    let headers = response.headers().clone();
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(ApiResult::NotModified);
     }
+    if let Some(until) = rate_limit_until(status.as_u16(), &headers, now) {
+        return Ok(ApiResult::RateLimited { until });
+    }
+    if !status.is_success() {
+        // The body of a GitHub error can be HTML or a JSON blob; it is useless to an
+        // operator and must not become a WARN on every check.
+        return Err(Error::Transport(format!(
+            "GitHub API returned HTTP {}",
+            status.as_u16()
+        )));
+    }
+    let etag = headers
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let last_modified = headers
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let release: Value = response
         .json()
         .await
@@ -271,7 +492,246 @@ async fn check_inner(state: &AppState, download: bool) -> Result<()> {
         .and_then(Value::as_str)
         .ok_or_else(|| Error::Transport("release has no tag_name".into()))?
         .to_string();
-    let version = tag.trim_start_matches('v').to_string();
+    {
+        let mut state = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+        state.etag = etag;
+        state.last_modified = last_modified;
+    }
+    Ok(ApiResult::Fresh {
+        version: tag.trim_start_matches('v').to_string(),
+        release,
+    })
+}
+
+/// Version discovery without the REST API: follow `releases/latest` to `/releases/tag/vX`.
+async fn discover_via_redirect(state: &AppState, endpoints: &Endpoints) -> Result<String> {
+    let response = state
+        .http
+        .head(&endpoints.releases_latest)
+        .header("user-agent", "rrouter")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| Error::Transport(format!("release redirect: {e}")))?;
+    if !response.status().is_success() {
+        return Err(Error::Transport(format!(
+            "release redirect returned HTTP {}",
+            response.status().as_u16()
+        )));
+    }
+    let final_url = response.url().clone();
+    let path = final_url.path();
+    let tag = path
+        .rsplit_once("/releases/tag/")
+        .map(|(_, tail)| tail.trim_matches('/'))
+        .filter(|tag| !tag.is_empty() && tag.len() <= 128)
+        .ok_or_else(|| {
+            Error::Transport(format!(
+                "release redirect did not land on a tag (path {})",
+                final_url.path()
+            ))
+        })?;
+    if !tag
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+    {
+        return Err(Error::Transport(
+            "release tag has an unexpected shape".into(),
+        ));
+    }
+    Ok(tag.to_string())
+}
+
+fn rate_limit_message(until: i64, now: i64) -> String {
+    let remaining = (until - now).max(0);
+    format!(
+        "GitHub API rate limit resets at {until} ({remaining}s); checked the release \
+         redirect instead"
+    )
+}
+
+async fn load_persisted(state: &std::sync::Arc<AppState>) -> Persisted {
+    let Ok(settings) = crate::settings::load(state).await else {
+        return Persisted::default();
+    };
+    settings
+        .get(STATE_KEY)
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Testable core of a check: explicit endpoints, token and mode, so a mock server can
+/// stand in for GitHub and no live request leaves the test.
+#[doc(hidden)]
+pub async fn check_with(
+    state: &std::sync::Arc<AppState>,
+    endpoints: &Endpoints,
+    token: Option<&str>,
+    download: bool,
+    manual: bool,
+) -> Result<Value> {
+    if !valid_endpoint(&endpoints.api)
+        || !valid_endpoint(&endpoints.releases_latest)
+        || !valid_endpoint(&endpoints.release_tag_base)
+        || !valid_endpoint(&endpoints.download_base)
+    {
+        return Err(Error::BadRequest(
+            "update endpoint is not an http(s) URL".into(),
+        ));
+    }
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return Err(Error::BadRequest(
+            "an update operation is already running".into(),
+        ));
+    }
+    hydrate(state).await;
+    let now = crate::now_unix();
+    let persisted = load_persisted(state).await;
+
+    // A restart must not re-check what was checked within a day, and automatic checks stop
+    // entirely while the API is in backoff.
+    if !manual
+        && (freshness_ok(now, &persisted)
+            || persisted
+                .rate_limited_until
+                .is_some_and(|until| until > now))
+    {
+        set_phase("idle");
+        BUSY.store(false, Ordering::SeqCst);
+        return Ok(snapshot(state).await);
+    }
+
+    set_phase("checking");
+    {
+        let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+        status.error = None;
+        status.last_error = None;
+    }
+
+    let backoff = persisted.rate_limited_until.filter(|until| *until > now);
+    let mut rate_limited_until = backoff;
+    // A caller that arrives during backoff is told when the API may be used again.
+    let mut api_problem: Option<String> = backoff.map(|until| rate_limit_message(until, now));
+    let mut discovery: Option<Discovery> = None;
+
+    if let (Some(token), None) = (token, backoff) {
+        match check_api(state, endpoints, token, &persisted, now).await {
+            Ok(ApiResult::Fresh { release, version }) => {
+                apply_api_release(&release, &version, now);
+                discovery = Some(Discovery::Api(release));
+            }
+            Ok(ApiResult::NotModified) => {
+                {
+                    let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+                    status.checked_at = Some(now);
+                    status.rate_limited_until = None;
+                    status.error = None;
+                    status.last_error = None;
+                    status.phase = Some("idle".into());
+                }
+                persist(state).await;
+                BUSY.store(false, Ordering::SeqCst);
+                return Ok(snapshot(state).await);
+            }
+            Ok(ApiResult::RateLimited { until }) => {
+                rate_limited_until = Some(until);
+                tracing::warn!(
+                    retry_in_secs = until.saturating_sub(now),
+                    "GitHub API rate limited; using the release redirect until the reset"
+                );
+                api_problem = Some(rate_limit_message(until, now));
+            }
+            Err(error) => {
+                api_problem = Some(error.to_string());
+            }
+        }
+    }
+
+    if discovery.is_none() {
+        match discover_via_redirect(state, endpoints).await {
+            Ok(tag) => {
+                let version = tag.trim_start_matches('v').to_string();
+                {
+                    let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+                    // Keep cached notes: the redirect carries no release body.
+                    status.latest = Some(version.clone());
+                    status.release_url = Some(format!(
+                        "{}/{}",
+                        endpoints.release_tag_base.trim_end_matches('/'),
+                        tag
+                    ));
+                    status.checked_at = Some(now);
+                    status.error = api_problem.clone();
+                    status.last_error = api_problem.clone();
+                    status.rate_limited_until = rate_limited_until;
+                    status.phase = Some("idle".into());
+                    if status
+                        .downloaded
+                        .as_ref()
+                        .is_some_and(|_| !newer(env!("CARGO_PKG_VERSION"), &version))
+                    {
+                        status.downloaded = None;
+                    }
+                }
+                discovery = Some(Discovery::Tag(tag));
+            }
+            Err(error) => {
+                // Fallback failed too: keep the previous release, report one clean error.
+                {
+                    let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+                    status.rate_limited_until = rate_limited_until;
+                    status.last_error =
+                        Some(api_problem.clone().unwrap_or_else(|| error.to_string()));
+                    status.error = status.last_error.clone();
+                    status.phase = Some("idle".into());
+                }
+                persist(state).await;
+                BUSY.store(false, Ordering::SeqCst);
+                return Err(Error::Transport(
+                    api_problem.unwrap_or_else(|| error.to_string()),
+                ));
+            }
+        }
+    }
+    persist(state).await;
+
+    if let Some(Discovery::Api(release)) = &discovery {
+        let Some(version) = release.get("tag_name").and_then(Value::as_str) else {
+            BUSY.store(false, Ordering::SeqCst);
+            return Err(Error::Transport("release has no tag_name".into()));
+        };
+        let version = version.trim_start_matches('v').to_string();
+        if !newer(env!("CARGO_PKG_VERSION"), &version) {
+            set_phase("idle");
+            BUSY.store(false, Ordering::SeqCst);
+            return Ok(snapshot(state).await);
+        }
+        if download && deployment().can_download {
+            let result = download_release(state, release, &version).await;
+            BUSY.store(false, Ordering::SeqCst);
+            result?;
+            return Ok(snapshot(state).await);
+        }
+        set_phase("idle");
+        BUSY.store(false, Ordering::SeqCst);
+        return Ok(snapshot(state).await);
+    }
+    if let Some(Discovery::Tag(tag)) = &discovery {
+        let version = tag.trim_start_matches('v').to_string();
+        if download && deployment().can_download && newer(env!("CARGO_PKG_VERSION"), &version) {
+            let result = download_tag(state, endpoints, tag, &version).await;
+            BUSY.store(false, Ordering::SeqCst);
+            result?;
+            return Ok(snapshot(state).await);
+        }
+    }
+    set_phase("idle");
+    BUSY.store(false, Ordering::SeqCst);
+    Ok(snapshot(state).await)
+}
+
+/// Copy the fields the status screen shows from a GitHub release payload.
+fn apply_api_release(release: &Value, version: &str, now: i64) {
     let notes = release
         .get("body")
         .and_then(Value::as_str)
@@ -284,34 +744,38 @@ async fn check_inner(state: &AppState, download: bool) -> Result<()> {
         .get("html_url")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let current = env!("CARGO_PKG_VERSION");
-
+    let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+    status.latest = Some(version.to_string());
+    status.notes = notes;
+    status.published_at = published;
+    status.release_url = url;
+    status.checked_at = Some(now);
+    status.rate_limited_until = None;
+    status.error = None;
+    status.last_error = None;
+    status.phase = Some("idle".into());
+    if status
+        .downloaded
+        .as_ref()
+        .is_some_and(|_| !newer(env!("CARGO_PKG_VERSION"), version))
     {
-        let mut state = STATUS.lock().unwrap_or_else(|e| e.into_inner());
-        state.latest = Some(version.clone());
-        state.notes = notes;
-        state.published_at = published;
-        state.release_url = url;
-        state.checked_at = Some(crate::now_unix());
-        state.error = None;
-        if state
-            .downloaded
-            .as_ref()
-            .is_some_and(|_| !newer(current, &version))
-        {
-            state.downloaded = None;
-        }
+        status.downloaded = None;
     }
+}
 
-    if !newer(current, &version) {
-        set_phase("idle");
-        return Ok(());
-    }
-    if !download || !deployment().can_download {
-        set_phase("idle");
-        return Ok(());
-    }
-    download_release(state, &release, &version).await
+/// Download the archive when only the tag is known: the URL follows the release layout.
+async fn download_tag(
+    state: &AppState,
+    endpoints: &Endpoints,
+    tag: &str,
+    version: &str,
+) -> Result<()> {
+    let asset_name = target_asset().ok_or_else(|| {
+        Error::BadRequest("no prebuilt archive exists for this OS/architecture".into())
+    })?;
+    let url = download_url(tag, &asset_name, &endpoints.download_base);
+    let checksum = format!("{url}.sha256");
+    download_and_stage(state, &asset_name, version, &url, &checksum).await
 }
 
 async fn download_release(state: &AppState, release: &Value, version: &str) -> Result<()> {
@@ -328,6 +792,20 @@ async fn download_release(state: &AppState, release: &Value, version: &str) -> R
     let Some(url) = asset.get("browser_download_url").and_then(Value::as_str) else {
         return Err(Error::Transport("release asset has no download URL".into()));
     };
+    let checksum = format!("{url}.sha256");
+    download_and_stage(state, &asset_name, version, url, &checksum).await
+}
+
+/// Fetch the archive and its checksum, verify SHA-256, and stage the binary. The URLs are
+/// explicit so the API path can use GitHub's asset URLs and the redirect path can construct
+/// the release-download layout.
+async fn download_and_stage(
+    state: &AppState,
+    asset_name: &str,
+    version: &str,
+    url: &str,
+    checksum_url: &str,
+) -> Result<()> {
     set_phase("downloading");
     let bytes = state
         .http
@@ -344,7 +822,7 @@ async fn download_release(state: &AppState, release: &Value, version: &str) -> R
         .map_err(|e| Error::Transport(format!("download body: {e}")))?;
     let checksum = state
         .http
-        .get(format!("{url}.sha256"))
+        .get(checksum_url)
         .header("user-agent", "rrouter")
         .timeout(Duration::from_secs(20))
         .send()
@@ -537,7 +1015,7 @@ pub fn spawn_daily(state: &std::sync::Arc<AppState>) {
                         .get("update_auto_download")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    if let Err(e) = check(&state, download).await {
+                    if let Err(e) = check_automatic(&state, download).await {
                         tracing::warn!(error = %e, "automatic update check failed");
                     }
                 }

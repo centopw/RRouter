@@ -2,6 +2,16 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.4.2 — 2026-11-09
+
+### Added
+- Model presets: named layouts with drag-and-drop ordering, hidden/restore lists, archived restore positions, auto-include policy, revision-guarded saves, 409 conflict recovery, and per-account active preset selection.
+- GitHub update checks now use an optional read-only token, persistent conditional metadata, rate-limit reset backoff, and a release-redirect fallback so routine checks do not consume the unauthenticated API budget.
+
+### Changed
+- Release pipeline now builds Docker architectures natively instead of QEMU, merges per-arch manifests, and creates one changelog-derived release body instead of four generated compare blocks.
+- CI runs actionlint for workflow files.
+
 ## 0.4.1 — 2026-11-09
 
 ### Documentation and media

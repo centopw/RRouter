@@ -136,6 +136,33 @@ Every release also ships `rrouter-<asset>.tar.gz.sbom.cdx.json`, a CycloneDX inv
 the tag's `Cargo.lock` for scanning. What is signed, what the installer checks, and what
 remains manual is in `docs/RELEASES.md`.
 
+### 5.2 Update checks and GitHub rate limits
+
+The update checker calls `api.github.com` at most once a day and persists its state, so a
+restart does not trigger another check. Unauthenticated GitHub allows **60 requests/hour per
+public IP**; several gateways behind one NAT can exhaust it. Recommended: create a
+fine-grained, read-only token (repository `centopw/RRouter`, permission **Contents: read
+only**) and set `RROUTER_UPDATE_TOKEN` (or `GITHUB_TOKEN`). The token is sent as
+`Authorization: Bearer`, never stored in the check state, and never logged or returned.
+
+Behaviour without a token, or while the API is in backoff:
+
+- version discovery follows `https://github.com/centopw/RRouter/releases/latest` to
+  `/releases/tag/vX` — no API request;
+- release notes come from the last cached check (empty if this instance never had one);
+- a requested download is built from the release-download layout
+  (`/releases/download/<tag>/<asset>` and `.sha256`) and verified exactly like an API
+  download.
+
+With a token the check uses conditional requests (`If-None-Match` / `If-Modified-Since`);
+a `304` reuses the cached release without an error. On a `403`/`429` exhaustion the gateway
+parses `x-ratelimit-remaining` and `x-ratelimit-reset`, records `rate_limited_until` (reset
+plus a deterministic jitter), stops automatic API calls until then, keeps the last known
+release, and logs **one** warning with the retry delay — never the raw 403 body. A malformed
+or missing reset falls back to a conservative 15-minute backoff. Manual **Check now** honors
+the backoff: it uses the redirect, keeps working, and reports `rate_limited_until` /
+`last_error` so the operator knows when the API will be used again.
+
 ## 5a. History growth
 
 `usage` and `attempts` keep every request. Set `RROUTER_USAGE_RETENTION_DAYS` (0 keeps
