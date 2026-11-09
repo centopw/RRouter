@@ -158,6 +158,15 @@ export type SessionRow = {
   created_at: number;
   expires_at: number;
   current: boolean;
+  /**
+   * Address that created the session, as the gateway received it. `null` for rows written
+   * before schema v28, which stored no session metadata.
+   */
+  ip: string | null;
+  /** Raw `User-Agent`, bounded by the gateway. `null` for legacy rows. */
+  user_agent: string | null;
+  /** A short label the gateway derives from the user agent, e.g. "Chrome on macOS". */
+  device_label: string | null;
 };
 
 export type Me = { user: AuthUser; sessions: SessionRow[] };

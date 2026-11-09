@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  adminToken,
   api,
   clearAccountQuota,
   getAccountSubscriptions,
@@ -18,8 +19,18 @@ import {
   type OAuthProvider,
   type OAuthStatus,
   type SystemInfo,
+  type Webhook,
+  type WebhookList,
+  type WebhookStatus,
+  type EvalRun,
+  type EvalRunDetail,
+  type EvalSuite,
+  type EvalSuiteDetail,
+  type Team,
+  type TeamMember,
   type Template,
   type TemplateVersion,
+  type UpdateTeam,
   type UpdateConnection,
   type UpdateAccountQuota,
   type UpdateKey,
@@ -58,6 +69,14 @@ export const qk = {
   users: ["users"] as const,
   invites: ["users", "invites"] as const,
   keys: ["keys"] as const,
+  teams: ["teams"] as const,
+  evals: ["evals"] as const,
+  webhooks: ["webhooks"] as const,
+  webhookStatus: ["webhooks", "status"] as const,
+  evalSuite: (id: string) => ["evals", "suite", id] as const,
+  evalRun: (id: string) => ["evals", "run", id] as const,
+  teamMembers: (id: string) => ["teams", id, "members"] as const,
+  teamKeys: (id: string) => ["teams", id, "keys"] as const,
   keyModels: (id: string) => ["key-models", id] as const,
   models: ["models"] as const,
   modelProviders: ["model-providers"] as const,
@@ -83,15 +102,25 @@ export function useHealth() {
   });
 }
 
-export function useSystem() {
-  return useQuery({ queryKey: qk.system, queryFn: () => api.get<SystemInfo>("/api/system") });
+export function useSystem(enabled = true) {
+  return useQuery({
+    queryKey: qk.system,
+    queryFn: () => api.get<SystemInfo>("/api/system"),
+    enabled,
+  });
 }
 
-export function useConnections() {
-  return useQuery({ queryKey: qk.connections, queryFn: () => list<Connection>("/api/connections") });
+/** Accounts the caller may see, optionally narrowed to one team (`?team_id=`). */
+export function useConnections(enabled = true, teamId?: string) {
+  return useQuery({
+    queryKey: [...qk.connections, teamId ?? ""] as const,
+    queryFn: () =>
+      list<Connection>(teamId ? `/api/connections?team_id=${encodeURIComponent(teamId)}` : "/api/connections"),
+    enabled,
+  });
 }
 
-export function useAccountSubscriptions() {
+export function useAccountSubscriptions(enabled = true) {
   return useQuery({
     queryKey: qk.accountSubscriptions,
     queryFn: getAccountSubscriptions,
@@ -99,11 +128,12 @@ export function useAccountSubscriptions() {
     // frequent enough for a dashboard and polite to the upstream.
     refetchInterval: 300_000,
     staleTime: 270_000,
+    enabled,
   });
 }
 
-export function useAccountQuotas() {
-  return useQuery({ queryKey: qk.accountQuotas, queryFn: getAccountQuotas });
+export function useAccountQuotas(enabled = true) {
+  return useQuery({ queryKey: qk.accountQuotas, queryFn: getAccountQuotas, enabled });
 }
 
 export function useUpdateAccountQuota() {
@@ -123,8 +153,12 @@ export function useClearAccountQuota() {
   });
 }
 
-export function useKeys() {
-  return useQuery({ queryKey: qk.keys, queryFn: () => list<KeyResult>("/api/keys") });
+export function useKeys(enabled = true) {
+  return useQuery({
+    queryKey: qk.keys,
+    queryFn: () => list<KeyResult>("/api/keys"),
+    enabled,
+  });
 }
 
 /**
@@ -253,21 +287,24 @@ export function useTemplateVersions(id: string | null) {
   });
 }
 
-export function useUsage(limit = 1000, hours?: number) {
+export function useUsage(limit = 1000, hours?: number, teamId?: string) {
   const query = new URLSearchParams({ limit: String(limit) });
   if (hours !== undefined) query.set("hours", String(hours));
+  if (teamId) query.set("team_id", teamId);
   return useQuery({
-    queryKey: [...qk.usage(limit), hours ?? "all"] as const,
+    queryKey: [...qk.usage(limit), hours ?? "all", teamId ?? ""] as const,
     queryFn: () => list<UsageEvent>(`/api/usage?${query}`),
     refetchInterval: 15_000,
   });
 }
 
 /** Newest N rows, polled fast for live routing. Kept separate from the history query. */
-export function useLiveUsage(limit = 200) {
+export function useLiveUsage(limit = 200, teamId?: string) {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (teamId) query.set("team_id", teamId);
   return useQuery({
-    queryKey: ["usage-live", limit] as const,
-    queryFn: () => list<UsageEvent>(`/api/usage?limit=${limit}`),
+    queryKey: ["usage-live", limit, teamId ?? ""] as const,
+    queryFn: () => list<UsageEvent>(`/api/usage?${query}`),
     refetchInterval: 5_000,
   });
 }
@@ -287,6 +324,7 @@ export type UsageFilters = {
   provider?: string;
   model?: string;
   keyId?: string;
+  teamId?: string;
   status?: "2xx" | "error";
 };
 
@@ -300,6 +338,7 @@ export function usageFilterQuery(filters: UsageFilters): URLSearchParams {
   if (filters.provider) query.set("provider", filters.provider);
   if (filters.model) query.set("model", filters.model);
   if (filters.keyId) query.set("key_id", filters.keyId);
+  if (filters.teamId) query.set("team_id", filters.teamId);
   if (filters.status) query.set("status", filters.status);
   return query;
 }
@@ -344,42 +383,49 @@ export function useUsageDetail(requestId: string | null) {
 }
 
 /** Buckets aggregated server-side, so the window is real regardless of volume. */
-export function useUsageSeries(hours: number, bucket?: string) {
+export function useUsageSeries(hours: number, bucket?: string, teamId?: string) {
   const query = new URLSearchParams({ hours: String(hours) });
   if (bucket) query.set("bucket", bucket);
+  if (teamId) query.set("team_id", teamId);
   return useQuery({
-    queryKey: qk.series(hours, bucket),
+    queryKey: [...qk.series(hours, bucket), teamId ?? ""] as const,
     queryFn: () => list<UsageBucket>(`/api/usage/series?${query}`),
     refetchInterval: 30_000,
   });
 }
 
 /** The same series split by model, for the stacked traffic chart. */
-export function useUsageByModel(hours: number, bucket?: string) {
+export function useUsageByModel(hours: number, bucket?: string, teamId?: string) {
   const query = new URLSearchParams({ hours: String(hours), by: "model" });
   if (bucket) query.set("bucket", bucket);
+  if (teamId) query.set("team_id", teamId);
   return useQuery({
-    queryKey: qk.series(hours, bucket, "model"),
+    queryKey: [...qk.series(hours, bucket, "model"), teamId ?? ""] as const,
     queryFn: () => list<UsageModelBucket>(`/api/usage/series?${query}`),
     refetchInterval: 30_000,
   });
 }
 
 /** Per-model totals, scoped to the last `hours` when given (the Activity table). */
-export function useUsageSummary(hours: number | null = null) {
+export function useUsageSummary(hours: number | null = null, teamId?: string) {
+  const query = new URLSearchParams();
+  if (hours !== null) query.set("hours", String(hours));
+  if (teamId) query.set("team_id", teamId);
+  const suffix = query.toString();
   return useQuery({
-    queryKey: qk.summary(hours),
+    queryKey: [...qk.summary(hours), teamId ?? ""] as const,
     queryFn: () =>
-      list<UsageSummaryRow>(`/api/usage/summary${hours === null ? "" : `?hours=${hours}`}`),
+      list<UsageSummaryRow>(`/api/usage/summary${suffix === "" ? "" : `?${suffix}`}`),
     refetchInterval: 15_000,
   });
 }
 
-export function useOAuthProviders() {
+export function useOAuthProviders(enabled = true) {
   return useQuery({
     queryKey: qk.oauthProviders,
     queryFn: () => list<OAuthProvider>("/api/oauth/providers"),
     staleTime: 60_000,
+    enabled,
   });
 }
 
@@ -395,6 +441,249 @@ export function useOAuthStatus(provider: string | null, id: string | null, inter
   });
 }
 
+
+// ------------------------------------------------------------------------ teams
+
+/** Teams visible to this caller: every team for an admin, their own for a reader. */
+export function useTeams() {
+  return useQuery({ queryKey: qk.teams, queryFn: () => list<Team>("/api/teams") });
+}
+
+export function useCreateTeam() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: UpdateTeam & { name: string }) => api.post<Team>("/api/teams", input),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.teams }),
+  });
+}
+
+export function useUpdateTeam() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: UpdateTeam }) =>
+      api.patch<Team>(`/api/teams/${encodeURIComponent(id)}`, patch),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.teams }),
+  });
+}
+
+export function useDeleteTeam() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.del<{ deleted: boolean }>(`/api/teams/${encodeURIComponent(id)}`),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: qk.teams });
+      // Keys are released, not deleted: the list's team badges changed.
+      void client.invalidateQueries({ queryKey: qk.keys });
+    },
+  });
+}
+
+export function useTeamMembers(id: string | null) {
+  return useQuery({
+    queryKey: qk.teamMembers(id ?? ""),
+    queryFn: () => list<TeamMember>(`/api/teams/${encodeURIComponent(id ?? "")}/members`),
+    enabled: id !== null,
+  });
+}
+
+/**
+ * One team's key rows. Only an admin or that team's `team_admin` may ask; the server
+ * refuses everyone else, so the caller gates on the role it already knows.
+ */
+export function useTeamKeys(id: string | null, enabled = true) {
+  return useQuery({
+    queryKey: qk.teamKeys(id ?? ""),
+    queryFn: () => list<KeyResult>(`/api/teams/${encodeURIComponent(id ?? "")}/keys`),
+    enabled: enabled && id !== null,
+  });
+}
+
+export function useAddTeamMember() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, email, role }: { id: string; email: string; role: string }) =>
+      api.post<TeamMember>(`/api/teams/${encodeURIComponent(id)}/members`, { email, role }),
+    onSuccess: (_member, { id }) => {
+      void client.invalidateQueries({ queryKey: qk.teams });
+      // The roster is its own query: a refreshed member count without the list is a lie.
+      void client.invalidateQueries({ queryKey: qk.teamMembers(id) });
+    },
+  });
+}
+
+export function useRemoveTeamMember() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, userId }: { id: string; userId: string }) =>
+      api.del<{ removed: boolean }>(
+        `/api/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+      ),
+    onSuccess: (_result, { id }) => {
+      void client.invalidateQueries({ queryKey: qk.teams });
+      void client.invalidateQueries({ queryKey: qk.teamMembers(id) });
+    },
+  });
+}
+
+
+
+// ------------------------------------------------------------------------ evals
+
+/** Every suite with its case count. */
+export function useEvalSuites() {
+  return useQuery({ queryKey: qk.evals, queryFn: () => list<EvalSuite>("/api/evals/suites") });
+}
+
+/** One suite with its cases and recent runs. */
+export function useEvalSuite(id: string | null) {
+  return useQuery({
+    queryKey: qk.evalSuite(id ?? ""),
+    queryFn: () => api.get<EvalSuiteDetail>(`/api/evals/suites/${encodeURIComponent(id ?? "")}`),
+    enabled: id !== null,
+  });
+}
+
+/**
+ * One run. The runner is asynchronous, so a pending or running run is polled once a
+ * second; a finished one stops polling on its own.
+ */
+export function useEvalRun(id: string | null) {
+  return useQuery({
+    queryKey: qk.evalRun(id ?? ""),
+    queryFn: () => api.get<EvalRunDetail>(`/api/evals/runs/${encodeURIComponent(id ?? "")}`),
+    enabled: id !== null,
+    refetchInterval: (query) => {
+      const status = query.state.data?.data.status;
+      return status === "pending" || status === "running" ? 1_000 : false;
+    },
+  });
+}
+
+function invalidateEvals(client: ReturnType<typeof useQueryClient>, suiteId?: string) {
+  void client.invalidateQueries({ queryKey: qk.evals });
+  if (suiteId) void client.invalidateQueries({ queryKey: qk.evalSuite(suiteId) });
+}
+
+export function useCreateEvalSuite() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { name: string; description?: string }) =>
+      api.post<EvalSuite>("/api/evals/suites", input),
+    onSuccess: () => invalidateEvals(client),
+  });
+}
+
+export function useUpdateEvalSuite() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: { name?: string; description?: string | null } }) =>
+      api.patch<EvalSuite>(`/api/evals/suites/${encodeURIComponent(id)}`, patch),
+    onSuccess: (_body, { id }) => invalidateEvals(client, id),
+  });
+}
+
+export function useDeleteEvalSuite() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.del<{ deleted: boolean }>(`/api/evals/suites/${encodeURIComponent(id)}`),
+    onSuccess: () => invalidateEvals(client),
+  });
+}
+
+export function useCreateEvalCase() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ suiteId, input, expected, name }: { suiteId: string; input: string; expected?: string; name?: string }) =>
+      api.post<{ data: unknown }>(`/api/evals/suites/${encodeURIComponent(suiteId)}/cases`, {
+        input,
+        expected,
+        name,
+      }),
+    onSuccess: (_body, { suiteId }) => invalidateEvals(client, suiteId),
+  });
+}
+
+export function useDeleteEvalCase() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ suiteId, caseId }: { suiteId: string; caseId: string }) =>
+      api.del<{ deleted: boolean }>(
+        `/api/evals/suites/${encodeURIComponent(suiteId)}/cases/${encodeURIComponent(caseId)}`,
+      ),
+    onSuccess: (_body, { suiteId }) => invalidateEvals(client, suiteId),
+  });
+}
+
+/** Start a run. Returns the pending run; poll `useEvalRun` for its progress. */
+export function useStartEvalRun() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ suiteId, model, apiKey }: { suiteId: string; model: string; apiKey?: string }) =>
+      api.post<{ data: EvalRun }>("/api/evals/runs", {
+        suite_id: suiteId,
+        model,
+        ...(apiKey ? { api_key: apiKey } : {}),
+      }),
+    onSuccess: (_body, { suiteId }) => invalidateEvals(client, suiteId),
+  });
+}
+
+
+// --------------------------------------------------------------------- webhooks
+
+/** Every delivery endpoint, plus the event vocabulary the server accepts. */
+export function useWebhooks(enabled = true) {
+  return useQuery({
+    queryKey: qk.webhooks,
+    queryFn: () => api.get<WebhookList>("/api/webhooks"),
+    enabled,
+  });
+}
+
+/** Outbox depth and recent attempts. Manual refresh; nothing here polls by itself. */
+export function useWebhookStatus(enabled = true) {
+  return useQuery({
+    queryKey: qk.webhookStatus,
+    queryFn: () => api.get<WebhookStatus>("/api/webhooks/status"),
+    enabled,
+  });
+}
+
+export function useCreateWebhook() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { url: string; event_types: string[]; secret_env: string }) =>
+      api.post<{ webhook: Webhook }>("/api/webhooks", input),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.webhooks }),
+  });
+}
+
+/** Present fields are applied; `secret_env` cannot be cleared, only replaced. */
+export function useUpdateWebhook() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      patch,
+    }: {
+      id: string;
+      patch: Partial<{ url: string; event_types: string[]; secret_env: string; enabled: boolean }>;
+    }) => api.patch<{ webhook: Webhook }>(`/api/webhooks/${encodeURIComponent(id)}`, patch),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.webhooks }),
+  });
+}
+
+export function useDeleteWebhook() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.del<{ deleted: boolean }>(`/api/webhooks/${encodeURIComponent(id)}`),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.webhooks }),
+  });
+}
+
 // ---------------------------------------------------------------- dashboard identity
 
 export function useAuthState() {
@@ -404,6 +693,18 @@ export function useAuthState() {
     staleTime: 30_000,
     retry: 1,
   });
+}
+
+/**
+ * May this tab use the admin surface? A break-glass admin token counts: the API accepts
+ * it exactly when the shell is allowed to render without a user session.
+ *
+ * The server is the authority — this only decides what to paint, so a bug here shows a
+ * page that then refuses, never a privilege.
+ */
+export function useIsAdmin(): boolean {
+  const state = useAuthState();
+  return state.data?.user?.role === "admin" || adminToken() !== null;
 }
 
 export function useSignOut() {

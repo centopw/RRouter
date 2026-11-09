@@ -6,12 +6,15 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection as Sql, OptionalExtension, Row};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{params, params_from_iter, Connection as Sql, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use rrouter_core::{Error, Result};
+
+use crate::teams::Team;
 
 use crate::crypto::Cipher;
 use crate::migrations;
@@ -39,8 +42,40 @@ pub struct Connection {
     pub last_error: Option<String>,
     pub last_error_code: Option<u16>,
     pub last_error_at: Option<i64>,
+    /// Owning team. `None` means the account is shared/instance-wide: it serves global
+    /// (non-team) keys and admin probes, and is deliberately **not** visible to any team
+    /// scope — a team key must not spend an operator's shared account.
+    pub team_id: Option<Uuid>,
+    /// Dashboard attribution only: the user who added the account. Not an access grant,
+    /// so it is never consulted for routing or visibility.
+    pub owner_user_id: Option<Uuid>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Which provider accounts a read may see.
+///
+/// Two scopes, not a filter with an "include shared" flag: the difference between "the
+/// whole instance" and "one tenant" is a security boundary, so it is a type rather than a
+/// nullable argument whose `None` could be read either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionScope {
+    /// Instance-wide view: every account, team-owned or shared. Admin/reporting reads and
+    /// the routing of keys that belong to no team.
+    Global,
+    /// Strict tenant view: only rows whose `team_id` is exactly this team. Shared rows
+    /// (`team_id IS NULL`) belong to the instance, not to any team, so they are excluded.
+    Team(Uuid),
+}
+
+impl ConnectionScope {
+    /// The scope a caller's team implies: a key outside every team is instance-wide.
+    pub fn for_team(team_id: Option<Uuid>) -> Self {
+        match team_id {
+            Some(team) => Self::Team(team),
+            None => Self::Global,
+        }
+    }
 }
 
 /// What a key may do. An `Inference` key spends tokens through `/v1/*`; an `Admin`
@@ -114,6 +149,9 @@ pub struct ApiKey {
     pub budget_window: BudgetWindow,
     /// Traffic policy; `None` = no checks at all for this key.
     pub guardrails: Option<Guardrails>,
+    /// Owning team; `None` = an instance-wide key. A team key is routed only to that
+    /// team's provider accounts (see [`ConnectionScope`]).
+    pub team_id: Option<Uuid>,
 }
 
 impl ApiKey {
@@ -149,6 +187,11 @@ pub struct Guardrails {
     /// Scan response text for `blocked` too. Without `blocked` terms this does nothing.
     #[serde(default, skip_serializing_if = "is_false")]
     pub scan_output: bool,
+    /// Redact email addresses, phone numbers, payment cards and credential-shaped strings
+    /// in this key's prompt and response. Off by default: redaction changes what the model
+    /// and the client see, so it is an explicit per-key opt-in.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub redact_pii: bool,
 }
 
 /// `skip_serializing_if` for a flag that is off by default.
@@ -165,7 +208,10 @@ impl Guardrails {
 
     /// Does this policy do anything at all? An all-default document is stored as NULL.
     pub fn is_empty(&self) -> bool {
-        self.max_prompt_chars.is_none() && self.blocked.is_empty() && !self.scan_output
+        self.max_prompt_chars.is_none()
+            && self.blocked.is_empty()
+            && !self.scan_output
+            && !self.redact_pii
     }
 
     /// Reject a policy the gateway cannot enforce as written. A bad policy is a client
@@ -514,6 +560,10 @@ pub struct UsageRecord {
     pub ts: i64,
     /// UUID echoed to the client as `x-request-id`; `None` for rows written before v8.
     pub request_id: Option<Uuid>,
+    /// W3C trace id this request ran under (v25 column), so the usage row joins the
+    /// request log and its attempts. `None` for rows written before v25, and for a writer
+    /// that has no trace context at all (a rerank row today; store/router tests).
+    pub trace_id: Option<String>,
     pub provider: String,
     pub model: String,
     pub connection_id: Option<Uuid>,
@@ -622,6 +672,45 @@ pub struct CacheEntry {
     pub created_at: i64,
     pub expires_at: i64,
     pub hits: u32,
+}
+
+/// One row of the semantic response cache: a stored response and the prompt embedding
+/// that justified it. `embedding` is raw little-endian `f32`s, opaque to SQLite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticCacheEntry {
+    /// SHA-256 of the canonical prompt: the exact-text dedupe key inside the scope.
+    pub prompt_hash: String,
+    pub embedding_model: String,
+    pub provider: String,
+    pub model: String,
+    /// Owning team; `None` is the instance view, stored as the empty string so the
+    /// unique index sees one key per scope. Scopes never overlap.
+    pub team_id: Option<Uuid>,
+    pub embedding: Vec<u8>,
+    pub body: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+/// What one semantic lookup may see. Every dimension is an equality filter, so a team
+/// never matches another team's row and a different embedding model never matches a
+/// vector from another space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticCacheScope<'a> {
+    pub embedding_model: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub team_id: Option<Uuid>,
+}
+
+/// One scan row: the stored vector stays raw so the caller compares in `f32`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticCacheCandidate {
+    pub id: i64,
+    pub prompt_hash: String,
+    pub embedding: Vec<u8>,
+    pub body: String,
+    pub created_at: i64,
 }
 
 /// What one retention sweep removed. Counts are rows, not bytes.
@@ -927,6 +1016,29 @@ impl Store {
         credentials: Credentials,
         name: Option<&str>,
     ) -> Result<Connection> {
+        self.create_connection_owned(provider, auth_type, credentials, name, None, None)
+            .await
+    }
+
+    /// Create an account owned by `team_id` and attributed to `owner_user_id`.
+    ///
+    /// A named team must exist: an account pointing at a missing team would be visible to
+    /// no team key and findable only by scanning the global list. `None` for `team_id`
+    /// creates the shared/instance-wide account [`Self::create_connection`] always made.
+    pub async fn create_connection_owned(
+        &self,
+        provider: &str,
+        auth_type: &str,
+        credentials: Credentials,
+        name: Option<&str>,
+        team_id: Option<Uuid>,
+        owner_user_id: Option<Uuid>,
+    ) -> Result<Connection> {
+        if let Some(team) = team_id {
+            if self.team(team).await?.is_none() {
+                return Err(Error::NotFound(format!("team {team}")));
+            }
+        }
         let id = Uuid::new_v4();
         let blob = self.seal(&id, &credentials)?;
         let now = now();
@@ -936,15 +1048,59 @@ impl Store {
             conn.execute(
                 "INSERT INTO connections \
                  (id, provider, auth_type, name, email, priority, is_active, data, backoff_level, \
-                  created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, ?6, 0, ?7, ?7)",
-                params![id.to_string(), provider, auth_type, name, email, blob, now],
+                  created_at, updated_at, team_id, owner_user_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, ?6, 0, ?7, ?7, ?8, ?9)",
+                params![
+                    id.to_string(),
+                    provider,
+                    auth_type,
+                    name,
+                    email,
+                    blob,
+                    now,
+                    team_id.map(|t| t.to_string()),
+                    owner_user_id.map(|u| u.to_string())
+                ],
             )
             .map_err(migrations::db_err)?;
         }
         self.get_connection(id)
             .await?
             .ok_or_else(|| Error::Store("connection vanished after insert".to_string()))
+    }
+
+    /// Assign the owning team and dashboard attribution, or clear either with `None`.
+    ///
+    /// `team_id = None` makes the account shared/instance-wide again; it is the only way a
+    /// team-owned account becomes visible to global keys other than the team that owned it.
+    pub async fn set_connection_owner(
+        &self,
+        id: Uuid,
+        team_id: Option<Uuid>,
+        owner_user_id: Option<Uuid>,
+    ) -> Result<()> {
+        if let Some(team) = team_id {
+            if self.team(team).await?.is_none() {
+                return Err(Error::NotFound(format!("team {team}")));
+            }
+        }
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "UPDATE connections SET team_id = ?2, owner_user_id = ?3, updated_at = ?4 \
+                 WHERE id = ?1",
+                params![
+                    id.to_string(),
+                    team_id.map(|t| t.to_string()),
+                    owner_user_id.map(|u| u.to_string()),
+                    now()
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("connection {id}")));
+        }
+        Ok(())
     }
 
     pub async fn get_connection(&self, id: Uuid) -> Result<Option<Connection>> {
@@ -961,39 +1117,63 @@ impl Store {
         blob.map(|raw| self.decode(raw)).transpose()
     }
 
+    /// Every account, team-owned or shared: the admin/reporting view.
+    ///
+    /// Ordering is `provider, priority, created_at` (or `priority, created_at` when one
+    /// provider is named), which is what the dashboard and probes read. Routing asks for
+    /// the scope it is entitled to through [`Self::list_connections_scoped`].
     pub async fn list_connections(&self, provider: Option<&str>) -> Result<Vec<Connection>> {
+        self.list_connections_scoped(ConnectionScope::Global, provider)
+            .await
+    }
+
+    /// The accounts visible to `scope`, in the same order [`Self::list_connections`] uses.
+    ///
+    /// `Global` returns every row. `Team(id)` returns only rows whose `team_id` is exactly
+    /// `id`: the shared rows (`team_id IS NULL`) are the instance's, not that team's, so a
+    /// team key cannot be routed to an operator's account by accident. The filter is in
+    /// SQL, so no caller can forget to apply it in memory.
+    pub async fn list_connections_scoped(
+        &self,
+        scope: ConnectionScope,
+        provider: Option<&str>,
+    ) -> Result<Vec<Connection>> {
         let raws = {
             let conn = self.conn();
+            let mut where_: Vec<String> = Vec::new();
+            let mut args: Vec<SqlValue> = Vec::new();
+            if let Some(provider) = provider {
+                args.push(SqlValue::Text(provider.to_string()));
+                where_.push(format!("provider = ?{}", args.len()));
+            }
+            if let ConnectionScope::Team(team) = scope {
+                args.push(SqlValue::Text(team.to_string()));
+                where_.push(format!("team_id = ?{}", args.len()));
+            }
+            let filter = if where_.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", where_.join(" AND "))
+            };
+            // The provider-scoped read is ordered by priority alone; the unfiltered one
+            // groups by provider first. Keeping both orders stable is what lets the
+            // planner's no-quota ordering stay a property, not a coincidence.
+            let order = if provider.is_some() {
+                " ORDER BY priority ASC, created_at ASC"
+            } else {
+                " ORDER BY provider ASC, priority ASC, created_at ASC"
+            };
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT {CONN_COLUMNS} FROM connections{filter}{order}"
+                ))
+                .map_err(migrations::db_err)?;
+            let rows = stmt
+                .query_map(params_from_iter(args.iter()), row_to_connection)
+                .map_err(migrations::db_err)?;
             let mut out = Vec::new();
-            match provider {
-                Some(p) => {
-                    let mut stmt = conn
-                        .prepare(&format!(
-                            "SELECT {CONN_COLUMNS} FROM connections WHERE provider = ?1 \
-                             ORDER BY priority ASC, created_at ASC"
-                        ))
-                        .map_err(migrations::db_err)?;
-                    let rows = stmt
-                        .query_map(params![p], row_to_connection)
-                        .map_err(migrations::db_err)?;
-                    for r in rows {
-                        out.push(r.map_err(migrations::db_err)?);
-                    }
-                }
-                None => {
-                    let mut stmt = conn
-                        .prepare(&format!(
-                            "SELECT {CONN_COLUMNS} FROM connections \
-                             ORDER BY provider ASC, priority ASC, created_at ASC"
-                        ))
-                        .map_err(migrations::db_err)?;
-                    let rows = stmt
-                        .query_map([], row_to_connection)
-                        .map_err(migrations::db_err)?;
-                    for r in rows {
-                        out.push(r.map_err(migrations::db_err)?);
-                    }
-                }
+            for r in rows {
+                out.push(r.map_err(migrations::db_err)?);
             }
             out
         };
@@ -1203,6 +1383,8 @@ impl Store {
             last_error: raw.last_error,
             last_error_code: raw.last_error_code,
             last_error_at: raw.last_error_at,
+            team_id: raw.team_id,
+            owner_user_id: raw.owner_user_id,
             created_at: raw.created_at,
             updated_at: raw.updated_at,
         })
@@ -1213,21 +1395,43 @@ impl Store {
     /// The key columns every read selects, in [`row_to_api_key`]'s order.
     const KEY_COLUMNS: &'static str =
         "id, key_hash, name, is_active, created_at, rpm, tpm, budget_tokens, allowed_models, \
-         expires_at, budget_micros, budget_window, guardrails, scope";
+         expires_at, budget_micros, budget_window, guardrails, scope, team_id";
 
     /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
     ///
-    /// A new key is an inference key with no limits, no allowlist and no expiry.
+    /// A new key is an inference key with no limits, no allowlist, no expiry and no team.
     pub async fn create_api_key(&self, name: Option<&str>) -> Result<(String, ApiKey)> {
+        self.create_api_key_in_team(name, None).await
+    }
+
+    /// Same, assigned to `team_id` at insert time so a key is never briefly unattributed.
+    pub async fn create_api_key_in_team(
+        &self,
+        name: Option<&str>,
+        team_id: Option<Uuid>,
+    ) -> Result<(String, ApiKey)> {
+        // A key must never point at a team that does not exist: the row would be invisible
+        // to every team report and impossible to release.
+        if let Some(team) = team_id {
+            if self.team(team).await?.is_none() {
+                return Err(Error::NotFound(format!("team {team}")));
+            }
+        }
         let plaintext = generate_api_key();
         let key_hash = hash_api_key(&plaintext);
         let id = Uuid::new_v4();
         let created_at = now();
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at) \
-             VALUES (?1, ?2, ?3, 1, ?4)",
-            params![id.to_string(), key_hash, name, created_at],
+            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at, team_id) \
+             VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+            params![
+                id.to_string(),
+                key_hash,
+                name,
+                created_at,
+                team_id.map(|t| t.to_string())
+            ],
         )
         .map_err(migrations::db_err)?;
         Ok((
@@ -1247,6 +1451,7 @@ impl Store {
                 expires_at: None,
                 budget_window: BudgetWindow::Total,
                 guardrails: None,
+                team_id,
             },
         ))
     }
@@ -1288,6 +1493,112 @@ impl Store {
         let mut out = Vec::new();
         for r in rows {
             out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    /// Keys assigned to one team, oldest first. `team_id` is never `None` here: the
+    /// instance-wide keys are the ones a team report must not include.
+    pub async fn list_api_keys_in_team(&self, team_id: Uuid) -> Result<Vec<ApiKey>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {} FROM api_keys WHERE team_id = ?1 ORDER BY created_at ASC",
+                Self::KEY_COLUMNS
+            ))
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params![team_id.to_string()], row_to_api_key)
+            .map_err(migrations::db_err)?;
+        rows.map(|r| r.map_err(migrations::db_err)).collect()
+    }
+
+    /// Assign a key to a team, or clear the assignment with `None`.
+    ///
+    /// Separate from [`ApiKeyPatch`] because tenancy is not part of the traffic policy: a
+    /// patch that only moved a key between teams must not rewrite the limits, and a team
+    /// must exist before a key can point at it.
+    pub async fn set_api_key_team(&self, id: Uuid, team_id: Option<Uuid>) -> Result<bool> {
+        if let Some(team) = team_id {
+            if self.team(team).await?.is_none() {
+                return Err(Error::NotFound(format!("team {team}")));
+            }
+        }
+        let n = self
+            .conn()
+            .execute(
+                "UPDATE api_keys SET team_id = ?2 WHERE id = ?1",
+                params![id.to_string(), team_id.map(|t| t.to_string())],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
+    }
+
+    /// The team a key is assigned to, or `None` for instance-wide.
+    ///
+    /// Tenancy is read separately from [`ApiKey`] because it is not traffic policy: the
+    /// governance struct stays the size the hot path wants, and a team report reads one
+    /// indexed column instead of joining the whole key row.
+    pub async fn key_team(&self, id: Uuid) -> Result<Option<Uuid>> {
+        let raw: Option<Option<String>> = self
+            .conn()
+            .query_row(
+                "SELECT team_id FROM api_keys WHERE id = ?1",
+                params![id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(migrations::db_err)?;
+        Ok(raw.flatten().and_then(|raw| Uuid::parse_str(&raw).ok()))
+    }
+
+    /// The team a key belongs to, as a row, in one query.
+    ///
+    /// This is the single call the admission path needs to enforce a team budget: the key
+    /// row on the hot path stays its old size, and nothing is fetched when the key is
+    /// instance-wide (the common case).
+    pub async fn key_team_row(&self, key_id: Uuid) -> Result<Option<Team>> {
+        self.conn()
+            .query_row(
+                "SELECT t.id, t.name, t.created_at, t.budget_tokens, t.budget_micros, \
+                        t.budget_window \
+                 FROM teams t JOIN api_keys k ON k.team_id = t.id WHERE k.id = ?1",
+                params![key_id.to_string()],
+                |r| {
+                    Ok(Team {
+                        id: uuid_col(r.get(0)?)?,
+                        name: r.get(1)?,
+                        created_at: r.get(2)?,
+                        budget_tokens: r.get(3)?,
+                        budget_micros: r.get(4)?,
+                        budget_window: BudgetWindow::from_stored(&r.get::<_, String>(5)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(migrations::db_err)
+    }
+
+    /// Every key's team in one query, keyed by key id; a key absent from the map is
+    /// instance-wide. Used by the list endpoint so N keys cost one statement.
+    pub async fn key_teams(&self) -> Result<std::collections::HashMap<Uuid, Option<Uuid>>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT id, team_id FROM api_keys")
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                let id: String = r.get(0)?;
+                let team: Option<String> = r.get(1)?;
+                Ok((id, team))
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (id, team) = row.map_err(migrations::db_err)?;
+            if let Ok(id) = Uuid::parse_str(&id) {
+                out.insert(id, team.and_then(|raw| Uuid::parse_str(&raw).ok()));
+            }
         }
         Ok(out)
     }
@@ -2141,8 +2452,139 @@ impl Store {
         Ok(out)
     }
 
-    // ----- usage -------------------------------------------------------------------
+    // ----- semantic response cache -------------------------------------------------
 
+    /// Store (or refresh) one semantic entry and keep the table bounded.
+    ///
+    /// The unique `(embedding_model, provider, model, team, prompt_hash)` index means the
+    /// same canonical prompt is stored once per scope, and re-storing it resets its age
+    /// and hit count. Expired rows and over-cap rows are deleted with the same insert,
+    /// so a reader in this process never observes a table above `max_entries`.
+    pub async fn semantic_cache_put(
+        &self,
+        entry: &SemanticCacheEntry,
+        max_entries: usize,
+    ) -> Result<()> {
+        let max_entries = i64::try_from(max_entries.max(1)).unwrap_or(i64::MAX);
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO semantic_cache \
+             (prompt_hash, embedding_model, provider, model, team_id, embedding, body, \
+              created_at, expires_at, hits) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0) \
+             ON CONFLICT(embedding_model, provider, model, team_id, prompt_hash) DO UPDATE SET \
+               embedding = excluded.embedding, body = excluded.body, \
+               created_at = excluded.created_at, expires_at = excluded.expires_at, hits = 0",
+            params![
+                entry.prompt_hash,
+                entry.embedding_model,
+                entry.provider,
+                entry.model,
+                entry
+                    .team_id
+                    .map(|team| team.to_string())
+                    .unwrap_or_default(),
+                entry.embedding,
+                entry.body,
+                entry.created_at,
+                entry.expires_at,
+            ],
+        )
+        .map_err(migrations::db_err)?;
+        conn.execute(
+            "DELETE FROM semantic_cache WHERE expires_at <= ?1",
+            params![entry.created_at],
+        )
+        .map_err(migrations::db_err)?;
+        conn.execute(
+            "DELETE FROM semantic_cache WHERE id IN ( \
+               SELECT id FROM semantic_cache ORDER BY created_at ASC, id ASC \
+               LIMIT max(0, (SELECT count(*) FROM semantic_cache) - ?1))",
+            params![max_entries],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Un-expired entries visible to `scope`, newest first, bounded by `limit`.
+    ///
+    /// The filters are the scope contract, in SQL: a different embedding model is a
+    /// different vector space, and a team row is invisible to the instance view (and
+    /// vice versa). Expiry is filtered here too, so an expired row can never win a scan.
+    pub async fn semantic_cache_scan(
+        &self,
+        scope: &SemanticCacheScope<'_>,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<SemanticCacheCandidate>> {
+        let limit = i64::try_from(limit.clamp(1, 4096)).unwrap_or(1024);
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, prompt_hash, embedding, body, created_at FROM semantic_cache \
+                 WHERE embedding_model = ?1 AND provider = ?2 AND model = ?3 \
+                   AND team_id = ?4 AND expires_at > ?5 \
+                 ORDER BY id DESC LIMIT ?6",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    scope.embedding_model,
+                    scope.provider,
+                    scope.model,
+                    scope
+                        .team_id
+                        .map(|team| team.to_string())
+                        .unwrap_or_default(),
+                    now,
+                    limit
+                ],
+                |r| {
+                    Ok(SemanticCacheCandidate {
+                        id: r.get(0)?,
+                        prompt_hash: r.get(1)?,
+                        embedding: r.get(2)?,
+                        body: r.get(3)?,
+                        created_at: r.get(4)?,
+                    })
+                },
+            )
+            .map_err(migrations::db_err)?;
+        rows.map(|row| row.map_err(migrations::db_err)).collect()
+    }
+
+    /// Count one semantic hit. A missing row (evicted between scan and update) is a
+    /// no-op: the response was already served.
+    pub async fn semantic_cache_hit(&self, id: i64) -> Result<()> {
+        self.conn()
+            .execute(
+                "UPDATE semantic_cache SET hits = hits + 1 WHERE id = ?1",
+                params![id],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Every semantic row's scope and age, for tests and ops. Bodies and vectors stay
+    /// out of the view: nothing needs to read an operator's prompts from a debug tool.
+    pub async fn semantic_cache_entries(&self) -> Result<Vec<(i64, String, String, String, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, embedding_model, provider, model, expires_at FROM semantic_cache \
+                 ORDER BY id ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .map_err(migrations::db_err)?;
+        rows.map(|row| row.map_err(migrations::db_err)).collect()
+    }
+
+    // ----- usage -------------------------------------------------------------------
     /// Append one usage row. Only counters and error text are stored, never payloads.
     pub async fn record_usage(&self, r: &UsageRecord) -> Result<()> {
         let conn = self.conn();
@@ -2150,8 +2592,9 @@ impl Store {
             "INSERT INTO usage \
              (ts, request_id, provider, model, connection_id, endpoint, key_id, input_tokens, \
               output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, \
-              streamed, error, cost_micros, upstream_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+              streamed, error, cost_micros, upstream_ms, trace_id, team_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
+                     ?19, (SELECT team_id FROM api_keys WHERE id = ?7))",
             params![
                 r.ts,
                 r.request_id.map(|u| u.to_string()).unwrap_or_default(),
@@ -2171,6 +2614,7 @@ impl Store {
                 r.error,
                 r.cost_micros,
                 r.upstream_ms,
+                r.trace_id,
             ],
         )
         .map_err(migrations::db_err)?;
@@ -2428,6 +2872,186 @@ impl Store {
         Ok(out)
     }
 
+    // ----- team reporting -----------------------------------------------------------
+
+    /// The request log restricted to `teams`.
+    ///
+    /// `None` is instance-wide (an admin), `Some(&[])` is deliberately empty (a signed-in
+    /// account with no team must not fall back to "everything"), and a non-empty slice
+    /// restricts to those teams. `usage.team_id` is attributed from the key at write time,
+    /// so anonymous traffic and keys without a team stay out of every team view.
+    pub async fn recent_usage_in_teams(
+        &self,
+        query: &UsageQuery,
+        teams: Option<&[Uuid]>,
+    ) -> Result<Vec<UsageRecord>> {
+        let (team_sql, team_args) = team_filter(teams, 10);
+        let key_id = query.key_id.map(|k| k.to_string());
+        let status = query
+            .status
+            .map(|status| SqlValue::Text(StatusFilter::as_sql(status).to_string()))
+            .unwrap_or(SqlValue::Null);
+        let mut args: Vec<SqlValue> = vec![
+            i64::try_from(query.limit).unwrap_or(i64::MAX).into(),
+            query.since.into(),
+            query.before_ts.into(),
+            query.before_id.into(),
+            query.provider.clone().into(),
+            query.model.clone().into(),
+            query.bare_model.clone().into(),
+            key_id.into(),
+            status,
+        ];
+        args.extend(team_args);
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {USAGE_COLUMNS} FROM usage \
+                 WHERE (?2 IS NULL OR ts >= ?2) \
+                 AND (?3 IS NULL OR ts < ?3 OR (?4 IS NOT NULL AND ts = ?3 AND id < ?4)) \
+                 AND (?5 IS NULL OR provider = ?5) \
+                 AND (?6 IS NULL OR model = ?6 OR (?7 IS NOT NULL AND model = ?7)) \
+                 AND (?8 IS NULL OR key_id = ?8) \
+                 AND (?9 IS NULL \
+                      OR (?9 = 'success' AND status BETWEEN 200 AND 299 AND error IS NULL) \
+                      OR (?9 = 'error' AND (status >= 400 OR error IS NOT NULL))) \
+                 {team_sql} \
+                 ORDER BY ts DESC, id DESC LIMIT ?1"
+            ))
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params_from_iter(args), row_to_usage)
+            .map_err(migrations::db_err)?;
+        rows.map(|r| r.map_err(migrations::db_err)).collect()
+    }
+
+    /// Per provider+model totals restricted to `teams`; see [`Store::recent_usage_in_teams`].
+    pub async fn usage_summary_in_teams(
+        &self,
+        since: Option<i64>,
+        teams: Option<&[Uuid]>,
+    ) -> Result<Vec<UsageSummary>> {
+        let (team_sql, team_args) = team_filter(teams, 2);
+        let mut args: Vec<SqlValue> = vec![since.into()];
+        args.extend(team_args);
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT provider, model, count(*), \
+                        sum(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), \
+                        sum(input_tokens), sum(output_tokens), \
+                        sum(cache_read_tokens), sum(cache_write_tokens), \
+                        sum(cost_micros), avg(latency_ms) \
+                 FROM usage WHERE (?1 IS NULL OR ts >= ?1) {team_sql} \
+                 GROUP BY provider, model ORDER BY provider ASC, model ASC"
+            ))
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params_from_iter(args), |r| {
+                let avg: f64 = r.get(9)?;
+                Ok(UsageSummary {
+                    provider: r.get(0)?,
+                    model: r.get(1)?,
+                    requests: r.get(2)?,
+                    errors: r.get(3)?,
+                    input_tokens: r.get(4)?,
+                    output_tokens: r.get(5)?,
+                    cache_read_tokens: r.get(6)?,
+                    cache_write_tokens: r.get(7)?,
+                    cost_micros: r.get(8)?,
+                    avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        rows.map(|r| r.map_err(migrations::db_err)).collect()
+    }
+
+    /// Time buckets restricted to `teams`; see [`Store::recent_usage_in_teams`].
+    pub async fn usage_series_in_teams(
+        &self,
+        since: i64,
+        bucket_secs: i64,
+        teams: Option<&[Uuid]>,
+    ) -> Result<Vec<UsageBucket>> {
+        let bucket_secs = bucket_secs.max(60);
+        let (team_sql, team_args) = team_filter(teams, 3);
+        let mut args: Vec<SqlValue> = vec![bucket_secs.into(), since.into()];
+        args.extend(team_args);
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT (ts / ?1) * ?1 AS bucket, count(*), \
+                        sum(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), \
+                        sum(input_tokens), sum(output_tokens), \
+                        sum(cache_read_tokens), sum(cache_write_tokens), \
+                        sum(cost_micros), avg(latency_ms) \
+                 FROM usage WHERE ts >= ?2 {team_sql} \
+                 GROUP BY bucket ORDER BY bucket ASC"
+            ))
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params_from_iter(args), |r| {
+                let avg: f64 = r.get(8)?;
+                Ok(UsageBucket {
+                    start: r.get(0)?,
+                    requests: r.get(1)?,
+                    errors: r.get(2)?,
+                    input_tokens: r.get(3)?,
+                    output_tokens: r.get(4)?,
+                    cache_read_tokens: r.get(5)?,
+                    cache_write_tokens: r.get(6)?,
+                    cost_micros: r.get(7)?,
+                    avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        rows.map(|r| r.map_err(migrations::db_err)).collect()
+    }
+
+    /// Per-model buckets restricted to `teams`; see [`Store::recent_usage_in_teams`].
+    pub async fn usage_series_by_model_in_teams(
+        &self,
+        since: i64,
+        bucket_secs: i64,
+        teams: Option<&[Uuid]>,
+    ) -> Result<Vec<UsageModelBucket>> {
+        let bucket_secs = bucket_secs.max(60);
+        let (team_sql, team_args) = team_filter(teams, 3);
+        let mut args: Vec<SqlValue> = vec![bucket_secs.into(), since.into()];
+        args.extend(team_args);
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT (ts / ?1) * ?1 AS bucket, provider, model, count(*), \
+                        sum(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), \
+                        sum(input_tokens), sum(output_tokens), \
+                        sum(cache_read_tokens), sum(cache_write_tokens), \
+                        sum(cost_micros), avg(latency_ms) \
+                 FROM usage WHERE ts >= ?2 {team_sql} \
+                 GROUP BY bucket, provider, model ORDER BY bucket ASC, provider ASC, model ASC"
+            ))
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params_from_iter(args), |r| {
+                let avg: f64 = r.get(10)?;
+                Ok(UsageModelBucket {
+                    start: r.get(0)?,
+                    provider: r.get(1)?,
+                    model: r.get(2)?,
+                    requests: r.get(3)?,
+                    errors: r.get(4)?,
+                    input_tokens: r.get(5)?,
+                    output_tokens: r.get(6)?,
+                    cache_read_tokens: r.get(7)?,
+                    cache_write_tokens: r.get(8)?,
+                    cost_micros: r.get(9)?,
+                    avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        rows.map(|r| r.map_err(migrations::db_err)).collect()
+    }
+
     // ----- maintenance --------------------------------------------------------------
 
     /// Delete `usage` and `attempts` rows older than `cutoff` (unix seconds).
@@ -2455,7 +3079,8 @@ impl Store {
     ///
     /// Independent of usage retention: a cache entry's life is its own TTL, so expired
     /// rows go even when the operator keeps history forever. The expiry index makes
-    /// this one range delete.
+    /// this one range delete. The semantic cache follows the same rule in the same
+    /// transaction — one sweep, two tables, so an operator sees one retention policy.
     pub async fn prune_expired_cache(&self, now: i64) -> Result<usize> {
         let mut conn = self.conn();
         let tx = conn
@@ -2467,6 +3092,11 @@ impl Store {
                 params![now],
             )
             .map_err(migrations::db_err)?;
+        tx.execute(
+            "DELETE FROM semantic_cache WHERE expires_at < ?1",
+            params![now],
+        )
+        .map_err(migrations::db_err)?;
         tx.commit().map_err(migrations::db_err)?;
         Ok(deleted)
     }
@@ -2527,7 +3157,7 @@ impl CredentialStore for Store {
 
 const CONN_COLUMNS: &str = "id, provider, auth_type, name, email, priority, is_active, data, \
                             backoff_level, last_error, last_error_code, last_error_at, \
-                            created_at, updated_at, weight";
+                            created_at, updated_at, weight, team_id, owner_user_id";
 
 /// Columns of a [`PromptTemplate`], in the order [`row_to_template`] reads them. Shared
 /// by every reader so a new column cannot desynchronize one query from the rest.
@@ -2609,6 +3239,33 @@ struct RawConnection {
     created_at: i64,
     updated_at: i64,
     weight: u32,
+    team_id: Option<Uuid>,
+    owner_user_id: Option<Uuid>,
+}
+
+/// `(sql, args)` restricting a `usage` scan to `teams`, with numbered placeholders that
+/// start at `first`.
+///
+/// `None` means "no restriction" (an admin's view). `Some(&[])` becomes `AND 0`, so an
+/// account with no team gets an empty report instead of everybody else's traffic — the
+/// difference between "unscoped" and "scoped to nothing" must never be a typo away.
+fn team_filter(teams: Option<&[Uuid]>, first: usize) -> (String, Vec<SqlValue>) {
+    match teams {
+        None => (String::new(), Vec::new()),
+        Some([]) => (" AND 0".to_string(), Vec::new()),
+        Some(ids) => {
+            let holes = (first..first + ids.len())
+                .map(|n| format!("?{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                format!(" AND team_id IN ({holes})"),
+                ids.iter()
+                    .map(|id| SqlValue::Text(id.to_string()))
+                    .collect(),
+            )
+        }
+    }
 }
 
 fn uuid_col(s: String) -> rusqlite::Result<Uuid> {
@@ -2617,11 +3274,18 @@ fn uuid_col(s: String) -> rusqlite::Result<Uuid> {
     })
 }
 
+/// A nullable UUID column. `NULL` stays `None`; a malformed value is a storage failure,
+/// never a silent `None` — for `connections.team_id`, `None` means "shared with every
+/// global key", so a corrupt id must fail the read rather than widen visibility.
+fn opt_uuid_col(raw: Option<String>) -> rusqlite::Result<Option<Uuid>> {
+    raw.map(uuid_col).transpose()
+}
+
 /// Columns of a [`UsageRecord`], in the order [`row_to_usage`] reads them. Shared by
 /// every reader so a new column cannot desynchronize one query from the rest.
 const USAGE_COLUMNS: &str = "id, ts, request_id, provider, model, connection_id, endpoint, \
      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, \
-     status, streamed, error, key_id, cost_micros, upstream_ms";
+     status, streamed, error, key_id, cost_micros, upstream_ms, trace_id";
 
 /// Empty `request_id` is the v8 "unknown" default written before request ids existed.
 fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
@@ -2632,6 +3296,7 @@ fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         id: r.get(0)?,
         ts: r.get(1)?,
         request_id: Uuid::parse_str(&rid).ok(),
+        trace_id: r.get(19)?,
         provider: r.get(3)?,
         model: r.get(4)?,
         connection_id: cid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
@@ -2668,6 +3333,8 @@ fn row_to_connection(r: &Row<'_>) -> rusqlite::Result<RawConnection> {
         created_at: r.get(12)?,
         updated_at: r.get(13)?,
         weight: (r.get::<_, i64>(14)?).clamp(i64::from(MIN_WEIGHT), i64::from(MAX_WEIGHT)) as u32,
+        team_id: opt_uuid_col(r.get(15)?)?,
+        owner_user_id: opt_uuid_col(r.get(16)?)?,
     })
 }
 
@@ -2705,6 +3372,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         budget_window: BudgetWindow::from_stored(&r.get::<_, String>(11)?),
         guardrails,
         scope: KeyScope::from_stored(&r.get::<_, String>(13)?),
+        team_id: opt_uuid_col(r.get(14)?)?,
     })
 }
 

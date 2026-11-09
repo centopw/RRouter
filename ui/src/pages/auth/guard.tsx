@@ -1,9 +1,8 @@
 import { useEffect, type ReactNode } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { adminToken, SIGN_IN_REQUIRED_EVENT } from "../../lib/api";
-import { useAuthState, useSignOut } from "../../lib/queries";
-import { AuthCard, AuthNotice, AuthShell, AuthTitle } from "../../components/auth-form";
-import { Button } from "../../components/ui";
+import { useAuthState, useIsAdmin } from "../../lib/queries";
+import { AuthNotice, AuthShell } from "../../components/auth-form";
 
 /** Where a signed-out operator is sent, preserving the page they wanted. */
 function signInPath(location: { pathname: string; search: string }): string {
@@ -14,7 +13,11 @@ function signInPath(location: { pathname: string; search: string }): string {
 /**
  * The dashboard's door. It reads the unauthenticated auth state and routes the three
  * first-run cases: no users at all → the setup screen, a user without a session → sign
- * in, a non-admin session → a plain "this account is limited" card.
+ * in, a session of any role → the shell.
+ *
+ * Roles are not decided here: every page a reader may not use is either absent from the
+ * nav or wrapped in [`RequireAdmin`], and the API refuses it regardless of what is
+ * painted.
  */
 export function AuthGuard({ children }: { children: ReactNode }) {
   const state = useAuthState();
@@ -47,32 +50,18 @@ export function AuthGuard({ children }: { children: ReactNode }) {
   // A stored admin token is break-glass access: the API accepts it, so let the shell
   // render even though no user session exists.
   if (!data.user && !adminToken()) return <Navigate to={signInPath(location)} replace />;
-  if (data.user && data.user.role !== "admin") return <LimitedAccount />;
   return <>{children}</>;
 }
 
-/** Members and viewers can sign in but the admin API refuses them; say so plainly. */
-function LimitedAccount() {
+/**
+ * Page guard for the admin-only routes. The nav already hides them, so this covers a
+ * typed URL or a bookmark: a reader lands on Activity instead of a page whose first
+ * request would be refused.
+ */
+export function RequireAdmin({ children }: { children: ReactNode }) {
   const state = useAuthState();
-  const signOut = useSignOut();
-  const navigate = useNavigate();
-  return (
-    <AuthShell>
-      <AuthCard>
-        <AuthTitle
-          title="This account cannot administer the gateway"
-          lead={`Signed in as ${state.data?.user?.email ?? "a limited account"}. Ask an administrator for the admin role, or sign out to use another account.`}
-        />
-        <Button
-          variant="primary"
-          className="w-full"
-          onClick={() => {
-            signOut.mutate(undefined, { onSettled: () => navigate("/sign-in", { replace: true }) });
-          }}
-        >
-          Sign out
-        </Button>
-      </AuthCard>
-    </AuthShell>
-  );
+  const admin = useIsAdmin();
+  if (state.isLoading) return null;
+  if (!admin) return <Navigate to="/activity" replace />;
+  return <>{children}</>;
 }

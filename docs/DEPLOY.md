@@ -110,6 +110,32 @@ decrypted. Stop the drill instance and remove `/tmp/restore-data` afterwards.
 A rollback to an older binary against a newer schema is not supported — restore the backup
 instead. Tags are immutable: pin a version and upgrade deliberately.
 
+### 5.1 Tenant-owned provider accounts (schema v26)
+
+v26 added `connections.team_id` and `owner_user_id` and rewrote no rows: every existing
+connection stays shared (`team_id IS NULL`) and keeps serving admin/global credentials.
+Routing changed with it: a **team-scoped key is planned only from its own team's
+connections**, and shared instance-wide accounts are never eligible for it (a team key must
+not spend the operator's shared credential). After upgrading, a team key whose team owns no
+account fails with `404 model_not_found` naming the empty team ("team … owns no provider
+accounts") until an admin assigns one — set `team_id` when creating or editing the account
+(`POST/PATCH /api/connections`) or from the Providers page. There is no automatic adoption
+of shared accounts, so assign deliberately. Admin/global credentials are unaffected.
+
+### Verify what you downloaded
+
+`install.sh` checks the SHA-256 only: that catches corruption, not authorship. Before
+replacing a binary on a sensitive host, verify provenance:
+
+```sh
+gh attestation verify rrouter-linux-amd64.tar.gz --repo centopw/RRouter
+./scripts/verify-release.sh <tag>    # all platforms: checksums, SBOMs, provenance
+```
+
+Every release also ships `rrouter-<asset>.tar.gz.sbom.cdx.json`, a CycloneDX inventory of
+the tag's `Cargo.lock` for scanning. What is signed, what the installer checks, and what
+remains manual is in `docs/RELEASES.md`.
+
 ## 5a. History growth
 
 `usage` and `attempts` keep every request. Set `RROUTER_USAGE_RETENTION_DAYS` (0 keeps

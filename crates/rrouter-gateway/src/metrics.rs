@@ -9,7 +9,7 @@
 //! newline) cannot break the exposition format — the label is quoted, `\` and `"` are
 //! backslash-escaped, and a newline becomes `\n`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -30,6 +30,29 @@ const CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 /// dispatch): an empty label value would read as "known and blank".
 const UNKNOWN: &str = "-";
 
+/// Distinct `model` label values that get their own series. The model id is client
+/// input and `/v1` is unauthenticated by default, so without a bound one client can
+/// mint a series per request: unbounded memory in this process and a scrape that grows
+/// with attacker traffic. Past the cap, new ids fold into [`OVERFLOW`] and the
+/// observations are counted in `rrouter_metric_series_dropped_total` instead.
+///
+/// 500 is deliberately far above the real catalog (tens of models per provider) and
+/// still bounds the exposition to a few hundred kilobytes.
+pub const MAX_MODEL_SERIES: usize = 500;
+
+/// Hard bound on `(provider, model, status)` series. The model cap normally keeps the
+/// map at `MAX_MODEL_SERIES` entries; this second bound covers many providers or
+/// statuses per model and guarantees the map cannot grow with traffic.
+pub const MAX_REQUEST_SERIES: usize = 2_000;
+
+/// Longest label value kept verbatim, in characters. Longer client-supplied ids are cut
+/// on a character boundary (never mid-UTF-8) so a 64 MiB `model` string cannot become a
+/// 64 MiB label.
+pub const MAX_LABEL_CHARS: usize = 120;
+
+/// Sentinel model for observations that lost their own series to either cap.
+const OVERFLOW: &str = "__other__";
+
 #[derive(Debug, Default)]
 struct Registry {
     /// `(provider, model, status)` → finished requests.
@@ -47,6 +70,12 @@ struct Registry {
     /// Requests refused by a key's guardrails, split by the stage that caught them.
     guardrail_input_blocks: u64,
     guardrail_output_blocks: u64,
+    /// Model labels that currently own a series.
+    models: BTreeSet<String>,
+    /// Observations folded into [`OVERFLOW`] because a cap was reached.
+    series_dropped: u64,
+    /// PII values replaced, indexed by [`RedactStage::index`] × [`PiiClass::index`].
+    pii: [u64; 12],
 }
 
 /// Which side of a request a guardrail refused. The metric labels this `stage`.
@@ -67,6 +96,39 @@ impl Stage {
     }
 }
 
+/// Where a PII redaction happened. The metric labels this `stage`; both labels are a
+/// closed set, so a scrape cannot leak a value (and no label ever carries the text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedactStage {
+    /// The prompt, before planning.
+    Input,
+    /// A non-streaming response body, before it is returned or cached.
+    Output,
+    /// A streamed text delta rewritten before it was encoded.
+    Stream,
+}
+
+impl RedactStage {
+    pub const ALL: [RedactStage; 3] =
+        [RedactStage::Input, RedactStage::Output, RedactStage::Stream];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::Stream => "stream",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Input => 0,
+            Self::Output => 1,
+            Self::Stream => 2,
+        }
+    }
+}
+
 /// Only poisoned by a panic while counting; the numbers are still readable, so recover.
 static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
 
@@ -77,25 +139,71 @@ fn lock() -> MutexGuard<'static, Registry> {
 /// One finished `/v1` request: its counters and its place in the latency histogram.
 ///
 /// Called exactly once per request, including the ones that failed, so
-/// `sum(rate(rrouter_requests_total))` matches the client's request rate.
+/// `sum(rate(rrouter_requests_total))` matches the client's request rate. A request
+/// whose labels hit a cardinality cap is still counted — under the overflow series —
+/// so that invariant survives an attack.
 pub fn request_finished(provider: &str, model: &str, status: u16, elapsed: Duration) {
-    let elapsed = elapsed.as_secs_f64();
-    let mut reg = lock();
-    let slot = (label(provider), label(model), status);
-    *reg.requests.entry(slot).or_insert(0) += 1;
-    let idx = BUCKETS
-        .iter()
-        .position(|bound| elapsed <= *bound)
-        .unwrap_or(BUCKETS.len());
-    reg.buckets[idx] += 1;
-    reg.duration_sum += elapsed;
-    reg.count += 1;
+    lock().record_request(provider, model, status, elapsed);
 }
 
 /// One dispatched candidate. `status` is `0` when nobody answered.
 pub fn attempt_finished(provider: &str, status: u16) {
-    let mut reg = lock();
-    *reg.attempts.entry((label(provider), status)).or_insert(0) += 1;
+    lock().record_attempt(provider, status);
+}
+
+impl Registry {
+    fn record_request(&mut self, provider: &str, model: &str, status: u16, elapsed: Duration) {
+        self.observe(elapsed);
+        let provider = label(provider);
+        let model = self.model_label(model);
+        let mut slot = (provider, model, status);
+        // A new tuple at the ceiling is folded, never dropped: the request happened and
+        // `requests_total` must still sum to the client-visible request count. The
+        // overflow tuple may itself be new once, so the map's hard bound is
+        // `MAX_REQUEST_SERIES + 1`.
+        if !self.requests.contains_key(&slot) && self.requests.len() >= MAX_REQUEST_SERIES {
+            self.series_dropped += 1;
+            slot = (OVERFLOW.to_string(), OVERFLOW.to_string(), 0);
+        }
+        *self.requests.entry(slot).or_insert(0) += 1;
+    }
+
+    /// The label this model gets: verbatim while it owns a series, truncated when it is
+    /// absurdly long, and [`OVERFLOW`] once the distinct-model cap is reached.
+    ///
+    /// Truncation happens before the membership check, so two long ids sharing a prefix
+    /// share one series — the alternative (hashing the tail) would be unreadable in a
+    /// dashboard for the ids that are merely long, not hostile.
+    fn model_label(&mut self, model: &str) -> String {
+        if model.is_empty() {
+            return UNKNOWN.to_string();
+        }
+        let bounded = truncate(model, MAX_LABEL_CHARS).to_string();
+        if self.models.contains(&bounded) {
+            return bounded;
+        }
+        if self.models.len() >= MAX_MODEL_SERIES {
+            self.series_dropped += 1;
+            return OVERFLOW.to_string();
+        }
+        self.models.insert(bounded.clone());
+        bounded
+    }
+
+    fn observe(&mut self, elapsed: Duration) {
+        let elapsed = elapsed.as_secs_f64();
+        let idx = BUCKETS
+            .iter()
+            .position(|bound| elapsed <= *bound)
+            .unwrap_or(BUCKETS.len());
+        self.buckets[idx] += 1;
+        self.duration_sum += elapsed;
+        self.count += 1;
+    }
+
+    fn record_attempt(&mut self, provider: &str, status: u16) {
+        *self.attempts.entry((label(provider), status)).or_insert(0) += 1;
+    }
 }
 
 /// One exact-match cache lookup served from the store: no upstream call happened.
@@ -117,13 +225,35 @@ pub fn guardrail_blocked(stage: Stage) {
     }
 }
 
-/// Replace an unknown label payload with [`UNKNOWN`]; everything else is escaped at
-/// render time so a counter key stays the raw value.
+/// Add one redaction report's counts to the metric, per class.
+///
+/// Labels are the fixed stage/class pair, never a value: this counter can be scraped and
+/// logged without leaking what was removed.
+pub fn pii_redacted(stage: RedactStage, report: &crate::redaction::RedactionReport) {
+    if report.is_empty() {
+        return;
+    }
+    let mut reg = lock();
+    for class in crate::redaction::PiiClass::ALL {
+        reg.pii[stage.index() * 4 + class.index()] += report.count(class);
+    }
+}
+
+/// Replace an unknown label payload with [`UNKNOWN`] and cut an oversized one; the
+/// remainder is escaped at render time so a counter key stays the raw value.
 fn label(value: &str) -> String {
     if value.is_empty() {
         UNKNOWN.to_string()
     } else {
-        value.to_string()
+        truncate(value, MAX_LABEL_CHARS).to_string()
+    }
+}
+
+/// First `max_chars` characters of `value`, cut on a character boundary.
+fn truncate(value: &str, max_chars: usize) -> &str {
+    match value.char_indices().nth(max_chars) {
+        Some((idx, _)) => &value[..idx],
+        None => value,
     }
 }
 
@@ -165,108 +295,158 @@ pub async fn scrape(State(state): State<Arc<AppState>>) -> Response {
 /// Render the whole exposition. Split from [`scrape`] so the escaping rules are
 /// testable without a database.
 pub fn render(version: &str, open_connections: &[(String, bool)]) -> String {
-    let reg = lock();
-    let mut out = String::with_capacity(1024 + reg.requests.len() * 64);
+    lock().render(version, open_connections)
+}
 
-    out.push_str("# HELP rrouter_build_info Build of the running gateway.\n");
-    out.push_str("# TYPE rrouter_build_info gauge\n");
-    out.push_str(&format!(
-        "rrouter_build_info{{version=\"{}\"}} 1\n",
-        escape(version)
-    ));
+impl Registry {
+    fn render(&self, version: &str, open_connections: &[(String, bool)]) -> String {
+        let reg = self;
+        let mut out = String::with_capacity(1024 + reg.requests.len() * 96);
 
-    out.push_str(
-        "# HELP rrouter_requests_total Finished requests, by provider, model and status (\"-\" = no provider).\n",
-    );
-    out.push_str("# TYPE rrouter_requests_total counter\n");
-    for ((provider, model, status), count) in &reg.requests {
-        let labels = format!(
-            "provider=\"{}\",model=\"{}\",status=\"{status}\"",
-            escape(provider),
-            escape(model)
+        out.push_str("# HELP rrouter_build_info Build of the running gateway.\n");
+        out.push_str("# TYPE rrouter_build_info gauge\n");
+        out.push_str(&format!(
+            "rrouter_build_info{{version=\"{}\"}} 1\n",
+            escape(version)
+        ));
+
+        out.push_str(
+            "# HELP rrouter_requests_total Finished requests, by provider, model and status (\"-\" = no provider).\n",
         );
-        out.push_str(&format!("rrouter_requests_total{{{labels}}} {count}\n"));
-    }
+        out.push_str("# TYPE rrouter_requests_total counter\n");
+        for ((provider, model, status), count) in &reg.requests {
+            let labels = format!(
+                "provider=\"{}\",model=\"{}\",status=\"{status}\"",
+                escape(provider),
+                escape(model)
+            );
+            out.push_str(&format!("rrouter_requests_total{{{labels}}} {count}\n"));
+        }
 
-    out.push_str("# HELP rrouter_attempts_total Upstream attempts, by provider and status (0 = no answer).\n");
-    out.push_str("# TYPE rrouter_attempts_total counter\n");
-    for ((provider, status), count) in &reg.attempts {
-        let labels = format!("provider=\"{}\",status=\"{status}\"", escape(provider));
-        out.push_str(&format!("rrouter_attempts_total{{{labels}}} {count}\n"));
-    }
-
-    out.push_str("# HELP rrouter_guardrail_blocks_total Requests refused by an API key's guardrails, by stage.\n");
-    out.push_str("# TYPE rrouter_guardrail_blocks_total counter\n");
-    // Both stages are always exposed, so a scrape answers "how many" without a
-    // second query and a dashboard series does not appear only when it first fires.
-    out.push_str(&format!(
-        "rrouter_guardrail_blocks_total{{stage=\"{}\"}} {}\n",
-        Stage::Input.as_str(),
-        reg.guardrail_input_blocks
-    ));
-    out.push_str(&format!(
-        "rrouter_guardrail_blocks_total{{stage=\"{}\"}} {}\n",
-        Stage::Output.as_str(),
-        reg.guardrail_output_blocks
-    ));
-
-    out.push_str("# HELP rrouter_rtk_requests_total Requests compressed by the Token Saver.\n");
-    out.push_str("# TYPE rrouter_rtk_requests_total counter\n");
-    out.push_str(&format!(
-        "rrouter_rtk_requests_total {}\n",
-        RTK_REQUESTS.load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    out.push_str(
-        "# HELP rrouter_rtk_saved_bytes_total Context bytes removed by the Token Saver.\n",
-    );
-    out.push_str("# TYPE rrouter_rtk_saved_bytes_total counter\n");
-    out.push_str(&format!(
-        "rrouter_rtk_saved_bytes_total {}\n",
-        RTK_SAVED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    out.push_str("# HELP rrouter_cache_hits_total Non-streaming requests served from the exact-match cache.\n");
-    out.push_str("# TYPE rrouter_cache_hits_total counter\n");
-    out.push_str(&format!("rrouter_cache_hits_total {}\n", reg.cache_hits));
-
-    out.push_str("# HELP rrouter_cache_misses_total Cache lookups that found no servable entry.\n");
-    out.push_str("# TYPE rrouter_cache_misses_total counter\n");
-    out.push_str(&format!(
-        "rrouter_cache_misses_total {}\n",
-        reg.cache_misses
-    ));
-
-    out.push_str("# HELP rrouter_request_duration_seconds End-to-end request latency.\n");
-    out.push_str("# TYPE rrouter_request_duration_seconds histogram\n");
-    let mut cumulative = 0u64;
-    for (index, bound) in BUCKETS.iter().enumerate() {
-        cumulative += reg.buckets[index];
+        out.push_str(
+            "# HELP rrouter_metric_series_dropped_total Request observations folded into the __other__ series after a cardinality cap.\n",
+        );
+        out.push_str("# TYPE rrouter_metric_series_dropped_total counter\n");
         out.push_str(&format!(
-            "rrouter_request_duration_seconds_bucket{{le=\"{bound}\"}} {cumulative}\n"
+            "rrouter_metric_series_dropped_total {}\n",
+            reg.series_dropped
         ));
-    }
-    cumulative += reg.buckets[BUCKETS.len()];
-    out.push_str(&format!(
-        "rrouter_request_duration_seconds_bucket{{le=\"+Inf\"}} {cumulative}\n"
-    ));
-    out.push_str(&format!(
-        "rrouter_request_duration_seconds_sum {}\n",
-        reg.duration_sum
-    ));
-    out.push_str(&format!(
-        "rrouter_request_duration_seconds_count {}\n",
-        reg.count
-    ));
 
-    out.push_str("# HELP rrouter_breaker_open Whether a connection's circuit breaker is open.\n");
-    out.push_str("# TYPE rrouter_breaker_open gauge\n");
-    for (connection, is_open) in open_connections {
+        out.push_str("# HELP rrouter_attempts_total Upstream attempts, by provider and status (0 = no answer).\n");
+        out.push_str("# TYPE rrouter_attempts_total counter\n");
+        for ((provider, status), count) in &reg.attempts {
+            let labels = format!("provider=\"{}\",status=\"{status}\"", escape(provider));
+            out.push_str(&format!("rrouter_attempts_total{{{labels}}} {count}\n"));
+        }
+
+        out.push_str("# HELP rrouter_guardrail_blocks_total Requests refused by an API key's guardrails, by stage.\n");
+        out.push_str("# TYPE rrouter_guardrail_blocks_total counter\n");
+        // Both stages are always exposed, so a scrape answers "how many" without a
+        // second query and a dashboard series does not appear only when it first fires.
         out.push_str(&format!(
-            "rrouter_breaker_open{{connection=\"{}\"}} {}\n",
-            escape(connection),
-            u8::from(*is_open)
+            "rrouter_guardrail_blocks_total{{stage=\"{}\"}} {}\n",
+            Stage::Input.as_str(),
+            reg.guardrail_input_blocks
         ));
+        out.push_str(&format!(
+            "rrouter_guardrail_blocks_total{{stage=\"{}\"}} {}\n",
+            Stage::Output.as_str(),
+            reg.guardrail_output_blocks
+        ));
+
+        out.push_str(
+            "# HELP rrouter_trace_context_rejected_total Inbound W3C trace contexts rejected, by reason. The request is served with a fresh trace.\n",
+        );
+        out.push_str("# TYPE rrouter_trace_context_rejected_total counter\n");
+        // One series per rejection reason, exposed at zero, so a dashboard does not wait
+        // for a malformed mesh to create its first sample.
+        for reason in crate::telemetry::RejectReason::ALL {
+            out.push_str(&format!(
+                "rrouter_trace_context_rejected_total{{reason=\"{}\"}} {}\n",
+                reason.as_str(),
+                crate::telemetry::rejected_count(reason)
+            ));
+        }
+
+        out.push_str(
+            "# HELP rrouter_pii_redactions_total PII values replaced, by stage and class. No label carries the text.\n",
+        );
+        out.push_str("# TYPE rrouter_pii_redactions_total counter\n");
+        // Every stage/class pair is always exposed, like the guardrail stages: a series
+        // exists before it first fires, and a scrape answers "how many" in one request.
+        for stage in RedactStage::ALL {
+            for class in crate::redaction::PiiClass::ALL {
+                out.push_str(&format!(
+                    "rrouter_pii_redactions_total{{stage=\"{}\",class=\"{}\"}} {}\n",
+                    stage.as_str(),
+                    class.as_str(),
+                    reg.pii[stage.index() * 4 + class.index()]
+                ));
+            }
+        }
+
+        out.push_str("# HELP rrouter_rtk_requests_total Requests compressed by the Token Saver.\n");
+        out.push_str("# TYPE rrouter_rtk_requests_total counter\n");
+        out.push_str(&format!(
+            "rrouter_rtk_requests_total {}\n",
+            RTK_REQUESTS.load(std::sync::atomic::Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP rrouter_rtk_saved_bytes_total Context bytes removed by the Token Saver.\n",
+        );
+        out.push_str("# TYPE rrouter_rtk_saved_bytes_total counter\n");
+        out.push_str(&format!(
+            "rrouter_rtk_saved_bytes_total {}\n",
+            RTK_SAVED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+        ));
+        out.push_str("# HELP rrouter_cache_hits_total Non-streaming requests served from the exact-match cache.\n");
+        out.push_str("# TYPE rrouter_cache_hits_total counter\n");
+        out.push_str(&format!("rrouter_cache_hits_total {}\n", reg.cache_hits));
+
+        out.push_str(
+            "# HELP rrouter_cache_misses_total Cache lookups that found no servable entry.\n",
+        );
+        out.push_str("# TYPE rrouter_cache_misses_total counter\n");
+        out.push_str(&format!(
+            "rrouter_cache_misses_total {}\n",
+            reg.cache_misses
+        ));
+
+        out.push_str("# HELP rrouter_request_duration_seconds End-to-end request latency.\n");
+        out.push_str("# TYPE rrouter_request_duration_seconds histogram\n");
+        let mut cumulative = 0u64;
+        for (index, bound) in BUCKETS.iter().enumerate() {
+            cumulative += reg.buckets[index];
+            out.push_str(&format!(
+                "rrouter_request_duration_seconds_bucket{{le=\"{bound}\"}} {cumulative}\n"
+            ));
+        }
+        cumulative += reg.buckets[BUCKETS.len()];
+        out.push_str(&format!(
+            "rrouter_request_duration_seconds_bucket{{le=\"+Inf\"}} {cumulative}\n"
+        ));
+        out.push_str(&format!(
+            "rrouter_request_duration_seconds_sum {}\n",
+            reg.duration_sum
+        ));
+        out.push_str(&format!(
+            "rrouter_request_duration_seconds_count {}\n",
+            reg.count
+        ));
+
+        out.push_str(
+            "# HELP rrouter_breaker_open Whether a connection's circuit breaker is open.\n",
+        );
+        out.push_str("# TYPE rrouter_breaker_open gauge\n");
+        for (connection, is_open) in open_connections {
+            out.push_str(&format!(
+                "rrouter_breaker_open{{connection=\"{}\"}} {}\n",
+                escape(connection),
+                u8::from(*is_open)
+            ));
+        }
+        out
     }
-    out
 }
 
 /// Escape a label value per the exposition format: `\`, `"` and newlines.
@@ -411,5 +591,154 @@ mod tests {
             text.contains(r#"rrouter_build_info{version="9.9.9"} 1"#),
             "{text}"
         );
+    }
+
+    /// Helpers for the cardinality tests: these use a fresh [`Registry`] rather than the
+    /// process-global one, so a flood cannot leak into the other tests' series.
+    fn request_series(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter(|line| line.starts_with("rrouter_requests_total{"))
+            .collect()
+    }
+
+    fn series_total(lines: &[&str]) -> u64 {
+        lines
+            .iter()
+            .filter_map(|line| line.rsplit(' ').next()?.parse::<u64>().ok())
+            .sum()
+    }
+
+    /// The model label is client input and `/v1` can be unauthenticated, so a flood must
+    /// be bounded by the caps — not by how many ids an attacker sends — while still
+    /// counting every request exactly once.
+    #[test]
+    fn a_flood_of_client_models_stays_within_the_series_caps() {
+        let mut reg = Registry::default();
+        for index in 0..5_000 {
+            reg.record_request(
+                "acme",
+                &format!("attacker-model-{index}"),
+                200,
+                Duration::from_millis(1),
+            );
+        }
+
+        assert_eq!(
+            reg.requests.len(),
+            MAX_MODEL_SERIES + 1,
+            "one series per distinct model, plus the overflow series"
+        );
+        assert_eq!(reg.series_dropped, (5_000 - MAX_MODEL_SERIES) as u64);
+
+        let text = reg.render("0.0.1", &[]);
+        let lines = request_series(&text);
+        assert_eq!(lines.len(), MAX_MODEL_SERIES + 1);
+        assert!(
+            lines.iter().all(|line| line.len() < 256),
+            "a single series line must stay short"
+        );
+        assert!(
+            text.len() < 256 * 1024,
+            "5000 hostile ids must not inflate the scrape: {} bytes",
+            text.len()
+        );
+
+        // No request was lost: the overflow series carries exactly the folded rest and
+        // the whole family still sums to the observation count.
+        let overflow = lines
+            .iter()
+            .find(|line| line.contains(r#"model="__other__""#))
+            .expect("overflow series rendered");
+        assert!(
+            overflow.ends_with(&format!(" {}", 5_000 - MAX_MODEL_SERIES)),
+            "{overflow}"
+        );
+        assert_eq!(series_total(&lines), 5_000);
+        assert!(
+            text.contains("rrouter_metric_series_dropped_total 4500"),
+            "dropped observations are exported: {text}"
+        );
+        assert_eq!(
+            text.lines()
+                .find_map(|l| l.strip_prefix("rrouter_request_duration_seconds_count "))
+                .and_then(|v| v.parse::<u64>().ok()),
+            Some(5_000),
+            "the histogram still counts every request"
+        );
+    }
+
+    /// Known models keep their exact labels once the cap is reached; only ids that never
+    /// owned a series are folded. Dashboards for real catalog models must not go blank
+    /// because someone probed random names earlier.
+    #[test]
+    fn a_known_model_keeps_its_own_series_after_the_cap() {
+        let mut reg = Registry::default();
+        reg.record_request("acme", "real-model", 200, Duration::from_millis(1));
+        for index in 0..MAX_MODEL_SERIES + 10 {
+            reg.record_request(
+                "acme",
+                &format!("noise-{index}"),
+                200,
+                Duration::from_millis(1),
+            );
+        }
+        reg.record_request("acme", "real-model", 200, Duration::from_millis(1));
+
+        let text = reg.render("0.0.1", &[]);
+        assert!(
+            text.contains(
+                r#"rrouter_requests_total{provider="acme",model="real-model",status="200"} 2"#
+            ),
+            "{text}"
+        );
+    }
+
+    /// A 5000-character model id is still valid UTF-8 after truncation and occupies one
+    /// bounded label, not 5000 bytes per scrape per request.
+    #[test]
+    fn oversized_labels_are_truncated_on_a_character_boundary() {
+        let mut reg = Registry::default();
+        let long = "é".repeat(5_000);
+        reg.record_request("acme", &long, 200, Duration::from_millis(1));
+
+        let text = reg.render("0.0.1", &[]);
+        let line = request_series(&text)
+            .into_iter()
+            .next()
+            .expect("series rendered");
+        let model = line
+            .split("model=\"")
+            .nth(1)
+            .expect("model label")
+            .split('"')
+            .next()
+            .expect("closed label");
+        assert_eq!(model.chars().count(), MAX_LABEL_CHARS);
+        assert_eq!(model, "é".repeat(MAX_LABEL_CHARS));
+        assert!(
+            reg.models.contains(&"é".repeat(MAX_LABEL_CHARS)),
+            "the truncated id owns the series"
+        );
+    }
+
+    /// The model cap is not the only bound: many providers or statuses for one model
+    /// must also stop growing the map, and the overflow still counts every observation.
+    #[test]
+    fn the_series_cap_also_bounds_provider_and_status_combinations() {
+        let mut reg = Registry::default();
+        let observations = MAX_REQUEST_SERIES + 100;
+        for index in 0..observations {
+            reg.record_request(
+                &format!("provider-{index}"),
+                "one-model",
+                200,
+                Duration::from_millis(1),
+            );
+        }
+
+        assert_eq!(reg.requests.len(), MAX_REQUEST_SERIES + 1);
+        assert_eq!(reg.series_dropped, 100);
+        let text = reg.render("0.0.1", &[]);
+        assert_eq!(series_total(&request_series(&text)), observations as u64);
     }
 }

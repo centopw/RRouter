@@ -2,15 +2,53 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
-## Unreleased
+## 0.4.0 — 2026-11-09
 
 ### Added
+- Webhooks: an admin-only endpoint registry (`/api/webhooks`) and a leased SQLite outbox
+  that delivers HMAC-SHA256-signed events (key/team/connection/audit) from a background
+  worker with backoff, dead-lettering and a terminal `unmatched` state for events with no
+  subscriber. The dashboard page shows subscription, secret readiness and queue status.
+- W3C trace context: `traceparent`/`tracestate` are accepted on every `/v1` entry, `x-trace-id`
+  is echoed on every response next to `x-request-id`, the access line carries `trace_id`,
+  every attempt logs a child span, and `usage.trace_id` joins a request's rows. Every
+  outbound attempt forwards a child `traceparent` (and the accepted `tracestate`) with the
+  same span id it logs — retries and hedged legs get distinct children — and rejected
+  inbound contexts are counted in `rrouter_trace_context_rejected_total{reason}`.
+- Teams own provider accounts (`connections.team_id`): a team-scoped key is routed only to
+  its team's accounts, and the upgrade note lives in `docs/DEPLOY.md` §5.1.
+- Evals: suites and cases executed through the real `/v1` path, with results and summaries
+  (`/api/evals/*` and the Evals page).
+- Per-key PII redaction (email/phone/card/credential shapes) for prompts, non-streaming
+  responses and streamed text, off by default, counted per stage and documented in
+  `docs/GUARDRAILS.md`. Streams rewrite text/reasoning deltas through a 512-byte carry
+  (bounded visible lag; a stream ending without its terminal frame still flushes); tool-call
+  arguments and opaque payloads are deliberately left byte-identical.
+- Semantic response cache: `RROUTER_SEMANTIC_CACHE=sqlite` embeds a canonical prompt with
+  an operator-supplied `RROUTER_SEMANTIC_EMBEDDING_MODEL` and serves a stored response when
+  cosine similarity reaches `RROUTER_SEMANTIC_CACHE_THRESHOLD`, within the scope, TTL and
+  row bounds. Non-streaming chat/messages/responses only.
+- Operator canary and non-streaming hedging: `RROUTER_CANARY=model=provider:percent`
+  prefers a provider for a share of request ids inside its priority tier (reloadable), and
+  `RROUTER_HEDGE_MS` starts the next same-priority candidate in parallel after the delay,
+  first success wins, loser cancelled. Streams are never hedged.
+- OpenAI-compatible files and batches: `/v1/files` and `/v1/batches` are forwarded
+  byte-identically to providers that declare the capability (multipart boundary and batch
+  JSON preserved), never executed or stored here; a provider without it answers `501`.
+- Optional OTLP/HTTP span export behind the `otel` cargo feature (default off, so default
+  builds link no OpenTelemetry crates): `RROUTER_OTEL_ENDPOINT` (env-only) enables
+  request/attempt spans with parent-based sampling, and shutdown flushes with a 5 s bound.
+  Only ids, provider/model, status and latency are exported.
+- Session device metadata (schema v28): every sign-in path records the resolved client IP,
+  raw User-Agent (bounded to 512 chars) and a derived `device_label`, returned for the
+  signed-in user's own sessions.
 - Token Saver (RTK): inbound tool results are compressed before routing — grouped greps,
   capped git status/diff/log, collapsed build logs and repeated lines, head/tail truncation
   with markers. On by default, toggle in Settings, bypass with `x-rrouter-rtk: off`; savings
   are logged and exported as `rrouter_rtk_saved_bytes_total`.
 - Production identity tooling: persisted audit trail with an Audit page, self-service
-  account page (rename, password change with session rotation, per-device revoke), recovery
+  account page (rename, password change with session rotation, per-device revoke and device
+  labels from the session metadata), recovery
   throttling, `/ready`, and `rrouter admin backup <file>` (consistent `VACUUM INTO`). CI runs
   clippy, tests and the dashboard build.
 - Model lists are newest-first (version- and date-aware) and retired families (Claude 3.x,

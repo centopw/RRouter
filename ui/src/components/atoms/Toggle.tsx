@@ -24,10 +24,14 @@ export function Toggle({
       aria-label={label}
       disabled={disabled}
       className={cx(
-        "relative shrink-0 rounded-full border transition-colors disabled:opacity-50",
+        "relative shrink-0 cursor-pointer rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+        // A 48×46 target without touching the visual: the pseudo-element is transparent
+        // and extends past the painted box (16px tall + 15px each side, 28px wide + 10).
+        "before:absolute before:-inset-x-[10px] before:-inset-y-[15px] before:content-['']",
         small ? "h-4 w-7" : "h-6 w-11",
         "data-[state=checked]:border-accent data-[state=checked]:bg-accent",
-        "data-[state=unchecked]:border-line-strong data-[state=unchecked]:bg-surface-3",
+        // `line-strong` on white is 1.9:1; the off state's boundary needs 3:1 to be seen.
+        "data-[state=unchecked]:border-[var(--color-faint)] data-[state=unchecked]:bg-surface-3",
       )}
     >
       <Switch.Thumb

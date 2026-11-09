@@ -2,20 +2,27 @@
 
 pub mod audit;
 pub mod auth;
+pub mod batches;
 pub mod combos;
 pub mod connections;
+pub mod evals;
+pub mod files;
 pub mod health;
 pub mod keys;
 pub mod models;
+pub(crate) mod native;
 pub mod oauth;
 pub mod quotas;
+pub mod rerank;
 pub mod settings;
 pub mod system;
 pub mod system_logs;
+pub mod teams;
 pub mod templates;
 pub mod updates;
 pub mod usage;
 pub mod users;
+pub mod webhooks;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

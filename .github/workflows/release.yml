@@ -1,7 +1,8 @@
 name: release
 
-# Tagged builds: the installer script downloads these tarballs, and their
-# sha256 files are what it verifies before installing.
+# Tagged builds: the installer downloads these tarballs and verifies their `.sha256`
+# before installing. Every release also carries a CycloneDX SBOM per artifact and a
+# GitHub build-provenance attestation; see docs/RELEASES.md for what that proves.
 
 on:
   push:
@@ -36,8 +37,15 @@ jobs:
             target: x86_64-apple-darwin
             asset: darwin-amd64
     runs-on: ${{ matrix.runner }}
+    # Least privilege: the release upload, the OIDC token for attestation signing, and
+    # the attestation store. Nothing else is granted to a job that runs build scripts.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Require a tag
+        id: tag
         # workflow_dispatch needs an explicit tag; a branch name would publish a
         # release nobody can install from.
         run: |
@@ -46,17 +54,37 @@ jobs:
             v*) ;;
             *) echo "publish needs a v* tag, got '$tag'" >&2; exit 1 ;;
           esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
+        with:
+          # A re-run for an old tag must build that tag, not the branch it is dispatched
+          # from — otherwise the provenance would name the wrong source.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve source commit
+        id: source
+        # `github.sha` is the event's commit; on a workflow_dispatch re-run that is the
+        # branch head, not the tag. The SBOM must describe what was actually built.
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Cache downloaded crates only. Restoring compiled `target/` output would let a
+          # poisoned cache reach a signed release artifact.
+          cache-targets: "false"
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
+        # Artifact names and `.sha256` layout are a contract with install.sh: do not
+        # rename them.
         run: |
           set -eu
           name="rrouter-${{ matrix.asset }}"
@@ -71,11 +99,54 @@ jobs:
             shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
           fi
 
+      - name: SBOM (CycloneDX 1.5)
+        # Deterministic and generated from the tag's Cargo.lock, so the published file can
+        # be re-derived from the source (see the `verify` job).
+        run: |
+          python3 scripts/sbom.py \
+            --artifact "rrouter-${{ matrix.asset }}" \
+            --version "${{ steps.tag.outputs.version }}" \
+            --commit "${{ steps.source.outputs.commit }}" \
+            --output "dist/rrouter-${{ matrix.asset }}.tar.gz.sbom.cdx.json"
+
+      - name: Attest build provenance
+        # Binds each downloadable file to this workflow, repository, commit and tag.
+        # `gh attestation verify` is the documented way to check it.
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/rrouter-${{ matrix.asset }}.tar.gz
+
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ steps.tag.outputs.tag }}
           files: |
             dist/rrouter-${{ matrix.asset }}.tar.gz
             dist/rrouter-${{ matrix.asset }}.tar.gz.sha256
+            dist/rrouter-${{ matrix.asset }}.tar.gz.sbom.cdx.json
           generate_release_notes: true
+
+  # Post-publish check: verify what users actually download, not what the build workspace
+  # happened to contain. A missing or swapped asset fails the workflow here.
+  verify:
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      # Read-only: download the release assets and read the attestation store.
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # `--commit` proves each SBOM is byte-identical to one generated from this tag.
+        # On a workflow_dispatch re-run the provenance statement's source ref is the
+        # dispatch commit (a GitHub limitation); a tag push is the authoritative path.
+        run: |
+          bash scripts/verify-release.sh "${{ github.event.inputs.tag || github.ref_name }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit "$(git rev-parse HEAD)"

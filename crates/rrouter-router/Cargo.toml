@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 rrouter-core.workspace = true
+rrouter-auth.workspace = true
 rrouter-store.workspace = true
 rusqlite.workspace = true
 tokio.workspace = true

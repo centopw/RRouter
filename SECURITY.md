@@ -11,6 +11,25 @@ reproduction, and the impact you observed. Acknowledgement within 72 hours.
 
 The latest `v0.*` release and `main`. Older tags receive fixes only for critical issues.
 
+## Verifying a release
+
+Release tarballs ship with a SHA-256 and a GitHub build-provenance attestation. The
+installer checks the digest only: that catches corruption or a truncated download, but not
+a swapped file, because the checksum comes from the same channel as the tarball. Before
+running a binary on a sensitive host, verify provenance:
+
+```sh
+gh attestation verify rrouter-linux-amd64.tar.gz --repo centopw/RRouter
+./scripts/verify-release.sh v0.3.0    # all platforms: checksums, SBOMs, provenance
+```
+
+What that proves: the tarball's digest was produced by this repository's `release.yml` from
+a specific commit and tag. What it does not prove: that the source is vulnerability-free,
+or that a local rebuild is byte-identical. Each release also carries a CycloneDX SBOM per
+artifact (the resolved `Cargo.lock` inventory) for scanning. There is no detached cosign
+signature in this release line — see `docs/RELEASES.md` for that decision and the exact
+verification commands.
+
 ## What RRouter stores
 
 | Data | Where | Protection |

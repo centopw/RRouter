@@ -83,6 +83,35 @@ pub struct SessionInfo {
     pub token_hash: String,
     pub created_at: i64,
     pub expires_at: i64,
+    /// Address that created the session, bounded to 64 characters; `None` for rows
+    /// written before schema v28 or by callers that pass no metadata.
+    pub ip: Option<String>,
+    /// Raw `User-Agent` bounded to 512 characters. The API derives a short label from
+    /// it at read time; this stays raw so the label can improve without a migration.
+    pub user_agent: Option<String>,
+}
+
+/// Longest stored client address (an `X-Forwarded-For` entry can be arbitrary text).
+pub const MAX_SESSION_IP: usize = 64;
+/// Longest stored user agent. Enough for a full desktop UA; longer strings are cut.
+pub const MAX_SESSION_USER_AGENT: usize = 512;
+
+/// Trim, strip control characters and bound one session metadata field. Empty becomes
+/// `None`, so a blank header never turns into an empty string in the database.
+fn session_metadata(raw: Option<&str>, limit: usize) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(limit).collect())
 }
 
 /// A pending (or consumed) invitation. `token_hash` is not exposed back to the caller
@@ -451,18 +480,34 @@ impl Store {
 
     // ----- sessions ------------------------------------------------------------------
 
+    /// Create a session. `ip` and `user_agent` are optional device metadata; both are
+    /// trimmed, stripped of control characters and bounded here, so no caller can store
+    /// an unbounded header.
     pub async fn create_session(
         &self,
         token_hash: &str,
         user_id: Uuid,
         expires_at: i64,
         remember: bool,
+        ip: Option<&str>,
+        user_agent: Option<&str>,
     ) -> Result<()> {
+        let ip = session_metadata(ip, MAX_SESSION_IP);
+        let user_agent = session_metadata(user_agent, MAX_SESSION_USER_AGENT);
         self.conn()
             .execute(
-                "INSERT INTO user_sessions (token_hash, user_id, created_at, expires_at, remember) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![token_hash, user_id.to_string(), now(), expires_at, remember as i64],
+                "INSERT INTO user_sessions \
+                 (token_hash, user_id, created_at, expires_at, remember, ip, user_agent) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    token_hash,
+                    user_id.to_string(),
+                    now(),
+                    expires_at,
+                    remember as i64,
+                    ip,
+                    user_agent
+                ],
             )
             .map_err(migrations::db_err)?;
         Ok(())
@@ -520,7 +565,7 @@ impl Store {
         let conn = self.conn();
         let mut stmt = conn
             .prepare(
-                "SELECT token_hash, created_at, expires_at FROM user_sessions \
+                "SELECT token_hash, created_at, expires_at, ip, user_agent FROM user_sessions \
                  WHERE user_id = ?1 AND expires_at > ?2 ORDER BY created_at DESC",
             )
             .map_err(migrations::db_err)?;
@@ -531,6 +576,8 @@ impl Store {
                     token_hash: r.get(0)?,
                     created_at: r.get(1)?,
                     expires_at: r.get(2)?,
+                    ip: r.get(3)?,
+                    user_agent: r.get(4)?,
                 })
             })
             .map_err(migrations::db_err)?;

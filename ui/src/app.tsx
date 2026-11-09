@@ -1,11 +1,14 @@
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   Pulse,
   ArrowsLeftRight,
+  Buildings,
   ChatCircleText,
   Cube,
   FileText,
+  Flask,
+  WebhooksLogo,
   GearSix,
   Heartbeat,
   ListMagnifyingGlass,
@@ -21,13 +24,20 @@ import {
   UsersThree,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
-import { useAuthState, useHealth, useModels, useSignOut, useSystem } from "./lib/queries";
+import { useAuthState, useHealth, useIsAdmin, useModels, useSignOut, useSystem } from "./lib/queries";
 import { Button, CopyChip, Dot, cx } from "./components/ui";
 import { uptime } from "./lib/format";
 
-type NavItem = { to: string; label: string; icon: React.ReactNode; group: string };
+type NavItem = {
+  to: string;
+  label: string;
+  icon: React.ReactNode;
+  group: string;
+  /** Hidden from members and viewers; the matching route is guarded too. */
+  adminOnly?: boolean;
+};
 
 const glyph = (Icon: typeof Pulse) => <Icon size={17} weight="regular" aria-hidden />;
 
@@ -43,20 +53,23 @@ const DEFAULT_NAME = "RRouter";
 
 const NAV: NavItem[] = [
   { to: "/activity", label: "Activity", icon: glyph(Pulse), group: "Gateway" },
-  { to: "/logs", label: "Logs", icon: glyph(ListBullets), group: "Gateway" },
-  { to: "/playground", label: "Playground", icon: glyph(ChatCircleText), group: "Gateway" },
+  { to: "/logs", label: "Logs", icon: glyph(ListBullets), group: "Gateway", adminOnly: true },
+  { to: "/playground", label: "Playground", icon: glyph(ChatCircleText), group: "Gateway", adminOnly: true },
   { to: "/templates", label: "Templates", icon: glyph(FileText), group: "Gateway" },
+  { to: "/evals", label: "Evals", icon: glyph(Flask), group: "Gateway" },
   { to: "/providers", label: "Providers", icon: glyph(PlugsConnected), group: "Gateway" },
   { to: "/models", label: "Models", icon: glyph(Cube), group: "Gateway" },
-  { to: "/keys", label: "API Keys", icon: glyph(Key), group: "Access" },
-  { to: "/users", label: "Users", icon: glyph(UsersThree), group: "Access" },
-  { to: "/aliases", label: "Aliases", icon: glyph(ArrowsLeftRight), group: "Routing" },
-  { to: "/combos", label: "Combos", icon: glyph(Shuffle), group: "Routing" },
+  { to: "/keys", label: "API Keys", icon: glyph(Key), group: "Access", adminOnly: true },
+  { to: "/teams", label: "Teams", icon: glyph(Buildings), group: "Access" },
+  { to: "/users", label: "Users", icon: glyph(UsersThree), group: "Access", adminOnly: true },
+  { to: "/aliases", label: "Aliases", icon: glyph(ArrowsLeftRight), group: "Routing", adminOnly: true },
+  { to: "/combos", label: "Combos", icon: glyph(Shuffle), group: "Routing", adminOnly: true },
   { to: "/account", label: "My account", icon: glyph(UserCircle), group: "System" },
-  { to: "/audit", label: "Audit", icon: glyph(ListMagnifyingGlass), group: "System" },
-  { to: "/health", label: "Health", icon: glyph(Heartbeat), group: "System" },
-  { to: "/system-logs", label: "System logs", icon: glyph(TerminalWindow), group: "System" },
-  { to: "/settings", label: "Settings", icon: glyph(GearSix), group: "System" },
+  { to: "/audit", label: "Audit", icon: glyph(ListMagnifyingGlass), group: "System", adminOnly: true },
+  { to: "/health", label: "Health", icon: glyph(Heartbeat), group: "System", adminOnly: true },
+  { to: "/webhooks", label: "Webhooks", icon: glyph(WebhooksLogo), group: "System", adminOnly: true },
+  { to: "/system-logs", label: "System logs", icon: glyph(TerminalWindow), group: "System", adminOnly: true },
+  { to: "/settings", label: "Settings", icon: glyph(GearSix), group: "System", adminOnly: true },
 ];
 
 /** A first run (no accounts, no keys) lands on the wizard once; the flag is set by the
@@ -65,12 +78,17 @@ const SETUP_DISMISSED = "rrouter:setup-dismissed";
 const SIDEBAR_COLLAPSED = "rrouter:sidebar-collapsed";
 
 export function Shell() {
+  const isAdmin = useIsAdmin();
   const health = useHealth();
-  const system = useSystem();
+  // `/api/system` is admin surface; asking as a reader would only produce a 403 toast.
+  const system = useSystem(isAdmin);
+  // White-label settings are admin surface; a reader gets the built-in brand rather
+  // than a 403 behind every page load.
   const settings = useQuery({
     queryKey: ["gateway-settings"],
     queryFn: () => api.get<Brand>("/api/settings"),
     staleTime: 60_000,
+    enabled: isAdmin,
   });
   const brand = settings.data ?? {};
   const name = brand.brand_name?.trim() || DEFAULT_NAME;
@@ -86,7 +104,12 @@ export function Shell() {
   }, [name, brand.brand_color]);
 
   const navigate = useNavigate();
+  const location = useLocation();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // The rail fades its ends only when the list actually scrolls, so a short nav has no
+  // unexplained gradient. The gutter keeps labels from shifting when it grows.
+  const navRef = useRef<HTMLElement | null>(null);
+  const [navEdges, setNavEdges] = useState({ top: false, bottom: false });
   // A collapsed rail keeps the icons and drops the labels; the choice survives reloads.
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -116,12 +139,13 @@ export function Shell() {
   }, []);
 
   useEffect(() => {
+    if (!isAdmin) return;
     const counts = system.data?.counts;
     if (!counts) return;
     if (counts.connections > 0 || counts.api_keys > 0) return;
     if (window.localStorage.getItem(SETUP_DISMISSED) === "1") return;
     navigate("/setup", { replace: true });
-  }, [system.data, navigate]);
+  }, [isAdmin, system.data, navigate]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -134,15 +158,40 @@ export function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  /** One list drives the rail, the mobile tabs and ⌘K, so no two can disagree. */
+  const nav = useMemo(() => NAV.filter((item) => isAdmin || !item.adminOnly), [isAdmin]);
+
   const groups = useMemo(() => {
     const out = new Map<string, NavItem[]>();
-    for (const item of NAV) {
+    for (const item of nav) {
       const bucket = out.get(item.group);
       if (bucket) bucket.push(item);
       else out.set(item.group, [item]);
     }
     return [...out.entries()];
-  }, []);
+  }, [nav]);
+
+  useEffect(() => {
+    const element = navRef.current;
+    if (!element) return;
+    const update = () =>
+      setNavEdges({
+        top: element.scrollTop > 2,
+        bottom: element.scrollTop + element.clientHeight < element.scrollHeight - 2,
+      });
+    update();
+    element.addEventListener("scroll", update, { passive: true });
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => {
+      element.removeEventListener("scroll", update);
+      observer.disconnect();
+    };
+  }, [collapsed]);
+
+  const navFade = `linear-gradient(to bottom, transparent 0, black ${
+    navEdges.top ? "12px" : "0px"
+  }, black calc(100% - ${navEdges.bottom ? "12px" : "0px"}), transparent 100%)`;
 
   const endpoint = `${window.location.origin}/v1`;
   const running = !health.isError;
@@ -153,6 +202,12 @@ export function Shell() {
 
   return (
     <div className="flex h-full flex-col min-[820px]:flex-row">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-full focus:bg-accent focus:px-4 focus:py-2 focus:text-body focus:font-semibold focus:text-[var(--color-accent-ink)]"
+      >
+        Skip to content
+      </a>
       <aside
         className={cx(
           "hidden shrink-0 flex-col border-r border-line bg-[var(--color-sidebar)] transition-[width] duration-200 min-[820px]:flex",
@@ -213,7 +268,12 @@ export function Shell() {
           <JumpButton onClick={() => setPaletteOpen(true)} collapsed={collapsed} />
         </div>
 
-        <nav className={cx("mt-2 flex-1 overflow-y-auto pb-3", collapsed ? "px-2" : "px-2")} aria-label="Dashboard">
+        <nav
+          ref={navRef}
+          className={cx("nav-scroll mt-2 flex-1 overflow-y-auto pb-3", collapsed ? "px-2" : "px-2")}
+          style={{ maskImage: navFade, WebkitMaskImage: navFade }}
+          aria-label="Dashboard"
+        >
           {groups.map(([group, items]) => (
             <div key={group} className="mb-3">
               {collapsed ? (
@@ -276,21 +336,29 @@ export function Shell() {
           </button>
         </div>
         <nav className="flex gap-1 overflow-x-auto px-2 pb-2" aria-label="Dashboard">
-          {NAV.map((item) => (
+          {nav.map((item) => (
             <NavItemLink key={item.to} item={item} variant="tab" />
           ))}
         </nav>
       </header>
 
-      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 min-[820px]:px-10 min-[820px]:pb-14 min-[820px]:pt-8">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 focus:outline-none min-[820px]:px-10 min-[820px]:pb-14 min-[820px]:pt-8"
+      >
         <div className="mx-auto w-full max-w-[1160px]">
-          <Suspense fallback={<div className="text-body text-faint">loading…</div>}>
-            <Outlet />
-          </Suspense>
+          {/* Keyed by path, not by query: a filter change inside a page must not remount
+              it, while a route change fades the new page in. */}
+          <div key={location.pathname} className="page-enter">
+            <Suspense fallback={<div className="text-body text-faint">loading…</div>}>
+              <Outlet />
+            </Suspense>
+          </div>
         </div>
       </main>
 
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} nav={nav} />
     </div>
   );
 }
@@ -477,7 +545,7 @@ function NavItemLink({
   );
 }
 
-function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
+function CommandPalette({ open, onClose, nav }: { open: boolean; onClose: () => void; nav: NavItem[] }) {
   const [query, setQuery] = useState("");
   const navigate = useNavigate();
   const models = useModels();
@@ -488,12 +556,12 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const pages = NAV.filter((n) => !q || n.label.toLowerCase().includes(q)).slice(0, 6);
+    const pages = nav.filter((n) => !q || n.label.toLowerCase().includes(q)).slice(0, 6);
     const modelHits = (models.data ?? [])
       .filter((m) => q && m.ref.toLowerCase().includes(q))
       .slice(0, 6);
     return { pages, modelHits };
-  }, [query, models.data]);
+  }, [nav, query, models.data]);
 
   const go = (path: string) => {
     navigate(path);

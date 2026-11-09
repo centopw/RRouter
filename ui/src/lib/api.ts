@@ -125,6 +125,19 @@ export async function download(path: string): Promise<{ blob: Blob; filename: st
   };
 }
 
+/** Save a downloaded blob under `filename` and release the object URL. */
+export function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Revoking immediately can cancel the download in Safari; one tick is enough.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /** `filename="x.csv"`, or RFC 5987 `filename*=UTF-8''x.csv`; null when unnamed. */
 function attachmentName(header: string | null): string | null {
   if (!header) return null;
@@ -210,6 +223,15 @@ export type Connection = {
   name: string | null;
   email: string | null;
   auth_type: string;
+  /** Owning team; `null` means shared/instance-wide (serves non-team keys only). */
+  team_id: string | null;
+  /** Dashboard attribution: who added the account. Not an access grant. */
+  owner_user_id: string | null;
+  /**
+   * Origin this account dispatches to; `null` means the provider's manifest URL. The
+   * gateway keeps the provider's endpoint path and takes only the origin from here.
+   */
+  base_url_override: string | null;
   priority: number;
   /** Share of traffic inside one priority group; only used by the weighted strategy. */
   weight: number;
@@ -295,6 +317,11 @@ export type Guardrails = {
   max_prompt_chars?: number;
   blocked: string[];
   scan_output: boolean;
+  /**
+   * Mask emails, phone numbers, card numbers and credential-shaped strings in the prompt
+   * and in a non-streaming response. Off unless the operator opts in.
+   */
+  redact_pii?: boolean;
 };
 
 /**
@@ -326,6 +353,8 @@ export type KeyResult = {
   expires_at: number | null;
   models?: KeyModelMap[];
   guardrails: Guardrails | null;
+  /** Tenancy: the team this key spends for, or null for instance-wide. */
+  team_id?: string | null;
 };
 
 /** Exactly the fields `PATCH /api/keys/{id}` accepts; null clears a nullable field. */
@@ -344,7 +373,158 @@ export type UpdateKey = Partial<{
   expires_at: number | null;
   /** Whole policy replace; null clears every check. */
   guardrails: Guardrails | null;
+  /** Tenancy; null releases the key back to instance-wide. */
+  team_id: string | null;
 }>;
+
+
+/** A member of a team; `team_admin` is scoped administration. */
+export type TeamRole = "team_admin" | "member" | "viewer";
+
+export type TeamMember = {
+  team_id: string;
+  user_id: string;
+  email: string | null;
+  name: string | null;
+  role: TeamRole;
+  created_at: number;
+};
+
+export type TeamSpend = { requests: number; tokens: number; cost_micros: number };
+
+export type Team = {
+  id: string;
+  name: string;
+  created_at: number;
+  budget_tokens: number;
+  budget_micros: number;
+  budget_window: BudgetWindow;
+  members: number;
+  spend: TeamSpend;
+  /** Present on the single-team read only. */
+  members_list?: TeamMember[];
+};
+
+/** Exactly the fields `POST`/`PATCH /api/teams/{id}` accept. */
+export type UpdateTeam = Partial<{
+  name: string;
+  budget_tokens: number;
+  budget_micros: number;
+  budget_window: BudgetWindow;
+}>;
+
+
+/** One eval suite: a named list of cases a model is run against. */
+export type EvalSuite = {
+  id: string;
+  name: string;
+  description: string | null;
+  cases: number;
+  created_at: number;
+  updated_at: number;
+};
+
+/** One case: the prompt, and the text a correct answer should contain. */
+export type EvalCase = {
+  id: string;
+  suite_id: string;
+  name: string | null;
+  input: string;
+  expected: string | null;
+  created_at: number;
+};
+
+export type EvalRunStatus = "pending" | "running" | "completed" | "failed";
+
+export type EvalSummary = {
+  cases: number;
+  passed: number;
+  failed: number;
+  unscored: number;
+  errors: number;
+  duration_ms: number;
+  error?: string | null;
+};
+
+export type EvalRun = {
+  id: string;
+  suite_id: string;
+  model: string;
+  status: EvalRunStatus;
+  created_at: number;
+  completed_at: number | null;
+  summary: EvalSummary | null;
+  progress: { done: number; total: number };
+};
+
+/** One case's outcome. `passed` is null when the case had no expectation. */
+export type EvalResult = {
+  id: string;
+  run_id: string;
+  case_id: string;
+  case_name: string | null;
+  case_input: string;
+  output: string | null;
+  score: number | null;
+  passed: boolean | null;
+  latency_ms: number | null;
+  error: string | null;
+  created_at: number;
+};
+
+export type EvalSuiteDetail = { data: EvalSuite; cases: EvalCase[]; runs: EvalRun[] };
+export type EvalRunDetail = { data: EvalRun; results: EvalResult[] };
+
+/** One webhook receiver. `secret_env` names an environment variable, never a secret. */
+export type Webhook = {
+  id: string;
+  url: string;
+  event_types: string[];
+  secret_env: string | null;
+  has_secret: boolean;
+  /** The named variable resolves in the gateway's environment right now. */
+  secret_configured: boolean;
+  /** `secret_configured && enabled`: whether this endpoint could receive an event today. */
+  ready: boolean;
+  enabled: boolean;
+  created_at: number;
+  /** `null` until the row is first patched. */
+  updated_at: number | null;
+};
+
+export type WebhookList = {
+  webhooks: Webhook[];
+  /** How many endpoints may be registered. */
+  max: number;
+  /** The subscription vocabulary; `*` means everything. */
+  event_types: string[];
+  /** Legacy comma-joined copy of `event_types`, for a server build that predates the array. */
+  event_types_csv?: string;
+};
+
+/** One outbox attempt. Never carries a payload. */
+export type WebhookAttempt = {
+  id: number;
+  type: string;
+  status: string;
+  attempts: number;
+  created_at: number;
+  next_attempt_at: number | null;
+  last_error: string | null;
+  delivered_at: number | null;
+};
+
+export type WebhookStatus = {
+  outbox: {
+    pending: number;
+    delivering: number;
+    delivered: number;
+    /** Terminal, but nothing was sent: no endpoint subscribed. Never folded into `delivered`. */
+    unmatched: number;
+    dead: number;
+  };
+  recent: WebhookAttempt[];
+};
 
 /** Exactly the fields `PATCH /api/connections/{id}` accepts; weight is clamped to 1..=1000. */
 export type UpdateConnection = Partial<{
@@ -504,7 +684,19 @@ export type ModelProvider = {
   /** How the provider authenticates: a subscription sign-in, an API key, or local. */
   kind: "oauth" | "api_key" | "local";
   has_connection: boolean;
+  /**
+   * Where a connected account is reachable from: `global` = a shared instance account,
+   * `team` = only a team-owned account (this caller's team), `none` = nothing connected.
+   */
+  scope: "global" | "team" | "none";
   listed: boolean;
+  /**
+   * The manifest host is a placeholder (Azure's `RESOURCE.openai.azure.com`), so every
+   * connection must supply its own base URL before it can route.
+   */
+  requires_base_url_override: boolean;
+  /** Origin to show in the field, e.g. `https://<resource>.openai.azure.com`. */
+  base_url_example: string | null;
 };
 
 export type SyncResult = { ok: boolean; models: number; providers: number; synced_at: number };

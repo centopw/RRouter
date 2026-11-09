@@ -9,6 +9,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::response::Response;
 use bytes::Bytes;
@@ -81,6 +82,9 @@ struct Filters {
     model: Option<String>,
     bare_model: Option<String>,
     key_id: Option<Uuid>,
+    /// Team the caller asked for. The store call is scoped by membership, not by this
+    /// value alone, so an admin can narrow and a reader can only ever confirm their own.
+    team_id: Option<Uuid>,
     status: Option<StatusFilter>,
 }
 
@@ -125,6 +129,12 @@ fn parse_filters(query: &[(String, String)]) -> Result<Filters, Error> {
             Uuid::parse_str(raw).map_err(|_| Error::BadRequest("key_id must be a uuid".into()))?,
         ),
     };
+    let team_id = match text("team_id") {
+        None => None,
+        Some(raw) => Some(
+            Uuid::parse_str(raw).map_err(|_| Error::BadRequest("team_id must be a uuid".into()))?,
+        ),
+    };
     let status = match text("status") {
         None => None,
         Some("2xx") => Some(StatusFilter::Success),
@@ -154,12 +164,14 @@ fn parse_filters(query: &[(String, String)]) -> Result<Filters, Error> {
         model,
         bare_model,
         key_id,
+        team_id,
         status,
     })
 }
 
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Response {
     let limit = param(&query, "limit")
@@ -175,8 +187,16 @@ pub async fn list(
         Ok(filters) => filters,
         Err(e) => return admin_error(&e),
     };
+    let teams = match super::teams::scoped_teams(&state, &headers, filters.team_id).await {
+        Ok(scope) => scope,
+        Err(response) => return *response,
+    };
     let query = filters.query(before_ts, before_id, limit);
-    match state.store.recent_usage(&query).await {
+    match state
+        .store
+        .recent_usage_in_teams(&query, teams.as_deref())
+        .await
+    {
         Ok(records) => {
             // A short page is the last one: there is nothing older to ask for.
             let next = (records.len() == limit).then(|| records.last()).flatten();
@@ -202,11 +222,16 @@ pub async fn list(
 /// sent can only end the body, which is what a client sees as a truncated download.
 pub async fn export_csv(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Response {
     let filters = match parse_filters(&query) {
         Ok(filters) => filters,
         Err(e) => return admin_error(&e),
+    };
+    let teams = match super::teams::scoped_teams(&state, &headers, filters.team_id).await {
+        Ok(scope) => scope,
+        Err(response) => return *response,
     };
     let attachment = HeaderValue::from_str(&format!(
         "attachment; filename=\"rrouter-usage-{}.csv\"",
@@ -232,7 +257,10 @@ pub async fn export_csv(
                 None => (None, None),
             };
             let page = match store
-                .recent_usage(&filters.query(before_ts, before_id, EXPORT_PAGE))
+                .recent_usage_in_teams(
+                    &filters.query(before_ts, before_id, EXPORT_PAGE),
+                    teams.as_deref(),
+                )
                 .await
             {
                 Ok(page) => page,
@@ -371,11 +399,26 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 /// returned with `"request": null` instead of a misleading 404.
 pub async fn detail(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(request_id): Path<String>,
 ) -> Response {
     let Ok(id) = Uuid::parse_str(&request_id) else {
         return admin_error(&Error::NotFound(format!("unknown request {request_id}")));
     };
+    // A request id is a capability only for someone allowed to see the row it names.
+    let teams = match super::teams::scoped_teams(&state, &headers, None).await {
+        Ok(scope) => scope,
+        Err(response) => return *response,
+    };
+    if let Some(ids) = teams.as_deref() {
+        let team = match state.store.usage_team(id).await {
+            Ok(team) => team,
+            Err(e) => return admin_error(&e),
+        };
+        if !team.is_some_and(|team| ids.contains(&team)) {
+            return admin_error(&Error::NotFound(format!("unknown request {id}")));
+        }
+    }
     let request = match state.store.usage_by_request(id).await {
         Ok(row) => row,
         Err(e) => return admin_error(&e),
@@ -402,6 +445,7 @@ pub async fn detail(
 /// event. `bucket` defaults to whichever of hour/day keeps the point count readable.
 pub async fn series(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Response {
     let param = |key: &str| query.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
@@ -418,9 +462,24 @@ pub async fn series(
         _ => 86_400,
     };
     let since = crate::now_unix() - hours * 3600;
+    let requested = match param("team_id").filter(|raw| !raw.is_empty()) {
+        None => None,
+        Some(raw) => match Uuid::parse_str(&raw) {
+            Ok(id) => Some(id),
+            Err(_) => return admin_error(&Error::BadRequest("team_id must be a uuid".into())),
+        },
+    };
+    let teams = match super::teams::scoped_teams(&state, &headers, requested).await {
+        Ok(scope) => scope,
+        Err(response) => return *response,
+    };
     // `by=model` answers the stacked traffic chart: one row per bucket and model.
     if param("by").as_deref() == Some("model") {
-        return match state.store.usage_series_by_model(since, bucket_secs).await {
+        return match state
+            .store
+            .usage_series_by_model_in_teams(since, bucket_secs, teams.as_deref())
+            .await
+        {
             Ok(rows) => {
                 let data: Vec<serde_json::Value> = rows
                     .iter()
@@ -447,7 +506,11 @@ pub async fn series(
             Err(e) => admin_error(&e),
         };
     }
-    match state.store.usage_series(since, bucket_secs).await {
+    match state
+        .store
+        .usage_series_in_teams(since, bucket_secs, teams.as_deref())
+        .await
+    {
         Ok(buckets) => {
             let data: Vec<serde_json::Value> = buckets
                 .iter()
@@ -473,6 +536,7 @@ pub async fn series(
 
 pub async fn summary(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Response {
     let since = query
@@ -480,7 +544,22 @@ pub async fn summary(
         .find(|(k, _)| k == "hours")
         .and_then(|(_, v)| v.parse::<i64>().ok())
         .map(|hours| crate::now_unix() - hours.clamp(1, 24 * 365) * 3600);
-    match state.store.usage_summary(since).await {
+    let requested = match param(&query, "team_id").filter(|raw| !raw.is_empty()) {
+        None => None,
+        Some(raw) => match Uuid::parse_str(raw) {
+            Ok(id) => Some(id),
+            Err(_) => return admin_error(&Error::BadRequest("team_id must be a uuid".into())),
+        },
+    };
+    let teams = match super::teams::scoped_teams(&state, &headers, requested).await {
+        Ok(scope) => scope,
+        Err(response) => return *response,
+    };
+    match state
+        .store
+        .usage_summary_in_teams(since, teams.as_deref())
+        .await
+    {
         Ok(rows) => {
             let data: Vec<serde_json::Value> = rows
                 .iter()

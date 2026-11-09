@@ -13,6 +13,8 @@ use super::ok_json;
 use crate::state::AppState;
 
 pub async fn system(State(state): State<Arc<AppState>>) -> Response {
+    // Restart-only fields dominate this view, but read one snapshot for consistency.
+    let config = state.config.load();
     let connections = state.store.list_connections(None).await.unwrap_or_default();
     let active = connections.iter().filter(|c| c.is_active).count();
     let providers: Vec<String> = {
@@ -44,11 +46,11 @@ pub async fn system(State(state): State<Arc<AppState>>) -> Response {
     ok_json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": state.uptime_secs(),
-        "require_api_key": state.config.require_api_key,
-        "allow_remote_admin": state.config.allow_remote_admin,
-        "static_assets": state.config.static_dir.is_some(),
-        "custom_cors": !state.config.cors_origins.is_empty(),
-        "master_key_source": if state.config.master_key.is_some() { "env" } else { "file" },
+        "require_api_key": config.require_api_key,
+        "allow_remote_admin": config.allow_remote_admin,
+        "static_assets": config.static_dir.is_some(),
+        "custom_cors": !config.cors_origins.is_empty(),
+        "master_key_source": if config.master_key.is_some() { "env" } else { "file" },
         "counts": {
             "connections": connections.len(),
             "active_connections": active,

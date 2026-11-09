@@ -1,0 +1,14 @@
+{
+  "id": "fireworks",
+  "display": "Fireworks AI",
+  "website": "https://fireworks.ai",
+  "docs": "https://docs.fireworks.ai/tools-sdks/openai-compatibility",
+  "key_url": "https://app.fireworks.ai/settings/users/api-keys",
+  "base_url": "https://api.fireworks.ai/inference/v1/chat/completions",
+  "auth": "bearer",
+  "default_dialect": "chat",
+  "max_tokens_key": "max_tokens",
+  "endpoints": ["POST /inference/v1/chat/completions"],
+  "capabilities": ["chat", "streaming", "tools", "vision", "reasoning"],
+  "notes": "Model ids look like accounts/fireworks/models/<name> and are stored verbatim. Fireworks documents max_tokens rather than max_completion_tokens, and returns usage in the final streaming chunk, which the gateway records."
+}

@@ -5,16 +5,17 @@
 //! request lives here so [`crate::proxy`] only has to call it.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
 use rrouter_core::{Dialect, Error, Result};
-use rrouter_router::Catalog;
+use rrouter_router::{model_allowed, Catalog};
 use rrouter_store::{ApiKey, Guardrails, KeyScope, Store};
 use uuid::Uuid;
 
-use crate::config::Config;
+use crate::config::{config_file::EnvLookup, Config, ConfigSnapshot, ReloadOutcome};
 
 /// Width of the sliding window behind `rpm` and `tpm`.
 const MINUTE: Duration = Duration::from_secs(60);
@@ -28,6 +29,33 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 const SECS_PER_DAY: i64 = 86_400;
 
+/// One per-minute window as the client is told about it: the cap, what is left of it,
+/// and when the oldest counted event expires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowUsage {
+    pub limit: u64,
+    pub remaining: u64,
+    pub reset_in: Duration,
+}
+
+/// What this request may still spend, as of admission.
+///
+/// Reported back as `x-ratelimit-*` (and `anthropic-ratelimit-*`) headers so a client can
+/// pace itself instead of discovering a cap through a 429. An `None` field means "this
+/// kind of limit does not exist for the key", never "nothing left": an unlimited key gets
+/// no header rather than a fictional one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimits {
+    /// The per-minute request cap, when the key has one.
+    pub requests: Option<WindowUsage>,
+    /// The per-minute token cap, when the key has one.
+    pub tokens: Option<WindowUsage>,
+    /// Tokens left in the key's durable budget window; `None` when unlimited.
+    pub budget_tokens_remaining: Option<u64>,
+    /// Micro-USD left in the key's durable budget window; `None` when unlimited.
+    pub budget_micros_remaining: Option<u64>,
+}
+
 pub struct AppState {
     pub store: Arc<Store>,
     pub catalog: Arc<Catalog>,
@@ -35,15 +63,17 @@ pub struct AppState {
     pub planner: rrouter_router::Planner,
     pub dispatcher: Arc<rrouter_router::Dispatcher>,
     pub http: reqwest::Client,
-    pub config: Config,
+    /// The live configuration. Read one snapshot per request with [`ConfigSnapshot::load`].
+    pub config: ConfigSnapshot,
     pub started: Instant,
     /// Live OAuth sign-in sessions (one-time browser/device logins).
     pub oauth: rrouter_auth::OAuthFlows,
     /// Per-key request/token windows for the caps that cannot be answered from SQL.
     pub counters: KeyCounters,
     /// Caps concurrent `/v1/*` proxy requests; `None` when `RROUTER_MAX_CONCURRENCY`
-    /// is 0. One permit spans a whole request, streamed body included.
-    pub concurrency: Option<Arc<tokio::sync::Semaphore>>,
+    /// is 0. One permit spans a whole request, streamed body included. Reloadable: the
+    /// semaphore is swapped atomically, and in-flight requests keep the old permits.
+    pub concurrency: RwLock<Option<Arc<tokio::sync::Semaphore>>>,
     /// Dashboard auth: the setup code and sign-in throttle.
     pub auth: crate::auth::Auth,
 }
@@ -67,6 +97,7 @@ pub enum Slot {
 pub fn dispatcher(config: &Config) -> rrouter_router::Dispatcher {
     rrouter_router::Dispatcher::new(rrouter_router::Breaker::new())
         .with_max_attempts(config.max_attempts)
+        .with_hedge((config.hedge_ms > 0).then(|| Duration::from_millis(config.hedge_ms)))
         .with_retry_policy(rrouter_router::dispatch::RetryPolicy {
             attempts: config.retry_attempts,
             base: Duration::from_millis(config.retry_base_ms),
@@ -111,7 +142,9 @@ impl AppState {
     /// pass retries; nothing here is visible to a client.
     async fn retention_sweep(&self) {
         let now = crate::now_unix();
-        let days = i64::try_from(self.config.usage_retention_days).unwrap_or(i64::MAX);
+        // One snapshot for the whole sweep: a reload mid-pass applies to the next pass.
+        let config = self.config.load();
+        let days = i64::try_from(config.usage_retention_days).unwrap_or(i64::MAX);
         let (deleted_usage, deleted_attempts) = if days == 0 {
             (0, 0)
         } else {
@@ -154,7 +187,7 @@ impl AppState {
     }
 
     pub fn request_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.config.request_timeout_secs)
+        std::time::Duration::from_secs(self.config.load().request_timeout_secs)
     }
 
     pub fn uptime_secs(&self) -> u64 {
@@ -166,13 +199,93 @@ impl AppState {
     /// Nothing is queued: with every permit in flight the caller answers `503`, which is
     /// the only backpressure a streaming gateway can apply without lying to the client.
     pub fn try_slot(&self) -> Slot {
-        let Some(semaphore) = &self.concurrency else {
+        // Clone the current semaphore out of the lock: a reload may replace it, and a
+        // request must keep the one it started with until its permit is released.
+        let concurrency = self
+            .concurrency
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(semaphore) = concurrency else {
             return Slot::Granted(None);
         };
-        match Arc::clone(semaphore).try_acquire_owned() {
+        match semaphore.try_acquire_owned() {
             Ok(permit) => Slot::Granted(Some(permit)),
             Err(_) => Slot::Full,
         }
+    }
+
+    /// Re-read the config file at `path` (environment wins, as at startup) and apply the
+    /// reloadable fields. Nothing is applied when the file is invalid.
+    pub fn reload_from_file(&self, path: &Path) -> Result<ReloadOutcome, String> {
+        let loaded = Config::load_reloadable_env(path)?;
+        Ok(self.apply_reload(&loaded.config))
+    }
+
+    /// [`Self::reload_from_file`] with an injected environment, for tests and dry runs.
+    pub fn reload_from(&self, path: &Path, env: EnvLookup<'_>) -> Result<ReloadOutcome, String> {
+        let loaded = Config::load_reloadable(path, env)?;
+        Ok(self.apply_reload(&loaded.config))
+    }
+
+    /// Apply an already-loaded candidate. Deterministic: no file and no environment.
+    ///
+    /// Only reloadable fields move; restart-only and rejected fields keep their live
+    /// values and are reported in the plan. The swap is one write lock, so no reader sees a
+    /// half-applied configuration.
+    pub fn apply_reload(&self, candidate: &Config) -> ReloadOutcome {
+        let outcome = self.config.apply(candidate);
+        if outcome.applied {
+            self.sync_subsystems(&outcome.config);
+            tracing::info!(
+                changed = ?outcome.plan.changed_fields().collect::<Vec<_>>(),
+                restart_required = ?outcome
+                    .plan
+                    .restart_required
+                    .iter()
+                    .map(|entry| entry.field)
+                    .collect::<Vec<_>>(),
+                rejected = ?outcome
+                    .plan
+                    .rejected
+                    .iter()
+                    .map(|entry| entry.field)
+                    .collect::<Vec<_>>(),
+                "configuration reloaded"
+            );
+        } else if outcome.plan.is_empty() {
+            tracing::debug!("configuration unchanged; reload was a no-op");
+        } else {
+            tracing::warn!(
+                restart_required = ?outcome
+                    .plan
+                    .restart_required
+                    .iter()
+                    .map(|entry| entry.field)
+                    .collect::<Vec<_>>(),
+                rejected = ?outcome
+                    .plan
+                    .rejected
+                    .iter()
+                    .map(|entry| entry.field)
+                    .collect::<Vec<_>>(),
+                "configuration reload not applied; restart required or field rejected"
+            );
+        }
+        outcome
+    }
+
+    /// Push reloadable values into the pieces built from config at startup.
+    ///
+    /// Only the concurrency cap lives here: `request_timeout`, cache, auth and logging
+    /// settings are read from the snapshot per use. The dispatcher and the HTTP client stay
+    /// restart-only (see `ReloadPlan`).
+    fn sync_subsystems(&self, config: &Config) {
+        let next = concurrency_for(config.max_concurrency);
+        *self
+            .concurrency
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
     }
 
     /// Resolve the presented credential and validate it.
@@ -195,7 +308,7 @@ impl AppState {
             None => None,
         };
         let Some(key) = key else {
-            if !self.config.require_api_key {
+            if !self.config.load().require_api_key {
                 return Ok(Caller::Anonymous);
             }
             return Err(Error::Unauthorized(
@@ -264,11 +377,15 @@ impl AppState {
     /// client's model is known and before any dispatch.
     ///
     /// Caps are checked in the order the contract names them: the allowlist (403), the
-    /// durable budget (429), then the in-memory per-minute windows (429). Nothing is
+    /// durable budgets (429), then the in-memory per-minute windows (429). Nothing is
     /// counted for a request that is refused.
-    pub async fn admit(&self, caller: &Caller, model: &str) -> Result<()> {
+    ///
+    /// The returned [`RateLimits`] is the state *after* this request's slot was taken, for
+    /// the response headers: a client that reads `remaining-requests: 0` has actually
+    /// spent its last slot. Anonymous traffic has no key policy and therefore no limits.
+    pub async fn admit(&self, caller: &Caller, model: &str) -> Result<Option<RateLimits>> {
         let Caller::Key(key) = caller else {
-            return Ok(());
+            return Ok(None);
         };
         if let Some(allowed) = &key.allowed_models {
             // The allowlist is written against resolved refs; compare after the same one
@@ -284,6 +401,7 @@ impl AppState {
         // Both budgets are measured over the key's own window; outside-window spend
         // does not count, so a daily/weekly/monthly key renews at the boundary.
         let since = rrouter_store::window_start(key.budget_window, crate::now_unix());
+        let mut budget_tokens_remaining = None;
         if key.budget_tokens > 0 {
             let spent = self.store.api_key_spend(key.id, since).await?;
             if spent >= key.budget_tokens {
@@ -297,7 +415,9 @@ impl AppState {
                     retry_after_secs: 3600,
                 });
             }
+            budget_tokens_remaining = Some(key.budget_tokens - spent);
         }
+        let mut budget_micros_remaining = None;
         if key.budget_micros > 0 {
             // Same durable source as the token budget: the summed cost of this key's
             // usage rows inside the window, so a restart never refunds spend.
@@ -326,9 +446,47 @@ impl AppState {
                     retry_after_secs: 3600,
                 });
             }
+            budget_micros_remaining = Some(key.budget_micros - spent);
+        }
+        // Team budgets sit above the key's: a key that bills a team spends the team's
+        // allowance, and the team's period is its own (`total` by default). A key with no
+        // team is instance-wide and stays unlimited, exactly as it was before v23.
+        if let Some(team) = self.store.key_team_row(key.id).await? {
+            // No budget means no query: an unlimited team costs nothing to admit.
+            if team.budget_tokens > 0 || team.budget_micros > 0 {
+                let since = rrouter_store::window_start(team.budget_window, crate::now_unix());
+                let spend = self.store.team_spend(team.id, since).await?;
+                if team.budget_tokens > 0 && spend.tokens >= team.budget_tokens {
+                    return Err(Error::Limited {
+                        code: "team_budget_exhausted",
+                        message: format!(
+                            "team {} has spent {} of its {} token budget",
+                            team.name, spend.tokens, team.budget_tokens
+                        ),
+                        // A lifetime budget needs an operator, not patience.
+                        retry_after_secs: 3600,
+                    });
+                }
+                if team.budget_micros > 0 && spend.cost_micros >= team.budget_micros {
+                    return Err(Error::Limited {
+                        code: "team_budget_exhausted",
+                        message: format!(
+                            "team {} has spent ${} of its ${} budget",
+                            team.name,
+                            dollars(spend.cost_micros),
+                            dollars(team.budget_micros)
+                        ),
+                        retry_after_secs: 3600,
+                    });
+                }
+            }
         }
         match self.counters.try_admit(key.id, key.rpm, key.tpm) {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(Some(self.rate_limits(
+                key,
+                budget_tokens_remaining,
+                budget_micros_remaining,
+            ))),
             Err(Cap::Rpm { limit }) => Err(Error::Limited {
                 code: "rate_limited",
                 message: format!(
@@ -345,6 +503,52 @@ impl AppState {
                 ),
                 retry_after_secs: 1,
             }),
+        }
+    }
+
+    /// The headers a *refused* request should carry: the windows as they stand, with no
+    /// budget figures (the refusal message already names the budget). `None` for
+    /// anonymous traffic, which has no limits to describe.
+    pub(crate) fn refused_limits(&self, caller: &Caller) -> Option<RateLimits> {
+        let Caller::Key(key) = caller else {
+            return None;
+        };
+        let window = self.counters.snapshot(key.id);
+        let usage = |limit: u32, used: u64| {
+            (limit > 0).then(|| WindowUsage {
+                limit: u64::from(limit),
+                remaining: u64::from(limit).saturating_sub(used),
+                reset_in: window.reset_in,
+            })
+        };
+        Some(RateLimits {
+            requests: usage(key.rpm, window.requests_used),
+            tokens: usage(key.tpm, window.tokens_used),
+            budget_tokens_remaining: None,
+            budget_micros_remaining: None,
+        })
+    }
+
+    /// The headers' view of a key's limits, read after its slot was taken.
+    fn rate_limits(
+        &self,
+        key: &ApiKey,
+        budget_tokens_remaining: Option<u64>,
+        budget_micros_remaining: Option<u64>,
+    ) -> RateLimits {
+        let window = self.counters.snapshot(key.id);
+        let usage = |limit: u32, used: u64| {
+            (limit > 0).then(|| WindowUsage {
+                limit: u64::from(limit),
+                remaining: u64::from(limit).saturating_sub(used),
+                reset_in: window.reset_in,
+            })
+        };
+        RateLimits {
+            requests: usage(key.rpm, window.requests_used),
+            tokens: usage(key.tpm, window.tokens_used),
+            budget_tokens_remaining,
+            budget_micros_remaining,
         }
     }
 
@@ -368,6 +572,10 @@ impl AppState {
 }
 
 /// Who pays for this request.
+// `ApiKey` grew with team/owner attribution and now dominates the enum. Boxing it would
+// add an allocation to every authenticated request, and `Caller` is a short-lived local
+// (never stored in a collection), so the size difference is deliberate.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Caller {
     /// No credential presented, or an unknown one while keys are optional.
@@ -381,6 +589,24 @@ impl Caller {
         match self {
             Self::Anonymous => None,
             Self::Key(key) => Some(key.id),
+        }
+    }
+
+    /// The paying key's `allowed_models`, for the planner's post-expansion check.
+    /// `None` means every model is allowed (and for anonymous traffic there is no list).
+    pub fn allowed_models(&self) -> Option<&[String]> {
+        match self {
+            Self::Anonymous => None,
+            Self::Key(key) => key.allowed_models.as_deref(),
+        }
+    }
+
+    /// The paying key's team, or `None` for an instance-wide key and anonymous traffic.
+    /// The planner restricts a team's candidates to that team's own accounts.
+    pub fn team_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Anonymous => None,
+            Self::Key(key) => key.team_id,
         }
     }
 
@@ -471,34 +697,15 @@ fn micros_to_usd(micros: u64) -> f64 {
     micros as f64 / 1_000_000.0
 }
 
-/// Does an allowlist cover `model`?
-///
-/// `allowed` comes from the database: `None` (NULL) allows every model, while an
-/// explicitly empty list allows none. An entry matches when it is
-///
-/// - `*`,
-/// - the model string itself,
-/// - a `provider/*` glob covering the model's `provider/` prefix,
-/// - the same model in its other form: a bare id matches the allowlist's full ref
-///   (`openai/gpt-4.1` allows `gpt-4.1`), because the planner adds the provider and a
-///   client should not be denied for spelling the model the shorter way.
-///
-/// A bare id is never covered by a `provider/*` glob: the provider is only known after
-/// planning, and guessing it would widen the allowlist.
-fn model_allowed(allowed: &[String], model: &str) -> bool {
-    let bare = model.rsplit_once('/').map(|(_, id)| id).unwrap_or(model);
-    allowed.iter().any(|raw| {
-        let entry = raw.trim();
-        if entry == "*" || entry == model {
-            return true;
-        }
-        if let Some(provider) = entry.strip_suffix("/*") {
-            return model.len() > provider.len()
-                && model.starts_with(provider)
-                && model.as_bytes()[provider.len()] == b'/';
-        }
-        entry.rsplit('/').next() == Some(bare)
-    })
+/// Micro-USD as the dollars an operator reads, at the precision the stored unit justifies:
+/// six decimals below a cent (a real spend must not read "$0.0000"), four above it.
+fn dollars(micros: u64) -> String {
+    let usd = micros_to_usd(micros);
+    if usd < 0.01 {
+        format!("{usd:.6}")
+    } else {
+        format!("{usd:.4}")
+    }
 }
 
 /// Sliding per-minute windows, one per key.
@@ -549,7 +756,58 @@ impl Window {
     }
 }
 
+/// What a key's windows hold right now, for the response headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowSnapshot {
+    /// Requests admitted in the current window.
+    pub requests_used: u64,
+    /// Tokens recorded in the current window.
+    pub tokens_used: u64,
+    /// Time until the oldest counted event leaves the window; a full minute when the
+    /// window is empty, so a caller always has a usable reset hint.
+    pub reset_in: Duration,
+}
+
+impl WindowSnapshot {
+    fn empty() -> Self {
+        Self {
+            requests_used: 0,
+            tokens_used: 0,
+            reset_in: MINUTE,
+        }
+    }
+}
+
 impl KeyCounters {
+    /// Read the window without consuming a slot.
+    ///
+    /// Expired entries are pruned first — that is bookkeeping, not accounting: the
+    /// snapshot must report exactly what the next [`KeyCounters::try_admit`] would see.
+    /// Nothing is pushed, so headers can be read on every response (including errors)
+    /// without inflating the request or token counts.
+    pub fn snapshot(&self, id: Uuid) -> WindowSnapshot {
+        let now = Instant::now();
+        let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(window) = map.get_mut(&id) else {
+            return WindowSnapshot::empty();
+        };
+        window.prune(now);
+        let oldest = window
+            .requests
+            .front()
+            .copied()
+            .into_iter()
+            .chain(window.tokens.front().map(|(at, _)| *at))
+            .min();
+        WindowSnapshot {
+            requests_used: window.requests.len() as u64,
+            tokens_used: window.token_total(),
+            reset_in: oldest
+                .map(|at| MINUTE.saturating_sub(now.saturating_duration_since(at)))
+                .unwrap_or(MINUTE),
+        }
+    }
+
     /// Check `rpm`/`tpm` and, when both allow it, count this request — one critical
     /// section, so two concurrent requests cannot both observe an empty window.
     pub fn try_admit(&self, id: Uuid, rpm: u32, tpm: u32) -> std::result::Result<(), Cap> {
@@ -600,6 +858,65 @@ mod tests {
 
     fn refs(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The snapshot is what the headers report: used and remaining are complementary,
+    /// and the reset hint is inside the one-minute window.
+    #[test]
+    fn snapshot_reports_remaining_and_resets_within_a_minute() {
+        let counters = KeyCounters::default();
+        let id = Uuid::new_v4();
+        assert_eq!(counters.try_admit(id, 3, 0), Ok(()));
+
+        let first = counters.snapshot(id);
+        assert_eq!(first.requests_used, 1);
+        assert!(
+            first.reset_in > Duration::ZERO && first.reset_in <= MINUTE,
+            "reset hint was {:?}",
+            first.reset_in
+        );
+
+        assert_eq!(counters.try_admit(id, 3, 0), Ok(()));
+        assert_eq!(counters.try_admit(id, 3, 0), Ok(()));
+        let full = counters.snapshot(id);
+        assert_eq!(full.requests_used, 3);
+        assert_eq!(u64::from(3u32) - full.requests_used, 0, "nothing is left");
+        assert_eq!(counters.try_admit(id, 3, 0), Err(Cap::Rpm { limit: 3 }));
+    }
+
+    /// Reading the window must not consume a slot: headers are rendered on every
+    /// response, including errors, and a read that counted would rate-limit itself.
+    #[test]
+    fn snapshot_does_not_count_a_request() {
+        let counters = KeyCounters::default();
+        let id = Uuid::new_v4();
+
+        // An unknown key is never given an entry just by being observed.
+        for _ in 0..5 {
+            assert_eq!(counters.snapshot(id), WindowSnapshot::empty());
+        }
+
+        assert_eq!(counters.try_admit(id, 2, 0), Ok(()));
+        let before = counters.snapshot(id);
+        assert_eq!(before.requests_used, 1);
+        for _ in 0..5 {
+            let again = counters.snapshot(id);
+            assert_eq!(again.requests_used, before.requests_used);
+            assert_eq!(again.tokens_used, before.tokens_used);
+            // The hint only shrinks with the clock; it never counts a new event.
+            assert!(again.reset_in <= before.reset_in);
+        }
+
+        // Both admitted slots are still available: one used, one left.
+        assert_eq!(counters.try_admit(id, 2, 0), Ok(()));
+        assert_eq!(counters.try_admit(id, 2, 0), Err(Cap::Rpm { limit: 2 }));
+
+        // Tokens move only when a response reports them, never when they are read.
+        counters.record_tokens(id, 10);
+        assert_eq!(counters.snapshot(id).tokens_used, 10);
+        for _ in 0..3 {
+            assert_eq!(counters.snapshot(id).tokens_used, 10);
+        }
     }
 
     #[test]

@@ -4,6 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# OTLP/HTTP span export. Off by default: the default build has no OpenTelemetry
+# dependency at all (asserted by `tests/otel.rs` and CI).
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
 [[bin]]
 name = "rrouter"
 path = "src/main.rs"
@@ -30,9 +40,14 @@ base64.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["json"] }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 rusqlite.workspace = true
 jsonwebtoken.workspace = true
 sha2.workspace = true
+hmac.workspace = true
 hex.workspace = true
 flate2.workspace = true
 tar.workspace = true

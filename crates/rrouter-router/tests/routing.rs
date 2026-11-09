@@ -12,7 +12,9 @@ use rrouter_core::{ChatResponse, Error, FinishReason, Usage};
 use rrouter_router::breaker::{BreakerState, ProbeTicket};
 use rrouter_router::dispatch::{AttemptOutcome, RetryPolicy};
 use rrouter_router::stream_dispatch::{byte_stream, collect_stream};
-use rrouter_router::{Breaker, Candidate, Catalog, Dispatcher, Plan, Planner, Strategy};
+use rrouter_router::{
+    Breaker, Candidate, Catalog, Dispatcher, Plan, PlanRequest, Planner, Strategy,
+};
 use rrouter_store::{ModelRow, Store};
 use uuid::Uuid;
 
@@ -74,10 +76,17 @@ async fn least_latency_order(planner: &Planner, store: &Store) -> Vec<Uuid> {
         .plan(
             &Catalog::builtin(),
             store,
-            "openai/gpt-5",
-            false,
-            None,
-            Strategy::LeastLatency,
+            PlanRequest {
+                model: "openai/gpt-5",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::LeastLatency,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .expect("plan")
@@ -120,10 +129,17 @@ async fn alias_resolves_one_hop_without_looping() {
         .plan(
             &Catalog::builtin(),
             &store,
-            "fast",
-            false,
-            None,
-            Strategy::Priority,
+            PlanRequest {
+                model: "fast",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .unwrap();
@@ -145,10 +161,17 @@ async fn self_referential_alias_does_not_loop() {
         .plan(
             &Catalog::builtin(),
             &store,
-            "loop",
-            false,
-            None,
-            Strategy::Priority,
+            PlanRequest {
+                model: "loop",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .unwrap();
@@ -173,10 +196,17 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
         .plan(
             &Catalog::builtin(),
             &store,
-            "claude/claude-opus-5-5",
-            false,
-            None,
-            Strategy::Priority,
+            PlanRequest {
+                model: "claude/claude-opus-5-5",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .unwrap();
@@ -190,10 +220,17 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
         .plan(
             &Catalog::builtin(),
             &store,
-            "mystery-model",
-            false,
-            None,
-            Strategy::Priority,
+            PlanRequest {
+                model: "mystery-model",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .unwrap();
@@ -216,10 +253,17 @@ async fn explicit_provider_wins_over_catalog_guess() {
         .plan(
             &Catalog::builtin(),
             &store,
-            "github/gpt-4.1",
-            false,
-            None,
-            Strategy::Priority,
+            PlanRequest {
+                model: "github/gpt-4.1",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .unwrap();
@@ -242,10 +286,17 @@ async fn combo_preserves_declared_order() {
         .plan(
             &Catalog::builtin(),
             &store,
-            "combo:chain",
-            false,
-            None,
-            Strategy::Priority,
+            PlanRequest {
+                model: "combo:chain",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .unwrap();
@@ -258,10 +309,17 @@ async fn combo_preserves_declared_order() {
         .plan(
             &Catalog::builtin(),
             &store,
-            "chain",
-            false,
-            None,
-            Strategy::Priority,
+            PlanRequest {
+                model: "chain",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .unwrap();
@@ -280,10 +338,17 @@ async fn round_robin_alternates_equal_priority_connections() {
         .plan(
             &catalog,
             &store,
-            "openai/gpt-5",
-            false,
-            None,
-            Strategy::Priority,
+            PlanRequest {
+                model: "openai/gpt-5",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .unwrap();
@@ -291,10 +356,17 @@ async fn round_robin_alternates_equal_priority_connections() {
         .plan(
             &catalog,
             &store,
-            "openai/gpt-5",
-            false,
-            None,
-            Strategy::Priority,
+            PlanRequest {
+                model: "openai/gpt-5",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .unwrap();
@@ -332,10 +404,17 @@ async fn weighted_puts_the_heavy_account_first_eight_times_in_ten() {
             .plan(
                 &catalog,
                 &store,
-                "openai/gpt-5",
-                false,
-                None,
-                Strategy::Weighted,
+                PlanRequest {
+                    model: "openai/gpt-5",
+                    stream: false,
+                    affinity: None,
+                    strategy: Strategy::Weighted,
+                    policy: None,
+                    allowed_models: None,
+                    team_id: None,
+                    canary: None,
+                    canary_seed: 0,
+                },
             )
             .await
             .unwrap();
@@ -372,7 +451,21 @@ async fn weighted_and_latency_never_override_priority() {
     let catalog = Catalog::builtin();
     for strategy in [Strategy::Weighted, Strategy::LeastLatency] {
         let plan = planner
-            .plan(&catalog, &store, "openai/gpt-5", false, None, strategy)
+            .plan(
+                &catalog,
+                &store,
+                PlanRequest {
+                    model: "openai/gpt-5",
+                    stream: false,
+                    affinity: None,
+                    strategy,
+                    policy: None,
+                    allowed_models: None,
+                    team_id: None,
+                    canary: None,
+                    canary_seed: 0,
+                },
+            )
             .await
             .unwrap();
         let order: Vec<Uuid> = plan.candidates.iter().map(|c| c.connection).collect();
@@ -423,7 +516,21 @@ async fn least_latency_orders_by_ewma_and_puts_unknown_connections_last() {
 /// Equal-priority order of every candidate for `model` under `strategy`.
 async fn order(store: &Store, model: &str, strategy: Strategy) -> Vec<Uuid> {
     Planner::new()
-        .plan(&Catalog::builtin(), store, model, false, None, strategy)
+        .plan(
+            &Catalog::builtin(),
+            store,
+            PlanRequest {
+                model,
+                stream: false,
+                affinity: None,
+                strategy,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
+        )
         .await
         .expect("plan")
         .candidates
@@ -566,10 +673,17 @@ async fn affinity_pins_one_conversation_but_spreads_conversations() {
         planner.plan(
             &catalog,
             &store,
-            "openai/gpt-5",
-            false,
-            Some(key),
-            Strategy::Priority,
+            PlanRequest {
+                model: "openai/gpt-5",
+                stream: false,
+                affinity: Some(key),
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
     };
 
@@ -603,10 +717,17 @@ async fn disabled_model_is_excluded() {
         .plan(
             &Catalog::builtin(),
             &store,
-            "openai/gpt-5",
-            false,
-            None,
-            Strategy::Priority,
+            PlanRequest {
+                model: "openai/gpt-5",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+            },
         )
         .await
         .unwrap_err();
@@ -1499,5 +1620,241 @@ fn backoff_doubles_caps_and_jitters_within_twenty_percent() {
         policy.delay(3, Some(Duration::from_secs(60)), 0.5),
         Duration::from_millis(500),
         "Retry-After is capped by the ceiling, not the other way round"
+    );
+}
+
+// ----- hedged requests -------------------------------------------------------------
+
+/// One candidate per entry, with the given provider label and priority.
+fn plan_with(entries: &[(&str, i32)]) -> Plan {
+    Plan {
+        model: "m".into(),
+        candidates: entries
+            .iter()
+            .map(|(provider, priority)| Candidate {
+                provider: (*provider).to_string(),
+                model: "m".into(),
+                connection: Uuid::new_v4(),
+                priority: *priority,
+                dialect: rrouter_core::Dialect::OpenAiChat,
+            })
+            .collect(),
+        stream: false,
+    }
+}
+
+fn hedging(attempts: usize, hedge_ms: u64) -> Dispatcher {
+    Dispatcher::new(Breaker::new())
+        .with_max_attempts(attempts)
+        .with_hedge(Some(Duration::from_millis(hedge_ms)))
+        .with_retry_policy(RetryPolicy {
+            attempts: 0,
+            ..RetryPolicy::default()
+        })
+}
+
+/// Counted on drop, so a cancelled hedge future is visible.
+struct DropFlag(Arc<AtomicUsize>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn a_hedge_starts_after_the_threshold_and_wins() {
+    let plan = plan_with(&[("slow", 0), ("fast", 0)]);
+    let dispatcher = hedging(4, 20);
+    let sent = Arc::new(AtomicUsize::new(0));
+    let started = Instant::now();
+
+    let outcome = dispatcher
+        .run(&plan, |c| {
+            let sent = Arc::clone(&sent);
+            async move {
+                sent.fetch_add(1, Ordering::SeqCst);
+                if c.provider == "slow" {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+                Ok::<String, Error>(c.provider.clone())
+            }
+        })
+        .await
+        .expect("the hedge answers");
+
+    let elapsed = started.elapsed();
+    assert_eq!(outcome.candidate.provider, "fast");
+    assert!(
+        elapsed >= Duration::from_millis(20),
+        "the hedge held for the threshold: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "the slow leg was not awaited: {elapsed:?}"
+    );
+    assert_eq!(sent.load(Ordering::SeqCst), 2, "both legs were sent");
+}
+
+#[tokio::test]
+async fn an_immediate_primary_wins_without_starting_the_hedge() {
+    let plan = plan_with(&[("a", 0), ("b", 0)]);
+    let dispatcher = hedging(4, 100);
+    let sent = Arc::new(AtomicUsize::new(0));
+
+    let outcome = dispatcher
+        .run(&plan, |c| {
+            let sent = Arc::clone(&sent);
+            async move {
+                sent.fetch_add(1, Ordering::SeqCst);
+                Ok::<String, Error>(c.provider.clone())
+            }
+        })
+        .await
+        .expect("the primary answers");
+
+    assert_eq!(outcome.candidate.provider, "a");
+    assert_eq!(sent.load(Ordering::SeqCst), 1, "no hedge was launched");
+}
+
+#[tokio::test]
+async fn a_cancelled_hedge_leg_is_dropped() {
+    let plan = plan_with(&[("a", 0), ("b", 0)]);
+    let dispatcher = hedging(4, 10);
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    let outcome = dispatcher
+        .run(&plan, |c| {
+            let drops = Arc::clone(&drops);
+            async move {
+                let _guard = DropFlag(drops);
+                if c.provider == "a" {
+                    // Started before the threshold, answers after it: both legs are live.
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+                Ok::<String, Error>(c.provider.clone())
+            }
+        })
+        .await
+        .expect("the primary answers");
+
+    assert_eq!(outcome.candidate.provider, "a");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        2,
+        "the losing hedge future was cancelled, not awaited"
+    );
+}
+
+#[tokio::test]
+async fn a_hedge_never_crosses_a_priority_group() {
+    let plan = plan_with(&[("a", 0), ("b", 1)]);
+    let dispatcher = hedging(4, 10);
+    let sent = Arc::new(AtomicUsize::new(0));
+    let started = Instant::now();
+
+    let outcome = dispatcher
+        .run(&plan, |c| {
+            let sent = Arc::clone(&sent);
+            async move {
+                sent.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                Ok::<String, Error>(c.provider.clone())
+            }
+        })
+        .await
+        .expect("the primary answers");
+
+    assert_eq!(outcome.candidate.provider, "a");
+    assert!(started.elapsed() >= Duration::from_millis(60));
+    assert_eq!(sent.load(Ordering::SeqCst), 1, "a lower tier is not hedged");
+}
+
+#[tokio::test]
+async fn a_single_candidate_is_never_hedged() {
+    let plan = plan_with(&[("only", 0)]);
+    let dispatcher = hedging(4, 10);
+    let sent = Arc::new(AtomicUsize::new(0));
+
+    let outcome = dispatcher
+        .run(&plan, |c| {
+            let sent = Arc::clone(&sent);
+            async move {
+                sent.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                Ok::<String, Error>(c.provider.clone())
+            }
+        })
+        .await
+        .expect("the only candidate answers");
+
+    assert_eq!(outcome.candidate.provider, "only");
+    assert_eq!(sent.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_failed_hedge_race_falls_back_inside_the_budget() {
+    let plan = plan_with(&[("a", 0), ("b", 0), ("c", 0)]);
+    let dispatcher = hedging(4, 10);
+    let sent = Arc::new(AtomicUsize::new(0));
+
+    let outcome = dispatcher
+        .run(&plan, |c| {
+            let sent = Arc::clone(&sent);
+            async move {
+                sent.fetch_add(1, Ordering::SeqCst);
+                match c.provider.as_str() {
+                    // The primary outlives the threshold, so the race actually happens.
+                    "a" => {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        Err(upstream(503))
+                    }
+                    "b" => Err(upstream(503)),
+                    _ => Ok("c".to_string()),
+                }
+            }
+        })
+        .await
+        .expect("the third candidate answers");
+
+    assert_eq!(outcome.candidate.provider, "c");
+    assert_eq!(
+        sent.load(Ordering::SeqCst),
+        3,
+        "two raced legs then fallback"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_hedge_race_never_exceeds_the_send_budget() {
+    let plan = plan_with(&[("a", 0), ("b", 0), ("c", 0)]);
+    let dispatcher = hedging(2, 10);
+    let sent = Arc::new(AtomicUsize::new(0));
+
+    let err = dispatcher
+        .run(&plan, |c| {
+            let sent = Arc::clone(&sent);
+            async move {
+                sent.fetch_add(1, Ordering::SeqCst);
+                if c.provider == "a" {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+                Err::<String, Error>(upstream(503))
+            }
+        })
+        .await
+        .expect_err("the budget is spent on the race");
+
+    match err {
+        Error::Upstream { status, .. } => assert_eq!(status, 503),
+        other => panic!("unexpected error: {other}"),
+    }
+    assert_eq!(
+        sent.load(Ordering::SeqCst),
+        2,
+        "the race spent the whole two-send budget"
     );
 }

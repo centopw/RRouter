@@ -56,6 +56,38 @@ pub(crate) async fn audit(
         .await
     {
         tracing::warn!(kind, error = %e, "audit write failed");
+        return;
+    }
+    // Fan the row out to webhook receivers. Best effort by design: a failed enqueue must
+    // not fail the mutation whose audit row already exists, but it must be visible.
+    if let Err(e) = crate::webhooks::enqueue_audit(&state.store, kind, actor, ip, detail).await {
+        tracing::warn!(kind, error = %e, "audit event not queued for webhooks");
+    }
+}
+
+/// Who made an admin call, in terms the audit trail can prove: the signed-in account's
+/// email, else the credential class. The secret itself is never recorded.
+pub(crate) async fn actor(state: &AppState, headers: &HeaderMap) -> String {
+    if let Some(token) = session_token(headers) {
+        if let Some(claims) = state.auth.verify_session(&token) {
+            if let Ok(Some(user)) = state
+                .store
+                .session_user(&claims.sid, crate::now_unix())
+                .await
+            {
+                return user.email;
+            }
+        }
+    }
+    let presented = headers.contains_key("x-admin-token")
+        || headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|value| !value.trim().is_empty());
+    if presented {
+        "admin token".to_string()
+    } else {
+        "loopback".to_string()
     }
 }
 
@@ -141,7 +173,12 @@ pub async fn state(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
 }
 
 /// `POST /api/auth/setup` — create the owner exactly once, consuming the setup code.
-pub async fn setup(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Body) -> Response {
+pub async fn setup(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    body: Body,
+) -> Response {
     let value = match body_json(body).await {
         Ok(v) => v,
         Err(resp) => return *resp,
@@ -221,7 +258,7 @@ pub async fn setup(State(state): State<Arc<AppState>>, headers: HeaderMap, body:
         Ok(codes) => codes,
         Err(e) => return admin_error(&e),
     };
-    let mut resp = match start_session(&state, &headers, &user.id, true).await {
+    let mut resp = match start_session(&state, &headers, peer.0, &user.id, true).await {
         Ok(resp) => resp,
         Err(e) => return admin_error(&e),
     };
@@ -245,6 +282,53 @@ async fn issue_recovery_codes(state: &AppState, user: &User) -> rrouter_core::Re
     Ok(codes)
 }
 
+/// A short, human label derived from the stored User-Agent at read time. Deliberately a
+/// heuristic: unrecognised agents return `None` rather than a wrong family, and the raw
+/// string is still returned separately for operators who need it.
+fn device_label(user_agent: Option<&str>) -> Option<String> {
+    let ua = user_agent?;
+    // Order matters: Edge and Opera also announce Chrome; iPhone/iPad also announce
+    // Safari; Chrome's UA contains Safari.
+    let browser = if ua.contains("Edg/") {
+        "Edge"
+    } else if ua.contains("OPR/") || ua.contains("Opera") {
+        "Opera"
+    } else if ua.contains("Firefox/") {
+        "Firefox"
+    } else if ua.contains("Chrome/") || ua.contains("CriOS/") {
+        "Chrome"
+    } else if ua.contains("Safari/") {
+        "Safari"
+    } else if ua.contains("curl/") {
+        "curl"
+    } else if ua.contains("python-requests") {
+        "python-requests"
+    } else if ua.contains("rrouter") {
+        "RRouter"
+    } else {
+        return None;
+    };
+    let platform = if ua.contains("iPhone") {
+        Some("iPhone")
+    } else if ua.contains("iPad") {
+        Some("iPad")
+    } else if ua.contains("Android") {
+        Some("Android")
+    } else if ua.contains("Windows") {
+        Some("Windows")
+    } else if ua.contains("Mac OS X") || ua.contains("Macintosh") {
+        Some("macOS")
+    } else if ua.contains("Linux") {
+        Some("Linux")
+    } else {
+        None
+    };
+    Some(match platform {
+        Some(platform) => format!("{browser} on {platform}"),
+        None => browser.to_string(),
+    })
+}
+
 fn normalize_code(code: &str) -> String {
     code.chars()
         .filter(|c| !c.is_whitespace())
@@ -256,6 +340,7 @@ fn normalize_code(code: &str) -> String {
 async fn start_session(
     state: &AppState,
     headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
     user_id: &uuid::Uuid,
     remember: bool,
 ) -> rrouter_core::Result<Response> {
@@ -266,9 +351,25 @@ async fn start_session(
         } else {
             SESSION_SECS
         };
+    // Device metadata for the account page: the resolved client address and the raw
+    // User-Agent. No cookie, token or other header is read, and the store bounds both.
+    // `client_ip` falls back to the literal "unknown" for a peer it cannot see; that is a
+    // useful audit value but not a device fact, so the session stores no ip instead.
+    let resolved_ip = crate::auth::client_ip(headers, peer);
+    let ip = (resolved_ip != "unknown").then_some(resolved_ip);
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok());
     state
         .store
-        .create_session(&sid, *user_id, expires_at, remember)
+        .create_session(
+            &sid,
+            *user_id,
+            expires_at,
+            remember,
+            ip.as_deref(),
+            user_agent,
+        )
         .await?;
     let jwt = state
         .auth
@@ -358,6 +459,18 @@ pub async fn login(
         for key in &keys {
             state.auth.note_failure(key);
         }
+        // Reached only after the throttle let this attempt through, so a flood is
+        // bounded by the same 5-per-minute bucket. The attempted address is recorded
+        // because the trail is how an operator sees credential stuffing; the password
+        // never is.
+        audit(
+            &state,
+            "sign_in_failed",
+            Some(&email),
+            &ip,
+            "invalid credentials",
+        )
+        .await;
         return invalid_credentials();
     };
     for key in &keys {
@@ -366,10 +479,22 @@ pub async fn login(
     if let Err(e) = state.store.mark_signed_in(user.id).await {
         return admin_error(&e);
     }
-    let mut resp = match start_session(&state, &headers, &user.id, remember).await {
+    let mut resp = match start_session(&state, &headers, peer.0, &user.id, remember).await {
         Ok(resp) => resp,
         Err(e) => return admin_error(&e),
     };
+    audit(
+        &state,
+        "sign_in",
+        Some(&user.email),
+        &ip,
+        if remember {
+            "password sign-in · remember me"
+        } else {
+            "password sign-in"
+        },
+    )
+    .await;
     let body = json!({ "user": user_json(&user) });
     *resp.status_mut() = StatusCode::OK;
     *resp.body_mut() = axum::body::Body::from(body.to_string());
@@ -408,6 +533,11 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
                 "created_at": session.created_at,
                 "expires_at": session.expires_at,
                 "current": session.token_hash == current,
+                // Device metadata captured when the session was created. Null for
+                // legacy rows (schema v28 and later); never a token or cookie.
+                "ip": session.ip,
+                "user_agent": session.user_agent,
+                "device_label": device_label(session.user_agent.as_deref()),
             })
         })
         .collect();
@@ -418,6 +548,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
 pub async fn update_me(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     body: Body,
 ) -> Response {
     let Some(user) = current_user(&state, &headers).await else {
@@ -494,7 +625,7 @@ pub async fn update_me(
         .await;
         // The password change ended every session, including this one; keep the current
         // tab signed in with a fresh cookie.
-        match start_session(&state, &headers, &user.id, false).await {
+        match start_session(&state, &headers, peer.0, &user.id, false).await {
             Ok(resp) => cookie = Some(resp),
             Err(e) => return admin_error(&e),
         }
@@ -837,6 +968,7 @@ pub async fn invite(
 pub async fn signup(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     body: Body,
 ) -> Response {
     let value = match body_json(body).await {
@@ -912,7 +1044,7 @@ pub async fn signup(
         Ok(codes) => codes,
         Err(e) => return admin_error(&e),
     };
-    let mut resp = match start_session(&state, &headers, &user.id, false).await {
+    let mut resp = match start_session(&state, &headers, peer.0, &user.id, false).await {
         Ok(resp) => resp,
         Err(e) => return admin_error(&e),
     };
@@ -1030,5 +1162,46 @@ pub async fn revoke_invite(
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => admin_error(&Error::NotFound(format!("invite {id}"))),
         Err(e) => admin_error(&e),
+    }
+}
+
+#[cfg(test)]
+mod device_label_tests {
+    use super::device_label;
+
+    #[test]
+    fn common_agents_get_a_family_and_platform() {
+        assert_eq!(
+            device_label(Some(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ))
+            .as_deref(),
+            Some("Chrome on macOS")
+        );
+        assert_eq!(
+            device_label(Some(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 Edg/120.0"
+            ))
+            .as_deref(),
+            Some("Edge on Windows")
+        );
+        assert_eq!(
+            device_label(Some(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 \
+                 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+            ))
+            .as_deref(),
+            Some("Safari on iPhone")
+        );
+        assert_eq!(device_label(Some("curl/8.4.0")).as_deref(), Some("curl"));
+    }
+
+    #[test]
+    fn unknown_or_absent_agents_get_no_label() {
+        assert_eq!(device_label(None), None);
+        assert_eq!(device_label(Some("")), None);
+        assert_eq!(device_label(Some("Wget/1.21.4")), None);
     }
 }

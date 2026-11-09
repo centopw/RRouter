@@ -6,17 +6,22 @@
 //! translators.
 
 mod anthropic;
+pub mod error;
 mod openai_chat;
+pub mod rerank;
 mod responses;
+mod wire;
 
 pub use anthropic::{AnthropicDecoder, AnthropicEncoder};
+pub use error::{parse_provider_error, upstream_error_body, ProviderError};
 pub use openai_chat::{OpenAiChatDecoder, OpenAiChatEncoder};
 pub use responses::{ResponsesDecoder, ResponsesEncoder};
+pub use wire::{MaxTokensKey, WireProfile, DEFAULT_MAX_TOKENS};
 
 use serde_json::{Map, Value};
 
 use rrouter_core::{
-    ChatRequest, ChatResponse, Dialect, Error, FinishReason, Result, StreamEvent, Usage,
+    ChatRequest, ChatResponse, Dialect, Error, FinishReason, Part, Result, StreamEvent, Usage,
 };
 
 /// Parse an inbound client body into canonical form.
@@ -31,11 +36,30 @@ pub fn parse_request(dialect: Dialect, body: &Value) -> Result<ChatRequest> {
 
 /// Serialize a canonical request into the outbound provider body for `dialect`.
 /// `stream` is authoritative over `req.stream`.
+///
+/// This is the provider-agnostic entry point: it assumes the widest-compatible wire
+/// shape (see [`WireProfile::default`]). Callers that know which provider will answer
+/// use [`build_request_with`] so the output cap is spelled the way that provider
+/// accepts it.
 pub fn build_request(dialect: Dialect, req: &ChatRequest, stream: bool) -> Result<Value> {
+    build_request_with(dialect, req, stream, &WireProfile::default())
+}
+
+/// [`build_request`] with the provider's wire shape applied.
+///
+/// `wire` decides the output-cap key for the Chat dialect (`max_tokens` vs
+/// `max_completion_tokens`) and the cap sent when the client named none. Dialects with
+/// a fixed spelling (`max_tokens`, `max_output_tokens`) only use the default.
+pub fn build_request_with(
+    dialect: Dialect,
+    req: &ChatRequest,
+    stream: bool,
+    wire: &WireProfile,
+) -> Result<Value> {
     match dialect {
-        Dialect::OpenAiChat => openai_chat::build_request(req, stream),
-        Dialect::AnthropicMessages => anthropic::build_request(req, stream),
-        Dialect::OpenAiResponses => responses::build_request(req, stream),
+        Dialect::OpenAiChat => openai_chat::build_request(req, stream, wire),
+        Dialect::AnthropicMessages => anthropic::build_request(req, stream, wire),
+        Dialect::OpenAiResponses => responses::build_request(req, stream, wire),
         Dialect::OpenAiEmbeddings => Ok(openai_chat::build_embeddings_request(req)),
     }
 }
@@ -196,22 +220,86 @@ fn is_identity_key(key: &str) -> bool {
     matches!(key, "model" | "stream")
 }
 
-/// Merge `req.extra` into `body` when it was captured from `dialect`.
+/// Request fields whose **name and meaning** are identical in both OpenAI dialects, so
+/// a client keeps them when the body is rebuilt for the other one.
+///
+/// Nothing is translated here: every key is written verbatim, which is only safe
+/// because these keys are documented by both APIs. A field with a different name or
+/// shape in the target (`response_format` vs `text.format`, `reasoning_effort` vs
+/// `reasoning.effort`, `metadata` whose schema differs per vendor) is deliberately
+/// absent — inventing a mapping would be worse than the drop.
+const PORTABLE_OPENAI_FIELDS: &[&str] = &["service_tier", "prompt_cache_key", "safety_identifier"];
+
+fn openai_family(dialect: Dialect) -> bool {
+    matches!(dialect, Dialect::OpenAiChat | Dialect::OpenAiResponses)
+}
+
+/// Whether `key` may travel from `from` into `to` unchanged.
+fn portable(key: &str, from: Dialect, to: Dialect) -> bool {
+    from != to && openai_family(from) && openai_family(to) && PORTABLE_OPENAI_FIELDS.contains(&key)
+}
+
+/// Merge `req.extra` into `body`.
+///
+/// Everything travels when the outbound dialect is the one that produced the fields;
+/// across dialects only [`PORTABLE_OPENAI_FIELDS`] do, because every other field was
+/// captured precisely because this crate does not model its meaning.
 fn merge_extra(body: &mut Value, req: &ChatRequest, dialect: Dialect) {
     let Some((src, extra)) = &req.extra else {
         return;
     };
-    if *src != dialect {
-        return;
-    }
-    let (Some(dst), Some(src)) = (body.as_object_mut(), extra.as_object()) else {
+    let (Some(dst), Some(fields)) = (body.as_object_mut(), extra.as_object()) else {
         return;
     };
-    for (k, v) in src {
-        if !is_identity_key(k) {
+    for (k, v) in fields {
+        if is_identity_key(k) {
+            continue;
+        }
+        if *src == dialect || portable(k, *src, dialect) {
             dst.insert(k.clone(), v.clone());
         }
     }
+}
+
+/// Fields [`build_request_with`] will not carry into `target`.
+///
+/// A translation drops what the target cannot express; the names are reported here so a
+/// caller can log or annotate the request instead of losing the fact silently. Values
+/// are never invented, and nothing in this list is a field the gateway models itself.
+pub fn dropped_fields(req: &ChatRequest, target: Dialect) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some((src, extra)) = &req.extra {
+        if let Some(fields) = extra.as_object() {
+            for key in fields.keys() {
+                if is_identity_key(key) || *src == target || portable(key, *src, target) {
+                    continue;
+                }
+                out.push(key.clone());
+            }
+        }
+    }
+    if let Some((src, _)) = &req.raw_tools {
+        if *src != target {
+            out.push("provider_tools".to_string());
+        }
+    }
+    if target == Dialect::OpenAiResponses {
+        // The Responses API has no stop sequences, and a foreign turn's reasoning can
+        // only be replayed with the provider's own encrypted payload.
+        if !req.stop.is_empty() {
+            out.push("stop".to_string());
+        }
+        let has_reasoning = req
+            .messages
+            .iter()
+            .any(|m| m.parts.iter().any(|p| matches!(p, Part::Reasoning { .. })));
+        if has_reasoning {
+            out.push("reasoning".to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Concatenate stop sequences; accepts a string or an array of strings.
@@ -227,7 +315,12 @@ fn parse_stop(v: &Value) -> Vec<String> {
     }
 }
 
-/// Parse a `tool_choice` string used by [OI] chat: auto|none|required|<name>.
+/// Parse a `tool_choice` value used by [OI] chat: the string form
+/// (`auto|none|required|<name>`) or the object form
+/// (`{"type":"function","function":{"name":…}}`).
+///
+/// The object form is what every OpenAI SDK sends for a forced tool; reading only `name`
+/// at the top level dropped the forcing silently on the way to another dialect.
 fn parse_openai_tool_choice(v: &Value) -> Option<rrouter_core::ToolChoice> {
     use rrouter_core::ToolChoice;
     if let Some(s) = v.as_str() {
@@ -237,6 +330,21 @@ fn parse_openai_tool_choice(v: &Value) -> Option<rrouter_core::ToolChoice> {
             "required" => ToolChoice::Required,
             other => ToolChoice::Tool(other.to_owned()),
         });
+    }
+    if let Some(kind) = v.get("type").and_then(Value::as_str) {
+        match kind {
+            "auto" => return Some(ToolChoice::Auto),
+            "none" => return Some(ToolChoice::None),
+            "required" | "any" => return Some(ToolChoice::Required),
+            "function" | "tool" => {
+                return v
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .or_else(|| v.get("name").and_then(Value::as_str))
+                    .map(|n| ToolChoice::Tool(n.to_owned()))
+            }
+            _ => return None,
+        }
     }
     v.get("name")
         .and_then(Value::as_str)

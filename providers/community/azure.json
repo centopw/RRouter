@@ -1,0 +1,20 @@
+{
+  "id": "azure",
+  "display": "Azure OpenAI",
+  "website": "https://azure.microsoft.com/products/ai-foundry",
+  "docs": "https://learn.microsoft.com/azure/ai-foundry/openai/api-version-lifecycle",
+  "key_url": "https://portal.azure.com/",
+  "base_url": "https://RESOURCE.openai.azure.com/openai/v1/chat/completions",
+  "base_url_requires_override": true,
+  "responses_url": "https://RESOURCE.openai.azure.com/openai/v1/responses",
+  "auth": "api-key",
+  "auth_header": "api-key",
+  "default_dialect": "chat",
+  "max_tokens_key": "max_completion_tokens",
+  "endpoints": [
+    "POST /openai/v1/chat/completions",
+    "POST /openai/v1/responses"
+  ],
+  "capabilities": ["chat", "streaming", "tools", "vision", "reasoning"],
+  "notes": "v1 surface. RESOURCE is a placeholder, not a tenant, so every connection must set its base URL to https://<resource>.openai.azure.com (the gateway keeps this path) and the gateway refuses to dispatch or save an Azure connection without one. The deployment name is the model id, so register each deployment with POST /api/models/custom; Azure publishes no plain model list. Microsoft no longer requires api-version on the v1 GA surface (preview features use feature headers), so none is declared; a tenant that needs a specific version can put ?api-version=... in its connection base URL, which wins over the manifest. The dated /openai/deployments/<deployment>/chat/completions surface is not expressible here: the deployment lives in the path and the static spec has no path template."
+}

@@ -78,8 +78,11 @@
   --text-caption: 11px;
   --text-caption--line-height: 1.4;
 
-  /* Motion: snappy feedback, measured transitions, ease-out. */
+  /* Motion: snappy feedback, measured transitions, ease-out. Popovers and page changes
+     sit in the 120–160ms band the audits asked for; nothing animates layout. */
   --motion-fast: 75ms;
+  --motion-pop: 140ms;
+  --motion-page: 160ms;
   --motion-base: 400ms;
   --motion-slow: 500ms;
   --ease-standard: cubic-bezier(0.4, 0, 0, 1);
@@ -125,9 +128,24 @@ a,
 input,
 select,
 textarea,
-[role="button"] {
+[role="button"],
+[role="switch"],
+summary {
   transition-duration: var(--motion-fast);
   transition-timing-function: var(--ease-standard);
+}
+
+/* A control that does something is a pointer; a disabled one says so. */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]),
+[role="switch"]:not(:disabled),
+summary {
+  cursor: pointer;
+}
+button:disabled,
+[role="switch"]:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
 }
 
 .route-grid {
@@ -167,13 +185,60 @@ textarea,
   animation: drawer-in var(--motion-fast) var(--ease-standard);
 }
 
+/* Popovers and page changes: opacity + a sub-pixel transform, nothing that reflows. */
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.popover-panel {
+  animation: popover-in var(--motion-pop) var(--ease-standard);
+  transform-origin: var(--radix-popover-content-transform-origin, top right);
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.page-enter {
+  animation: page-in var(--motion-page) var(--ease-standard);
+}
+
+/* The rail keeps its width whether or not the list overflows, so labels never shift. */
+.nav-scroll {
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
-    animation-duration: 0ms !important;
-    transition-duration: 0ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+  .popover-panel,
+  .page-enter,
+  .drawer-panel,
+  .route-edge,
+  .live-dot,
+  .pulse {
+    animation: none !important;
   }
 }
 /* Numeric readouts line up in tables and metric cards. */
@@ -221,50 +286,4 @@ h1[tabindex="-1"]:focus-visible {
   animation: rrouter-pulse 2s ease-in-out infinite;
 }
 
-.route-grid {
-  background-image: radial-gradient(circle, var(--color-rule) 1px, transparent 1px);
-  background-size: 22px 22px;
-  opacity: 0.55;
-  mask-image: radial-gradient(ellipse at center, black 35%, transparent 80%);
-}
 
-@keyframes route-flow {
-  to {
-    stroke-dashoffset: -20;
-  }
-}
-
-.route-edge {
-  stroke-dasharray: 3 7;
-  animation: route-flow 1.1s linear infinite;
-}
-
-.live-dot {
-  animation: rrouter-pulse 2s ease-in-out infinite;
-}
-
-@keyframes drawer-in {
-  from {
-    transform: translateX(16px);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
-
-.drawer-panel {
-  animation: drawer-in var(--motion-fast) var(--ease-standard);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .pulse,
-  .route-edge,
-  .live-dot {
-    animation: none;
-  }
-  * {
-    transition-duration: 0.01ms !important;
-  }
-}

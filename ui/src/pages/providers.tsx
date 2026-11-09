@@ -28,11 +28,14 @@ import {
   useAccountSubscriptions,
   useClearAccountQuota,
   useConnections,
+  useIsAdmin,
   useModelProviders,
   useOAuthProviders,
+  useTeams,
   useUpdateAccountQuota,
   useUpdateConnection,
 } from "../lib/queries";
+import { apiCode } from "../lib/auth";
 import {
   api,
   type AccountQuotaRow,
@@ -50,10 +53,18 @@ import { Heading } from "../components/atoms";
 type AddStep = "kind" | "provider" | "opencode" | "key";
 
 export default function Providers() {
-  const connections = useConnections();
-  const providers = useModelProviders();
-  const oauth = useOAuthProviders();
   const client = useQueryClient();
+  const isAdmin = useIsAdmin();
+  const [params, setParams] = useSearchParams();
+  // `?team_id=` narrows the list inside the caller's own scope; the API is what decides
+  // which teams those are, so a foreign id is refused rather than silently widened.
+  const teamFilter = params.get("team_id") ?? undefined;
+  const connections = useConnections(true, teamFilter);
+  const providers = useModelProviders();
+  // OAuth sign-in, subscription limits and operator quotas are admin surface; a reader
+  // must not fire requests that would only answer 403.
+  const oauth = useOAuthProviders(isAdmin);
+  const teams = useTeams();
 
   const [adding, setAdding] = useState(false);
   const [step, setStep] = useState<AddStep>("kind");
@@ -61,14 +72,15 @@ export default function Providers() {
   const [signIn, setSignIn] = useState<OAuthProvider | null>(null);
   const [keyProvider, setKeyProvider] = useState<string | null>(null);
   const [customProtocol, setCustomProtocol] = useState<"openai" | "anthropic" | null>(null);
-  const [params, setParams] = useSearchParams();
   const [authWindow, setAuthWindow] = useState<Window | null>(null);
   const [notice, setNotice] = useState<{ tone: "pos" | "neg"; text: string } | null>(null);
   const [routing, setRouting] = useState<Connection | null>(null);
+  const [baseUrlFor, setBaseUrlFor] = useState<Connection | null>(null);
+  const [teamFor, setTeamFor] = useState<Connection | null>(null);
   const [quotaFor, setQuotaFor] = useState<AccountQuotaRow | null>(null);
   const [removing, setRemoving] = useState<Connection | null>(null);
-  const quotas = useAccountQuotas();
-  const subscriptions = useAccountSubscriptions();
+  const quotas = useAccountQuotas(isAdmin);
+  const subscriptions = useAccountSubscriptions(isAdmin);
 
   const accounts = connections.data ?? [];
   const connectedIds = useMemo(() => new Set(accounts.map((a) => a.provider)), [accounts]);
@@ -76,6 +88,24 @@ export default function Providers() {
 
   const displayOf = (id: string) =>
     providers.data?.find((p) => p.id === id)?.display ?? id;
+
+  /** A connection's owner team name, or `null` when it is shared. */
+  const teamName = (id: string | null): string | null =>
+    id === null
+      ? null
+      : (teams.data?.find((team) => team.id === id)?.name ?? id.slice(0, 8));
+
+  const setTeamFilter = (team: string) => {
+    const next = new URLSearchParams(params);
+    if (team) next.set("team_id", team);
+    else next.delete("team_id");
+    setParams(next, { replace: true });
+  };
+
+  /** An account that cannot route until it names its own resource (a legacy Azure row). */
+  const needsOverride = (r: Connection) =>
+    providers.data?.find((p) => p.id === r.provider)?.requires_base_url_override === true &&
+    !r.base_url_override;
 
   const invalidate = () => {
     void client.invalidateQueries({ queryKey: qk.connections });
@@ -126,17 +156,24 @@ export default function Providers() {
     setNotice(null);
   };
 
-  // Sidebar shortcuts land here with `?custom=openai|anthropic`.
+  // Sidebar shortcuts land here with `?custom=openai|anthropic`. A reader cannot add a
+  // connection, so the deep link is dropped rather than opening a form that would 403.
   useEffect(() => {
     const custom = params.get("custom");
     if (custom !== "openai" && custom !== "anthropic") return;
+    if (!isAdmin) {
+      const next = new URLSearchParams(params);
+      next.delete("custom");
+      setParams(next, { replace: true });
+      return;
+    }
     startCustom(custom);
     const next = new URLSearchParams(params);
     next.delete("custom");
     setParams(next, { replace: true });
     // `startCustom` is stable for this effect's purpose: it only sets local state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params, setParams]);
+  }, [params, setParams, isAdmin]);
 
   const startSignIn = (provider: OAuthProvider) => {
     // The popup must be opened during the click to survive popup blockers.
@@ -197,10 +234,42 @@ export default function Providers() {
       ),
     },
     {
+      key: "owner",
+      title: "owner",
+      width: "9rem",
+      render: (r) => {
+        const name = teamName(r.team_id);
+        return name === null ? (
+          <Badge
+            tone="neutral"
+            title="shared with the instance; a team key cannot use a shared account"
+          >
+            shared
+          </Badge>
+        ) : (
+          <Badge tone="accent" title={`owned by team ${name}: only that team's keys route here`}>
+            {name}
+          </Badge>
+        );
+      },
+    },
+    {
       key: "account",
       title: "account",
       render: (r) => (
-        <span className="text-muted">{r.name ?? r.email ?? <span className="text-faint">unnamed</span>}</span>
+        <div className="min-w-0">
+          <span className="text-muted">
+            {r.name ?? r.email ?? <span className="text-faint">unnamed</span>}
+          </span>
+          {r.base_url_override ? (
+            <div
+              className="truncate font-mono text-caption text-faint"
+              title={r.base_url_override}
+            >
+              {hostOf(r.base_url_override)}
+            </div>
+          ) : null}
+        </div>
       ),
     },
     {
@@ -232,37 +301,62 @@ export default function Providers() {
     {
       key: "state",
       title: "state",
-      render: (r) =>
-        r.backoff_level > 0 ? (
-          <Badge tone="warn">backoff {r.backoff_level}</Badge>
-        ) : r.is_active ? (
-          <Badge tone="pos">active</Badge>
-        ) : (
-          <Badge tone="neutral">disabled</Badge>
-        ),
-    },
-    {
-      key: "actions",
-      title: "",
-      align: "right",
       render: (r) => (
-        <span className="flex justify-end gap-1.5">
-          <Button onClick={() => setRouting(r)} title="edit routing priority and weight">
-            edit
-          </Button>
-          <TestButton id={r.id} />
-          <Button
-            onClick={() => toggle.mutate({ id: r.id, active: !r.is_active })}
-            title={r.is_active ? "stop routing through this account" : "route through this account again"}
-          >
-            {r.is_active ? "disable" : "enable"}
-          </Button>
-          <Button variant="danger" onClick={() => setRemoving(r)}>
-            remove
-          </Button>
+        <span className="flex flex-wrap gap-1">
+          {needsOverride(r) ? (
+            <Badge tone="warn" title="cannot route until this account names its resource base URL">
+              base url
+            </Badge>
+          ) : null}
+          {r.backoff_level > 0 ? (
+            <Badge tone="warn">backoff {r.backoff_level}</Badge>
+          ) : r.is_active ? (
+            <Badge tone="pos">active</Badge>
+          ) : (
+            <Badge tone="neutral">disabled</Badge>
+          )}
         </span>
       ),
     },
+    // Mutations are admin-only at the API gate, so a reader gets no controls at all.
+    ...(isAdmin
+      ? [
+        {
+          key: "actions",
+          title: "",
+          align: "right",
+          render: (r) => (
+            <span className="flex justify-end gap-1.5">
+              <Button
+                onClick={() => setTeamFor(r)}
+                title="move this account between a team and the shared pool"
+              >
+                team
+              </Button>
+              <Button
+                onClick={() => setBaseUrlFor(r)}
+                title="edit the base URL this account dispatches to"
+              >
+                base url
+              </Button>
+              <Button onClick={() => setRouting(r)} title="edit routing priority and weight">
+                edit
+              </Button>
+              <TestButton id={r.id} />
+              <Button
+                onClick={() => toggle.mutate({ id: r.id, active: !r.is_active })}
+                title={r.is_active ? "stop routing through this account" : "route through this account again"}
+              >
+                {r.is_active ? "disable" : "enable"}
+              </Button>
+              <Button variant="danger" onClick={() => setRemoving(r)}>
+                remove
+              </Button>
+            </span>
+          ),
+        } as Column<Connection>,
+      ]
+      : []),
   ];
 
   return (
@@ -271,11 +365,43 @@ export default function Providers() {
         title="Providers"
         subtitle="Accounts this gateway can route through. Each one is an upstream the router may pick."
         actions={
-          <Button variant="primary" onClick={openAdd}>
-            add provider
-          </Button>
+          <>
+            {(teams.data ?? []).length > 0 ? (
+              <div className="w-[180px]">
+                <Select
+                  ariaLabel="filter accounts by owner team"
+                  value={teamFilter ?? ""}
+                  onChange={setTeamFilter}
+                >
+                  <option value="">{isAdmin ? "all accounts" : "my teams"}</option>
+                  {(teams.data ?? []).map((team) => (
+                    <option key={team.id} value={team.id}>
+                      {team.name}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            ) : null}
+            {isAdmin ? (
+              <Button variant="primary" onClick={openAdd}>
+                add provider
+              </Button>
+            ) : null}
+          </>
         }
       />
+
+      {!isAdmin ? (
+        <p className="mb-3 text-small text-muted">
+          Read-only: these are the provider accounts your team may route through. An
+          administrator adds, edits and assigns them.
+        </p>
+      ) : null}
+      <p className="mb-4 text-small text-muted">
+        A team key routes only to its own team's accounts. A team key with no team-owned
+        account fails with “no eligible upstream” until an administrator assigns one, and
+        shared accounts serve instance-wide keys only.
+      </p>
 
       <ConfirmDialog
         open={removing !== null}
@@ -308,12 +434,31 @@ export default function Providers() {
 
       {connections.isError ? (
         <div className="mb-4">
-          <ErrorNote error={connections.error} onRetry={() => void connections.refetch()} />
+          {apiCode(connections.error) === "team_forbidden" ? (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-body text-[var(--color-warn-ink)]"
+            >
+              <span className="min-w-0 flex-1">
+                That team's provider accounts are not visible to this account — assignments
+                are only readable by members of the owning team.
+              </span>
+              <button
+                type="button"
+                onClick={() => setTeamFilter("")}
+                className="shrink-0 text-caption underline underline-offset-2"
+              >
+                clear filter
+              </button>
+            </div>
+          ) : (
+            <ErrorNote error={connections.error} onRetry={() => void connections.refetch()} />
+          )}
         </div>
       ) : null}
 
       {!connections.isLoading && accounts.length === 0 ? (
-        <EmptyProviders onAdd={openAdd} />
+        <EmptyProviders onAdd={isAdmin ? openAdd : null} />
       ) : (
         <Card>
           <CardHeader
@@ -335,7 +480,7 @@ export default function Providers() {
         </Card>
       )}
 
-      {!connections.isLoading && accounts.length > 0 ? (
+      {isAdmin && !connections.isLoading && accounts.length > 0 ? (
         <div className="mt-4">
           <Card>
             <CardHeader
@@ -368,7 +513,7 @@ export default function Providers() {
         </div>
       ) : null}
 
-      {!connections.isLoading && accounts.length > 0 ? (
+      {isAdmin && !connections.isLoading && accounts.length > 0 ? (
         <div className="mt-4">
           <Card>
             <CardHeader
@@ -408,7 +553,7 @@ export default function Providers() {
         customProtocol={customProtocol}
         subscriptionProviders={subscriptionProviders}
         keyProviders={keyProviders}
-        connected={connectedIds}
+        providers={providers.data ?? []}
         onConnected={(label, warning) => {
           setAdding(false);
           invalidate();
@@ -421,6 +566,23 @@ export default function Providers() {
 
       {routing ? (
         <RoutingModal key={routing.id} connection={routing} onClose={() => setRouting(null)} />
+      ) : null}
+
+      {baseUrlFor ? (
+        <BaseUrlModal
+          key={baseUrlFor.id}
+          connection={baseUrlFor}
+          spec={providers.data?.find((p) => p.id === baseUrlFor.provider)}
+          onClose={() => setBaseUrlFor(null)}
+        />
+      ) : null}
+
+      {teamFor ? (
+        <TeamModal
+          key={teamFor.id}
+          connection={teamFor}
+          onClose={() => setTeamFor(null)}
+        />
       ) : null}
 
       {quotaFor ? (
@@ -451,6 +613,42 @@ export default function Providers() {
 }
 
 /** Whole number inside `min..=max`; the server clamps, but a silent clamp would hide typos. */
+/** The host an override points at, for the account cell. */
+function hostOf(url: string): string {
+  return url
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+    .replace(/[/?#].*$/, "")
+    .replace(/^[^@]*@/, "")
+    .replace(/:\d+$/, "");
+}
+
+const PLACEHOLDER_LABELS = /^(resource|your-resource|placeholder)$/i;
+
+/**
+ * Why this base URL cannot be saved, or `null`.
+ *
+ * Mirrors the server, so the form never offers a value the API will refuse: a provider
+ * whose manifest host is a placeholder (Azure) needs the deployment's own resource URL,
+ * and `RESOURCE` copied from the manifest is refused for every provider because the host
+ * cannot resolve.
+ */
+function baseUrlProblem(value: string, required: boolean): string | null {
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return required
+      ? "This provider needs the resource endpoint of your own deployment."
+      : null;
+  }
+  if (/<\s*resource\s*>/i.test(trimmed)) {
+    return "Replace <resource> with your own resource name.";
+  }
+  const label = hostOf(trimmed).split(".")[0] ?? "";
+  if (PLACEHOLDER_LABELS.test(label)) {
+    return "The manifest host is a placeholder — replace RESOURCE with your own resource name.";
+  }
+  return null;
+}
+
 function intProblem(value: string, min: number, max: number): string | null {
   const text = value.trim();
   if (text === "") return "required";
@@ -563,7 +761,188 @@ function RoutingModal({ connection, onClose }: { connection: Connection; onClose
   );
 }
 
-function EmptyProviders({ onAdd }: { onAdd: () => void }) {
+/**
+ * One account's base URL.
+ *
+ * The override is an origin: the gateway takes it and keeps the provider's endpoint path,
+ * so an Azure tenant URL is `https://<resource>.openai.azure.com` with no path of its own.
+ * A saved URL can be replaced here but not removed — the credential merge has no "unset",
+ * and an empty base URL would send traffic to the origin root — so the hint says so
+ * instead of offering a control that would do nothing.
+ */
+function BaseUrlModal({
+  connection,
+  spec,
+  onClose,
+}: {
+  connection: Connection;
+  spec?: ModelProvider;
+  onClose: () => void;
+}) {
+  const client = useQueryClient();
+  const [value, setValue] = useState(connection.base_url_override ?? "");
+  const [failure, setFailure] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const required = spec?.requires_base_url_override === true;
+  const example = spec?.base_url_example ?? "https://<resource>.openai.azure.com";
+  const problem = baseUrlProblem(value, required);
+  const unchanged = (connection.base_url_override ?? "") === value.trim();
+
+  const save = async () => {
+    if (problem !== null || unchanged || busy) return;
+    setBusy(true);
+    setFailure(null);
+    try {
+      await api.patch<Connection>(`/api/connections/${connection.id}`, {
+        credentials: { base_url_override: value.trim() },
+      });
+      void client.invalidateQueries({ queryKey: qk.connections });
+      void client.invalidateQueries({ queryKey: qk.models });
+      void client.invalidateQueries({ queryKey: qk.modelProviders });
+      onClose();
+    } catch (error) {
+      setFailure(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Base URL"
+      open
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            cancel
+          </Button>
+          <Button
+            variant="primary"
+            disabled={problem !== null || unchanged || busy}
+            onClick={() => void save()}
+          >
+            {busy ? "saving…" : "save"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <p className="text-small leading-relaxed text-muted">
+          {required
+            ? `${spec?.display ?? connection.provider} names your deployment, so this account must point at its own resource. Only the origin is used; the gateway keeps the provider's API path.`
+            : "Optional: send this account's traffic to a regional, self-hosted or proxy endpoint. Only the origin is used; the gateway keeps the provider's API path."}
+        </p>
+        <Field
+          label={required ? "resource base URL (required)" : "base URL"}
+          hint={required ? `for example ${example}` : "an origin; any path here is replaced"}
+        >
+          <Input
+            value={value}
+            onChange={setValue}
+            placeholder={example}
+            ariaLabel="base url override"
+          />
+        </Field>
+        {problem ? (
+          <span role="alert" className="text-caption text-neg">
+            {problem}
+          </span>
+        ) : null}
+        {connection.base_url_override ? (
+          <p className="text-caption text-faint">
+            A saved base URL can be replaced but not removed here: it is where this account
+            routes.
+          </p>
+        ) : null}
+        {failure ? <ErrorNote error={failure} /> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Move one account between a team and the shared pool.
+ *
+ * The two choices are not equivalent for routing: a team-owned account is used only by
+ * that team's keys, while a shared account is used only by instance-wide keys. The hint
+ * says so, because "shared" reads as "available to everyone" and it is not.
+ */
+function TeamModal({
+  connection,
+  onClose,
+}: {
+  connection: Connection;
+  onClose: () => void;
+}) {
+  const client = useQueryClient();
+  const teams = useTeams();
+  const [team, setTeam] = useState(connection.team_id ?? "");
+  const [failure, setFailure] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const unchanged = (connection.team_id ?? "") === team;
+
+  const save = async () => {
+    if (unchanged || busy) return;
+    setBusy(true);
+    setFailure(null);
+    try {
+      await api.patch<Connection>(`/api/connections/${connection.id}`, {
+        // Explicit null hands the account back to the shared pool.
+        team_id: team === "" ? null : team,
+      });
+      void client.invalidateQueries({ queryKey: qk.connections });
+      void client.invalidateQueries({ queryKey: qk.modelProviders });
+      void client.invalidateQueries({ queryKey: qk.models });
+      onClose();
+    } catch (error) {
+      setFailure(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Owner team"
+      open
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            cancel
+          </Button>
+          <Button variant="primary" disabled={unchanged || busy} onClick={() => void save()}>
+            {busy ? "saving…" : "save"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <Field
+          label="owner"
+          hint="a team account serves only that team's keys; a shared account serves instance-wide keys and is invisible to team accounts"
+        >
+          <Select value={team} onChange={setTeam} ariaLabel="connection owner team">
+            <option value="">Shared / instance-wide</option>
+            {(teams.data ?? []).map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <p className="text-caption text-faint">
+          Moving an account takes effect on the next request: a team key with no team-owned
+          account of this provider fails with “no eligible upstream” until one is assigned.
+        </p>
+        {failure ? <ErrorNote error={failure} /> : null}
+      </div>
+    </Modal>
+  );
+}
+
+function EmptyProviders({ onAdd }: { onAdd: (() => void) | null }) {
   return (
     <Card className="px-6 py-14 text-center">
       <img
@@ -578,11 +957,17 @@ function EmptyProviders({ onAdd }: { onAdd: () => void }) {
         RRouter has nothing to route to yet. Sign in to a subscription account, or paste an API key — either
         takes about a minute.
       </p>
-      <div className="mt-5">
-        <Button variant="primary" onClick={onAdd}>
-          add your first provider
-        </Button>
-      </div>
+      {onAdd ? (
+        <div className="mt-5">
+          <Button variant="primary" onClick={onAdd}>
+            add your first provider
+          </Button>
+        </div>
+      ) : (
+        <p className="mt-4 text-caption text-faint">
+          An administrator adds the first provider account.
+        </p>
+      )}
     </Card>
   );
 }
@@ -602,7 +987,7 @@ function AddProviderFlow({
   customProtocol,
   subscriptionProviders,
   keyProviders,
-  connected,
+  providers,
   onConnected,
 }: {
   open: boolean;
@@ -619,7 +1004,8 @@ function AddProviderFlow({
   customProtocol: "openai" | "anthropic" | null;
   subscriptionProviders: Array<OAuthProvider & { display: string }>;
   keyProviders: ModelProvider[];
-  connected: Set<string>;
+  /** Every provider row, for the connection scope of a subscription sign-in. */
+  providers: ModelProvider[];
   onConnected: (label: string, warning: string | null) => void;
 }) {
   return (
@@ -669,7 +1055,7 @@ function AddProviderFlow({
             id: p.id,
             title: p.display,
             meta: p.flow === "device_code" ? "device code" : "browser sign-in",
-            connected: connected.has(p.id),
+            scope: providers.find((row) => row.id === p.id)?.scope ?? "none",
             onClick: () => onChooseOAuth(p),
           }))}
         />
@@ -714,7 +1100,7 @@ function AddProviderFlow({
                 id: p.id,
                 title: p.display,
                 meta: p.listed ? "lists its models" : "add models manually",
-                connected: connected.has(p.id),
+                scope: p.scope,
                 onClick: () => onChooseKey(p.id),
               }))}
             />
@@ -777,7 +1163,14 @@ function ProviderList({
   items,
   empty,
 }: {
-  items: Array<{ id: string; title: string; meta: string; connected: boolean; onClick: () => void }>;
+  items: Array<{
+    id: string;
+    title: string;
+    meta: string;
+    /** `global` = shared account, `team` = a team-owned account, `none` = nothing. */
+    scope: ModelProvider["scope"];
+    onClick: () => void;
+  }>;
   empty: string;
 }) {
   if (items.length === 0) return <p className="text-body text-faint">{empty}</p>;
@@ -794,7 +1187,15 @@ function ProviderList({
               <span className="block truncate text-body">{item.title}</span>
               <span className="block text-caption text-faint">{item.meta}</span>
             </span>
-            {item.connected ? <Badge tone="pos">connected</Badge> : null}
+            {item.scope === "global" ? (
+              <Badge tone="pos" title="a shared instance account: serves non-team keys only">
+                connected · shared
+              </Badge>
+            ) : item.scope === "team" ? (
+              <Badge tone="accent" title="a team-owned account: serves that team's keys">
+                connected · team
+              </Badge>
+            ) : null}
             <span className="text-caption text-faint">→</span>
           </button>
         </li>
@@ -880,8 +1281,10 @@ function ApiKeyForm({
   onConnected: (label: string, warning: string | null) => void;
 }) {
   const client = useQueryClient();
+  const teams = useTeams();
   const [provider, setProvider] = useState(fixedProvider ?? providers[0]?.id ?? "");
   const [name, setName] = useState("");
+  const [team, setTeam] = useState("");
   const [key, setKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [error, setError] = useState<unknown>(null);
@@ -890,7 +1293,13 @@ function ApiKeyForm({
     if (fixedProvider) setProvider(fixedProvider);
   }, [fixedProvider]);
 
-  const fixedDisplay = providers.find((p) => p.id === (fixedProvider ?? provider))?.display;
+  const selected = providers.find((p) => p.id === (fixedProvider ?? provider));
+  const fixedDisplay = selected?.display;
+  // A provider whose manifest host is a placeholder cannot route without a real URL, so
+  // the field stops being optional and the button stays disabled until it is filled in.
+  const requiresBaseUrl = selected?.requires_base_url_override === true;
+  const example = selected?.base_url_example ?? "https://<resource>.openai.azure.com";
+  const baseProblem = baseUrlProblem(baseUrl, requiresBaseUrl);
   const needsBaseUrl = customProtocol !== null && baseUrl.trim() === "";
 
   const save = useMutation({
@@ -899,6 +1308,8 @@ function ApiKeyForm({
         provider,
         auth_type: "api_key",
         name: name || null,
+        // `null` is the shared pool: instance-wide keys route here, team keys do not.
+        team_id: team === "" ? null : team,
         credentials: {
           api_key: key,
           ...(baseUrl.trim() ? { base_url_override: baseUrl.trim() } : {}),
@@ -913,7 +1324,8 @@ function ApiKeyForm({
     },
     onError: setError,
   });
-  const ready = provider !== "" && key !== "" && !needsBaseUrl && !save.isPending;
+  const ready =
+    provider !== "" && key !== "" && !needsBaseUrl && baseProblem === null && !save.isPending;
 
   return (
     <form
@@ -951,24 +1363,50 @@ function ApiKeyForm({
       <Field label="label" hint="how this account appears in the table">
         <Input value={name} onChange={setName} placeholder="production-key" ariaLabel="account label" />
       </Field>
+      <Field
+        label="owner"
+        hint="a team account serves only that team's keys; shared serves instance-wide keys"
+      >
+        <Select value={team} onChange={setTeam} ariaLabel="connection owner team">
+          <option value="">Shared / instance-wide</option>
+          {(teams.data ?? []).map((row) => (
+            <option key={row.id} value={row.id}>
+              {row.name}
+            </option>
+          ))}
+        </Select>
+      </Field>
       <Field label="api key" hint="stored encrypted; never returned by the API">
         <Input value={key} onChange={setKey} type="password" placeholder="sk-…" ariaLabel="api key" />
       </Field>
       <Field
-        label="base url"
+        label={requiresBaseUrl ? "resource base URL (required)" : "base url"}
         hint={
-          customProtocol
-            ? "required; the endpoint root that serves this protocol"
-            : "optional, for a self-hosted or proxy endpoint"
+          requiresBaseUrl
+            ? `Your deployment's endpoint, for example ${example}. The gateway keeps the provider's API path.`
+            : customProtocol
+              ? "required; the endpoint root that serves this protocol"
+              : "optional, for a self-hosted or proxy endpoint"
         }
       >
         <Input
           value={baseUrl}
           onChange={setBaseUrl}
-          placeholder={customProtocol === "anthropic" ? "https://api.example.com/v1" : "https://api.example.com/v1"}
+          placeholder={
+            requiresBaseUrl
+              ? example
+              : customProtocol === "anthropic"
+                ? "https://api.example.com/v1"
+                : "https://api.example.com/v1"
+          }
           ariaLabel="base url override"
         />
       </Field>
+      {baseProblem ? (
+        <span role="alert" className="text-caption text-neg">
+          {baseProblem}
+        </span>
+      ) : null}
       {error ? <ErrorNote error={error} /> : null}
       <div className="flex justify-end">
         <Button type="submit" variant="primary" disabled={!ready}>

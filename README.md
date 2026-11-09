@@ -9,8 +9,8 @@ backend at it, and it routes each request to whichever account you configured �
 between the OpenAI Chat, OpenAI Responses, and Anthropic Messages protocols on the way in
 and out.
 
-No Node runtime, no Redis, no external database, no telemetry. SQLite, the encryption key
-material, and the dashboard all live inside the binary and the data directory.
+No Node runtime, no Redis, no external database, no telemetry by default. SQLite, the
+encryption key material, and the dashboard all live inside the binary and the data directory.
 
 - **Single binary, embedded storage.** SQLite is compiled in; the dashboard is compiled in.
 - **Protocol translation, not a proxy.** Anthropic clients can talk to a Codex account, and
@@ -21,6 +21,23 @@ material, and the dashboard all live inside the binary and the data directory.
   SHA-256 hashes and printed once.
 - **A real model registry.** Model lists, capabilities, and limits converge from the catalog,
   the provider's own `/models` endpoint, and [models.dev](https://models.dev).
+
+## See it
+
+[Watch the 10-second demo](docs/assets/rrouter-demo.mp4) · [Activity](docs/screenshots/activity.png) · [Models](docs/screenshots/models.png) · [Evals](docs/screenshots/evals.png) · [Webhooks](docs/screenshots/webhooks.png)
+
+[![RRouter demo](docs/assets/rrouter-demo.gif)](docs/assets/rrouter-demo.mp4)
+
+<p align="center">
+  <img src="docs/screenshots/activity.png" width="49%" alt="Activity dashboard">
+  <img src="docs/screenshots/models.png" width="49%" alt="Models registry with pagination and capability popover">
+</p>
+<p align="center">
+  <img src="docs/screenshots/evals.png" width="49%" alt="Evals suites and runs">
+  <img src="docs/screenshots/webhooks.png" width="49%" alt="Webhook delivery queue">
+</p>
+
+Mobile layouts: [Models at 390px](docs/screenshots/models-mobile.png) · [Webhooks at 390px](docs/screenshots/webhooks-mobile.png)
 
 ---
 
@@ -35,13 +52,16 @@ curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | s
 ```
 
 ```sh
-# pin a version / choose a directory
-RROUTER_VERSION=v0.2.3 RROUTER_INSTALL_DIR="$HOME/bin" \
+# pin the newest published release (v0.4.0) / choose a directory
+RROUTER_VERSION=v0.4.0 RROUTER_INSTALL_DIR="$HOME/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
 
 # see what it would do
 RROUTER_DRY_RUN=1 curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | sh
 ```
+
+`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.0 is
+the newest. The workspace is 0.4.0 — tag artifacts are published by the release workflow.
 
 ## Quick start
 
@@ -94,7 +114,10 @@ where it goes, not the protocol.
 | `POST /v1/audio/speech` | forwarded; audio bytes relayed with the upstream content-type |
 | `POST /v1/audio/transcriptions` | multipart forwarded verbatim (boundary preserved) |
 | `GET /v1/audio/voices` | forwarded when the provider has one |
-| `GET/POST /api/*` | admin: providers, keys, models, aliases, combos, usage |
+| `POST /v1/rerank` | canonical rerank, forwarded to providers with a rerank endpoint |
+| `POST/GET /v1/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content` | provider file API forwarded verbatim (multipart boundary preserved; content streamed); only the built-in OpenAI provider declares these today (`501` otherwise; a community manifest can declare them), uploads buffered under a 64 MiB cap |
+| `POST/GET /v1/batches`, `GET /v1/batches/{id}`, `POST /v1/batches/{id}/cancel` | provider batch API forwarded byte-identically; execution stays with the provider; only the built-in OpenAI provider declares these today (`501` otherwise; a community manifest can declare them); pin one provider when a batch references an uploaded file |
+| `GET/POST /api/*` | admin: providers, keys, models, teams, webhooks, evals, usage, settings |
 
 `/v1/messages/count_tokens` and `/v1/responses/compact` are forwarded to the provider that
 implements them (Anthropic and OpenAI/GitHub respectively), because both are provider-native
@@ -102,6 +125,11 @@ shapes the canonical request cannot represent. A provider without the endpoint a
 with its dialect's error envelope rather than an invented estimate. Codex's subscription
 backend does not serve `/responses/compact` today, so that one answers its own `404`; an
 OpenAI API-key connection does.
+
+Admin-side additions in this tree: signed webhooks (`/api/webhooks` — endpoint registry plus a
+leased SQLite outbox with retries, dead-lettering and a terminal `unmatched` state, and a
+delivery-status view), and an eval harness (`/api/evals/*` — suites/cases run in-process
+through the real `/v1` path, with stored results and summaries).
 
 Usage reads are windowed and aggregated in SQL, so the dashboard never pages through events:
 
@@ -138,6 +166,10 @@ team keeps a stable model name while the operator repoints it.
 - `GET /metrics` is Prometheus text behind the admin gate: build info, requests by
   provider/model/status, attempts by provider/status, a latency histogram, and breaker state
   per connection.
+- W3C trace context is accepted, continued and logged (`x-trace-id` on every response, one
+  child span per attempt); exporting spans over OTLP/HTTP is optional — build with
+  `--features otel` and set `RROUTER_OTEL_ENDPOINT`. Default builds link no OpenTelemetry
+  crates; the setting is environment-only and off until an endpoint is set.
 - Activity's request detail shows the attempt timeline and splits streamed latency into
   time-to-first-output and generation.
 
@@ -151,6 +183,15 @@ tokens and zero cost — it shows up in Activity without pretending the provider
 `x-rrouter-cache: bypass` forces a miss; streamed requests and errors are never cached.
 `RROUTER_CACHE_TTL_SECS` and `RROUTER_CACHE_MAX_ENTRIES` bound lifetime and size; expired
 rows are dropped lazily.
+
+`RROUTER_SEMANTIC_CACHE=sqlite` adds an opt-in **semantic** layer on top: the canonical
+prompt is embedded by `RROUTER_SEMANTIC_EMBEDDING_MODEL` (a `provider/model` ref) and a
+stored response is served when cosine similarity reaches
+`RROUTER_SEMANTIC_CACHE_THRESHOLD` (default 0.92), within the same scope — embedding model,
+provider, model and team (not per gateway key) — and the `RROUTER_SEMANTIC_CACHE_TTL_SECS` /
+`RROUTER_SEMANTIC_CACHE_MAX_ENTRIES` bounds. It is non-streaming chat/messages/responses
+only, needs the embedding provider to answer before the lookup, and a semantic hit is marked
+`x-rrouter-cache: semantic-hit`.
 
 ## Keys and limits
 
@@ -168,11 +209,26 @@ A gateway key is not just a password: each one carries the limits an operator ne
 Spend is read from the usage table (not a counter that drifts), every usage row records which
 key produced it, and the Keys page edits all of it.
 
-A key can also carry **guardrails**: a prompt-size cap, case-insensitive blocked phrases, and
-an output-scan switch. Input checks run before planning (system prompt plus message text); output
-checks inspect the response, and a streamed hit is cut with one error frame. Blocks answer `403`
-with `prompt_too_long`, `guardrail_blocked` or `output_blocked`, and are counted per stage in
-`/metrics`. Enforcement applies whenever a key is
+**Teams add a second budget level.** A team carries the same token and USD budgets over a
+lifetime or daily/weekly/monthly window (`/api/teams`). A key that belongs to a team spends the
+team's allowance, and an exhausted team answers `429` `team_budget_exhausted` before dispatch.
+Usage rows record the team, so `GET /api/usage`, `/api/usage/summary`, `/api/usage/series` and
+`/api/usage/export.csv` attribute spend per team without a join. There is deliberately **no
+prepaid credit balance**: budgets are the cap, and the gateway never holds a customer's money
+([ADR 0001](docs/decisions/0001-no-prepaid-credits.md)).
+
+A key can also carry **guardrails**: a prompt-size cap, case-insensitive blocked phrases, an
+output-scan switch, and opt-in PII redaction (`guardrails.redact_pii`). Input checks run
+before planning (system prompt plus message text); output checks inspect the response, and a
+streamed hit is cut with one error frame. Blocks answer `403` with `prompt_too_long`,
+`guardrail_blocked` or `output_blocked`, and are counted per stage in `/metrics`.
+
+With redaction on, emails, phone numbers, cards and credential-shaped strings become
+`[email]`/`[phone]`/`[card]`/`[secret]` in prompts, non-streaming responses **and streamed
+text**. Streams hold at most 512 bytes so a value split across deltas is still caught; the
+bounded cost is visible lag, and a value longer than the window can straddle an emission
+cut. Tool-call arguments and opaque payloads are deliberately not rewritten (a redacted
+argument would change what a tool does). Enforcement applies whenever a key is
 presented; with `RROUTER_REQUIRE_API_KEY=false` a request with no key is still anonymous, and
 an unknown placeholder key is ignored so local tools keep working. A *known* key that is
 inactive or expired is always rejected.
@@ -253,7 +309,10 @@ the **Audit** page and are pruned with the usage retention window.
 - Dashboard accounts hash passwords with argon2id; session cookies, recovery codes and
   invitation tokens are stored only as hashes. The owner cannot be demoted, disabled or
   deleted. Cookie-authenticated writes require the `x-rrouter-csrf` header, sign-in is
-  rate-limited, and the owner's setup code is printed once and consumed on use.
+  rate-limited, and the owner's setup code is printed once and consumed on use. Each session
+  records the resolved client IP, raw User-Agent (bounded) and a derived device label for the
+  account page; legacy sessions show none, and the forwarded IP is only as trustworthy as the
+  proxy that sets it.
 - Upstream payloads are never persisted; usage rows record tokens, latency, status, and the
   model — not prompts or completions.
 
@@ -315,6 +374,16 @@ The operational guide — exposure, TLS proxy, backups, upgrades, failure modes 
 | `RROUTER_RETRY_ATTEMPTS` | `1` | Extra tries of the same candidate on a retryable error (0–5) |
 | `RROUTER_RETRY_BASE_MS` | `200` | First backoff; doubles per retry, ±20% jitter |
 | `RROUTER_RETRY_MAX_MS` | `5000` | Backoff ceiling, also caps an upstream `Retry-After` |
+| `RROUTER_HEDGE_MS` | `0` | Non-streaming hedge delay: after N ms without an answer, the next same-priority candidate starts in parallel; `0` disables; restart-only |
+| `RROUTER_CANARY` | unset | Operator A/B, `model=provider:percent` (e.g. `gpt-4.1=azure:10`); the canary provider is tried first for that share of request ids, inside its own priority tier |
+| `RROUTER_SEMANTIC_CACHE` | `off` | `sqlite` enables the opt-in semantic cache (non-streaming chat/messages/responses) |
+| `RROUTER_SEMANTIC_CACHE_THRESHOLD` | `0.92` | Minimum cosine similarity for a semantic hit (0–1) |
+| `RROUTER_SEMANTIC_EMBEDDING_MODEL` | unset | `provider/model` used to embed prompts; required when the cache is on |
+| `RROUTER_SEMANTIC_CACHE_TTL_SECS` | `3600` | Semantic entry lifetime |
+| `RROUTER_SEMANTIC_CACHE_MAX_ENTRIES` | `1000` | Semantic rows kept, oldest evicted first |
+| `RROUTER_OTEL_ENDPOINT` | unset | Full OTLP/HTTP traces URL; only read by builds with `--features otel`; unset disables export; environment-only |
+| `RROUTER_OTEL_SERVICE_NAME` | `rrouter` | `service.name` resource attribute for exported spans |
+| `RROUTER_OTEL_SAMPLE_RATIO` | `1.0` | Local root sampling ratio (0–1); an inbound `traceparent` sampling flag wins |
 | `RROUTER_SHUTDOWN_GRACE_SECS` | `20` | How long a graceful shutdown waits for live streams |
 | `RROUTER_CORS_ORIGINS` | unset | Comma-separated allowlist; `*` is rejected |
 | `RROUTER_USAGE_RETENTION_DAYS` | `0` | Delete usage/attempts older than N days (0 keeps everything); expired cache rows are swept daily regardless |
@@ -356,33 +425,71 @@ those, which is why it needs no Rust toolchain.
 
 ## Architecture
 
-Seven crates, each with one job:
+```mermaid
+flowchart LR
+  subgraph Clients["Clients"]
+    c1["OpenAI / Codex CLI"]
+    c2["Anthropic / Claude Code"]
+    c3["Dashboard / admin API"]
+  end
 
+  subgraph Gateway["RRouter — one Rust binary"]
+    ingress["Protocol ingress<br/>chat · responses · messages"]
+    auth["Auth + scopes<br/>keys · teams · sessions"]
+    guard["Guardrails<br/>cap · blocks · PII"]
+    plan["Planner<br/>priority · weight · latency · cost<br/>canary · team scope"]
+    dispatch["Dispatcher<br/>retries · breaker · hedge"]
+    cache["Exact + semantic cache"]
+    trace["Trace · audit · webhooks"]
+  end
+
+  subgraph Providers["Provider accounts"]
+    oauth["OAuth subscriptions"]
+    keys["API-key providers"]
+    local["Local / custom"]
+  end
+
+  store[("SQLite<br/>keys · usage · cache<br/>audit · evals · outbox")]
+
+  c1 --> ingress
+  c2 --> ingress
+  c3 --> auth
+  ingress --> auth --> guard --> plan --> dispatch
+  plan <--> cache
+  dispatch --> oauth
+  dispatch --> keys
+  dispatch --> local
+  dispatch --> store
+  cache --> store
+  trace --> store
+  auth --> store
 ```
-client ──▶ gateway ──▶ translate ──▶ router ──▶ upstream
-             │            │            │
-             │            │            └── planner, breaker, dispatcher
-             │            └── canonical request/response + SSE codecs
-             └── axum routes, admin API, embedded dashboard
 
-core        shared types (ChatRequest, StreamEvent, Usage, errors)
-auth        provider registry, credential refresh, OAuth flows
-store       SQLite, encryption, connections/keys/models/usage
-translate   Chat ⇄ Responses ⇄ Anthropic, request and stream
-router      model resolution, aliases, combos, circuit breaker
-gateway     HTTP surface, proxying, admin routes
-ui          the embedded Vite dashboard (build-time asset table)
-```
+**Runtime flow**
 
-The proxy parses the client body into one canonical request, picks candidates, builds the
-provider's wire body, and decodes the upstream stream incrementally — a client frame is
-emitted as soon as the chunk carrying it arrives. A stream-only upstream (Codex) serving a
-non-streaming client is reassembled from the same decoder.
+1. **Ingress** normalizes Chat, Responses and Messages into one canonical request.
+2. **Auth + guardrails** resolve the key/team, limits and PII/blocking policy before dispatch.
+3. **Planner** expands aliases/combos and selects eligible accounts; priority is authoritative.
+4. **Dispatcher** retries, fails over, probes breakers and optionally hedges.
+5. **Response** is translated back to the caller's dialect; usage, trace, audit and webhooks are recorded.
+
+The full diagram source is [`docs/architecture.mmd`](docs/architecture.mmd).
+
+| Crate | Responsibility |
+| --- | --- |
+| `rrouter-core` | shared request/response/stream types and errors |
+| `rrouter-auth` | provider registry, credentials, OAuth refresh |
+| `rrouter-store` | SQLite, encryption, connections/keys/teams/usage/evals/outbox |
+| `rrouter-translate` | Chat ⇄ Responses ⇄ Anthropic, request and stream |
+| `rrouter-router` | aliases, combos, planning, breaker, dispatch |
+| `rrouter-rtk` | Token Saver: inbound tool-result compression |
+| `rrouter-gateway` | HTTP surface, proxy, admin API, dashboard |
+| `rrouter-ui` | embedded Vite dashboard |
 
 ## Tests
 
 ```sh
-cargo test --workspace                              # 284 tests
+cargo test --workspace                              # unit + integration suites
 cargo clippy --workspace --all-targets -- -D warnings
 ./scripts/verify.sh                                 # build + every gate
 python3 scripts/e2e_smoke.py                        # live binary + mock upstream

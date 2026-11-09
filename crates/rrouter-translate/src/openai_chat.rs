@@ -12,7 +12,7 @@ use crate::{
     arguments_to_string, arguments_value, capture_extra, finish_from_openai, merge_extra,
     openai_tool_choice_value, opt_f64, opt_u32, parse_arguments, parse_err,
     parse_openai_tool_choice, parse_stop, req_str, req_str_field, tool_schema, usage_from_openai,
-    usage_to_openai,
+    usage_to_openai, WireProfile,
 };
 
 const D: Dialect = Dialect::OpenAiChat;
@@ -176,8 +176,9 @@ fn parse_parts(msg: &Value, index: usize) -> Result<Vec<Part>> {
         }]);
     }
 
-    if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
-        for call in calls {
+    let mut calls: Vec<Part> = Vec::new();
+    if let Some(list) = msg.get("tool_calls").and_then(Value::as_array) {
+        for call in list {
             let id = req_str(call, "id").unwrap_or_default().to_owned();
             let func = call.get("function");
             let name = func
@@ -191,22 +192,28 @@ fn parse_parts(msg: &Value, index: usize) -> Result<Vec<Part>> {
             if name.is_empty() && id.is_empty() {
                 continue;
             }
-            parts.push(Part::ToolUse {
+            calls.push(Part::ToolUse {
                 id,
                 name,
                 input: parse_arguments(&args),
             });
         }
     }
+    // Canonical order for an assistant turn is reasoning, then content, then calls: it is
+    // the order providers emit, and the only order Anthropic accepts (a `thinking` block
+    // must precede the text and tool_use blocks it produced).
+    let mut ordered: Vec<Part> = Vec::with_capacity(parts.len() + calls.len() + 1);
     if let Some(text) = req_str(msg, "reasoning_content") {
         if !text.is_empty() {
-            parts.push(Part::Reasoning {
+            ordered.push(Part::Reasoning {
                 text: text.to_owned(),
                 signature: None,
             });
         }
     }
-    Ok(parts)
+    ordered.extend(parts);
+    ordered.extend(calls);
+    Ok(ordered)
 }
 
 fn parse_image(item: &Value) -> (String, Option<String>) {
@@ -283,7 +290,7 @@ pub fn build_embeddings_request(req: &ChatRequest) -> Value {
 // Request out
 // ---------------------------------------------------------------------------
 
-pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
+pub fn build_request(req: &ChatRequest, stream: bool, wire: &WireProfile) -> Result<Value> {
     let mut messages: Vec<Value> = Vec::with_capacity(req.messages.len() + 1);
     if let Some(system) = &req.system {
         if !system.is_empty() {
@@ -330,8 +337,11 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
     if let Some(choice) = &req.tool_choice {
         body.insert("tool_choice".into(), openai_tool_choice_value(choice));
     }
-    if let Some(n) = req.max_tokens {
-        body.insert("max_completion_tokens".into(), Value::from(n));
+    // The provider decides both the key and the default: OpenAI's own surface rejects
+    // `max_tokens` on current models, while Mistral-class providers answer 422 to
+    // `max_completion_tokens`. An explicit client value always wins.
+    if let Some(n) = wire.max_tokens_opt(req.max_tokens) {
+        body.insert(wire.max_tokens_key.as_str().into(), Value::from(n));
     }
     if let Some(t) = req.temperature {
         body.insert("temperature".into(), Value::from(t));
@@ -347,14 +357,21 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
     Ok(value)
 }
 
-/// `[OI]` has no tool part: each tool result becomes its own `role:"tool"`
-/// message, so one canonical message may expand to several wire messages.
+/// `[OI]` has no tool part: each tool result becomes its own `role:"tool"` message, so
+/// one canonical message may expand to several wire messages.
+///
+/// Tool results are written **first**, because OpenAI requires them immediately after the
+/// assistant turn that requested the call. Anthropic carries `tool_result` blocks in the
+/// following *user* turn, so a translated turn is usually `[tool_result, text]`; writing
+/// the prose first would put a `user` message between the call and its result, and the
+/// empty `user` message that used to be emitted for a tool-only turn is rejected by
+/// providers that validate `content`.
 fn messages_out(msg: &Message) -> Result<Vec<Value>> {
-    let mut tool_msgs: Vec<Value> = Vec::new();
+    let mut out: Vec<Value> = Vec::new();
     let mut texts: Vec<Value> = Vec::new();
     let mut calls: Vec<Value> = Vec::new();
     let mut reasoning = String::new();
-    let mut tool_content: Option<String> = None;
+    let mut tool_results: Vec<(String, String, bool)> = Vec::new();
 
     for part in &msg.parts {
         match part {
@@ -371,41 +388,31 @@ fn messages_out(msg: &Message) -> Result<Vec<Value>> {
                 tool_use_id,
                 content,
                 is_error,
-            } => {
-                if msg.role == Role::Tool {
-                    tool_content
-                        .get_or_insert_with(String::new)
-                        .push_str(content);
-                } else {
-                    tool_msgs.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tool_use_id,
-                        "content": if *is_error { format!("error: {content}") } else { content.clone() },
-                    }));
-                }
-            }
+            } => tool_results.push((tool_use_id.clone(), content.clone(), *is_error)),
             Part::Reasoning { text, .. } => reasoning.push_str(text),
             Part::Opaque(v) => texts.push(v.clone()),
         }
     }
 
-    if msg.role == Role::Tool {
-        return Ok(vec![json!({
+    for (tool_use_id, content, is_error) in tool_results {
+        out.push(json!({
             "role": "tool",
-            "tool_call_id": msg
-                .parts
-                .iter()
-                .find_map(|p| match p {
-                    Part::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default(),
-            "content": tool_content.unwrap_or_default(),
-        })]);
+            "tool_call_id": tool_use_id,
+            "content": if is_error { format!("error: {content}") } else { content },
+        }));
+    }
+    // A pure tool turn carries nothing else.
+    if msg.role == Role::Tool {
+        return Ok(out);
+    }
+    // Nothing a `role` could describe: skip the message rather than send `content: null`
+    // to a provider that rejects it.
+    if texts.is_empty() && calls.is_empty() && reasoning.is_empty() {
+        return Ok(out);
     }
 
-    let mut out = Map::new();
-    out.insert(
+    let mut message = Map::new();
+    message.insert(
         "role".into(),
         Value::from(match msg.role {
             Role::System => "system",
@@ -415,24 +422,23 @@ fn messages_out(msg: &Message) -> Result<Vec<Value>> {
         }),
     );
     if texts.is_empty() && calls.is_empty() {
-        out.insert("content".into(), Value::Null);
+        message.insert("content".into(), Value::Null);
     } else if texts.len() == 1 && texts[0].get("type") == Some(&Value::from("text")) {
-        out.insert(
+        message.insert(
             "content".into(),
             texts[0].get("text").cloned().unwrap_or(Value::Null),
         );
     } else if !texts.is_empty() {
-        out.insert("content".into(), Value::Array(texts));
+        message.insert("content".into(), Value::Array(texts));
     }
     if !calls.is_empty() {
-        out.insert("tool_calls".into(), Value::Array(calls));
+        message.insert("tool_calls".into(), Value::Array(calls));
     }
     if !reasoning.is_empty() {
-        out.insert("reasoning_content".into(), Value::from(reasoning));
+        message.insert("reasoning_content".into(), Value::from(reasoning));
     }
-    let mut all = vec![Value::Object(out)];
-    all.extend(tool_msgs);
-    Ok(all)
+    out.push(Value::Object(message));
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -451,13 +457,10 @@ pub fn parse_response(body: &Value) -> Result<ChatResponse> {
         .get("message")
         .ok_or_else(|| parse_err(D, "choice has no message"))?;
 
+    // Reasoning first: that is the order the provider emitted it in, and it is the only
+    // order Anthropic accepts (a `thinking` block must precede the text it explains).
+    // Reading text first put a translated `thinking` block after prose.
     let mut parts = Vec::new();
-    if let Some(text) = msg.get("content") {
-        let text = content_text(text);
-        if !text.is_empty() {
-            parts.push(Part::Text(text));
-        }
-    }
     if let Some(reasoning) = req_str(msg, "reasoning_content").or_else(|| req_str(msg, "reasoning"))
     {
         if !reasoning.is_empty() {
@@ -465,6 +468,12 @@ pub fn parse_response(body: &Value) -> Result<ChatResponse> {
                 text: reasoning.to_owned(),
                 signature: None,
             });
+        }
+    }
+    if let Some(text) = msg.get("content") {
+        let text = content_text(text);
+        if !text.is_empty() {
+            parts.push(Part::Text(text));
         }
     }
     if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {

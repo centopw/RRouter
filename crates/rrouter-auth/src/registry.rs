@@ -11,6 +11,7 @@ use std::sync::LazyLock;
 use rrouter_core::Dialect;
 
 use crate::overrides::{override_for, OverrideKind};
+use rrouter_translate::{MaxTokensKey, WireProfile};
 
 /// How an account for this provider is obtained and refreshed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,6 +31,9 @@ pub enum AuthStyle {
     Bearer,
     /// `x-api-key: <key>`.
     XApiKey,
+    /// `<ProviderSpec::auth_header>: <key>`. Azure OpenAI uses `api-key`; a manifest names
+    /// the header, and `authorization` is refused there because `Bearer` already covers it.
+    ApiKeyHeader,
     /// No auth header (local servers).
     None,
 }
@@ -120,8 +124,13 @@ pub struct ProviderSpec {
     pub display: &'static str,
     /// Credential kind.
     pub kind: ProviderKind,
-    /// Full chat endpoint URL, no trailing slash.
+    /// Full chat endpoint URL, no trailing slash. When `base_url_requires_override` is set
+    /// this is a documented placeholder, not a callable endpoint.
     pub base_url: &'static str,
+    /// The host above names a tenant the manifest cannot know (Azure's
+    /// `RESOURCE.openai.azure.com`), so every connection supplies its own base URL.
+    /// [`crate::base_url`] refuses to dispatch or save one that does not.
+    pub base_url_requires_override: bool,
     /// Native Responses endpoint, when the provider speaks it.
     pub responses_url: Option<&'static str>,
     /// Explicit model-list URL when it cannot be derived from the inference base.
@@ -143,6 +152,20 @@ pub struct ProviderSpec {
     pub auth: AuthStyle,
     /// Headers every request to this provider must carry.
     pub extra_headers: &'static [(&'static str, &'static str)],
+    /// Header that carries the key when `auth` is [`AuthStyle::ApiKeyHeader`]; empty for
+    /// every other style. Azure OpenAI names it `api-key`.
+    pub auth_header: &'static str,
+    /// Static query parameters every request to this provider carries, reviewed with the
+    /// transport. Azure's `api-version` is the case this exists for; a parameter the
+    /// connection's base URL already sets wins (see [`crate::query::with_query`]).
+    pub query: &'static [(&'static str, &'static str)],
+    /// Key the Chat dialect uses for the output cap. `max_completion_tokens` only on
+    /// OpenAI's own surface; everything else `max_tokens`, which Mistral-class APIs
+    /// require and OpenAI's current models reject.
+    pub max_tokens_key: MaxTokensKey,
+    /// Client protocol beta headers this provider understands. The gateway forwards only
+    /// these names, so a client's credential headers can never travel with them.
+    pub passthrough_headers: &'static [&'static str],
     /// Provider-imposed output cap default.
     pub default_max_tokens: Option<u32>,
     /// Refresh recipe; `None` for `ApiKey`/`Local`.
@@ -172,6 +195,33 @@ impl ProviderSpec {
     /// Base URL to use for this account: the credential's override wins unconditionally.
     pub fn base_url_for<'a>(&'a self, override_url: Option<&'a str>) -> &'a str {
         override_url.unwrap_or(self.base_url)
+    }
+
+    /// Native rerank endpoint, when the provider serves `/v1/rerank` itself.
+    ///
+    /// Kept out of the struct because it is a separate capability surface, not part of the
+    /// chat transport: the manifest declares it and [`rerank_endpoint`] resolves it.
+    pub fn rerank_url(&self) -> Option<&'static str> {
+        rerank_endpoint(self.id)
+    }
+
+    /// OpenAI-compatible file API endpoint, when the provider serves one.
+    pub fn files_url(&self) -> Option<&'static str> {
+        files_endpoint(self.id)
+    }
+
+    /// OpenAI-compatible batch API endpoint, when the provider serves one.
+    pub fn batches_url(&self) -> Option<&'static str> {
+        batches_endpoint(self.id)
+    }
+
+    /// Request shaping this provider's wire surface demands.
+    ///
+    /// Read by the proxy before it serializes a translated request, so the output cap is
+    /// spelled the way this provider accepts it and an omitted cap becomes the provider's
+    /// configured default instead of a hardcoded one.
+    pub fn wire_profile(&self) -> WireProfile {
+        WireProfile::new(self.max_tokens_key, self.default_max_tokens)
     }
 }
 
@@ -268,6 +318,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "Claude (Anthropic OAuth)",
         kind: ProviderKind::OAuth,
         base_url: "https://api.anthropic.com/v1/messages",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: Some("https://api.anthropic.com/v1/messages"),
@@ -278,6 +329,12 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::AnthropicMessages,
         auth: AuthStyle::Bearer,
         extra_headers: CLAUDE_HEADERS,
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        // 1M context, interleaved thinking and fine-grained tool streaming are `beta`
+        // flags only the client knows it needs.
+        passthrough_headers: &["anthropic-beta"],
         default_max_tokens: Some(32_000),
         refresh: Some(CLAUDE_REFRESH),
         profile_url: Some("https://api.anthropic.com/api/oauth/profile"),
@@ -289,6 +346,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "Codex (ChatGPT OAuth)",
         kind: ProviderKind::OAuth,
         base_url: "https://chatgpt.com/backend-api/codex/responses",
+        base_url_requires_override: false,
         responses_url: Some("https://chatgpt.com/backend-api/codex/responses"),
         models_url: None,
         messages_url: None,
@@ -299,6 +357,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiResponses,
         auth: AuthStyle::Bearer,
         extra_headers: CODEX_HEADERS,
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxCompletionTokens,
+        passthrough_headers: &["openai-beta"],
         default_max_tokens: None,
         refresh: Some(CODEX_REFRESH),
         login: Some(CODEX_LOGIN),
@@ -310,6 +372,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "GitHub Copilot",
         kind: ProviderKind::OAuth,
         base_url: "https://api.githubcopilot.com/chat/completions",
+        base_url_requires_override: false,
         responses_url: Some("https://api.githubcopilot.com/responses"),
         models_url: None,
         messages_url: Some("https://api.githubcopilot.com/v1/messages"),
@@ -320,6 +383,12 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: GITHUB_HEADERS,
+        auth_header: "",
+        query: &[],
+        // Copilot proxies OpenAI models, so it needs the same cap key — but its beta header
+        // vocabulary is undocumented, and guessing one is worse than forwarding none.
+        max_tokens_key: MaxTokensKey::MaxCompletionTokens,
+        passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
         login: Some(GITHUB_LOGIN),
@@ -331,6 +400,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "OpenAI",
         kind: ProviderKind::ApiKey,
         base_url: "https://api.openai.com/v1/chat/completions",
+        base_url_requires_override: false,
         responses_url: Some("https://api.openai.com/v1/responses"),
         models_url: None,
         messages_url: None,
@@ -342,6 +412,11 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        // OpenAI's own surface: current gpt-5/o-series models reject `max_tokens`.
+        max_tokens_key: MaxTokensKey::MaxCompletionTokens,
+        passthrough_headers: &["openai-beta"],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -354,6 +429,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         // OpenCode translates every text model through its OpenAI-compatible surface.
         base_url: "https://opencode.ai/inference/openai/v1/chat/completions",
+        base_url_requires_override: false,
         responses_url: Some("https://opencode.ai/inference/openai/v1/responses"),
         models_url: Some("https://opencode.ai/inference/v1/models"),
         messages_url: None,
@@ -364,6 +440,11 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        // An aggregator: the widest-common cap spelling, and it passes betas through.
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &["openai-beta"],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -375,6 +456,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "Anthropic",
         kind: ProviderKind::ApiKey,
         base_url: "https://api.anthropic.com/v1/messages",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: Some("https://api.anthropic.com/v1/messages"),
@@ -385,6 +467,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::AnthropicMessages,
         auth: AuthStyle::XApiKey,
         extra_headers: ANTHROPIC_HEADERS,
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &["anthropic-beta"],
         default_max_tokens: Some(32_000),
         refresh: None,
         login: None,
@@ -396,6 +482,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "DeepSeek",
         kind: ProviderKind::ApiKey,
         base_url: "https://api.deepseek.com/chat/completions",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: None,
@@ -406,6 +493,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -417,6 +508,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "Google Gemini",
         kind: ProviderKind::ApiKey,
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: None,
@@ -427,6 +519,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -438,6 +534,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "Groq",
         kind: ProviderKind::ApiKey,
         base_url: "https://api.groq.com/openai/v1/chat/completions",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: None,
@@ -448,6 +545,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -459,6 +560,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "OpenRouter",
         kind: ProviderKind::ApiKey,
         base_url: "https://openrouter.ai/api/v1/chat/completions",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: None,
@@ -469,6 +571,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -480,6 +586,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "xAI",
         kind: ProviderKind::ApiKey,
         base_url: "https://api.x.ai/v1/chat/completions",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: None,
@@ -490,6 +597,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -501,6 +612,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "Mistral",
         kind: ProviderKind::ApiKey,
         base_url: "https://api.mistral.ai/v1/chat/completions",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: None,
@@ -511,6 +623,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -522,6 +638,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "Together AI",
         kind: ProviderKind::ApiKey,
         base_url: "https://api.together.xyz/v1/chat/completions",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: None,
@@ -532,6 +649,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -543,6 +664,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "Cerebras",
         kind: ProviderKind::ApiKey,
         base_url: "https://api.cerebras.ai/v1/chat/completions",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: None,
@@ -553,6 +675,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::Bearer,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -564,6 +690,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         display: "Ollama (local)",
         kind: ProviderKind::Local,
         base_url: "http://localhost:11434/v1/chat/completions",
+        base_url_requires_override: false,
         responses_url: None,
         models_url: None,
         messages_url: None,
@@ -574,6 +701,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         default_dialect: Dialect::OpenAiChat,
         auth: AuthStyle::None,
         extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -627,6 +758,58 @@ pub fn login_flow_for(provider: &str) -> Option<LoginFlow> {
             LoginFlow::DeviceCode(d)
         }
     })
+}
+
+/// Core providers that serve `/v1/rerank`. Empty today: the capability ships through
+/// community manifests, and this table is where a built-in provider would join.
+const CORE_RERANK: &[(&str, &str)] = &[];
+
+/// Native rerank endpoint for `provider`, when it serves `/v1/rerank`.
+///
+/// The manifest is the single source: `build.rs` compiles every `rerank_url` into
+/// `COMMUNITY_RERANK`, and the round-trip test requires the two to agree. A provider
+/// without one answers `501` on that route rather than having a path guessed for it.
+pub fn rerank_endpoint(provider: &str) -> Option<&'static str> {
+    CORE_RERANK
+        .iter()
+        .chain(COMMUNITY_RERANK.iter())
+        .find(|(id, _)| *id == provider)
+        .map(|(_, url)| *url)
+}
+
+/// Core providers with an OpenAI-compatible file API.
+///
+/// OpenAI is the only one: Together serves uploads at `/v1/files/upload` (not `/v1/files`),
+/// Mistral's batch API is `/v1/batch` with a different body, and Azure's files/batches are
+/// host- and version-scoped. Every other reviewed provider publishes no such API, so none
+/// is listed — a missing endpoint answers `501` instead of a guessed path.
+const CORE_FILES: &[(&str, &str)] = &[("openai", "https://api.openai.com/v1/files")];
+
+/// Core providers with an OpenAI-compatible batch API. OpenAI only, for the reasons on
+/// [`CORE_FILES`].
+const CORE_BATCHES: &[(&str, &str)] = &[("openai", "https://api.openai.com/v1/batches")];
+
+fn capability(
+    table: &'static [(&'static str, &'static str)],
+    provider: &str,
+) -> Option<&'static str> {
+    table
+        .iter()
+        .find(|(id, _)| *id == provider)
+        .map(|(_, url)| *url)
+}
+
+/// OpenAI-compatible file endpoint for `provider`, when it serves one.
+///
+/// A manifest is the source for every community provider: `build.rs` compiles each
+/// `files_url` into `COMMUNITY_FILES`.
+pub fn files_endpoint(provider: &str) -> Option<&'static str> {
+    capability(CORE_FILES, provider).or_else(|| capability(COMMUNITY_FILES, provider))
+}
+
+/// OpenAI-compatible batch endpoint for `provider`, when it serves one.
+pub fn batches_endpoint(provider: &str) -> Option<&'static str> {
+    capability(CORE_BATCHES, provider).or_else(|| capability(COMMUNITY_BATCHES, provider))
 }
 
 /// `true` when `id` names a registered OAuth provider.
@@ -715,6 +898,135 @@ mod tests {
                     assert!(spec.refresh.is_none(), "{}", spec.id)
                 }
             }
+        }
+    }
+
+    #[test]
+    fn wire_shape_is_declared_for_every_provider() {
+        for spec in all() {
+            if spec.auth == AuthStyle::ApiKeyHeader {
+                assert!(
+                    !spec.auth_header.is_empty(),
+                    "{} uses api-key auth but names no header",
+                    spec.id
+                );
+                assert!(
+                    spec.auth_header
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                    "{} auth_header `{}` is not a header name",
+                    spec.id,
+                    spec.auth_header
+                );
+                assert_ne!(
+                    spec.auth_header, "authorization",
+                    "{} must use bearer auth for Authorization",
+                    spec.id
+                );
+            } else {
+                assert!(
+                    spec.auth_header.is_empty(),
+                    "{} names an auth header without api-key auth",
+                    spec.id
+                );
+            }
+            for (name, value) in spec.query {
+                assert!(
+                    !name.is_empty()
+                        && !value.is_empty()
+                        && value.chars().all(
+                            |c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '-')
+                        ),
+                    "{} query `{name}` is not a literal parameter",
+                    spec.id
+                );
+            }
+            // The allowlist is the only way a client header reaches a provider, so it must
+            // never name a credential or hop-by-hop header.
+            for name in spec.passthrough_headers {
+                assert!(
+                    matches!(*name, "anthropic-beta" | "openai-beta"),
+                    "{} would forward {name}",
+                    spec.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_openai_surface_uses_max_completion_tokens() {
+        for spec in all() {
+            let expected = match spec.id {
+                "openai" | "codex" | "github" | "azure" => MaxTokensKey::MaxCompletionTokens,
+                _ => MaxTokensKey::MaxTokens,
+            };
+            assert_eq!(spec.max_tokens_key, expected, "{}", spec.id);
+        }
+        // The two facts the proxy needs come from the same place.
+        let claude = get("claude").expect("claude").wire_profile();
+        assert_eq!(claude.max_tokens_key, MaxTokensKey::MaxTokens);
+        assert_eq!(claude.default_max_tokens, Some(32_000));
+        assert_eq!(
+            get("mistral")
+                .expect("mistral")
+                .wire_profile()
+                .default_max_tokens,
+            None
+        );
+    }
+
+    #[test]
+    fn passthrough_headers_are_protocol_betas_only() {
+        assert_eq!(
+            get("claude").expect("claude").passthrough_headers,
+            &["anthropic-beta"]
+        );
+        assert_eq!(
+            get("openai").expect("openai").passthrough_headers,
+            &["openai-beta"]
+        );
+        assert!(get("mistral")
+            .expect("mistral")
+            .passthrough_headers
+            .is_empty());
+        assert!(get("github")
+            .expect("github")
+            .passthrough_headers
+            .is_empty());
+    }
+
+    #[test]
+    fn only_openai_declares_files_and_batches() {
+        assert_eq!(
+            get("openai").expect("openai").files_url(),
+            Some("https://api.openai.com/v1/files")
+        );
+        assert_eq!(
+            get("openai").expect("openai").batches_url(),
+            Some("https://api.openai.com/v1/batches")
+        );
+        assert_eq!(
+            files_endpoint("openai"),
+            Some("https://api.openai.com/v1/files")
+        );
+        assert_eq!(
+            batches_endpoint("openai"),
+            Some("https://api.openai.com/v1/batches")
+        );
+
+        for id in ["mistral", "together", "claude", "azure", "cohere", "jina"] {
+            let spec = get(id).expect(id);
+            assert_eq!(spec.files_url(), None, "{id}");
+            assert_eq!(spec.batches_url(), None, "{id}");
+            assert_eq!(files_endpoint(id), None, "{id}");
+            assert_eq!(batches_endpoint(id), None, "{id}");
+        }
+
+        // Every table entry names a registered provider, and the URL is exact.
+        for (id, url) in CORE_FILES.iter().chain(CORE_BATCHES) {
+            assert!(get(id).is_some(), "{id} is not a provider");
+            assert!(url.starts_with("https://"), "{id}");
+            assert!(!url.ends_with('/') && !url.contains('?'), "{id}");
         }
     }
 

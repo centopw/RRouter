@@ -9,8 +9,8 @@ use std::sync::LazyLock;
 
 use rrouter_store::{
     cache_key, window_start, AccountQuota, ApiKey, ApiKeyPatch, AttemptRecord, BudgetWindow,
-    Credentials, Guardrails, KeyModel, KeyScope, ModelRow, PruneReport, StatusFilter, Store,
-    UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
+    ConnectionScope, Credentials, Guardrails, KeyModel, KeyScope, ModelRow, PruneReport,
+    StatusFilter, Store, UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -70,6 +70,26 @@ fn creds(token: &str) -> Credentials {
         access_token: Some(token.to_string()),
         ..Credentials::default()
     }
+}
+
+/// Schema artifacts added after v24. A test that rewinds `user_version` to an older number
+/// must remove these too, or the replay runs `ALTER TABLE … ADD COLUMN` on a column the
+/// file still has. Indexes go first: SQLite refuses to drop a column an index covers.
+const UNDO_AFTER_V24: &str = "\
+    DROP TABLE IF EXISTS semantic_cache; \
+    DROP TABLE IF EXISTS eval_results; DROP TABLE IF EXISTS eval_runs; \
+    DROP TABLE IF EXISTS eval_cases; DROP TABLE IF EXISTS eval_suites; \
+    DROP TABLE IF EXISTS events_outbox; DROP TABLE IF EXISTS webhook_endpoints; \
+    DROP INDEX IF EXISTS idx_usage_trace; ALTER TABLE usage DROP COLUMN trace_id; \
+    DROP INDEX IF EXISTS idx_connections_team; \
+    ALTER TABLE connections DROP COLUMN owner_user_id; \
+    ALTER TABLE connections DROP COLUMN team_id; \
+    ALTER TABLE user_sessions DROP COLUMN user_agent; \
+    ALTER TABLE user_sessions DROP COLUMN ip; ";
+
+fn rewind_past_v24(conn: &rusqlite::Connection) {
+    conn.execute_batch(UNDO_AFTER_V24)
+        .expect("strip post-v24 schema");
 }
 
 // ----- 1. encryption ---------------------------------------------------------------
@@ -503,14 +523,15 @@ fn an_unknown_stored_scope_reads_as_inference() {
 /// v15 shipped no scope column; opening a v15 database adds it and every existing key
 /// becomes an inference key, which the admin gate refuses.
 #[test]
-fn v15_database_migrates_to_twenty_one_with_the_scope_column() {
+fn v15_database_migrates_to_current_with_the_scope_column() {
     let dir = TempDir::new("v15");
     let id = Uuid::new_v4();
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         // Start from the current schema, then remove exactly what v16 adds.
         drop(Store::open(&dir.db(), None).expect("current schema"));
-        conn.execute_batch("ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; PRAGMA user_version = 15;")
+        rewind_past_v24(&conn);
+        conn.execute_batch("ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 15;")
             .expect("rewind to v15");
         conn.execute(
             "INSERT INTO api_keys (id, key_hash, name, is_active, created_at) \
@@ -548,7 +569,7 @@ fn v15_database_migrates_to_twenty_one_with_the_scope_column() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
     let columns: i64 = conn
         .query_row(
             "SELECT count(*) FROM pragma_table_info('api_keys') WHERE name = 'scope'",
@@ -570,6 +591,7 @@ fn spent_tokens_sums_only_that_key() {
             id: None,
             ts,
             request_id: Some(Uuid::new_v4()),
+            trace_id: None,
             provider: "claude".to_string(),
             model: "haiku".to_string(),
             connection_id: None,
@@ -634,6 +656,7 @@ fn cost_micros_round_trips_and_sums_per_key() {
             id: None,
             ts: 1_700_000_000,
             request_id: Some(Uuid::new_v4()),
+            trace_id: None,
             provider: "claude".to_string(),
             model: "haiku".to_string(),
             connection_id: None,
@@ -741,7 +764,7 @@ fn model_costs_returns_published_rows_for_the_named_providers() {
 }
 
 #[test]
-fn v6_database_migrates_to_twenty_one() {
+fn v6_database_migrates_to_current() {
     let dir = TempDir::new("v6");
     // A real v6 database: api_keys before the governance columns, usage before key_id.
     {
@@ -844,7 +867,7 @@ fn v6_database_migrates_to_twenty_one() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
     for (index, why) in [
         ("idx_usage_key_ts", "per-key spend must be indexed"),
         (
@@ -871,7 +894,7 @@ fn v6_database_migrates_to_twenty_one() {
 /// connection defaults to weight 100 (the plain round-robin share), and the two new
 /// tables start empty.
 #[test]
-fn v8_database_migrates_to_twenty_one() {
+fn v8_database_migrates_to_current() {
     let dir = TempDir::new("v8");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
@@ -953,7 +976,7 @@ fn v8_database_migrates_to_twenty_one() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
 
     let weight: i64 = conn
         .query_row("SELECT weight FROM connections", [], |r| r.get(0))
@@ -984,12 +1007,31 @@ fn v8_database_migrates_to_twenty_one() {
 /// A v9 database gains the money columns without touching existing rows: spend recorded
 /// before v10 stays at "unknown price", and every key stays unlimited.
 #[test]
-fn v9_database_migrates_to_twenty_one() {
+fn v9_database_migrates_to_current() {
     let dir = TempDir::new("v9");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         conn.execute_batch(
-            "CREATE TABLE api_keys (
+            "CREATE TABLE connections (
+               id              TEXT PRIMARY KEY,
+               provider        TEXT NOT NULL,
+               auth_type       TEXT NOT NULL,
+               name            TEXT,
+               email           TEXT,
+               priority        INTEGER NOT NULL DEFAULT 0,
+               is_active       INTEGER NOT NULL DEFAULT 1,
+               data            BLOB NOT NULL,
+               backoff_level   INTEGER NOT NULL DEFAULT 0,
+               last_error      TEXT,
+               last_error_code INTEGER,
+               last_error_at   INTEGER,
+               created_at      INTEGER NOT NULL,
+               updated_at      INTEGER NOT NULL,
+               weight          INTEGER NOT NULL DEFAULT 100
+             );
+             CREATE INDEX idx_conn_provider ON connections(provider, is_active, priority);
+
+             CREATE TABLE api_keys (
                id             TEXT PRIMARY KEY,
                key_hash       TEXT NOT NULL UNIQUE,
                name           TEXT,
@@ -1069,23 +1111,24 @@ fn v9_database_migrates_to_twenty_one() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
 }
 
 /// A v10 database gains the response cache in place: the migration only adds a table and
 /// its index, so every existing row is untouched and the version reaches 13.
 #[test]
-fn v10_database_migrates_to_twenty_one() {
+fn v10_database_migrates_to_current() {
     let dir = TempDir::new("v10");
     {
         // A real v10 database: the current schema with the v11 table and the v12 column
         // removed, so the upgrade path is the one a deployed v10 database takes.
         drop(Store::open(&dir.db(), None).expect("current schema"));
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
+        rewind_past_v24(&conn);
         conn.execute_batch(
             "DROP TABLE response_cache; ALTER TABLE api_keys DROP COLUMN budget_window; \
              ALTER TABLE api_keys DROP COLUMN guardrails; \
-             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; PRAGMA user_version = 10;",
+             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 10;",
         )
         .expect("rewind to v10");
     }
@@ -1104,7 +1147,7 @@ fn v10_database_migrates_to_twenty_one() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
     for (kind, name) in [("table", "response_cache"), ("index", "idx_cache_expiry")] {
         let found: i64 = conn
             .query_row(
@@ -1429,6 +1472,7 @@ fn usage_records_summary_and_recent_order() {
             ts,
             // Deterministic per row, so the audit trail is assertable after the read.
             request_id: Some(Uuid::from_u128(ts as u128)),
+            trace_id: None,
             provider: provider.to_string(),
             model: model.to_string(),
             connection_id: Some(conn_id),
@@ -1619,6 +1663,7 @@ fn attempts_round_trip_under_the_request_id() {
             id: None,
             ts: 1_700_000_010,
             request_id: Some(request_id),
+            trace_id: None,
             provider: "openai".to_string(),
             model: "gpt-4.1".to_string(),
             connection_id: Some(second_conn),
@@ -1811,6 +1856,7 @@ fn prune_usage_deletes_history_older_than_the_cutoff() {
         id: None,
         ts,
         request_id: Some(Uuid::from_u128(ts as u128)),
+        trace_id: None,
         provider: "openai".to_string(),
         model: "gpt-4.1".to_string(),
         connection_id: None,
@@ -1984,7 +2030,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// A v11 database gains `budget_window` in place: an existing key reads as `total`
 /// (lifetime, unchanged behaviour), and the version reaches 14.
 #[test]
-fn v11_database_migrates_to_twenty_one_with_total_windows() {
+fn v11_database_migrates_to_current_with_total_windows() {
     let dir = TempDir::new("v11");
     let id = Uuid::new_v4();
     {
@@ -1993,10 +2039,11 @@ fn v11_database_migrates_to_twenty_one_with_total_windows() {
         // marker and drop the columns added since so the table is exactly what v11
         // shipped.
         drop(Store::open(&dir.db(), None).expect("current schema"));
+        rewind_past_v24(&conn);
         conn.execute_batch(
             "ALTER TABLE api_keys DROP COLUMN budget_window; \
              ALTER TABLE api_keys DROP COLUMN guardrails; \
-             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; PRAGMA user_version = 11;",
+             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 11;",
         )
         .expect("rewind to v11");
         conn.execute(
@@ -2021,21 +2068,22 @@ fn v11_database_migrates_to_twenty_one_with_total_windows() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
 }
 
 /// v12 shipped no `attempts(ts)` index; the retention sweep deletes by `ts`, so opening
 /// a v12 database adds the index and bumps the marker.
 #[test]
-fn v12_database_migrates_to_twenty_one_with_the_attempt_ts_index() {
+fn v12_database_migrates_to_current_with_the_attempt_ts_index() {
     let dir = TempDir::new("v12");
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         // Start from the current schema, then remove exactly what v13 and v14 add.
         drop(Store::open(&dir.db(), None).expect("current schema"));
+        rewind_past_v24(&conn);
         conn.execute_batch(
             "DROP INDEX idx_attempts_ts; ALTER TABLE api_keys DROP COLUMN guardrails; \
-             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; PRAGMA user_version = 12;",
+             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 12;",
         )
         .expect("rewind to v12");
     }
@@ -2046,7 +2094,7 @@ fn v12_database_migrates_to_twenty_one_with_the_attempt_ts_index() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
     let indexes: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type = 'index' \
@@ -2073,6 +2121,7 @@ fn spend_since_counts_only_rows_inside_the_window() {
             id: None,
             ts,
             request_id: Some(Uuid::new_v4()),
+            trace_id: None,
             provider: "claude".to_string(),
             model: "haiku".to_string(),
             connection_id: None,
@@ -2166,6 +2215,7 @@ fn guardrails_round_trip_through_patch_and_clear() {
             max_prompt_chars: Some(20_000),
             blocked: vec!["secret".into(), "ssn:".into()],
             scan_output: true,
+            ..Guardrails::default()
         };
         let patched = s
             .update_api_key(
@@ -2404,16 +2454,17 @@ fn policy_with_term() -> Guardrails {
 /// v13 shipped no guardrails column; opening a v13 database adds it, and the key that
 /// existed before it keeps the only policy a pre-v14 key can have: none.
 #[test]
-fn v13_database_migrates_to_twenty_one_with_the_guardrails_column() {
+fn v13_database_migrates_to_current_with_the_guardrails_column() {
     let dir = TempDir::new("v13");
     let id = Uuid::new_v4();
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         // Start from the current schema, then remove exactly what v14 adds.
         drop(Store::open(&dir.db(), None).expect("current schema"));
+        rewind_past_v24(&conn);
         conn.execute_batch(
             "ALTER TABLE api_keys DROP COLUMN guardrails; \
-             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; PRAGMA user_version = 13;",
+             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 13;",
         )
         .expect("rewind to v13");
         conn.execute(
@@ -2437,7 +2488,7 @@ fn v13_database_migrates_to_twenty_one_with_the_guardrails_column() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
     let columns: i64 = conn
         .query_row(
             "SELECT count(*) FROM pragma_table_info('api_keys') WHERE name = 'guardrails'",
@@ -2451,16 +2502,17 @@ fn v13_database_migrates_to_twenty_one_with_the_guardrails_column() {
 /// v14 shipped no template tables; opening a v14 database adds them at v15, writable,
 /// and leaves everything a v14 database already held alone.
 #[test]
-fn v14_database_migrates_to_twenty_one_with_the_template_tables() {
+fn v14_database_migrates_to_current_with_the_template_tables() {
     let dir = TempDir::new("v14");
     let key = Uuid::new_v4();
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         // Start from the current schema, then remove exactly what v15 adds.
         drop(Store::open(&dir.db(), None).expect("current schema"));
+        rewind_past_v24(&conn);
         conn.execute_batch(
             "DROP TABLE prompt_template_versions; DROP TABLE prompt_templates; \
-             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; PRAGMA user_version = 14;",
+             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 14;",
         )
         .expect("rewind to v14");
         conn.execute(
@@ -2498,7 +2550,7 @@ fn v14_database_migrates_to_twenty_one_with_the_template_tables() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
     for table in ["prompt_templates", "prompt_template_versions"] {
         let n: i64 = conn
             .query_row(
@@ -2518,6 +2570,7 @@ fn page_row(ts: i64, marker: &str) -> UsageRecord {
         id: None,
         ts,
         request_id: Some(Uuid::from_u128(ts as u128)),
+        trace_id: None,
         provider: "claude".to_string(),
         model: marker.to_string(),
         connection_id: None,
@@ -3256,6 +3309,7 @@ fn account_quota_exhausts_only_on_usage_inside_its_window() {
             id: None,
             ts,
             request_id: Some(Uuid::new_v4()),
+            trace_id: None,
             provider: "claude".to_string(),
             model: "haiku".to_string(),
             connection_id: Some(connection),
@@ -3371,6 +3425,7 @@ fn account_quota_enforces_token_and_cost_limits() {
             id: None,
             ts: now - 10,
             request_id: Some(Uuid::new_v4()),
+            trace_id: None,
             provider: "claude".to_string(),
             model: "haiku".to_string(),
             connection_id: Some(connection),
@@ -3425,12 +3480,13 @@ fn account_quota_enforces_token_and_cost_limits() {
 /// v16 had no quota table; opening a v16 database adds it without touching connections
 /// or usage, and the version lands on 17.
 #[test]
-fn v16_database_migrates_to_twenty_one_with_account_quotas() {
+fn v16_database_migrates_to_current_with_account_quotas() {
     let dir = TempDir::new("v16-quotas");
     drop(Store::open(&dir.db(), None).expect("current schema"));
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("raw");
-        conn.execute_batch("DROP TABLE account_quotas; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; PRAGMA user_version = 16;")
+        rewind_past_v24(&conn);
+        conn.execute_batch("DROP TABLE account_quotas; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 16;")
             .expect("rewind to v16");
     }
     let store = Store::open(&dir.db(), None).expect("open runs the v17 step");
@@ -3455,7 +3511,7 @@ fn v16_database_migrates_to_twenty_one_with_account_quotas() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
     let columns: i64 = conn
         .query_row(
             "SELECT count(*) FROM pragma_table_info('account_quotas')",
@@ -3469,14 +3525,15 @@ fn v16_database_migrates_to_twenty_one_with_account_quotas() {
 /// v17 had no users; opening a v17 database adds users, sessions, recovery codes and
 /// invitations, and the version lands on 18.
 #[test]
-fn v17_database_migrates_to_twenty_one_with_users() {
+fn v17_database_migrates_to_current_with_users() {
     let dir = TempDir::new("v17-users");
     drop(Store::open(&dir.db(), None).expect("current schema"));
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("raw");
+        rewind_past_v24(&conn);
         conn.execute_batch(
             "DROP TABLE invites; DROP TABLE user_recovery_codes; DROP TABLE user_sessions; \
-             DROP TABLE users; ALTER TABLE usage DROP COLUMN upstream_ms; PRAGMA user_version = 17;",
+             DROP TABLE users; ALTER TABLE usage DROP COLUMN upstream_ms; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 17;",
         )
         .expect("rewind to v17");
     }
@@ -3502,7 +3559,7 @@ fn v17_database_migrates_to_twenty_one_with_users() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 21);
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
     for table in ["users", "user_sessions", "user_recovery_codes", "invites"] {
         let exists: i64 = conn
             .query_row(
@@ -3523,16 +3580,601 @@ fn ephemeral_sessions_are_pruned_on_boot_but_remember_me_survives() {
     let now = 4_000_000_000i64;
     rt().block_on(async {
         store
-            .create_session("ephemeral", user, now + 3600, false)
+            .create_session("ephemeral", user, now + 3600, false, None, None)
             .await
             .expect("ephemeral");
         store
-            .create_session("remembered", user, now + 3600, true)
+            .create_session("remembered", user, now + 3600, true, None, None)
             .await
             .expect("remembered");
         assert_eq!(store.prune_ephemeral_sessions().await.expect("prune"), 1);
         let left = store.sessions_for_user(user).await.expect("sessions");
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].token_hash, "remembered");
+    });
+}
+
+/// Device metadata is optional, bounded on write and returned verbatim on read.
+#[test]
+fn session_device_metadata_is_bounded_and_optional() {
+    let dir = TempDir::new("session-device");
+    let store = Store::open(&dir.db(), None).expect("store");
+    let user = Uuid::new_v4();
+    let now = 4_000_000_000i64;
+    let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 \
+              (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    let long_ip = "7".repeat(200);
+    let long_ua = "A".repeat(2000);
+    rt().block_on(async {
+        store
+            .create_session(
+                "with-device",
+                user,
+                now,
+                false,
+                Some("203.0.113.7"),
+                Some(ua),
+            )
+            .await
+            .expect("device session");
+        store
+            .create_session("without-device", user, now, false, None, None)
+            .await
+            .expect("legacy-shaped session");
+        store
+            .create_session("bounded", user, now, false, Some(&long_ip), Some(&long_ua))
+            .await
+            .expect("oversized metadata");
+        let rows = store.sessions_for_user(user).await.expect("sessions");
+        let by_hash = |hash: &str| {
+            rows.iter()
+                .find(|row| row.token_hash == hash)
+                .unwrap_or_else(|| panic!("{hash}"))
+        };
+        let device = by_hash("with-device");
+        assert_eq!(device.ip.as_deref(), Some("203.0.113.7"));
+        assert_eq!(device.user_agent.as_deref(), Some(ua));
+        let none = by_hash("without-device");
+        assert_eq!(none.ip, None);
+        assert_eq!(none.user_agent, None);
+        let bounded = by_hash("bounded");
+        assert_eq!(
+            bounded.ip.as_deref().map(str::len),
+            Some(rrouter_store::MAX_SESSION_IP)
+        );
+        assert_eq!(
+            bounded.user_agent.as_deref().map(str::len),
+            Some(rrouter_store::MAX_SESSION_USER_AGENT)
+        );
+        // A paginated session list never leaks the token hash through its shape either:
+        // it is the caller's job, but the store returns it for that derivation only.
+        assert!(!rows.is_empty());
+    });
+}
+
+/// A v24 file that already holds a connection, a key and a usage row upgrades in place:
+/// both rows still load through the public API, ownership reads as unset (shared), and the
+/// version lands on 27.
+#[test]
+fn v24_database_upgrades_with_legacy_rows_shared() {
+    let dir = TempDir::new("v24-legacy");
+    let (connection_id, key_id) = {
+        let store = dir.store();
+        let connection = rt()
+            .block_on(store.create_connection("openai", "api_key", creds("tok"), Some("legacy")))
+            .expect("connection");
+        let (_, key) = rt()
+            .block_on(store.create_api_key(Some("legacy")))
+            .expect("key");
+        (connection.id, key.id)
+    };
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("raw");
+        rewind_past_v24(&conn);
+        conn.execute_batch("PRAGMA user_version = 24;")
+            .expect("rewind to v24");
+        conn.execute(
+            "INSERT INTO usage (ts, provider, model, status, connection_id) \
+             VALUES (1, 'openai', 'gpt-4.1', 200, ?1)",
+            [connection_id.to_string()],
+        )
+        .expect("legacy usage row");
+    }
+
+    let store = dir.store();
+    let connection = rt()
+        .block_on(store.get_connection(connection_id))
+        .expect("connection read")
+        .expect("the legacy connection still loads");
+    assert_eq!(connection.provider, "openai");
+    assert_eq!(connection.name.as_deref(), Some("legacy"));
+    assert_eq!(connection.credentials.access_token.as_deref(), Some("tok"));
+    let keys = rt().block_on(store.list_api_keys()).expect("keys");
+    assert!(
+        keys.iter().any(|k| k.id == key_id),
+        "the legacy key still loads"
+    );
+    drop(store);
+
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, rrouter_store::SCHEMA_VERSION);
+    let ownership: (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT team_id, owner_user_id FROM connections WHERE id = ?1",
+            [connection_id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("ownership");
+    assert_eq!(
+        ownership,
+        (None, None),
+        "a v24 connection stays shared and unowned"
+    );
+    let usage_rows: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM usage WHERE connection_id = ?1",
+            [connection_id.to_string()],
+            |r| r.get(0),
+        )
+        .expect("usage rows");
+    assert_eq!(usage_rows, 1, "the legacy usage row survives");
+    for table in [
+        "events_outbox",
+        "webhook_endpoints",
+        "eval_suites",
+        "eval_cases",
+        "eval_runs",
+        "eval_results",
+    ] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .expect("table");
+        assert_eq!(exists, 1, "{table} exists after the upgrade");
+    }
+}
+
+// ----- connection scoping ----------------------------------------------------------
+
+/// One team-owned (or shared) account, for the scoping tests below.
+fn owned_connection(
+    store: &Store,
+    provider: &str,
+    team: Option<Uuid>,
+    token: &str,
+) -> rrouter_store::Connection {
+    rt().block_on(store.create_connection_owned(
+        provider,
+        "api_key",
+        creds(token),
+        None,
+        team,
+        None,
+    ))
+    .expect("connection")
+}
+
+/// Global listing is the instance view: shared accounts and every team's accounts.
+#[test]
+fn connection_scope_global_sees_shared_and_team_owned_accounts() {
+    let dir = TempDir::new("conn-scope-global");
+    let store = dir.store();
+    let team = rt()
+        .block_on(store.create_team("alpha", 0, 0, BudgetWindow::Total))
+        .expect("team");
+    let shared = owned_connection(&store, "openai", None, "shared");
+    let owned = owned_connection(&store, "claude", Some(team.id), "owned");
+
+    assert_eq!(shared.team_id, None, "an unowned account is shared");
+    assert_eq!(owned.team_id, Some(team.id), "the insert keeps its owner");
+    assert_eq!(owned.owner_user_id, None);
+
+    let all = rt().block_on(store.list_connections(None)).expect("list");
+    assert_eq!(all.len(), 2, "global sees both accounts");
+    let scoped = rt()
+        .block_on(store.list_connections_scoped(ConnectionScope::Global, None))
+        .expect("scoped list");
+    assert_eq!(scoped.len(), 2, "Global is the admin/reporting view");
+    let reread = rt()
+        .block_on(store.get_connection(owned.id))
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        reread.team_id,
+        Some(team.id),
+        "team survives the read mapping"
+    );
+}
+
+/// A team sees exactly its own rows: never the shared account, never another team's.
+#[test]
+fn connection_scope_team_isolates_tenants() {
+    let dir = TempDir::new("conn-scope-team");
+    let store = dir.store();
+    let alpha = rt()
+        .block_on(store.create_team("alpha", 0, 0, BudgetWindow::Total))
+        .expect("alpha");
+    let beta = rt()
+        .block_on(store.create_team("beta", 0, 0, BudgetWindow::Total))
+        .expect("beta");
+    let alpha_conn = owned_connection(&store, "openai", Some(alpha.id), "a");
+    let beta_conn = owned_connection(&store, "openai", Some(beta.id), "b");
+    let _shared = owned_connection(&store, "openai", None, "shared");
+
+    let alpha_view = rt()
+        .block_on(store.list_connections_scoped(ConnectionScope::Team(alpha.id), None))
+        .expect("alpha");
+    assert_eq!(
+        alpha_view.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![alpha_conn.id],
+        "alpha sees its own account and neither beta's nor the shared one"
+    );
+    let beta_view = rt()
+        .block_on(store.list_connections_scoped(ConnectionScope::Team(beta.id), None))
+        .expect("beta");
+    assert_eq!(
+        beta_view.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![beta_conn.id]
+    );
+
+    // The provider filter composes with the scope instead of replacing it.
+    let alpha_claude = rt()
+        .block_on(store.list_connections_scoped(ConnectionScope::Team(alpha.id), Some("claude")))
+        .expect("alpha/claude");
+    assert!(alpha_claude.is_empty());
+    assert_eq!(
+        rt().block_on(
+            store.list_connections_scoped(ConnectionScope::Team(alpha.id), Some("openai"))
+        )
+        .expect("alpha/openai")
+        .len(),
+        1
+    );
+}
+
+/// Reassigning and clearing the owner is the insert/update mapping's other half: the
+/// account moves between the global view and one team's view, never both.
+#[test]
+fn connection_owner_can_be_reassigned_and_cleared() {
+    let dir = TempDir::new("conn-scope-update");
+    let store = dir.store();
+    let team = rt()
+        .block_on(store.create_team("alpha", 0, 0, BudgetWindow::Total))
+        .expect("team");
+    let user = Uuid::new_v4();
+    let conn = owned_connection(&store, "openai", None, "k");
+
+    rt().block_on(store.set_connection_owner(conn.id, Some(team.id), Some(user)))
+        .expect("assign");
+    let read = rt()
+        .block_on(store.get_connection(conn.id))
+        .expect("read")
+        .expect("row");
+    assert_eq!(read.team_id, Some(team.id));
+    assert_eq!(read.owner_user_id, Some(user), "attribution is stored");
+    assert_eq!(
+        rt().block_on(store.list_connections_scoped(ConnectionScope::Team(team.id), None))
+            .expect("team view")
+            .len(),
+        1
+    );
+
+    rt().block_on(store.set_connection_owner(conn.id, None, None))
+        .expect("clear");
+    let read = rt()
+        .block_on(store.get_connection(conn.id))
+        .expect("read")
+        .expect("row");
+    assert_eq!(read.team_id, None, "cleared to shared/instance-wide");
+    assert_eq!(read.owner_user_id, None);
+    assert!(
+        rt().block_on(store.list_connections_scoped(ConnectionScope::Team(team.id), None))
+            .expect("team view")
+            .is_empty(),
+        "a cleared account leaves the team view"
+    );
+
+    let missing = rt().block_on(store.set_connection_owner(conn.id, Some(Uuid::new_v4()), None));
+    assert!(
+        missing.is_err(),
+        "a connection cannot point at a missing team"
+    );
+}
+
+/// Deleting a team releases its provider accounts to the instance, exactly as it releases
+/// keys: nothing is deleted and nothing keeps a dangling team id.
+#[test]
+fn deleting_a_team_releases_its_provider_accounts() {
+    let dir = TempDir::new("conn-scope-delete");
+    let store = dir.store();
+    let team = rt()
+        .block_on(store.create_team("alpha", 0, 0, BudgetWindow::Total))
+        .expect("team");
+    let conn = owned_connection(&store, "openai", Some(team.id), "k");
+
+    assert!(rt().block_on(store.delete_team(team.id)).expect("delete"));
+    let read = rt()
+        .block_on(store.get_connection(conn.id))
+        .expect("read")
+        .expect("the account survives");
+    assert_eq!(read.team_id, None, "released to shared/instance-wide");
+    assert_eq!(
+        rt().block_on(store.list_connections(None))
+            .expect("global")
+            .len(),
+        1
+    );
+}
+
+// ----- usage trace id --------------------------------------------------------------
+
+/// The v25 `usage.trace_id` column is written from the record and read back with the row;
+/// a record with no trace context stores `NULL` rather than an empty string, so "no
+/// trace" stays distinguishable from a malformed one.
+#[test]
+fn usage_trace_id_roundtrips_and_absent_stays_null() {
+    let dir = TempDir::new("usage-trace");
+    let store = dir.store();
+    let traced = Uuid::new_v4();
+    let untraced = Uuid::new_v4();
+    let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+    for (request_id, trace_id) in [(traced, Some(trace)), (untraced, None)] {
+        rt().block_on(store.record_usage(&UsageRecord {
+            id: None,
+            ts: 1_700_000_000,
+            request_id: Some(request_id),
+            trace_id: trace_id.map(str::to_owned),
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".to_string()),
+            key_id: None,
+            cost_micros: 0,
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            upstream_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        }))
+        .expect("record");
+    }
+
+    let row = rt()
+        .block_on(store.usage_by_request(traced))
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.trace_id.as_deref(), Some(trace));
+    let row = rt()
+        .block_on(store.usage_by_request(untraced))
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.trace_id, None, "no trace context means NULL");
+}
+
+// ----- semantic response cache -----------------------------------------------------
+
+fn semantic_entry(
+    embedding_model: &str,
+    provider: &str,
+    model: &str,
+    team: Option<Uuid>,
+    prompt: &str,
+    body: &str,
+    now: i64,
+) -> rrouter_store::SemanticCacheEntry {
+    rrouter_store::SemanticCacheEntry {
+        prompt_hash: rrouter_store::cache_key(prompt),
+        embedding_model: embedding_model.to_string(),
+        provider: provider.to_string(),
+        model: model.to_string(),
+        team_id: team,
+        embedding: vec![0, 0, 128, 63],
+        body: body.to_string(),
+        created_at: now,
+        expires_at: now + 60,
+    }
+}
+
+/// Every scope dimension is an equality filter: another embedding model is another vector
+/// space, another provider/model is another response, and a team row is invisible to the
+/// instance view (and vice versa).
+#[test]
+fn semantic_cache_scan_is_scoped_and_expires() {
+    let dir = TempDir::new("semantic-scope");
+    let store = dir.store();
+    let now = 1_700_000_000i64;
+    let team = Uuid::new_v4();
+    rt().block_on(async {
+        store
+            .semantic_cache_put(
+                &semantic_entry(
+                    "text-embedding-3-small",
+                    "openai",
+                    "gpt-4.1",
+                    None,
+                    "hello",
+                    "shared body",
+                    now,
+                ),
+                100,
+            )
+            .await
+            .expect("shared put");
+        store
+            .semantic_cache_put(
+                &semantic_entry(
+                    "text-embedding-3-small",
+                    "openai",
+                    "gpt-4.1",
+                    Some(team),
+                    "hello",
+                    "team body",
+                    now,
+                ),
+                100,
+            )
+            .await
+            .expect("team put");
+    });
+
+    let scan = |embedding_model: &'static str,
+                provider: &'static str,
+                model: &'static str,
+                team_id: Option<Uuid>,
+                at: i64| {
+        let scope = rrouter_store::SemanticCacheScope {
+            embedding_model,
+            provider,
+            model,
+            team_id,
+        };
+        rt().block_on(store.semantic_cache_scan(&scope, at, 64))
+            .expect("scan")
+    };
+
+    let shared = scan("text-embedding-3-small", "openai", "gpt-4.1", None, now);
+    assert_eq!(shared.len(), 1);
+    assert_eq!(shared[0].body, "shared body");
+    assert_eq!(
+        shared[0].prompt_hash,
+        rrouter_store::cache_key("hello"),
+        "the exact-text dedupe key is stored"
+    );
+
+    assert!(
+        scan(
+            "text-embedding-3-small",
+            "openai",
+            "gpt-4.1",
+            Some(team),
+            now
+        )
+        .len()
+            == 1,
+        "the team sees its own row"
+    );
+    assert!(
+        scan("text-embedding-3-large", "openai", "gpt-4.1", None, now).is_empty(),
+        "a different embedding model is a different vector space"
+    );
+    assert!(scan("text-embedding-3-small", "together", "gpt-4.1", None, now).is_empty());
+    assert!(scan("text-embedding-3-small", "openai", "gpt-4o", None, now).is_empty());
+    assert!(
+        scan(
+            "text-embedding-3-small",
+            "openai",
+            "gpt-4.1",
+            None,
+            now + 61
+        )
+        .is_empty(),
+        "an expired row never wins a scan"
+    );
+}
+
+/// Re-storing the same canonical prompt in one scope refreshes the row instead of
+/// duplicating it, and the retention sweep drops expired semantic rows.
+#[test]
+fn semantic_cache_refreshes_and_prunes_expired_rows() {
+    let dir = TempDir::new("semantic-prune");
+    let store = dir.store();
+    let now = 1_700_000_000i64;
+    rt().block_on(async {
+        store
+            .semantic_cache_put(
+                &semantic_entry(
+                    "text-embedding-3-small",
+                    "openai",
+                    "gpt-4.1",
+                    None,
+                    "hello",
+                    "first",
+                    now,
+                ),
+                100,
+            )
+            .await
+            .expect("first");
+        store
+            .semantic_cache_put(
+                &semantic_entry(
+                    "text-embedding-3-small",
+                    "openai",
+                    "gpt-4.1",
+                    None,
+                    "hello",
+                    "second",
+                    now,
+                ),
+                100,
+            )
+            .await
+            .expect("refresh");
+        assert_eq!(
+            store.semantic_cache_entries().await.expect("entries").len(),
+            1,
+            "one row per prompt and scope"
+        );
+        let scope = rrouter_store::SemanticCacheScope {
+            embedding_model: "text-embedding-3-small",
+            provider: "openai",
+            model: "gpt-4.1",
+            team_id: None,
+        };
+        let row = store
+            .semantic_cache_scan(&scope, now, 8)
+            .await
+            .expect("scan");
+        assert_eq!(row[0].body, "second", "the latest response wins");
+
+        store.prune_expired_cache(now + 61).await.expect("prune");
+        assert!(
+            store
+                .semantic_cache_entries()
+                .await
+                .expect("entries")
+                .is_empty(),
+            "the sweep drops expired semantic rows"
+        );
+    });
+}
+
+/// The entry cap is a bound, not a contract: the oldest rows go first.
+#[test]
+fn semantic_cache_evicts_over_the_entry_cap() {
+    let dir = TempDir::new("semantic-cap");
+    let store = dir.store();
+    let now = 1_700_000_000i64;
+    rt().block_on(async {
+        for (index, prompt) in ["one", "two", "three"].iter().enumerate() {
+            store
+                .semantic_cache_put(
+                    &semantic_entry(
+                        "text-embedding-3-small",
+                        "openai",
+                        "gpt-4.1",
+                        None,
+                        prompt,
+                        &format!("body {index}"),
+                        now + index as i64,
+                    ),
+                    2,
+                )
+                .await
+                .expect("put");
+        }
+        let entries = store.semantic_cache_entries().await.expect("entries");
+        assert_eq!(entries.len(), 2, "the cap is enforced on write");
     });
 }

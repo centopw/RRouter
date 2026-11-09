@@ -20,12 +20,22 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 | `together` | Together AI | API key | Chat | yes | |
 | `cerebras` | Cerebras | API key | Chat | yes | |
 | `ollama` | Ollama (local) | none | Chat | yes | `base_url_override` pointing at a remote Ollama works the same way. |
+| `azure` | Azure OpenAI | API key (`api-key` header) | Chat (v1 surface) | **no** | Requires a per-connection base URL (`https://<resource>.openai.azure.com`); the deployment name is the model id, registered as a custom model. Uses `max_completion_tokens`. |
+| `cohere` | Cohere | API key | Chat (OpenAI-compatibility surface) | derived | Chat goes through Cohere's compatibility API; rerank is `https://api.cohere.com/v1/rerank`. Chat and rerank model ids differ, so each surface needs its own custom rows. |
+| `fireworks` | Fireworks AI | API key | Chat | derived | Ids look like `accounts/fireworks/models/<name>` and are stored verbatim; the API documents `max_tokens`. |
+| `jina` | Jina AI | API key | — (rerank only) | **no** | No chat API: the entry exists for `https://api.jina.ai/v1/rerank`, and a chat request aimed at it is rejected by Jina. |
 
-## Dialect matrix
+The last four are reviewed community manifests (`providers/community/*.json`) compiled into
+the binary at build time, so they appear here exactly as the built-in rows do. `derived` means
+the gateway derives the list URL from the chat endpoint because the provider declares none; a
+failed fetch leaves the catalog rows untouched and is not an error the operator sees.
 
 Non-chat endpoints follow the same rule: a provider that declares one gets the client body
-forwarded (`/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`,
-`/v1/audio/voices`); every other provider answers `501` for that path without calling upstream.
+forwarded (`/v1/rerank`, `/v1/files`, `/v1/batches`, `/v1/images/generations`,
+`/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/voices`); every other provider
+answers `501` for that path without calling upstream.
+
+## Dialect matrix
 
 | Client → provider | Chat | Responses | Messages | Embeddings |
 | --- | --- | --- | --- | --- |
@@ -38,10 +48,14 @@ patched, so provider-native cache markers and tool definitions survive.
 
 ## Adding a provider
 
-1. Add a `ProviderSpec` in `crates/rrouter-auth/src/registry.rs` (id, display, kind, base URL,
-   optional Responses/Messages URLs, headers, sign-in flow or API-key auth).
-2. Model listing derives from the base URL (`models_url` in `crates/rrouter-gateway/src/models_registry.rs`),
-   so a standard OpenAI-compatible server works with no extra code.
+1. For an API-key provider, add a reviewed manifest in `providers/community/<id>.json`
+   (schema: `providers/schema.json`); `crates/rrouter-auth/build.rs` compiles it into the
+   binary. Built-in providers — and anything needing an OAuth flow — are a `ProviderSpec` in
+   `crates/rrouter-auth/src/registry.rs` (id, display, kind, base URL, optional
+   Responses/Messages/rerank/files/batches URLs, headers, sign-in flow or API-key auth).
+2. Model listing derives from the chat base URL unless the spec declares `models_url`, so a
+   standard OpenAI-compatible server works with no extra code; the derivation itself is
+   `models_url` in `crates/rrouter-gateway/src/models_registry.rs`.
 3. Run `cargo test -p rrouter-auth -p rrouter-gateway`; the registry tests assert that every
    provider has a valid spec.
 

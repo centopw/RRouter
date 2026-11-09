@@ -11,7 +11,7 @@ import {
 import "./index.css";
 import { Shell } from "./app";
 import { ToastProvider } from "./components/toast";
-import { AuthGuard } from "./pages/auth/guard";
+import { AuthGuard, RequireAdmin } from "./pages/auth/guard";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -53,10 +53,12 @@ function page(load: () => Promise<{ default: ComponentType }>) {
 const Activity = page(() => import("./pages/activity"));
 const Health = page(() => import("./pages/health"));
 const SystemLogs = page(() => import("./pages/system-logs"));
+const Webhooks = page(() => import("./pages/webhooks"));
 const Keys = page(() => import("./pages/keys"));
 const Aliases = page(() => import("./pages/aliases"));
 const Combos = page(() => import("./pages/combos"));
 const Templates = page(() => import("./pages/templates"));
+const Evals = page(() => import("./pages/evals"));
 const Models = page(() => import("./pages/models"));
 const Playground = page(() => import("./pages/playground"));
 const Settings = page(() => import("./pages/settings"));
@@ -64,6 +66,7 @@ const Providers = page(() => import("./pages/providers"));
 const Setup = page(() => import("./pages/setup"));
 const Logs = page(() => import("./pages/logs"));
 const Users = page(() => import("./pages/users"));
+const Teams = page(() => import("./pages/teams"));
 const Audit = page(() => import("./pages/audit"));
 const Account = page(() => import("./pages/account"));
 const SignIn = page(() => import("./pages/auth/sign-in"));
@@ -72,6 +75,11 @@ const TokenSignIn = page(() => import("./pages/auth/token-signin"));
 const SetupAdmin = page(() => import("./pages/auth/setup-admin"));
 const Forgot = page(() => import("./pages/auth/forgot"));
 const Invite = page(() => import("./pages/auth/invite"));
+
+/** An admin page: hidden from a reader's nav, and redirected here on a typed URL. */
+function AdminPage({ children }: { children: ReactNode }) {
+  return <RequireAdmin>{children}</RequireAdmin>;
+}
 
 /**
  * A tab left open across a deploy keeps the old bundle in memory; no HTTP header can
@@ -123,7 +131,9 @@ const router = createBrowserRouter(
       path: "setup",
       element: (
         <AuthGuard>
-          <Setup />
+          <RequireAdmin>
+            <Setup />
+          </RequireAdmin>
         </AuthGuard>
       ),
       errorElement: <RouteError />,
@@ -144,21 +154,26 @@ const router = createBrowserRouter(
           children: [
             { index: true, element: <Navigate to="/activity" replace /> },
             { path: "activity", element: <Activity /> },
-            { path: "logs", element: <Logs /> },
+            // Reader surface: any signed-in role may open these.
+            { path: "models", element: <Models /> },
+            { path: "templates", element: <Templates /> },
+            { path: "evals", element: <Evals /> },
+            { path: "teams", element: <Teams /> },
+            { path: "account", element: <Account /> },
+            // Admin surface: hidden from the nav and refused here on a typed URL.
+            { path: "logs", element: <AdminPage><Logs /></AdminPage> },
             { path: "providers", element: <Providers /> },
             { path: "connections", element: <Navigate to="/providers" replace /> },
-            { path: "models", element: <Models /> },
-            { path: "playground", element: <Playground /> },
-            { path: "templates", element: <Templates /> },
-            { path: "settings", element: <Settings /> },
-            { path: "keys", element: <Keys /> },
-            { path: "users", element: <Users /> },
-            { path: "audit", element: <Audit /> },
-            { path: "account", element: <Account /> },
-            { path: "aliases", element: <Aliases /> },
-            { path: "combos", element: <Combos /> },
-            { path: "health", element: <Health /> },
-            { path: "system-logs", element: <SystemLogs /> },
+            { path: "playground", element: <AdminPage><Playground /></AdminPage> },
+            { path: "settings", element: <AdminPage><Settings /></AdminPage> },
+            { path: "keys", element: <AdminPage><Keys /></AdminPage> },
+            { path: "users", element: <AdminPage><Users /></AdminPage> },
+            { path: "audit", element: <AdminPage><Audit /></AdminPage> },
+            { path: "aliases", element: <AdminPage><Aliases /></AdminPage> },
+            { path: "combos", element: <AdminPage><Combos /></AdminPage> },
+            { path: "health", element: <AdminPage><Health /></AdminPage> },
+            { path: "webhooks", element: <AdminPage><Webhooks /></AdminPage> },
+            { path: "system-logs", element: <AdminPage><SystemLogs /></AdminPage> },
             { path: "*", element: <NotFound /> },
           ],
         },

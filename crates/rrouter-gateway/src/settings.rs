@@ -113,11 +113,12 @@ pub fn brand_of(settings: &Value) -> Value {
 /// owns the main connection and has no key/value surface, and a second writer on the same
 /// file would only add lock contention.
 fn settings_path(state: &AppState) -> std::path::PathBuf {
-    state.config.data_dir.join("settings.db")
+    state.config.load().data_dir.join("settings.db")
 }
 
 fn open(state: &AppState) -> Result<rusqlite::Connection> {
-    if let Err(e) = std::fs::create_dir_all(&state.config.data_dir) {
+    let data_dir = state.config.load().data_dir.clone();
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
         return Err(Error::Store(format!("create data dir: {e}")));
     }
     let conn = rusqlite::Connection::open(settings_path(state))

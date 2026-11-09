@@ -19,13 +19,44 @@
       "type": "string",
       "format": "uri",
       "pattern": "^https://",
-      "description": "Chat endpoint, or an OpenAI-compatible base ending in /v1."
+      "description": "Chat endpoint, or an OpenAI-compatible base ending in /v1. Must not end in a slash."
     },
-    "auth": { "enum": ["bearer", "x-api-key", "none"] },
+    "base_url_requires_override": {
+      "type": "boolean",
+      "default": false,
+      "description": "True when this host is a placeholder rather than a usable endpoint (Azure's RESOURCE.openai.azure.com): every connection must supply its own base URL, and the gateway refuses to dispatch or save one that does not. Only a placeholder host (first label resource, your-resource or placeholder) may set it."
+    },
+    "auth": {
+      "enum": ["bearer", "x-api-key", "api-key", "none"],
+      "description": "bearer -> Authorization: Bearer <key>; x-api-key -> the key in x-api-key; api-key -> the key in `auth_header`; none -> no credential."
+    },
+    "auth_header": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "description": "Header that carries the key when `auth` is `api-key`. Defaults to `api-key`. `authorization`, `cookie` and hop-by-hop names are refused: use `bearer` for the Authorization header."
+    },
     "default_dialect": { "enum": ["chat", "responses", "messages"] },
     "models_url": { "type": "string", "format": "uri" },
     "responses_url": { "type": "string", "format": "uri" },
     "messages_url": { "type": "string", "format": "uri" },
+    "files_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://",
+      "description": "OpenAI-compatible file API root (POST /v1/files, list, retrieve, content). A full endpoint, no trailing slash and no query of its own; the gateway forwards uploads byte for byte with the client's multipart boundary."
+    },
+    "batches_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://",
+      "description": "OpenAI-compatible batch API root (POST /v1/batches, list, retrieve, cancel). Forwarded, never executed by the gateway; no trailing slash and no query of its own."
+    },
+    "rerank_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://",
+      "description": "Native rerank endpoint (Cohere and Jina both use POST /v1/rerank). A full endpoint, no trailing slash; the gateway posts the canonical rerank body to exactly this URL."
+    },
     "images_url": { "type": "string", "format": "uri" },
     "audio_speech_url": { "type": "string", "format": "uri" },
     "audio_transcriptions_url": { "type": "string", "format": "uri" },
@@ -33,7 +64,29 @@
     "stream_only": { "type": "boolean" },
     "extra_headers": {
       "type": "object",
-      "additionalProperties": { "type": "string" }
+      "additionalProperties": { "type": "string" },
+      "description": "Headers every request to this provider carries. Credential-bearing and hop-by-hop names are refused, and no value may look like a token."
+    },
+    "query": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z0-9._~-]+$" },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9._~-]+$"
+      },
+      "description": "Query parameters every request to this provider carries, e.g. Azure's api-version. A parameter the connection's base URL already sets wins, so a deployment can override a reviewed default. Credential-bearing names are refused."
+    },
+    "max_tokens_key": {
+      "enum": ["max_tokens", "max_completion_tokens"],
+      "default": "max_tokens",
+      "description": "How the Chat dialect spells the output cap for this provider. `max_completion_tokens` only for OpenAI's own surface: current gpt-5/o-series models reject `max_tokens`, and Mistral-class APIs answer 422 to `max_completion_tokens`."
+    },
+    "passthrough_headers": {
+      "type": "array",
+      "items": { "enum": ["anthropic-beta", "openai-beta"] },
+      "uniqueItems": true,
+      "maxItems": 2,
+      "description": "Client protocol beta headers this provider understands and the gateway may forward, unioned with its own. Only these two reviewed names exist, so a manifest cannot forward a credential header."
     },
     "endpoints": {
       "type": "array",

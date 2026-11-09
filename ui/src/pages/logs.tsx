@@ -10,7 +10,7 @@ import {
   useUsagePage,
   type UsageFilters,
 } from "../lib/queries";
-import { download, type Model, type UsageEvent } from "../lib/api";
+import { download, saveBlob, type Model, type UsageEvent } from "../lib/api";
 import { cacheLabel, RequestDetailDialog } from "./activity/request-log";
 
 /** Incident review: every request newest first, filtered on the server, paged backwards on demand. */
@@ -392,18 +392,6 @@ function LogTable({
 function rowKey(row: UsageEvent): string {
   if (row.request_id) return row.request_id;
   return row.id !== null ? `#${row.id}` : `${row.ts}:${row.model}:${row.latency_ms}`;
-}
-
-/** Hand a blob to the browser's downloader, then drop the object URL it used. */
-function saveBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function isFailed(row: UsageEvent): boolean {

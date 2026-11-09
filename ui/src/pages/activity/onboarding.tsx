@@ -6,8 +6,12 @@ import { Heading } from "../../components/atoms";
 
 /** Zero-traffic gateway: show how to send the first request instead of four dashes. */
 
-export function Onboarding({ baseUrl }: { baseUrl: string }) {
+export function Onboarding({ baseUrl, canAdmin = true }: { baseUrl: string; canAdmin?: boolean }) {
   const curl = curlFor(baseUrl, "/v1/chat/completions", "claude/sonnet-4-5");
+  // A reader can see that the gateway is idle but cannot add a provider or mint a key,
+  // so those steps lose their link rather than leading to a page that redirects away.
+  const providerLink = canAdmin ? { to: "/providers", cta: "Open Providers" } : {};
+  const keyLink = canAdmin ? { to: "/keys", cta: "Open API Keys" } : {};
   return (
     <section className="rounded-[var(--radius-card)] border border-line bg-surface px-8 py-10">
       <div className="mx-auto max-w-[560px] text-center">
@@ -22,10 +26,10 @@ export function Onboarding({ baseUrl }: { baseUrl: string }) {
         </p>
 
         <ol className="mt-6 space-y-3 text-left">
-          <Step n={1} title="Add a provider" to="/providers" cta="Open Providers">
+          <Step n={1} title="Add a provider" {...providerLink}>
             Sign in with a Claude, ChatGPT or Copilot subscription, or paste an API key.
           </Step>
-          <Step n={2} title="Create an API key" to="/keys" cta="Open API Keys">
+          <Step n={2} title="Create an API key" {...keyLink}>
             Clients authenticate with <span className="font-mono text-small text-muted">sk-rr-…</span>.
           </Step>
           <Step n={3} title="Send a test request" done>

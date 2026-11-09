@@ -367,7 +367,7 @@ async fn download_release(state: &AppState, release: &Value, version: &str) -> R
         )));
     }
 
-    let dir = state.config.data_dir.join("updates").join(version);
+    let dir = state.config.load().data_dir.join("updates").join(version);
     std::fs::create_dir_all(&dir).map_err(|e| Error::Store(format!("create update dir: {e}")))?;
     let staged = dir.join("rrouter");
     let tmp = dir.join("rrouter.part");
@@ -495,7 +495,7 @@ fn self_replace(state: &AppState, staged: &Path) -> Result<()> {
         let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755));
     }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let data_dir = state.config.data_dir.clone();
+    let data_dir = state.config.load().data_dir.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(700));
         if let Err(e) = std::fs::rename(&temp, &exe) {

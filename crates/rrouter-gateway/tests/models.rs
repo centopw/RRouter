@@ -99,6 +99,13 @@ fn config() -> Config {
         usage_retention_days: 0,
         log_format: rrouter_gateway::config::LogFormat::Text,
         access_log: true,
+        hedge_ms: 0,
+        canary: None,
+        semantic_cache: rrouter_gateway::config::CacheMode::Off,
+        semantic_cache_threshold: 0.92,
+        semantic_embedding_model: None,
+        semantic_cache_ttl_secs: 3600,
+        semantic_cache_max_entries: 1000,
     }
 }
 
@@ -118,11 +125,11 @@ fn harness() -> Harness {
             .timeout(Duration::from_secs(30))
             .build()
             .expect("client"),
-        config: config(),
+        config: rrouter_gateway::config::ConfigSnapshot::from(config()),
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
-        concurrency: None,
+        concurrency: std::sync::RwLock::new(None),
         auth: rrouter_gateway::auth::Auth::load(&config().data_dir, false),
     });
     let router = app(Arc::clone(&state));
@@ -700,4 +707,296 @@ fn sync_parser_ignores_a_non_object_document() {
     assert!(parse_models_dev(&json!([])).is_empty());
     assert!(parse_models_dev(&json!({"p": {"no_models": 1}})).is_empty());
     assert_eq!(MAX_FETCHED_IDS, 5000);
+}
+
+// ------------------------------------------------------------ provider base URLs
+
+/// The provider row carries the two facts the add-provider form needs: whether a base URL
+/// is mandatory, and a shape to type into the field.
+#[tokio::test]
+async fn providers_payload_flags_the_override_requirement() {
+    let h = harness();
+    let (status, body) = h.get("/api/models/providers").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let data = body["data"].as_array().expect("data");
+    let row = |id: &str| {
+        data.iter()
+            .find(|p| p["id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing"))
+            .clone()
+    };
+
+    let azure = row("azure");
+    assert_eq!(azure["requires_base_url_override"], true);
+    assert_eq!(
+        azure["base_url_example"], "https://<resource>.openai.azure.com",
+        "the example is the origin shape, not the manifest placeholder: {azure}"
+    );
+    assert_eq!(azure["kind"], "api_key");
+    assert_eq!(
+        azure["listed"], false,
+        "Azure publishes no plain model list"
+    );
+
+    // Every other provider keeps its old answer and gains `false`, not a missing key.
+    let openai = row("openai");
+    assert_eq!(openai["requires_base_url_override"], false);
+    assert_eq!(openai["base_url_example"], "https://api.openai.com");
+    assert_eq!(openai["listed"], true);
+    assert_eq!(openai["has_connection"], false);
+
+    // Nothing in the payload is credential material.
+    let text = body.to_string();
+    assert!(!text.contains("api-key"), "{text}");
+    assert!(!text.contains("Bearer "), "{text}");
+}
+
+/// Saving Azure without a resource URL is refused before the row exists, and the message
+/// names what the operator must supply.
+#[tokio::test]
+async fn an_azure_connection_needs_a_resource_url() {
+    let h = harness();
+    let (status, body) = h
+        .post(
+            "/api/connections",
+            json!({
+                "provider": "azure",
+                "auth_type": "api_key",
+                "credentials": {"api_key": "azure-secret"},
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("requires a connection base URL"),
+        "{message}"
+    );
+    assert!(
+        !body.to_string().contains("azure-secret"),
+        "the credential never echoes back: {body}"
+    );
+
+    let (status, list) = h.get("/api/connections").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        list["data"].as_array().expect("data").len(),
+        0,
+        "a refused save writes nothing"
+    );
+}
+
+/// A resource URL is what makes the account usable; the view reports it without the key.
+#[tokio::test]
+async fn an_azure_connection_accepts_a_resource_url() {
+    let h = harness();
+    let (status, created) = h
+        .post(
+            "/api/connections",
+            json!({
+                "provider": "azure",
+                "auth_type": "api_key",
+                "name": "contoso",
+                "credentials": {
+                    "api_key": "azure-secret",
+                    "base_url_override": "https://contoso.openai.azure.com",
+                },
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["provider"], "azure");
+    assert_eq!(
+        created["base_url_override"],
+        "https://contoso.openai.azure.com"
+    );
+    assert_eq!(created["has_api_key"], true);
+    assert!(
+        !created.to_string().contains("azure-secret"),
+        "the row reports booleans, not the key: {created}"
+    );
+
+    let (status, body) = h.get("/api/models/providers").await;
+    assert_eq!(status, StatusCode::OK);
+    let azure = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|p| p["id"] == "azure")
+        .expect("azure")
+        .clone();
+    assert_eq!(azure["has_connection"], true);
+}
+
+/// Copying the manifest placeholder into the field is the same mistake spelled out, and it
+/// is caught even though the UI would have blocked it.
+#[tokio::test]
+async fn an_azure_placeholder_override_is_refused() {
+    let h = harness();
+    for placeholder in [
+        "https://RESOURCE.openai.azure.com",
+        "https://your-resource.openai.azure.com",
+        "https://placeholder.openai.azure.com",
+    ] {
+        let (status, body) = h
+            .post(
+                "/api/connections",
+                json!({
+                    "provider": "azure",
+                    "auth_type": "api_key",
+                    "credentials": {
+                        "api_key": "azure-secret",
+                        "base_url_override": placeholder,
+                    },
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{placeholder}: {body}");
+        let message = body["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("placeholder host"),
+            "{placeholder}: {message}"
+        );
+    }
+    let (_, list) = h.get("/api/connections").await;
+    assert_eq!(list["data"].as_array().expect("data").len(), 0);
+}
+
+/// An update validates what the row would keep: omitting the URL keeps it, sending a new
+/// one replaces it, and an explicitly empty value is refused instead of breaking dispatch.
+#[tokio::test]
+async fn updating_a_connection_keeps_or_replaces_the_override() {
+    let h = harness();
+    let (status, created) = h
+        .post(
+            "/api/connections",
+            json!({
+                "provider": "azure",
+                "auth_type": "api_key",
+                "credentials": {
+                    "api_key": "azure-secret",
+                    "base_url_override": "https://contoso.openai.azure.com",
+                },
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("id");
+
+    // Touching another credential field leaves the base URL alone.
+    let (status, kept) = h
+        .send(
+            "PATCH",
+            &format!("/api/connections/{id}"),
+            json!({"credentials": {"api_key": "rotated-secret"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    assert_eq!(
+        kept["base_url_override"],
+        "https://contoso.openai.azure.com"
+    );
+    assert_eq!(kept["has_api_key"], true);
+
+    // A new resource replaces it.
+    let (status, replaced) = h
+        .send(
+            "PATCH",
+            &format!("/api/connections/{id}"),
+            json!({"credentials": {"base_url_override": "https://fabrikam.openai.azure.com"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    assert_eq!(
+        replaced["base_url_override"],
+        "https://fabrikam.openai.azure.com"
+    );
+
+    // Replacing it with the placeholder is refused, and the good value survives.
+    let (status, body) = h
+        .send(
+            "PATCH",
+            &format!("/api/connections/{id}"),
+            json!({"credentials": {"base_url_override": "https://RESOURCE.openai.azure.com"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // `null` means "no change" for credentials (the merge model), and `""` is refused
+    // rather than stored as a URL that would dispatch to the origin root.
+    let (status, kept) = h
+        .send(
+            "PATCH",
+            &format!("/api/connections/{id}"),
+            json!({"credentials": {"base_url_override": null}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    assert_eq!(
+        kept["base_url_override"],
+        "https://fabrikam.openai.azure.com"
+    );
+
+    let (status, body) = h
+        .send(
+            "PATCH",
+            &format!("/api/connections/{id}"),
+            json!({"credentials": {"base_url_override": "  "}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(message.contains("cannot be empty"), "{message}");
+
+    let (_, after) = h.get("/api/connections").await;
+    assert_eq!(
+        after["data"][0]["base_url_override"], "https://fabrikam.openai.azure.com",
+        "a refused clear writes nothing"
+    );
+}
+
+/// Providers whose manifest host is real keep working exactly as before: no override is
+/// required, and one that is supplied still wins.
+#[tokio::test]
+async fn providers_without_the_flag_stay_unchanged() {
+    let h = harness();
+    let (status, created) = h
+        .post(
+            "/api/connections",
+            json!({
+                "provider": "openai",
+                "auth_type": "api_key",
+                "credentials": {"api_key": "sk-test"},
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["base_url_override"],
+        serde_json::Value::Null,
+        "no override, no requirement"
+    );
+
+    let id = created["id"].as_str().expect("id");
+    let mock = start_mock().await;
+    let (status, override_url) = h
+        .send(
+            "PATCH",
+            &format!("/api/connections/{id}"),
+            json!({"credentials": {"base_url_override": mock}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{override_url}");
+    assert_eq!(override_url["base_url_override"], mock);
+
+    // A placeholder is still refused even for a provider that does not require an
+    // override: the host would never resolve.
+    let (status, body) = h
+        .send(
+            "PATCH",
+            &format!("/api/connections/{id}"),
+            json!({"credentials": {"base_url_override": "https://RESOURCE.example.com"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }

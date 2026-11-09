@@ -165,7 +165,7 @@ fn asset_response(content_type: &str, body: &'static str, cache: &'static str) -
 /// is not a plain relative path of normal components is a `404`, and so is a file whose
 /// canonical path escapes the canonical root (symlinks included).
 async fn ext_file(state: &AppState, rest: &str) -> Response {
-    let Some(root) = state.config.static_dir.clone() else {
+    let Some(root) = state.config.load().static_dir.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let relative = match sanitize(rest) {

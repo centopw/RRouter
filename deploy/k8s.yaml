@@ -50,13 +50,18 @@ spec:
           volumeMounts:
             - { name: data, mountPath: /data }
           livenessProbe:
+            # Liveness is the process answering; restarting a healthy process because the
+            # database is briefly locked would only lengthen the outage.
             exec: { command: ["/usr/local/bin/rrouter", "--healthcheck"] }
             initialDelaySeconds: 10
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
-            exec: { command: ["/usr/local/bin/rrouter", "--healthcheck"] }
+            # Readiness also reads the store (`GET /ready`), so a pod whose /data volume
+            # is unwritable or whose schema cannot be opened leaves the Service instead of
+            # serving 5xx behind a green healthcheck.
+            exec: { command: ["/usr/local/bin/rrouter", "--ready"] }
             initialDelaySeconds: 5
             periodSeconds: 15
             timeoutSeconds: 5

@@ -27,7 +27,9 @@ import {
 } from "../../lib/activity";
 import {
   useConnections,
+  useIsAdmin,
   useKeys,
+  useTeams,
   useLiveUsage,
   useUsage,
   useUsageByModel,
@@ -80,6 +82,7 @@ export default function Activity() {
   const [metric, setMetric] = useState<Metric>("requests");
   const [modelFilter, setModelFilter] = useState<string | null>(null);
   const [keyFilter, setKeyFilter] = useState<string | null>(null);
+  const [teamFilter, setTeamFilter] = useState<string | null>(null);
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showAll, setShowAll] = useState(false);
@@ -93,22 +96,29 @@ export default function Activity() {
   const alignedFrom = Math.floor(from / spec.seconds) * spec.seconds;
 
   // Current + previous window in one fetch: deltas are real, not estimated.
-  const series = useUsageSeries(spec.hours * 2, spec.bucket);
-  const byModel = useUsageByModel(spec.hours, spec.bucket);
-  const summary = useUsageSummary(spec.hours);
-  const usage = useUsage(200, spec.hours);
-  // Key names come from the same list the API Keys page edits.
-  const keys = useKeys();
+  // Tenancy filter: an admin narrows the whole page to one team; a reader's choices are
+  // already their own teams, and the server scopes the unfiltered view anyway.
+  const teams = useTeams();
+  const teamParam = teamFilter ?? undefined;
+  const series = useUsageSeries(spec.hours * 2, spec.bucket, teamParam);
+  const byModel = useUsageByModel(spec.hours, spec.bucket, teamParam);
+  const summary = useUsageSummary(spec.hours, teamParam);
+  const usage = useUsage(200, spec.hours, teamParam);
+  // Key names and the provider roster come from admin surface. A reader gets the log
+  // and the charts instead of two requests that would be refused.
+  const isAdmin = useIsAdmin();
+  const keys = useKeys(isAdmin);
   // One row proves the gateway has ever served traffic; the window-scoped
   // queries cannot tell "never used" from "quiet right now".
   const ever = useUsage(1);
-  const live = useLiveUsage(200);
-  const connections = useConnections();
-  const providerIds = useMemo(
-    () =>
-      [...new Set((connections.data ?? []).filter((c) => c.is_active).map((c) => c.provider))].sort(),
-    [connections.data],
-  );
+  const live = useLiveUsage(200, teamParam);
+  const connections = useConnections(isAdmin);
+  const providerIds = useMemo(() => {
+    const seen = isAdmin
+      ? (connections.data ?? []).filter((c) => c.is_active).map((c) => c.provider)
+      : (live.data ?? []).map((event) => event.provider);
+    return [...new Set(seen)].sort();
+  }, [isAdmin, connections.data, live.data]);
 
   const currentBuckets = (series.data ?? []).filter((b) => b.start >= alignedFrom);
   const cur = totalsOf(currentBuckets);
@@ -434,7 +444,7 @@ export default function Activity() {
           )}
         </Card>
 
-        {onboard ? <Onboarding baseUrl={baseUrl} /> : null}
+        {onboard ? <Onboarding baseUrl={baseUrl} canAdmin={isAdmin} /> : null}
 
         {showPanels ? (
           <>
@@ -480,23 +490,44 @@ export default function Activity() {
                   <span className="text-small text-faint">Most recent first</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <div className="w-[148px]">
-                    <Select
-                      ariaLabel="filter requests by key"
-                      value={keyFilter ?? ""}
-                      onChange={(v) => {
-                        setKeyFilter(v || null);
-                        setSelectedId(null);
-                            }}
-                    >
-                      <option value="">All keys</option>
-                      {(keys.data ?? []).map((k) => (
-                        <option key={k.id} value={k.id}>
-                          {k.name ?? k.id.slice(0, 8)}
-                        </option>
-                      ))}
-                    </Select>
-                  </div>
+                  {(teams.data ?? []).length > 0 ? (
+                    <div className="w-[148px]">
+                      <Select
+                        ariaLabel="filter by team"
+                        value={teamFilter ?? ""}
+                        onChange={(v) => {
+                          setTeamFilter(v || null);
+                          setSelectedId(null);
+                        }}
+                      >
+                        <option value="">{isAdmin ? "All teams" : "My teams"}</option>
+                        {(teams.data ?? []).map((team) => (
+                          <option key={team.id} value={team.id}>
+                            {team.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                  ) : null}
+                  {isAdmin ? (
+                    <div className="w-[148px]">
+                      <Select
+                        ariaLabel="filter requests by key"
+                        value={keyFilter ?? ""}
+                        onChange={(v) => {
+                          setKeyFilter(v || null);
+                          setSelectedId(null);
+                        }}
+                      >
+                        <option value="">All keys</option>
+                        {(keys.data ?? []).map((k) => (
+                          <option key={k.id} value={k.id}>
+                            {k.name ?? k.id.slice(0, 8)}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                  ) : null}
                   <FilterChip
                     on={!errorsOnly && !modelFilter && !keyFilter}
                     onClick={() => {

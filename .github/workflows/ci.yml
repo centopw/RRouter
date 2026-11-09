@@ -12,10 +12,28 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          # rustfmt is its own gate now: the tree is clean today, and a formatting drift
+          # should fail the same job that compiles it.
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked
+
+  # Dependency advisories. The lockfile is clean as of this commit (252 crates against
+  # the full RustSec database), so this is a real gate, not aspirational: a newly
+  # published advisory fails the PR and is fixed by bumping the crate, or — only when no
+  # fixed version exists — by an `audit.toml` `[advisories] ignore` entry with a review
+  # date in the comment. Do not add an ignore list pre-emptively.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
 
   dashboard:
     runs-on: ubuntu-latest

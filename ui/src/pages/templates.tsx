@@ -18,6 +18,7 @@ import { ago, when } from "../lib/format";
 import {
   useCreateTemplate,
   useDeleteTemplate,
+  useIsAdmin,
   useTemplateVersions,
   useTemplates,
   useUpdateTemplate,
@@ -42,6 +43,7 @@ const bodyClass =
 
 export default function Templates() {
   const templates = useTemplates();
+  const isAdmin = useIsAdmin();
   const navigate = useNavigate();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [attempted, setAttempted] = useState(false);
@@ -123,19 +125,23 @@ export default function Templates() {
       align: "right",
       render: (row) => (
         <span className="flex flex-wrap items-center justify-end gap-1.5">
-          <Button
-            variant="ghost"
-            onClick={() => navigate(`/playground?template=${encodeURIComponent(row.id)}`)}
-            title="load this prompt into the Playground and open it"
-          >
-            open
-          </Button>
-          <Button
-            variant="quiet"
-            onClick={() => open({ id: row.id, name: row.name, body: row.body })}
-          >
-            edit
-          </Button>
+          {isAdmin ? (
+            <>
+              <Button
+                variant="ghost"
+                onClick={() => navigate(`/playground?template=${encodeURIComponent(row.id)}`)}
+                title="load this prompt into the Playground and open it"
+              >
+                open
+              </Button>
+              <Button
+                variant="quiet"
+                onClick={() => open({ id: row.id, name: row.name, body: row.body })}
+              >
+                edit
+              </Button>
+            </>
+          ) : null}
           <Button
             variant="quiet"
             onClick={() => setHistoryOf(row)}
@@ -143,9 +149,11 @@ export default function Templates() {
           >
             history
           </Button>
-          <Button variant="danger" onClick={() => del(row)}>
-            delete
-          </Button>
+          {isAdmin ? (
+            <Button variant="danger" onClick={() => del(row)}>
+              delete
+            </Button>
+          ) : null}
         </span>
       ),
     },
@@ -168,11 +176,17 @@ export default function Templates() {
 
       <PageHeader
         title="Templates"
-        subtitle="Reusable system prompts. Write one here, then load it into the Playground."
+        subtitle={
+          isAdmin
+            ? "Reusable system prompts. Write one here, then load it into the Playground."
+            : "Reusable system prompts, newest revision first. Every earlier body is kept in the history."
+        }
         actions={
-          <Button variant="primary" onClick={() => open({ id: null, name: "", body: "" })}>
-            New template
-          </Button>
+          isAdmin ? (
+            <Button variant="primary" onClick={() => open({ id: null, name: "", body: "" })}>
+              New template
+            </Button>
+          ) : undefined
         }
       />
 
@@ -204,11 +218,13 @@ export default function Templates() {
               conversation. Save one here and load it into the Playground instead of retyping
               it for every test.
             </p>
-            <div className="mt-3">
-              <Button variant="ghost" onClick={() => open({ id: null, name: "", body: "" })}>
-                write the first template
-              </Button>
-            </div>
+            {isAdmin ? (
+              <div className="mt-3">
+                <Button variant="ghost" onClick={() => open({ id: null, name: "", body: "" })}>
+                  write the first template
+                </Button>
+              </div>
+            ) : null}
           </EmptyState>
         ) : (
           <DataTable

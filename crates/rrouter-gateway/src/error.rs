@@ -33,8 +33,17 @@ pub fn error_object_with(status: u16, message: &str, code: Option<&str>) -> Valu
 
 /// Body for a non-streaming failure. Anthropic clients expect the top-level
 /// `{"type":"error","error":{...}}` envelope; everyone else gets `{"error":{...}}`.
+///
+/// An upstream failure keeps the provider's own `type`, `code` and `param`: client SDKs
+/// and retry policies branch on those fields, and rebuilding the body from a formatted
+/// message turned every provider failure into the same opaque shape. Governance errors
+/// (our own 403/429 refusals) keep their stable codes, because there is no upstream body
+/// to preserve.
 pub fn error_body(inbound: Dialect, err: &Error) -> Value {
     let status = err.status();
+    if let Error::Upstream { body, payload, .. } = err {
+        return rrouter_translate::upstream_error_body(inbound, status, payload.as_ref(), body);
+    }
     let message = err.to_string();
     let obj = error_object_with(status, &message, err.code());
     match inbound {
@@ -80,6 +89,41 @@ pub fn not_implemented(inbound: Dialect, what: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The status, the body's code and the `Retry-After` header describe one fact; a
+    /// client must not have to reconcile three different answers.
+    #[test]
+    fn rate_limited_body_and_retry_after_agree() {
+        let err = Error::Limited {
+            code: "rate_limited",
+            message: "api key is limited to 1 request per minute".into(),
+            retry_after_secs: 1,
+        };
+        let resp = error_response(Dialect::OpenAiChat, &err);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+
+        let body = error_body(Dialect::OpenAiChat, &err);
+        assert_eq!(body["error"]["code"], "rate_limited", "{body}");
+        assert_eq!(body["error"]["type"], "rate_limit_error", "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("limited to 1 request")),
+            "{body}"
+        );
+
+        // The Anthropic envelope says the same thing in its own shape.
+        let body = error_body(Dialect::AnthropicMessages, &err);
+        assert_eq!(body["type"], "error", "{body}");
+        assert_eq!(body["error"]["code"], "rate_limited", "{body}");
+        assert_eq!(body["error"]["type"], "rate_limit_error", "{body}");
+    }
 
     #[test]
     fn anthropic_gets_envelope_openai_gets_plain_error() {

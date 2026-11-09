@@ -1,0 +1,18 @@
+{
+  "id": "cohere",
+  "display": "Cohere",
+  "website": "https://cohere.com",
+  "docs": "https://docs.cohere.com/reference/rerank",
+  "key_url": "https://dashboard.cohere.com/api-keys",
+  "base_url": "https://api.cohere.ai/compatibility/v1/chat/completions",
+  "auth": "bearer",
+  "default_dialect": "chat",
+  "max_tokens_key": "max_tokens",
+  "rerank_url": "https://api.cohere.com/v1/rerank",
+  "endpoints": [
+    "POST /compatibility/v1/chat/completions",
+    "POST /v1/rerank"
+  ],
+  "capabilities": ["chat", "streaming", "rerank"],
+  "notes": "Chat uses Cohere's documented OpenAI-compatibility surface (base https://api.cohere.ai/compatibility/v1), so the OpenAI Chat dialect is correct there; rerank uses Cohere's own v1 endpoint. Model ids differ per surface (command-* for chat, rerank-* for rerank), so register each with POST /api/models/custom. Cohere publishes no model-list endpoint for the compatibility surface, so model discovery is expected to fail for this provider."
+}

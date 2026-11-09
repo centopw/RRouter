@@ -11,7 +11,7 @@ use rrouter_core::{
 
 use crate::{
     capture_extra, finish_from_responses, merge_extra, opt_f64, opt_u32, parse_err, req_str,
-    req_str_field, tool_schema, usage_from_responses, usage_to_responses,
+    req_str_field, tool_schema, usage_from_responses, usage_to_responses, WireProfile,
 };
 
 const D: Dialect = Dialect::OpenAiResponses;
@@ -266,7 +266,7 @@ fn parse_tool_choice(v: &Value) -> Option<ToolChoice> {
 // Request out
 // ---------------------------------------------------------------------------
 
-pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
+pub fn build_request(req: &ChatRequest, stream: bool, wire: &WireProfile) -> Result<Value> {
     let mut input: Vec<Value> = Vec::with_capacity(req.messages.len());
     // System messages found inside `messages` fold into `instructions`.
     let mut instructions = req.system.clone().unwrap_or_default();
@@ -332,7 +332,8 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
     if !instructions.is_empty() {
         body.insert("instructions".into(), Value::from(instructions));
     }
-    if let Some(n) = req.max_tokens {
+    // Optional here: the client's value wins, then the provider's configured default.
+    if let Some(n) = wire.max_tokens_opt(req.max_tokens) {
         body.insert("max_output_tokens".into(), Value::from(n));
     }
     if let Some(t) = req.temperature {

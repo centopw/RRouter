@@ -1,10 +1,17 @@
 //! `/api/connections` — provider credential CRUD and the 1-token probe.
+//!
+//! A connection is owned by a team or shared with the whole instance. Reads are scoped by
+//! the caller ([`super::teams::reader_teams`]): global/admin authority sees every row, a
+//! team account sees only its own team's rows, and a shared row (`team_id IS NULL`) is
+//! visible to global scope alone — a team key must never spend an operator's shared
+//! account, so showing it to a team would be a lie about routing. Mutations are
+//! admin-only at the gate, and `owner_user_id` is attribution, never an access grant.
 
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use rrouter_auth::Credentials;
 use rrouter_core::{ChatRequest, Error, Message, Role};
@@ -27,6 +34,10 @@ pub struct ConnectionView {
     /// Traffic share for the weighted strategy (`1..=1000`, 100 = even).
     pub weight: u32,
     pub is_active: bool,
+    /// Owning team; `null` means shared/instance-wide (visible to global scope only).
+    pub team_id: Option<String>,
+    /// Dashboard attribution: the account that added this connection. Not an access grant.
+    pub owner_user_id: Option<String>,
     pub base_url_override: Option<String>,
     pub has_access_token: bool,
     pub has_refresh_token: bool,
@@ -51,6 +62,8 @@ impl From<&Connection> for ConnectionView {
             priority: c.priority,
             weight: c.weight,
             is_active: c.is_active,
+            team_id: c.team_id.map(|team| team.to_string()),
+            owner_user_id: c.owner_user_id.map(|user| user.to_string()),
             base_url_override: creds.base_url_override.clone(),
             has_access_token: creds.access_token.as_deref().is_some_and(|t| !t.is_empty()),
             has_refresh_token: creds
@@ -68,25 +81,173 @@ impl From<&Connection> for ConnectionView {
     }
 }
 
+/// Which connections a caller may see: `None` is global/admin authority (every row),
+/// `Some(teams)` is that account's own teams. A shared row is global-only by design.
+///
+/// Shared with `/api/models/providers`, which reports the same scope on a provider so the
+/// dashboard and the connection list can never disagree about what a caller can reach.
+pub(crate) fn in_scope(conn: &Connection, scope: &Option<Vec<Uuid>>) -> bool {
+    match scope {
+        None => true,
+        Some(teams) => conn.team_id.is_some_and(|team| teams.contains(&team)),
+    }
+}
+
+/// The non-secret facts an audit reader needs about a connection: which row, which
+/// provider, and who can route to it. Credential material is never part of this string.
+fn describe(conn: &Connection) -> String {
+    let scope = match conn.team_id {
+        Some(team) => format!("team {team}"),
+        None => "shared".to_string(),
+    };
+    format!(
+        "connection {} · provider {} · name {} · scope {scope} · auth {}",
+        conn.id,
+        conn.provider,
+        conn.name.as_deref().unwrap_or("—"),
+        conn.auth_type,
+    )
+}
+
+/// Body fields a PATCH acted on, for the audit row. Only names are listed — a credential
+/// value is never read here — and unknown keys are ignored, so a client cannot smuggle
+/// free text into the trail through a field the route does not honour.
+fn patched_fields(value: &Value) -> String {
+    const FIELDS: &[&str] = &[
+        "credentials",
+        "email",
+        "base_url_override",
+        "priority",
+        "weight",
+        "is_active",
+        "last_error",
+        "team_id",
+    ];
+    let mut seen: Vec<&str> = FIELDS
+        .iter()
+        .copied()
+        .filter(|field| value.get(*field).is_some())
+        .collect();
+    seen.sort_unstable();
+    if seen.is_empty() {
+        "no fields".to_string()
+    } else {
+        seen.join(", ")
+    }
+}
+
+/// One audit row for a connection mutation.
+///
+/// Best effort by construction: [`super::auth::audit`] logs a failed write and returns
+/// `()`, so auditing can never fail or roll back the mutation it describes. It also
+/// enqueues the webhook fan-out, which is why callers do not touch the outbox directly.
+async fn audit_mutation(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    peer: crate::auth::Peer,
+    kind: &str,
+    detail: &str,
+) {
+    let actor = super::auth::actor(state, headers).await;
+    super::auth::audit(
+        state,
+        kind,
+        Some(&actor),
+        &crate::auth::client_ip(headers, peer.0),
+        detail,
+    )
+    .await;
+}
+
+/// `GET /api/connections[?provider=&team_id=]` — the caller's visible accounts.
+///
+/// Global authority (admin token, admin key, an admin session, loopback) sees every row.
+/// A signed-in member sees only the rows owned by a team they belong to; a shared
+/// (`team_id IS NULL`) row is deliberately invisible to them, because it is not a
+/// candidate for their keys either.
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Response {
+    let scope = match super::teams::reader_teams(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(response) => return *response,
+    };
     let provider = query
         .iter()
         .find(|(k, _)| k == "provider")
-        .map(|(_, v)| v.as_str());
+        .map(|(_, v)| v.as_str())
+        .filter(|value| !value.is_empty());
+    // `?team_id=` narrows inside the caller's scope. A team account asking for a team it
+    // does not belong to is refused: silently answering with its own rows would make a
+    // typo look like a permissions bug.
+    let requested = match query.iter().find(|(k, _)| k == "team_id") {
+        None => None,
+        Some((_, raw)) if raw.trim().is_empty() || raw.trim() == "null" => None,
+        Some((_, raw)) => match Uuid::parse_str(raw.trim()) {
+            Ok(team) => Some(team),
+            Err(_) => {
+                return admin_error(&Error::BadRequest("team_id must be a uuid or null".into()))
+            }
+        },
+    };
+    if let (Some(teams), Some(team)) = (&scope, requested) {
+        if !teams.contains(&team) {
+            return admin_error(&Error::Forbidden {
+                code: "team_forbidden",
+                message: "this account is not a member of that team".into(),
+            });
+        }
+    }
     match state.store.list_connections(provider).await {
         Ok(conns) => {
-            let data: Vec<ConnectionView> = conns.iter().map(ConnectionView::from).collect();
+            let data: Vec<ConnectionView> = conns
+                .iter()
+                .filter(|conn| in_scope(conn, &scope))
+                .filter(|conn| requested.is_none_or(|team| conn.team_id == Some(team)))
+                .map(ConnectionView::from)
+                .collect();
             ok_json(json!({ "data": data }))
         }
         Err(e) => admin_error(&e),
     }
 }
 
-/// Body: `{provider, auth_type, name?, email?, priority?, credentials:{…}}`.
-pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response {
+/// `GET /api/connections/{id}` — one visible account, or `404`.
+///
+/// An invisible row answers exactly like a missing one: telling a team that another
+/// team's connection exists is itself a disclosure.
+pub async fn get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let Ok(uuid) = Uuid::parse_str(&id) else {
+        return admin_error(&Error::NotFound(format!("connection {id}")));
+    };
+    let scope = match super::teams::reader_teams(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(response) => return *response,
+    };
+    match state.store.get_connection(uuid).await {
+        Ok(Some(conn)) if in_scope(&conn, &scope) => ok_json(ConnectionView::from(&conn)),
+        Ok(_) => admin_error(&Error::NotFound(format!("connection {uuid}"))),
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// Body: `{provider, auth_type, name?, email?, priority?, team_id?, credentials:{…}}`.
+///
+/// `team_id` is nullable: absent or `null` creates the shared/instance-wide account. A
+/// named team must exist (the store answers `404`), and the row is attributed to the
+/// signed-in account that created it when there is one.
+pub async fn create(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    body: Body,
+) -> Response {
     let value = match body_json(body).await {
         Ok(v) => v,
         Err(resp) => return *resp,
@@ -104,12 +265,47 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
         Ok(c) => c,
         Err(e) => return admin_error(&e),
     };
+    // A provider whose manifest host is a placeholder cannot be saved without a real
+    // resource URL; the message names what to fix and never echoes the credential.
+    if let Err(e) = check_override(
+        Some(spec),
+        creds.base_url_override.as_deref(),
+        value.get("credentials"),
+    ) {
+        return admin_error(&e);
+    }
+    let team_id = match team_field(&value) {
+        Ok(team) => team,
+        Err(e) => return admin_error(&e),
+    };
+    // Attribution only: the actor who added this account. Admin token, admin key and
+    // loopback have no user, so the column stays `NULL` for operator-created rows.
+    let owner_user_id = super::auth::current_user(&state, &headers)
+        .await
+        .map(|user| user.id);
     match state
         .store
-        .create_connection(&provider, &auth_type, creds, name.as_deref())
+        .create_connection_owned(
+            &provider,
+            &auth_type,
+            creds,
+            name.as_deref(),
+            team_id,
+            owner_user_id,
+        )
         .await
     {
         Ok(created) => {
+            // The row is committed: audit it now, so a later failure in this handler (a
+            // rejected routing knob) cannot leave a connection that the trail never saw.
+            audit_mutation(
+                &state,
+                &headers,
+                peer,
+                "connection_created",
+                &describe(&created),
+            )
+            .await;
             // The routing knobs are their own columns, so they are applied after the
             // row exists; a body that names neither leaves the defaults alone.
             let policy = json!({
@@ -144,6 +340,8 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
 /// `PATCH /api/connections/:id` with any subset of the create body.
 pub async fn update(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
@@ -159,6 +357,24 @@ pub async fn update(
             Ok(p) => p,
             Err(e) => return admin_error(&e),
         };
+        // The merge model cannot express "remove this credential", so validate the value
+        // this request would *leave* on the row: the new one when present, the stored one
+        // otherwise. That is also what keeps a legacy row from being saved still-broken.
+        let existing = match state.store.get_connection(uuid).await {
+            Ok(Some(connection)) => connection,
+            Ok(None) => return admin_error(&Error::NotFound(format!("connection {uuid}"))),
+            Err(e) => return admin_error(&e),
+        };
+        let effective = patch
+            .base_url_override
+            .as_deref()
+            .or(existing.credentials.base_url_override.as_deref());
+        // A provider dropped from the registry has no rule to apply; the empty-value check
+        // still runs, so a removed provider's account can be re-keyed but not broken.
+        let spec = rrouter_auth::get(&existing.provider);
+        if let Err(e) = check_override(spec, effective, Some(creds)) {
+            return admin_error(&e);
+        }
         if let Err(e) = state.store.merge_credentials(uuid, patch).await {
             return admin_error(&e);
         }
@@ -166,26 +382,84 @@ pub async fn update(
     if let Err(e) = apply_patch(&state, uuid, value.clone()).await {
         return admin_error(&e);
     }
+    // Ownership is its own column pair: `team_id: null` hands the account back to the
+    // instance, a uuid moves it to that team, and an absent key leaves it alone.
+    // `owner_user_id` is attribution, so it follows the row rather than the patcher.
+    if value.get("team_id").is_some() {
+        let team_id = match team_field(&value) {
+            Ok(team) => team,
+            Err(e) => return admin_error(&e),
+        };
+        let owner = match state.store.get_connection(uuid).await {
+            Ok(Some(conn)) => conn.owner_user_id,
+            Ok(None) => return admin_error(&Error::NotFound(format!("connection {uuid}"))),
+            Err(e) => return admin_error(&e),
+        };
+        if let Err(e) = state.store.set_connection_owner(uuid, team_id, owner).await {
+            return admin_error(&e);
+        }
+    }
     match state.store.get_connection(uuid).await {
-        Ok(Some(c)) => ok_json(ConnectionView::from(&c)),
+        Ok(Some(c)) => {
+            audit_mutation(
+                &state,
+                &headers,
+                peer,
+                "connection_updated",
+                &format!("{} · fields {}", describe(&c), patched_fields(&value)),
+            )
+            .await;
+            ok_json(ConnectionView::from(&c))
+        }
         Ok(None) => admin_error(&Error::NotFound(format!("connection {uuid}"))),
         Err(e) => admin_error(&e),
     }
 }
 
-pub async fn remove(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+pub async fn remove(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    Path(id): Path<String>,
+) -> Response {
     let Ok(uuid) = Uuid::parse_str(&id) else {
         return admin_error(&Error::BadRequest("connection id must be a uuid".into()));
     };
+    // Read the row before it goes: the audit trail should outlive what it describes.
+    let existing = match state.store.get_connection(uuid).await {
+        Ok(Some(conn)) => conn,
+        Ok(None) => return admin_error(&Error::NotFound(format!("connection {uuid}"))),
+        Err(e) => return admin_error(&e),
+    };
     match state.store.delete_connection(uuid).await {
-        Ok(true) => ok_json(json!({ "deleted": true, "id": uuid.to_string() })),
+        Ok(true) => {
+            audit_mutation(
+                &state,
+                &headers,
+                peer,
+                "connection_deleted",
+                &describe(&existing),
+            )
+            .await;
+            ok_json(json!({ "deleted": true, "id": uuid.to_string() }))
+        }
         Ok(false) => admin_error(&Error::NotFound(format!("connection {uuid}"))),
         Err(e) => admin_error(&e),
     }
 }
 
 /// `POST /api/connections/:id/test`: refresh credentials, then ask for one token.
-pub async fn test(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+///
+/// The probe spends the account's own credential, so it follows the same visibility rule
+/// as `GET`: a row outside the caller's scope answers `404`, never a probe. The route is
+/// admin-gated today, which makes that check redundant for the current gates and
+/// load-bearing the moment a team gate widens it.
+pub async fn test(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    Path(id): Path<String>,
+) -> Response {
     let Ok(uuid) = Uuid::parse_str(&id) else {
         return admin_error(&Error::BadRequest("connection id must be a uuid".into()));
     };
@@ -195,6 +469,13 @@ pub async fn test(State(state): State<Arc<AppState>>, Path(id): Path<String>) ->
     }) else {
         return admin_error(&Error::NotFound(format!("connection {uuid}")));
     };
+    let scope = match super::teams::reader_teams(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(response) => return *response,
+    };
+    if !in_scope(&conn, &scope) {
+        return admin_error(&Error::NotFound(format!("connection {uuid}")));
+    }
     let Some(spec) = rrouter_auth::get(&conn.provider) else {
         return admin_error(&Error::BadRequest(format!(
             "unknown provider {}",
@@ -202,8 +483,23 @@ pub async fn test(State(state): State<Arc<AppState>>, Path(id): Path<String>) ->
         )));
     };
     let started = std::time::Instant::now();
+    let described = describe(&conn);
     let result = probe(&state, spec, conn).await;
     let latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+    // One row per probe, whether it answered or failed. The outcome is the status the
+    // provider gave, never the error body (which can echo the credential).
+    let outcome = match &result {
+        Ok(status) => format!("probe ok {status}"),
+        Err(e) => format!("probe failed {}", e.status()),
+    };
+    audit_mutation(
+        &state,
+        &headers,
+        peer,
+        "connection_tested",
+        &format!("{described} · {outcome} · {latency_ms}ms"),
+    )
+    .await;
     match result {
         Ok(status) => ok_json(json!({ "ok": true, "status": status, "latency_ms": latency_ms })),
         Err(e) => ok_json(json!({
@@ -480,6 +776,33 @@ pub fn credentials_from(value: &Value) -> Result<Credentials, Error> {
 
 /// Credential fields present in `credentials`: only these are merged, so a PATCH never
 /// wipes tokens it did not mention.
+/// Validate the base URL a connection would save with.
+///
+/// Two rules, both `400`: the provider's own rule ([`rrouter_auth::validate_base_url_override`]
+/// refuses a placeholder host, including one an operator pasted from the manifest), and the
+/// gateway's refusal of an explicitly empty value — an empty base URL would send every
+/// request to the origin root, and the credential-merge model has no way to express "remove
+/// this field", so the honest answer is a message rather than a silently unusable row.
+fn check_override(
+    spec: Option<&rrouter_auth::ProviderSpec>,
+    effective: Option<&str>,
+    credentials: Option<&Value>,
+) -> Result<(), Error> {
+    if let Some(raw) = credentials.and_then(|creds| creds.get("base_url_override")) {
+        if raw.as_str().is_some_and(|value| value.trim().is_empty()) {
+            return Err(Error::BadRequest(
+                "base_url_override cannot be empty: an empty base URL would send traffic to \
+                 the origin root. Send a full URL, or omit the field to keep the saved one."
+                    .into(),
+            ));
+        }
+    }
+    match spec {
+        Some(spec) => rrouter_auth::validate_base_url_override(spec, effective),
+        None => Ok(()),
+    }
+}
+
 fn credentials_patch(value: &Value) -> Result<Credentials, Error> {
     let Value::Object(map) = value else {
         return Err(Error::BadRequest("credentials must be an object".into()));
@@ -504,6 +827,18 @@ fn credentials_patch(value: &Value) -> Result<Credentials, Error> {
     }
     c.extra = extra;
     Ok(c)
+}
+
+/// `team_id` from a body: a uuid, or absent/`null`/empty for the shared account.
+fn team_field(value: &Value) -> Result<Option<Uuid>, Error> {
+    match value.get("team_id") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) if raw.trim().is_empty() => Ok(None),
+        Some(Value::String(raw)) => Uuid::parse_str(raw.trim())
+            .map(Some)
+            .map_err(|_| Error::BadRequest("team_id must be a uuid or null".into())),
+        Some(_) => Err(Error::BadRequest("team_id must be a uuid or null".into())),
+    }
 }
 
 fn string_or_none(v: &Value) -> Option<String> {
@@ -567,6 +902,8 @@ mod tests {
             last_error: None,
             last_error_code: None,
             last_error_at: None,
+            team_id: None,
+            owner_user_id: None,
             created_at: 0,
             updated_at: 0,
         };

@@ -12,17 +12,22 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod events;
 pub mod headers;
 pub mod metrics;
 pub mod models_registry;
 pub mod provider_usage;
 pub mod proxy;
+pub mod redaction;
 pub mod routes;
+pub mod semantic;
 pub mod settings;
 pub mod state;
 pub mod syslog;
+pub mod telemetry;
 pub mod ui;
 pub mod updates;
+pub mod webhooks;
 
 use std::sync::Arc;
 
@@ -71,11 +76,61 @@ pub fn auth_header(headers: &HeaderMap) -> Option<String> {
 pub fn app(state: Arc<AppState>) -> Router {
     spawn_model_sync(&state);
     updates::spawn_daily(&state);
-    let api = Router::new()
+    // Eval runs are in-process work; anything still active at boot is orphaned.
+    routes::evals::sweep_orphan_runs(&state);
+    // Read-only dashboard surface: usage, the model catalog and prompt templates. A
+    // signed-in account of any role may read these; every mutation lives on the admin
+    // router below, even where the paths are shared. Each router carries its own gate,
+    // so the privilege split is one list to audit instead of a rule per handler.
+    let api_read = Router::new()
+        .route("/usage", get(routes::usage::list))
+        .route("/usage/export.csv", get(routes::usage::export_csv))
+        .route("/usage/summary", get(routes::usage::summary))
+        .route("/usage/series", get(routes::usage::series))
+        .route("/usage/{request_id}", get(routes::usage::detail))
+        .route("/models", get(routes::models::registry_list))
+        .route("/models/providers", get(routes::models::providers))
+        .route("/templates", get(routes::templates::list))
+        .route("/templates/{id}", get(routes::templates::get))
+        .route("/templates/{id}/versions", get(routes::templates::versions))
+        // Evals: suites, their cases and run history are readable by any signed-in
+        // account; running a suite and editing it are admin actions below.
+        .route("/evals/suites", get(routes::evals::list_suites))
+        .route("/evals/suites/{id}", get(routes::evals::get_suite))
+        .route("/evals/runs", get(routes::evals::list_runs))
+        .route("/evals/runs/{id}", get(routes::evals::get_run))
+        // Provider accounts: an admin sees every row, a team account only its team's
+        // rows, and a shared row is global-scope only. Every mutation stays admin-only.
+        .route("/connections", get(routes::connections::list))
+        .route("/connections/{id}", get(routes::connections::get))
+        // Teams are read-only here: a member sees their own team, an account with no team
+        // sees none. Every mutation lives on the admin router below.
+        .route("/teams", get(routes::teams::list))
+        .route("/teams/{id}", get(routes::teams::get))
+        .route("/teams/{id}/members", get(routes::teams::members))
+        // Only that team's admin (or a gateway admin) may read these rows; the handler
+        // decides, because the rule is a team role rather than "signed in".
+        .route("/teams/{id}/keys", get(routes::teams::keys))
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_reader,
+        ));
+
+    // Membership mutations: a gateway admin, or the `team_admin` of the team in the path.
+    // Its own router so the widened rule is one line to audit next to `require_admin`.
+    let api_team_admin = Router::new()
+        .route("/teams/{id}/members", post(routes::teams::add_member))
         .route(
-            "/connections",
-            get(routes::connections::list).post(routes::connections::create),
+            "/teams/{id}/members/{user_id}",
+            axum::routing::delete(routes::teams::remove_member),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_team_admin,
+        ));
+
+    let api = Router::new()
+        .route("/connections", post(routes::connections::create))
         .route(
             "/connections/{id}",
             patch(routes::connections::update).delete(routes::connections::remove),
@@ -99,8 +154,6 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/disabled/{model}", put(routes::models::disable))
         .route("/disabled/{model}/enable", put(routes::models::enable))
-        .route("/models", get(routes::models::registry_list))
-        .route("/models/providers", get(routes::models::providers))
         .route("/models/sync", post(routes::models::sync))
         .route("/models/fetch", post(routes::models::fetch))
         .route(
@@ -114,17 +167,28 @@ pub fn app(state: Arc<AppState>) -> Router {
                 .post(routes::combos::create)
                 .delete(routes::combos::remove),
         )
-        .route(
-            "/templates",
-            get(routes::templates::list).post(routes::templates::create),
-        )
+        // The reads live on `api_read`; the same paths keep their writes here.
+        .route("/templates", post(routes::templates::create))
         .route(
             "/templates/{id}",
-            get(routes::templates::get)
-                .put(routes::templates::update)
-                .delete(routes::templates::remove),
+            put(routes::templates::update).delete(routes::templates::remove),
         )
-        .route("/templates/{id}/versions", get(routes::templates::versions))
+        .route("/evals/suites", post(routes::evals::create_suite))
+        .route(
+            "/evals/suites/{id}",
+            patch(routes::evals::update_suite).delete(routes::evals::delete_suite),
+        )
+        .route("/evals/suites/{id}/cases", post(routes::evals::create_case))
+        .route(
+            "/evals/suites/{id}/cases/{case_id}",
+            axum::routing::delete(routes::evals::delete_case),
+        )
+        .route("/evals/runs", post(routes::evals::start_run))
+        .route("/teams", post(routes::teams::create))
+        .route(
+            "/teams/{id}",
+            patch(routes::teams::update).delete(routes::teams::remove),
+        )
         .route("/accounts/quotas", get(routes::quotas::list))
         .route("/accounts/usage", get(routes::quotas::usage))
         .route(
@@ -132,6 +196,17 @@ pub fn app(state: Arc<AppState>) -> Router {
             put(routes::quotas::update).delete(routes::quotas::remove),
         )
         .route("/audit", get(routes::audit::list))
+        // Webhook receivers and their delivery queue. Admin-only: a receiver URL is an
+        // egress capability, and the queue names administrative actions.
+        .route(
+            "/webhooks",
+            get(routes::webhooks::list).post(routes::webhooks::create),
+        )
+        .route("/webhooks/status", get(routes::webhooks::status))
+        .route(
+            "/webhooks/{id}",
+            patch(routes::webhooks::update).delete(routes::webhooks::remove),
+        )
         .route("/users", get(routes::users::list))
         .route(
             "/users/{id}",
@@ -145,11 +220,6 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/users/invites/{id}",
             axum::routing::delete(routes::auth::revoke_invite),
         )
-        .route("/usage", get(routes::usage::list))
-        .route("/usage/export.csv", get(routes::usage::export_csv))
-        .route("/usage/{request_id}", get(routes::usage::detail))
-        .route("/usage/summary", get(routes::usage::summary))
-        .route("/usage/series", get(routes::usage::series))
         .route("/system", get(routes::system::system))
         .route(
             "/system/logs",
@@ -177,14 +247,16 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/ui/panels", get(ui::panels))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
-            admin_gate,
-        ));
+            require_admin,
+        ))
+        .merge(api_read)
+        .merge(api_team_admin);
 
     // Prometheus scrapes `/metrics`, not `/api/metrics`, so it needs its own gate: the
     // same loopback-only rule as the admin API, and no API key — a scraper is not a
     // model client and must not need a virtual key to read counters.
     // Signed-out surfaces: creating the first user, signing in, accepting an invitation
-    // and recovering a password. They sit outside `admin_gate` by design.
+    // and recovering a password. They sit outside `require_admin` by design.
     let auth_api = Router::new()
         .route("/api/auth/state", get(routes::auth::state))
         .route("/api/auth/setup", post(routes::auth::setup))
@@ -211,7 +283,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/metrics", get(metrics::scrape))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
-            admin_gate,
+            require_admin,
         ));
 
     Router::new()
@@ -226,6 +298,21 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/v1/responses/compact", post(proxy::compact))
         .route("/v1/messages/count_tokens", post(proxy::count_tokens))
         .route("/v1/embeddings", post(proxy::embeddings))
+        .route("/v1/rerank", post(routes::rerank::rerank))
+        // Provider-native storage and jobs: forwarded verbatim, `501` where the provider
+        // declares no endpoint (see `routes::native` for the shared plumbing).
+        .route(
+            "/v1/files",
+            post(routes::files::upload).get(routes::files::list),
+        )
+        .route("/v1/files/{id}", get(routes::files::get))
+        .route("/v1/files/{id}/content", get(routes::files::content))
+        .route(
+            "/v1/batches",
+            post(routes::batches::create).get(routes::batches::list),
+        )
+        .route("/v1/batches/{id}", get(routes::batches::get))
+        .route("/v1/batches/{id}/cancel", post(routes::batches::cancel))
         .route("/v1/images/generations", post(proxy::images))
         .route("/v1/audio/speech", post(proxy::speech))
         .route("/v1/audio/transcriptions", post(proxy::transcriptions))
@@ -282,7 +369,7 @@ async fn cors(
     let Some(origin) = origin else {
         return response;
     };
-    let Some(allow) = state.config.cors_origin_for(&origin) else {
+    let Some(allow) = state.config.load().cors_origin_for(&origin) else {
         return response;
     };
     let headers = response.headers_mut();
@@ -304,13 +391,12 @@ async fn cors(
     response
 }
 
-/// Admin API gate. `/api/*` and `/metrics` are admitted when any of these holds:
+/// Admin API gate. `/api/*` (except the read-only surface) and `/metrics` admit:
 ///
-/// 1. a configured `RROUTER_ADMIN_TOKEN` is presented,
-/// 2. a live key with `scope=admin` is presented (`Authorization: Bearer …` or
-///    `x-admin-token`),
-/// 3. no token is configured and the peer is loopback (or `RROUTER_ALLOW_REMOTE_ADMIN`
-///    is on).
+/// 1. a configured `RROUTER_ADMIN_TOKEN` presented in the request,
+/// 2. a live key with `scope=admin` (`Authorization: Bearer …` or `x-admin-token`),
+/// 3. a dashboard session whose account has the `admin` role,
+/// 4. no token configured and the peer is loopback (or `RROUTER_ALLOW_REMOTE_ADMIN`).
 ///
 /// A configured token still *replaces* the loopback rule instead of adding to it: behind
 /// a reverse proxy every peer is the proxy, so the socket address proves nothing about
@@ -321,76 +407,210 @@ async fn cors(
 /// than `401`, because the caller holds a real key and only lacks the authority. A
 /// request without a peer address (in-process `oneshot` calls) counts as loopback, which
 /// is what makes the integration tests exercise the same path.
-async fn admin_gate(
+async fn require_admin(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: Request,
     next: Next,
 ) -> Response {
-    let dialect = state::dialect_of(req.uri());
-    let safe_method = matches!(
-        req.method(),
-        &axum::http::Method::GET | &axum::http::Method::HEAD | &axum::http::Method::OPTIONS
-    );
-    let presented = admin_credential(req.headers());
-    if let Some(expected) = state.config.admin_token.as_deref() {
-        if presented
-            .as_deref()
-            .is_some_and(|presented| constant_time_eq(presented, expected))
-        {
-            return next.run(req).await;
-        }
+    let facts = probe(&req);
+    match access(&state, &facts).await {
+        Ok(Access::Admin) => next.run(req).await,
+        // Same refusal a non-admin always got, so the dashboard can explain the role.
+        Ok(Access::Reader) => admin_forbidden(
+            facts.dialect,
+            "role_required",
+            "this account cannot administer the gateway",
+        ),
+        Err(response) => *response,
     }
-    // A dashboard session identifies a person, so it works even when
-    // `RROUTER_ADMIN_TOKEN` is configured (that token is for automation). A signed-in
-    // non-admin is refused here rather than at each route; a cookie-authenticated write
-    // must carry the CSRF header.
-    if let Some(token) = auth::session_token(req.headers()) {
-        if let Some(claims) = state.auth.verify_session(&token) {
-            match state.store.session_user(&claims.sid, now_unix()).await {
-                Ok(Some(user)) if !user.is_admin() => {
-                    return admin_forbidden(
-                        dialect,
-                        "role_required",
-                        "this account cannot administer the gateway",
-                    )
-                }
-                Ok(Some(_)) if !safe_method && !auth::csrf_ok(req.headers()) => {
-                    return admin_forbidden(
-                        dialect,
-                        "csrf_required",
-                        "the x-rrouter-csrf header is required for this request",
-                    )
-                }
-                Ok(Some(_)) => return next.run(req).await,
-                Ok(None) => {}
-                Err(e) => return error::error_response(dialect, &e),
+}
+
+/// Read-only gate: every credential `require_admin` admits, plus any signed-in account
+/// regardless of role.
+///
+/// The routes behind it are GET-only, and the safe-method check keeps that true: a
+/// reader credential must never authorise a mutation even if someone later registers one
+/// on this router by mistake.
+async fn require_reader(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let facts = probe(&req);
+    match access(&state, &facts).await {
+        Ok(_) if facts.safe_method => next.run(req).await,
+        Ok(_) => admin_forbidden(
+            facts.dialect,
+            "role_required",
+            "this account cannot administer the gateway",
+        ),
+        Err(response) => *response,
+    }
+}
+
+/// Membership mutation gate: a gateway admin, or the `team_admin` of the team named in the
+/// path.
+///
+/// The role is resolved here rather than in each handler so the routes behind this gate
+/// cannot disagree, and the CSRF header is enforced here too — [`access`] only checks it
+/// for admin sessions, which is exactly the case this gate widens.
+async fn require_team_admin(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let facts = probe(&req);
+    match access(&state, &facts).await {
+        Ok(Access::Admin) => next.run(req).await,
+        Ok(Access::Reader) => {
+            if !facts.csrf {
+                return admin_forbidden(
+                    facts.dialect,
+                    "csrf_required",
+                    "the x-rrouter-csrf header is required for this request",
+                );
+            }
+            let Some(team) = team_id_from_path(req.uri().path()) else {
+                return admin_forbidden(
+                    facts.dialect,
+                    "role_required",
+                    "this account cannot manage that team",
+                );
+            };
+            let Some(user) = routes::auth::current_user(&state, req.headers()).await else {
+                return admin_forbidden(
+                    facts.dialect,
+                    "role_required",
+                    "this account cannot manage that team",
+                );
+            };
+            match state.store.team_member_role(team, user.id).await {
+                Ok(Some(rrouter_store::TeamRole::TeamAdmin)) => next.run(req).await,
+                Ok(_) => admin_forbidden(
+                    facts.dialect,
+                    "role_required",
+                    "this account cannot manage that team",
+                ),
+                Err(e) => error::error_response(facts.dialect, &e),
             }
         }
+        Err(response) => *response,
     }
-    if state.config.admin_token.is_none() {
-        let peer_is_loopback = req
+}
+
+/// The `{team}` segment of `/api/teams/{team}/members…`, for the gate above.
+///
+/// The router has already matched the path; this only needs the id. A malformed one is
+/// refused as "not allowed" rather than passed to a handler that would answer `404`, so a
+/// reader cannot use the difference to probe which teams exist.
+fn team_id_from_path(path: &str) -> Option<uuid::Uuid> {
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    while let Some(segment) = segments.next() {
+        if segment == "teams" {
+            return segments
+                .next()
+                .and_then(|raw| uuid::Uuid::parse_str(raw).ok());
+        }
+    }
+    None
+}
+
+/// What the credentials on a request prove.
+enum Access {
+    /// Full administration.
+    Admin,
+    /// A signed-in dashboard account whose role is not `admin`.
+    Reader,
+}
+
+/// The facts one request contributes to an access decision.
+///
+/// Read before the first `.await`, because `axum::body::Body` is not `Sync`: holding a
+/// `&Request` across an await point would make the middleware future non-`Send` and the
+/// whole router stop compiling.
+struct Probe {
+    dialect: rrouter_core::Dialect,
+    safe_method: bool,
+    presented: Option<String>,
+    session: Option<String>,
+    csrf: bool,
+    /// In-process `oneshot` calls carry no peer address and count as loopback.
+    loopback: bool,
+}
+
+fn probe(req: &Request) -> Probe {
+    Probe {
+        dialect: state::dialect_of(req.uri()),
+        safe_method: matches!(
+            req.method(),
+            &axum::http::Method::GET | &axum::http::Method::HEAD | &axum::http::Method::OPTIONS
+        ),
+        presented: admin_credential(req.headers()),
+        session: auth::session_token(req.headers()),
+        csrf: auth::csrf_ok(req.headers()),
+        loopback: req
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0.ip().is_loopback())
-            .unwrap_or(true);
-        if peer_is_loopback || state.config.allow_remote_admin {
-            return next.run(req).await;
+            .unwrap_or(true),
+    }
+}
+
+/// Resolve the credential on a request once, so the two gates cannot drift apart.
+///
+/// Order is the pre-existing contract and is load-bearing: configured token, then
+/// dashboard session (a session works even when a token is configured), then the
+/// loopback rule, then an admin-scoped key. A signed-in non-admin stops at
+/// [`Access::Reader`] instead of falling through, so the role is authoritative even on
+/// the operator's own machine; the CSRF check stays on the write path for admins.
+async fn access(state: &Arc<AppState>, facts: &Probe) -> Result<Access, Box<Response>> {
+    let dialect = facts.dialect;
+    // One snapshot for the whole decision: a token rotation mid-request must not compare
+    // against one value and then fall through using another.
+    let config = state.config.load();
+    if let Some(expected) = config.admin_token.as_deref() {
+        if facts
+            .presented
+            .as_deref()
+            .is_some_and(|presented| constant_time_eq(presented, expected))
+        {
+            return Ok(Access::Admin);
         }
+    }
+    if let Some(token) = facts.session.as_deref() {
+        if let Some(claims) = state.auth.verify_session(token) {
+            match state.store.session_user(&claims.sid, now_unix()).await {
+                Ok(Some(user)) if !user.is_admin() => return Ok(Access::Reader),
+                Ok(Some(_)) if !facts.safe_method && !facts.csrf => {
+                    return Err(Box::new(admin_forbidden(
+                        dialect,
+                        "csrf_required",
+                        "the x-rrouter-csrf header is required for this request",
+                    )))
+                }
+                Ok(Some(_)) => return Ok(Access::Admin),
+                Ok(None) => {}
+                Err(e) => return Err(Box::new(error::error_response(dialect, &e))),
+            }
+        }
+    }
+    if config.admin_token.is_none() && (facts.loopback || config.allow_remote_admin) {
+        return Ok(Access::Admin);
     }
     // Only a credential that could be a gateway key is worth a database lookup: an
     // arbitrary token can never match one.
-    let key = match presented.as_deref() {
+    let key = match facts.presented.as_deref() {
         Some(token) if token.starts_with(rrouter_store::API_KEY_PREFIX) => {
             state.live_api_key(token).await
         }
         _ => Ok(None),
     };
     match key {
-        Ok(Some(key)) if key.scope == rrouter_store::KeyScope::Admin => next.run(req).await,
-        Ok(Some(_)) => admin_required(dialect),
-        Ok(None) if state.config.admin_token.is_some() => admin_unauthorized(dialect),
-        Ok(None) => admin_loopback_only(dialect),
-        Err(e) => error::error_response(dialect, &e),
+        Ok(Some(key)) if key.scope == rrouter_store::KeyScope::Admin => Ok(Access::Admin),
+        Ok(Some(_)) => Err(Box::new(admin_required(dialect))),
+        Ok(None) if config.admin_token.is_some() => Err(Box::new(admin_unauthorized(dialect))),
+        Ok(None) => Err(Box::new(admin_loopback_only(dialect))),
+        Err(e) => Err(Box::new(error::error_response(dialect, &e))),
     }
 }
 

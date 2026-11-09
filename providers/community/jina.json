@@ -1,0 +1,15 @@
+{
+  "id": "jina",
+  "display": "Jina AI",
+  "website": "https://jina.ai",
+  "docs": "https://jina.ai/reranker",
+  "key_url": "https://jina.ai/api-dashboard/key-manager",
+  "base_url": "https://api.jina.ai/v1/rerank",
+  "auth": "bearer",
+  "default_dialect": "chat",
+  "max_tokens_key": "max_tokens",
+  "rerank_url": "https://api.jina.ai/v1/rerank",
+  "endpoints": ["POST /v1/rerank"],
+  "capabilities": ["rerank"],
+  "notes": "Rerank only: Jina publishes no chat completions API, so chat must never be routed here and the entry exists for /v1/rerank. base_url repeats the rerank endpoint because every provider entry carries one; it is not a chat surface, and a chat request aimed at it is rejected by Jina. Model ids are a closed enum (jina-reranker-v2-base-multilingual, jina-reranker-v1-turbo-en, ...), so register the ones you use with POST /api/models/custom."
+}

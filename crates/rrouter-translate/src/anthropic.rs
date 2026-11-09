@@ -11,6 +11,7 @@ use rrouter_core::{
 use crate::{
     capture_extra, finish_from_anthropic, merge_extra, opt_f64, opt_u32, parse_err, parse_stop,
     req_str, req_str_field, to_json, tool_schema, usage_from_anthropic, usage_to_anthropic,
+    WireProfile,
 };
 
 const D: Dialect = Dialect::AnthropicMessages;
@@ -220,7 +221,7 @@ fn parse_tool_choice(body: &Value) -> Option<ToolChoice> {
 // Request out
 // ---------------------------------------------------------------------------
 
-pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
+pub fn build_request(req: &ChatRequest, stream: bool, wire: &WireProfile) -> Result<Value> {
     let mut messages: Vec<Value> = Vec::with_capacity(req.messages.len());
     for msg in &req.messages {
         let role = match msg.role {
@@ -233,9 +234,12 @@ pub fn build_request(req: &ChatRequest, stream: bool) -> Result<Value> {
     let mut body = Map::new();
     body.insert("model".into(), Value::from(req.model.clone()));
     body.insert("messages".into(), Value::from(messages));
+    // `max_tokens` is mandatory here. An omitted client value used to become a hardcoded
+    // 4096, silently truncating every translated request that named no cap; the provider's
+    // configured default (32k for Claude) now applies first.
     body.insert(
         "max_tokens".into(),
-        Value::from(req.max_tokens.unwrap_or(4096)),
+        Value::from(wire.max_tokens(req.max_tokens)),
     );
     body.insert("stream".into(), Value::Bool(stream));
     if let Some(system) = &req.system {
@@ -823,7 +827,7 @@ mod tests {
         assert_eq!(req.tools.len(), 1, "the server tool is not a function tool");
         assert_eq!(req.tools[0].name, "lookup");
 
-        let same = super::build_request(&req, false).unwrap();
+        let same = super::build_request(&req, false, &WireProfile::default()).unwrap();
         let tools = same["tools"].as_array().expect("tools");
         assert_eq!(tools.len(), 2);
         assert_eq!(

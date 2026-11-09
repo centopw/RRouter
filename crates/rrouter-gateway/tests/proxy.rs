@@ -35,6 +35,8 @@ struct MockInner {
     seen: Mutex<Vec<(String, Value)>>,
     /// Every request as it arrived on the wire: path, `content-type`, raw bytes.
     wire: Mutex<Vec<(String, String, Vec<u8>)>>,
+    /// Every request's headers, in arrival order, so passthrough can be inspected.
+    headers: Mutex<Vec<Vec<(String, String)>>>,
     plan: Mutex<Vec<MockReply>>,
     url: String,
 }
@@ -75,6 +77,7 @@ impl Mock {
                 hits: AtomicUsize::new(0),
                 seen: Mutex::new(Vec::new()),
                 wire: Mutex::new(Vec::new()),
+                headers: Mutex::new(Vec::new()),
                 plan: Mutex::new(plan),
                 url: format!("http://{addr}"),
             }),
@@ -132,6 +135,16 @@ impl Mock {
     fn wire(&self) -> Vec<(String, String, Vec<u8>)> {
         self.inner.wire.lock().expect("wire").clone()
     }
+
+    /// One request's headers as the upstream saw them, or `None` past the last call.
+    fn headers(&self, index: usize) -> Option<Vec<(String, String)>> {
+        self.inner
+            .headers
+            .lock()
+            .expect("headers")
+            .get(index)
+            .cloned()
+    }
 }
 
 async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
@@ -143,8 +156,23 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
+    let seen_headers: Vec<(String, String)> = req
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_ascii_lowercase(),
+                value.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
     let bytes = req.into_body().collect().await.expect("body").to_bytes();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    mock.inner
+        .headers
+        .lock()
+        .expect("headers")
+        .push(seen_headers);
     mock.inner
         .seen
         .lock()
@@ -254,6 +282,13 @@ fn config(require_api_key: bool) -> Config {
         usage_retention_days: 0,
         log_format: rrouter_gateway::config::LogFormat::Text,
         access_log: true,
+        hedge_ms: 0,
+        canary: None,
+        semantic_cache: rrouter_gateway::config::CacheMode::Off,
+        semantic_cache_threshold: 0.92,
+        semantic_embedding_model: None,
+        semantic_cache_ttl_secs: 3600,
+        semantic_cache_max_entries: 1000,
     }
 }
 
@@ -291,17 +326,19 @@ fn build_state(config: Config) -> AppState {
         )),
         planner: Planner::new(),
         dispatcher: Arc::new(
-            Dispatcher::new(Breaker::new()).with_max_attempts(config.max_attempts),
+            Dispatcher::new(Breaker::new())
+                .with_max_attempts(config.max_attempts)
+                .with_hedge((config.hedge_ms > 0).then(|| Duration::from_millis(config.hedge_ms))),
         ),
         http: reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .expect("client"),
-        config,
+        config: rrouter_gateway::config::ConfigSnapshot::from(config),
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
-        concurrency,
+        concurrency: std::sync::RwLock::new(concurrency),
         auth: rrouter_gateway::auth::Auth::load(&data_dir, false),
     }
 }
@@ -320,6 +357,37 @@ impl Harness {
         self.state
             .store
             .create_connection(provider, "api_key", creds, Some("mock"))
+            .await
+            .expect("connection")
+            .id
+    }
+
+    /// A connection owned by `team`. A team-scoped key is routed only to its own team's
+    /// accounts (shared instance rows are never eligible), so a routing test for a team
+    /// key has to create its account this way.
+    async fn connect_for_team(
+        &self,
+        provider: &str,
+        mock: &Mock,
+        team_id: uuid::Uuid,
+    ) -> uuid::Uuid {
+        let creds = Credentials {
+            api_key: Some("test-key".into()),
+            access_token: Some("SECRET-ACCESS-TOKEN".into()),
+            refresh_token: Some("SECRET-REFRESH-TOKEN".into()),
+            base_url_override: Some(mock.url()),
+            ..Credentials::default()
+        };
+        self.state
+            .store
+            .create_connection_owned(
+                provider,
+                "api_key",
+                creds,
+                Some("mock"),
+                Some(team_id),
+                None,
+            )
             .await
             .expect("connection")
             .id
@@ -1311,7 +1379,7 @@ async fn ext_static_rejects_traversal() {
     std::fs::write(root.join("js/panel.js"), "export const ok = 1;\n").expect("write");
     state_config.static_dir = Some(root.clone());
     let state = Arc::new(AppState {
-        config: state_config,
+        config: rrouter_gateway::config::ConfigSnapshot::from(state_config),
         ..build_state(config(false))
     });
     // The traversal target must exist relative to the root for the test to be meaningful.
@@ -1771,6 +1839,7 @@ async fn budget_exhausted_blocks_the_next_request() {
             id: None,
             ts: rrouter_gateway::now_unix(),
             request_id: Some(uuid::Uuid::new_v4()),
+            trace_id: None,
             provider: "claude".to_string(),
             model: "haiku".to_string(),
             connection_id: None,
@@ -1945,6 +2014,7 @@ async fn key_rows_match_the_governance_contract() {
         "allowed_models": ["claude/claude-haiku-4-5-20251001"],
         "expires_at": null,
         "guardrails": null,
+        "team_id": null,
         "models": [],
     });
     assert_eq!(patched, expected);
@@ -3411,6 +3481,7 @@ async fn passthrough_refuses_an_exhausted_key_before_the_upstream_call() {
             id: None,
             ts: rrouter_gateway::now_unix(),
             request_id: Some(uuid::Uuid::new_v4()),
+            trace_id: None,
             provider: "openai".to_string(),
             model: "gpt-4.1".to_string(),
             connection_id: None,
@@ -3849,6 +3920,7 @@ async fn seed_usage(
             id: None,
             ts,
             request_id: Some(uuid::Uuid::new_v4()),
+            trace_id: None,
             provider: provider.to_string(),
             model: model.to_string(),
             connection_id: None,
@@ -3974,6 +4046,7 @@ async fn usage_api_pages_backwards_without_overlap() {
                 id: None,
                 ts,
                 request_id: Some(uuid::Uuid::new_v4()),
+                trace_id: None,
                 provider: "openai".to_string(),
                 model: model.to_string(),
                 connection_id: None,
@@ -4065,6 +4138,7 @@ async fn usage_api_filters_compose_with_the_cursor() {
                 id: None,
                 ts,
                 request_id: Some(uuid::Uuid::new_v4()),
+                trace_id: None,
                 provider: "openai".to_string(),
                 model: model.to_string(),
                 connection_id: None,
@@ -4179,6 +4253,7 @@ fn export_row(ts: i64) -> UsageRecord {
         id: None,
         ts,
         request_id: Some(uuid::Uuid::new_v4()),
+        trace_id: None,
         provider: "openai".to_string(),
         model: "gpt-4.1".to_string(),
         connection_id: None,
@@ -4635,6 +4710,7 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
             id: None,
             ts: month_start - 1,
             request_id: Some(uuid::Uuid::new_v4()),
+            trace_id: None,
             provider: "openai".to_string(),
             model: "gpt-4.1".to_string(),
             connection_id: None,
@@ -4674,6 +4750,7 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
             id: None,
             ts: now,
             request_id: Some(uuid::Uuid::new_v4()),
+            trace_id: None,
             provider: "openai".to_string(),
             model: "gpt-4.1".to_string(),
             connection_id: None,
@@ -5682,6 +5759,7 @@ fn quota_usage(connection: uuid::Uuid) -> UsageRecord {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0),
         request_id: Some(uuid::Uuid::new_v4()),
+        trace_id: None,
         provider: "claude".to_string(),
         model: "haiku".to_string(),
         connection_id: Some(connection),
@@ -5938,4 +6016,1977 @@ async fn json_reply_to_a_stream_request_is_converted_to_sse() {
     .expect("utf8");
     assert!(text.contains("converted text"), "{text}");
     assert!(text.contains("[DONE]"), "{text}");
+}
+
+// ------------------------------------------------------ wire fidelity (provider profile)
+
+/// Value of `name` across every occurrence, comma-joined; empty when absent.
+fn header_value(headers: &[(String, String)], name: &str) -> String {
+    headers
+        .iter()
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn anthropic_reply() -> MockReply {
+    MockReply::Json(
+        200,
+        json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 1}
+        }),
+    )
+}
+
+/// Mistral's API answers `422` to `max_completion_tokens`; a translated request must
+/// speak its spelling, not OpenAI's.
+#[tokio::test]
+async fn mistral_translated_chat_uses_max_tokens_not_max_completion_tokens() {
+    let mock = Mock::start(vec![openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("mistral", &mock).await;
+
+    let (status, body) = h
+        .post(
+            "/v1/messages",
+            json!({
+                "model": "mistral/mistral-large-latest",
+                "max_tokens": 123,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let sent = mock.seen()[0].clone();
+    assert_eq!(sent["max_tokens"], 123, "Mistral wants max_tokens: {sent}");
+    assert!(
+        sent.get("max_completion_tokens").is_none(),
+        "Mistral rejects max_completion_tokens: {sent}"
+    );
+}
+
+/// OpenAI's own surface spells the cap `max_completion_tokens` on current gpt-5 models.
+#[tokio::test]
+async fn openai_chat_target_uses_max_completion_tokens() {
+    let mock = Mock::start(vec![openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (status, body) = h
+        .post(
+            "/v1/messages",
+            json!({
+                "model": "openai/gpt-5",
+                "max_tokens": 77,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let sent = mock.seen()[0].clone();
+    assert_eq!(sent["max_completion_tokens"], 77, "{sent}");
+    assert!(
+        sent.get("max_tokens").is_none(),
+        "gpt-5 rejects max_tokens: {sent}"
+    );
+}
+
+/// A provider that declares no default cap must not have one invented for it; a provider
+/// that does (Claude's 32k) gets it when the client names none.
+#[tokio::test]
+async fn provider_cap_default_is_applied_only_when_declared() {
+    let mock = Mock::start(vec![openai_reply("ok"), anthropic_reply()]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.connect("claude", &mock).await;
+
+    // openai declares no default: nothing is invented in either spelling.
+    let (status, body) = h
+        .post(
+            "/v1/messages",
+            json!({
+                "model": "openai/gpt-5",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sent = mock.seen()[0].clone();
+    assert!(
+        sent.get("max_completion_tokens").is_none() && sent.get("max_tokens").is_none(),
+        "no cap was declared or requested, so none may be sent: {sent}"
+    );
+
+    // Anthropic requires the field; the provider's declared default fills it.
+    let (status, body) = h
+        .post(
+            "/v1/chat/completions",
+            json!({
+                "model": "claude/claude-sonnet-4-5",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sent = mock.seen()[1].clone();
+    assert_eq!(
+        sent["max_tokens"], 32_000,
+        "Claude's declared default must fill an omitted cap: {sent}"
+    );
+}
+
+/// Client protocol headers travel only to providers that declare them, and never replace
+/// the gateway's own flags.
+#[tokio::test]
+async fn client_beta_headers_are_forwarded_only_where_the_provider_allows_them() {
+    let mock = Mock::start(vec![anthropic_reply(), openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("claude", &mock).await;
+    h.connect("openai", &mock).await;
+
+    let client_flags = [
+        ("anthropic-beta", "client-flag-2025-01-01"),
+        ("openai-beta", "assistants=v2"),
+        ("authorization", "Bearer CLIENT-SECRET"),
+    ];
+
+    let (status, body) = h
+        .post_with(
+            "/v1/messages",
+            json!({
+                "model": "claude/claude-sonnet-4-5",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            &client_flags,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let headers = mock.headers(0).expect("upstream headers");
+    let beta = header_value(&headers, "anthropic-beta");
+    assert!(
+        beta.contains("client-flag-2025-01-01"),
+        "claude declares anthropic-beta, so the client's flag travels: {beta:?}"
+    );
+    assert!(
+        beta.contains("oauth-2025-04-20"),
+        "the gateway's own beta flag must survive the union: {beta:?}"
+    );
+    assert!(
+        !header_value(&headers, "openai-beta").contains("assistants"),
+        "claude does not declare openai-beta: {:?}",
+        header_value(&headers, "openai-beta")
+    );
+    assert!(
+        !header_value(&headers, "authorization").contains("CLIENT-SECRET"),
+        "client credentials must never be forwarded"
+    );
+
+    let (status, body) = h
+        .post_with(
+            "/v1/chat/completions",
+            json!({"model": "openai/gpt-5", "messages": [{"role": "user", "content": "hi"}]}),
+            &client_flags,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let headers = mock.headers(1).expect("upstream headers");
+    assert!(
+        header_value(&headers, "anthropic-beta").is_empty(),
+        "openai does not declare anthropic-beta: {:?}",
+        header_value(&headers, "anthropic-beta")
+    );
+    assert!(
+        header_value(&headers, "openai-beta").contains("assistants=v2"),
+        "openai declares openai-beta: {:?}",
+        header_value(&headers, "openai-beta")
+    );
+    assert!(header_value(&headers, "authorization").starts_with("Bearer test-key"));
+}
+
+/// A failed upstream call keeps the provider's `type`, `code` and `param`: SDKs branch on
+/// those, and the old body threw them away.
+#[tokio::test]
+async fn upstream_error_body_keeps_type_code_and_param() {
+    let openai_error = MockReply::Json(
+        400,
+        json!({"error": {
+            "message": "This model's maximum context length is 8192 tokens",
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded",
+            "param": "messages"
+        }}),
+    );
+    let anthropic_error = MockReply::Json(
+        400,
+        json!({"type": "error", "error": {
+            "type": "invalid_request_error",
+            "message": "max_tokens: field required",
+            "code": "invalid_beta"
+        }}),
+    );
+    let mock = Mock::start(vec![openai_error, anthropic_error]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.connect("anthropic", &mock).await;
+
+    let (status, body) = h
+        .post(
+            "/v1/chat/completions",
+            json!({"model": "openai/gpt-5", "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["type"], "invalid_request_error", "{body}");
+    assert_eq!(body["error"]["code"], "context_length_exceeded", "{body}");
+    assert_eq!(body["error"]["param"], "messages", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("maximum context length"),
+        "{body}"
+    );
+
+    // Anthropic's envelope keeps type and code; `param` has no Anthropic spelling.
+    let (status, body) = h
+        .post(
+            "/v1/messages",
+            json!({
+                "model": "anthropic/claude-sonnet-4-5",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["type"], "error", "{body}");
+    assert_eq!(body["error"]["type"], "invalid_request_error", "{body}");
+    assert_eq!(body["error"]["code"], "invalid_beta", "{body}");
+    assert_eq!(
+        body["error"]["message"], "max_tokens: field required",
+        "{body}"
+    );
+}
+
+// ----------------------------------------- key allowlist on the non-streaming path
+
+/// The non-streaming path builds its own plan inside `complete_traced`, and that plan is
+/// the one that dispatches. It must carry the key's `allowed_models`, or a
+/// provider-scoped allowlist is bypassed by exactly the requests it exists to constrain.
+#[tokio::test]
+async fn non_streaming_request_refuses_a_model_outside_the_expanded_allowlist() {
+    let mock = Mock::start(vec![openai_reply("must not be sent")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    // Pins the bare id `gpt-4.1` to a provider that does not serve it. The pre-expansion
+    // check accepts the spelling (same model id); provider expansion is what refuses it.
+    h.patch_key(&id, json!({"allowed_models": ["anthropic/gpt-4.1"]}))
+        .await;
+
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "model_not_allowed", "{body}");
+    assert_eq!(mock.hits(), 0, "a refused model never reaches a provider");
+}
+
+/// The regression this fixes: with the cache off, the plan built here is authoritative.
+/// `claude` precedes `anthropic` in the catalog for this model id, so an unfiltered plan
+/// sends the request to the provider the key's allowlist excluded.
+#[tokio::test]
+async fn non_streaming_request_never_reaches_a_disallowed_provider() {
+    let disallowed = Mock::start(vec![anthropic_reply()]).await;
+    let allowed = Mock::start(vec![anthropic_reply()]).await;
+    let h = harness(false);
+    h.connect("claude", &disallowed).await;
+    h.connect("anthropic", &allowed).await;
+
+    let (key, id) = h.create_key().await;
+    // Same model id, pinned to one provider: the pre-expansion check accepts the bare
+    // spelling, so only the expanded candidate list can keep the request away from claude.
+    h.patch_key(
+        &id,
+        json!({"allowed_models": ["anthropic/claude-sonnet-4-5"]}),
+    )
+    .await;
+
+    let (status, _, body) = h.chat(Some(&key), "claude-sonnet-4-5").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(allowed.hits(), 1, "the allowed provider serves: {body}");
+    assert_eq!(
+        disallowed.hits(),
+        0,
+        "a disallowed provider must never be called, even when the catalog lists it first"
+    );
+}
+
+/// A combo is expanded after the allowlist's cheap pre-check, so what the allowlist is
+/// judged against is the *contents*: a glob-shaped combo name must not smuggle them in.
+#[tokio::test]
+async fn combo_contents_cannot_escape_the_key_allowlist() {
+    let mock = Mock::start(vec![openai_reply("must not be sent")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.state
+        .store
+        .upsert_combo("claude/cheap", &["openai/gpt-4.1".to_string()])
+        .await
+        .expect("combo");
+    let (key, id) = h.create_key().await;
+    // `claude/*` matches the combo's *name*, which is why the pre-check lets it through.
+    h.patch_key(&id, json!({"allowed_models": ["claude/*"]}))
+        .await;
+
+    let (status, _, body) = h.chat(Some(&key), "claude/cheap").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "model_not_allowed", "{body}");
+    assert_eq!(
+        mock.hits(),
+        0,
+        "a combo cannot smuggle a disallowed provider"
+    );
+}
+
+// ------------------------------------------------------------- team budgets (v23)
+
+/// A key billed to a team: `(plaintext, key id, team id)`.
+async fn key_billed_to_team(
+    h: &Harness,
+    name: &str,
+    budget_tokens: u64,
+    budget_micros: u64,
+) -> (String, uuid::Uuid, uuid::Uuid) {
+    let (key, id) = h.create_key().await;
+    let key_id = uuid::Uuid::parse_str(&id).expect("key id");
+    let team = h
+        .state
+        .store
+        .create_team(name, budget_tokens, budget_micros, BudgetWindow::Total)
+        .await
+        .expect("team");
+    h.state
+        .store
+        .set_api_key_team(key_id, Some(team.id))
+        .await
+        .expect("assign key to team");
+    (key, key_id, team.id)
+}
+
+/// Record spend on a key; the usage row inherits the key's team, exactly as the proxy's
+/// own writer does.
+async fn seed_spend(store: &Store, key: uuid::Uuid, tokens: u32, cost_micros: u64) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    store
+        .record_usage(&UsageRecord {
+            id: None,
+            ts,
+            request_id: Some(uuid::Uuid::new_v4()),
+            trace_id: None,
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".to_string()),
+            key_id: Some(key),
+            cost_micros,
+            input_tokens: tokens,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            upstream_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+        })
+        .await
+        .expect("seed usage");
+}
+
+/// A refusal costs nothing: no upstream call, and the only row it writes is the terminal
+/// zero-token 429 that makes the refusal visible in the log.
+async fn assert_refused_for_free(
+    h: &Harness,
+    mock: &Mock,
+    request_id: uuid::Uuid,
+    body: &Value,
+    expected_team: &str,
+) {
+    assert_eq!(mock.hits(), 0, "a refused request never reaches a provider");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(expected_team),
+        "the message names the team: {body}"
+    );
+    let row = h.usage_for(request_id).await;
+    assert_eq!(row.status, 429, "the refusal is logged: {row:?}");
+    assert_eq!(
+        row.input_tokens + row.output_tokens + row.cache_read_tokens + row.cache_write_tokens,
+        0,
+        "a refusal consumes no tokens: {row:?}"
+    );
+    assert_eq!(row.cost_micros, 0, "a refusal costs nothing: {row:?}");
+}
+
+#[tokio::test]
+async fn team_token_budget_refuses_before_any_upstream_call() {
+    let mock = Mock::start(vec![openai_reply("must not be sent")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, key_id, _team) = key_billed_to_team(&h, "Tokens", 100, 0).await;
+    seed_spend(h.state.store.as_ref(), key_id, 120, 0).await;
+
+    let (status, headers, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"]["code"], "team_budget_exhausted", "{body}");
+    let request_id: uuid::Uuid = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| uuid::Uuid::parse_str(v).ok())
+        .expect("request id");
+    assert_refused_for_free(&h, &mock, request_id, &body, "Tokens").await;
+}
+
+#[tokio::test]
+async fn team_usd_budget_refuses_before_any_upstream_call() {
+    let mock = Mock::start(vec![openai_reply("must not be sent")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, key_id, _team) = key_billed_to_team(&h, "Dollars", 0, 1_000).await;
+    // $0.0015 spent against a $0.001 budget.
+    seed_spend(h.state.store.as_ref(), key_id, 1, 1_500).await;
+
+    let (status, headers, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"]["code"], "team_budget_exhausted", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("0.0015"),
+        "the message carries the amount: {body}"
+    );
+    let request_id: uuid::Uuid = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| uuid::Uuid::parse_str(v).ok())
+        .expect("request id");
+    assert_refused_for_free(&h, &mock, request_id, &body, "Dollars").await;
+}
+
+/// `0` is unlimited on both team budgets, and an unlimited team costs no extra query.
+#[tokio::test]
+async fn unlimited_team_budget_admits() {
+    let mock = Mock::start(vec![openai_reply("served")]).await;
+    let h = harness(false);
+    let (key, key_id, team) = key_billed_to_team(&h, "Unlimited", 0, 0).await;
+    // The key is team-scoped, so it is routed only to that team's own account.
+    h.connect_for_team("openai", &mock, team).await;
+    // Spend far past any plausible limit: with both budgets at 0 nothing may refuse.
+    seed_spend(h.state.store.as_ref(), key_id, 10_000_000, 9_000_000).await;
+
+    let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(mock.hits(), 1);
+}
+
+/// A key with no team is instance-wide: another team's exhausted budget must not touch it.
+#[tokio::test]
+async fn instance_wide_key_is_not_bound_by_a_team_budget() {
+    let mock = Mock::start(vec![openai_reply("served")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (team_key, team_key_id, _team) = key_billed_to_team(&h, "Exhausted", 10, 0).await;
+    seed_spend(h.state.store.as_ref(), team_key_id, 50, 0).await;
+    let (status, _, body) = h.chat(Some(&team_key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+
+    let (free_key, _) = h.create_key().await;
+    let (status, _, body) = h.chat(Some(&free_key), "gpt-4.1").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "instance-wide keys are unlimited: {body}"
+    );
+    assert_eq!(mock.hits(), 1);
+}
+
+// ------------------------------------------------------- rate-limit headers (v22/A2)
+
+/// A successful JSON response reports where the key stands, so a client can pace itself
+/// instead of discovering the cap through a 429.
+#[tokio::test]
+async fn success_carries_ratelimit_headers() {
+    let mock = Mock::start(vec![openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(
+        &id,
+        json!({"rpm": 5, "tpm": 1000, "budget_tokens": 1000, "budget_micros": 2_000_000}),
+    )
+    .await;
+
+    let (status, headers, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            openai_chat_body("gpt-4.1"),
+            &[("authorization", &format!("Bearer {key}"))],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    // The slot this request took is already spent, so remaining is limit - 1.
+    assert_eq!(header("x-ratelimit-limit-requests"), "5", "{headers:?}");
+    assert_eq!(header("x-ratelimit-remaining-requests"), "4", "{headers:?}");
+    assert!(
+        header("x-ratelimit-reset-requests").ends_with('s'),
+        "{headers:?}"
+    );
+    // Tokens are recorded when the response reports usage, so this response still shows
+    // the whole window.
+    assert_eq!(header("x-ratelimit-limit-tokens"), "1000", "{headers:?}");
+    assert_eq!(
+        header("x-ratelimit-remaining-tokens"),
+        "1000",
+        "{headers:?}"
+    );
+    assert_eq!(header("x-rrouter-budget-remaining-tokens"), "1000");
+    assert_eq!(header("x-rrouter-budget-remaining-micros"), "2000000");
+    // An OpenAI client gets the OpenAI vocabulary only.
+    assert_eq!(header("anthropic-ratelimit-requests-limit"), "");
+}
+
+/// Anthropic's SDK reads `anthropic-ratelimit-*`; a Messages client gets both vocabularies.
+#[tokio::test]
+async fn anthropic_inbound_gets_anthropic_ratelimit_headers() {
+    let mock = Mock::start(vec![anthropic_reply()]).await;
+    let h = harness(false);
+    h.connect("claude", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"rpm": 5, "tpm": 1000})).await;
+
+    let (status, headers, body) = h
+        .post_headers(
+            "/v1/messages",
+            json!({
+                "model": "claude/claude-sonnet-4-5",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            &[("authorization", &format!("Bearer {key}"))],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(
+        header("anthropic-ratelimit-requests-limit"),
+        "5",
+        "{headers:?}"
+    );
+    assert_eq!(
+        header("anthropic-ratelimit-requests-remaining"),
+        "4",
+        "{headers:?}"
+    );
+    assert!(header("anthropic-ratelimit-requests-reset").ends_with('s'));
+    assert_eq!(header("anthropic-ratelimit-tokens-limit"), "1000");
+    assert_eq!(header("anthropic-ratelimit-tokens-remaining"), "1000");
+    assert!(header("anthropic-ratelimit-tokens-reset").ends_with('s'));
+    // Both vocabularies describe the same numbers.
+    assert_eq!(header("x-ratelimit-limit-requests"), "5");
+    assert_eq!(header("x-ratelimit-remaining-requests"), "4");
+}
+
+/// A streamed response carries the headers on the response head, before any chunk.
+#[tokio::test]
+async fn streaming_response_carries_ratelimit_headers() {
+    let wire = |event: &str, data: &str| format!("event: {event}\ndata: {data}\n\n");
+    let mock = Mock::start(vec![MockReply::Sse(vec![
+        SseStep {
+            wire: wire(
+                "response.created",
+                r#"{"type":"response.created","response":{"id":"r1","model":"gpt-5.6-luna"}}"#,
+            ),
+            await_gate: None,
+        },
+        SseStep {
+            wire: wire(
+                "response.output_text.delta",
+                r#"{"type":"response.output_text.delta","delta":"Hi"}"#,
+            ),
+            await_gate: None,
+        },
+        SseStep {
+            wire: wire(
+                "response.completed",
+                r#"{"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":4,"output_tokens":1}}}"#,
+            ),
+            await_gate: None,
+        },
+    ])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"rpm": 5})).await;
+
+    let mut body = openai_chat_body("codex/gpt-5.6-luna");
+    body["stream"] = json!(true);
+    let (status, headers, _) = h
+        .post_headers(
+            "/v1/chat/completions",
+            body,
+            &[("authorization", &format!("Bearer {key}"))],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-ratelimit-limit-requests")
+            .and_then(|v| v.to_str().ok()),
+        Some("5"),
+        "the response head carries the limits: {headers:?}"
+    );
+    assert_eq!(
+        headers
+            .get("x-ratelimit-remaining-requests")
+            .and_then(|v| v.to_str().ok()),
+        Some("4")
+    );
+}
+
+/// A 429 carries the same headers with nothing left, so backing off needs no guesswork.
+#[tokio::test]
+async fn rate_limited_response_carries_zero_remaining() {
+    let mock = Mock::start(vec![openai_reply("first")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"rpm": 1})).await;
+
+    let (status, _, _) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, headers, body) = h.chat(Some(&key), "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"]["code"], "rate_limited", "{body}");
+    assert_eq!(
+        headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert_eq!(
+        headers
+            .get("x-ratelimit-limit-requests")
+            .and_then(|v| v.to_str().ok()),
+        Some("1"),
+        "the refusal still describes the window: {headers:?}"
+    );
+    assert_eq!(
+        headers
+            .get("x-ratelimit-remaining-requests")
+            .and_then(|v| v.to_str().ok()),
+        Some("0")
+    );
+    assert_eq!(mock.hits(), 1, "the limited request is not dispatched");
+}
+
+// ------------------------------------------------- wave 7: trace + PII redaction
+
+/// POST that keeps the raw response body, for streaming (not JSON).
+async fn post_raw(
+    h: &Harness,
+    uri: &str,
+    body: Value,
+    headers: &[(&str, &str)],
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let res = h
+        .router
+        .clone()
+        .oneshot(builder.body(Body::from(body.to_string())).expect("request"))
+        .await
+        .expect("oneshot");
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
+/// One upstream request's header value, by case-insensitive name.
+fn upstream_header(mock: &Mock, index: usize, name: &str) -> Option<String> {
+    mock.headers(index).and_then(|headers| {
+        headers
+            .into_iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value)
+    })
+}
+
+fn upstream_traceparent(mock: &Mock, index: usize) -> String {
+    upstream_header(mock, index, "traceparent")
+        .unwrap_or_else(|| panic!("upstream request {index} carried no traceparent"))
+}
+
+/// Parse a forwarded traceparent and assert it is a valid child of `trace` (not the
+/// client's span). Returns the child span id.
+fn assert_child_traceparent(value: &str, trace: &str, inbound_span: &str) -> String {
+    let parts: Vec<&str> = value.split('-').collect();
+    assert_eq!(parts.len(), 4, "{value}");
+    assert_eq!(parts[0], "00", "{value}");
+    assert_eq!(parts[1], trace, "{value}");
+    assert_eq!(parts[2].len(), 16, "{value}");
+    assert!(
+        parts[2]
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+        "{value}"
+    );
+    assert_ne!(
+        parts[2], inbound_span,
+        "the client's raw span must not be forwarded"
+    );
+    assert_eq!(parts[3], "01", "{value}");
+    parts[2].to_string()
+}
+
+fn trace_header(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-trace-id")
+        .expect("every response carries the trace id")
+        .to_str()
+        .expect("ascii")
+        .to_string()
+}
+
+fn request_id_of(headers: &axum::http::HeaderMap) -> uuid::Uuid {
+    headers
+        .get("x-request-id")
+        .expect("every response carries the request id")
+        .to_str()
+        .expect("ascii")
+        .parse()
+        .expect("uuid")
+}
+
+#[tokio::test]
+async fn a_valid_traceparent_is_continued_and_echoed() {
+    let mock = Mock::start(vec![openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+    let (status, headers, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]}),
+            &[("traceparent", &format!("00-{trace}-00f067aa0ba902b7-01"))],
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(trace_header(&headers), trace);
+}
+
+#[tokio::test]
+async fn an_attempt_forwards_a_child_traceparent_and_the_accepted_tracestate() {
+    let mock = Mock::start(vec![openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+    let inbound_span = "00f067aa0ba902b7";
+
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]}),
+            &[
+                ("traceparent", &format!("00-{trace}-{inbound_span}-01")),
+                ("tracestate", "vendor=value,other=1"),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let forwarded = upstream_traceparent(&mock, 0);
+    assert_child_traceparent(&forwarded, trace, inbound_span);
+    assert_eq!(
+        upstream_header(&mock, 0, "tracestate").as_deref(),
+        Some("vendor=value,other=1"),
+        "an accepted tracestate is forwarded verbatim"
+    );
+}
+
+#[tokio::test]
+async fn invalid_or_absent_context_generates_a_valid_child_and_counts_the_rejection() {
+    let mock = Mock::start(vec![openai_reply("ok"), openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let body = json!({"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]});
+
+    // No traceparent at all: a fresh server trace is generated and still forwarded, and a
+    // stray client tracestate is not forwarded with it.
+    let (status, headers, _) = h
+        .post_headers(
+            "/v1/chat/completions",
+            body.clone(),
+            &[("tracestate", "vendor=value")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let generated = upstream_traceparent(&mock, 0);
+    assert_child_traceparent(&generated, &trace_header(&headers), "0000000000000000");
+    assert_eq!(upstream_header(&mock, 0, "tracestate"), None);
+
+    let (_, _, metrics) = h.get_raw("/metrics").await;
+    let series = r#"rrouter_trace_context_rejected_total{reason="version"}"#;
+    let before = metric_value(&metrics, series);
+
+    // A traceparent this build rejects: version 01. The request is served with a fresh
+    // trace, still forwards a valid child, and counts the rejection once.
+    let (status, headers, _) = h
+        .post_headers(
+            "/v1/chat/completions",
+            body,
+            &[
+                (
+                    "traceparent",
+                    "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                ),
+                ("tracestate", "vendor=value"),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let generated = upstream_traceparent(&mock, 1);
+    assert_child_traceparent(&generated, &trace_header(&headers), "00f067aa0ba902b7");
+    assert_eq!(
+        upstream_header(&mock, 1, "tracestate"),
+        None,
+        "tracestate belongs to a trace we did not continue"
+    );
+
+    let (_, _, metrics) = h.get_raw("/metrics").await;
+    assert_eq!(
+        metric_value(&metrics, series),
+        before + 1,
+        "one rejected inbound context counts exactly once"
+    );
+}
+
+#[tokio::test]
+async fn retried_attempts_forward_distinct_child_span_ids() {
+    let mock = Mock::start(vec![
+        MockReply::Json(500, json!({"error": {"message": "boom"}})),
+        openai_reply("ok"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]}),
+            &[("traceparent", &format!("00-{trace}-00f067aa0ba902b7-01"))],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(mock.hits(), 2, "the 500 was retried on the same candidate");
+
+    let first =
+        assert_child_traceparent(&upstream_traceparent(&mock, 0), trace, "00f067aa0ba902b7");
+    let second =
+        assert_child_traceparent(&upstream_traceparent(&mock, 1), trace, "00f067aa0ba902b7");
+    assert_ne!(first, second, "every attempt gets its own child span");
+}
+
+#[tokio::test]
+async fn hedged_attempts_forward_distinct_child_span_ids() {
+    let mut cfg = config(false);
+    cfg.hedge_ms = 20;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let notifier = Arc::clone(&gate);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        notifier.notify_one();
+    });
+    let slow_body = serde_json::to_vec(&json!({
+        "id": "chatcmpl-slow",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "mock-model",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "slow"}, "finish_reason": "stop"}]
+    }))
+    .expect("json");
+    let slow = Mock::start(vec![MockReply::Chunks(
+        200,
+        "application/json",
+        vec![(slow_body, Some(gate))],
+    )])
+    .await;
+    let fast = Mock::start(vec![openai_reply("fast")]).await;
+    let h = harness_with(cfg);
+    h.connect("openai", &slow).await;
+    h.connect("together", &fast).await;
+    let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            openai_chat_body("canary-model"),
+            &[("traceparent", &format!("00-{trace}-00f067aa0ba902b7-01"))],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(slow.hits(), 1, "the hedged leg was dispatched");
+    assert_eq!(fast.hits(), 1);
+    let slow_child =
+        assert_child_traceparent(&upstream_traceparent(&slow, 0), trace, "00f067aa0ba902b7");
+    let fast_child =
+        assert_child_traceparent(&upstream_traceparent(&fast, 0), trace, "00f067aa0ba902b7");
+    assert_ne!(
+        slow_child, fast_child,
+        "each raced attempt names its own span"
+    );
+}
+
+#[tokio::test]
+async fn client_credentials_never_become_trace_headers() {
+    let mock = Mock::start(vec![openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]}),
+            &[
+                ("traceparent", &format!("00-{trace}-00f067aa0ba902b7-01")),
+                ("authorization", "Bearer sk-client-secret"),
+                ("cookie", "rrouter_session=client-cookie"),
+                ("x-api-key", "sk-client-key"),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let headers = mock.headers(0).expect("upstream headers");
+    assert!(
+        !headers
+            .iter()
+            .any(|(_, value)| value.contains("sk-client-secret")
+                || value.contains("client-cookie")
+                || value.contains("sk-client-key")),
+        "client credentials leaked upstream: {headers:?}"
+    );
+    assert_eq!(upstream_header(&mock, 0, "cookie"), None);
+    assert_eq!(
+        upstream_header(&mock, 0, "authorization").as_deref(),
+        Some("Bearer test-key"),
+        "the provider's own credential is the only auth header"
+    );
+}
+
+#[tokio::test]
+async fn the_embeddings_attempt_also_forwards_a_child_traceparent() {
+    let mock = Mock::start(vec![MockReply::Json(
+        200,
+        json!({
+            "object": "list",
+            "data": [{"object": "embedding", "embedding": [0.1, 0.2]}],
+            "model": "gpt-4.1",
+            "usage": {"prompt_tokens": 1, "total_tokens": 1}
+        }),
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/embeddings",
+            json!({"model": "gpt-4.1", "input": "hi"}),
+            &[("traceparent", &format!("00-{trace}-00f067aa0ba902b7-01"))],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_child_traceparent(&upstream_traceparent(&mock, 0), trace, "00f067aa0ba902b7");
+}
+
+#[tokio::test]
+async fn a_missing_or_invalid_traceparent_starts_a_fresh_trace() {
+    let mock = Mock::start(vec![
+        openai_reply("ok"),
+        openai_reply("ok"),
+        openai_reply("ok"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let body = json!({"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]});
+
+    let (status, headers, _) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let fresh = trace_header(&headers);
+    assert_eq!(fresh.len(), 32);
+    assert!(fresh.bytes().all(|b| b.is_ascii_hexdigit()));
+
+    let (status, headers, _) = h
+        .post_headers(
+            "/v1/chat/completions",
+            body,
+            &[("traceparent", "00-not-a-trace")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let replaced = trace_header(&headers);
+    assert_eq!(replaced.len(), 32);
+    assert_ne!(replaced, fresh, "an invalid header is not continued");
+
+    // Error responses carry the trace id too.
+    let (status, headers, _) = h
+        .post_headers("/v1/chat/completions", json!({"messages": []}), &[])
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(trace_header(&headers).len(), 32);
+}
+
+/// The usage row stores the trace id the client saw, so Activity and the request log
+/// join on the same id instead of only on `x-request-id`.
+#[tokio::test]
+async fn a_served_request_stores_its_trace_id_on_the_usage_row() {
+    let mock = Mock::start(vec![openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+    let (status, headers, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]}),
+            &[("traceparent", &format!("00-{trace}-00f067aa0ba902b7-01"))],
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(trace_header(&headers), trace);
+    let row = h.usage_for(request_id_of(&headers)).await;
+    assert_eq!(row.trace_id.as_deref(), Some(trace));
+}
+
+/// A streamed request writes its row when the stream ends; the trace id is the same one
+/// the response header carried.
+#[tokio::test]
+async fn a_streamed_request_stores_its_trace_id_on_the_usage_row() {
+    let wire = concat!(
+        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"model\":\"gpt-5.6-luna\"}}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire: wire.to_string(),
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+    let trace = "0af7651916cd43dd8448eb211c80319c";
+
+    let (status, headers, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({"model": "codex/gpt-5.6-luna", "stream": true, "messages": [{"role": "user", "content": "hi"}]}),
+            &[("traceparent", &format!("00-{trace}-b7ad6b7169203331-01"))],
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let row = h.usage_for(request_id_of(&headers)).await;
+    assert!(row.streamed, "the row records the stream");
+    assert_eq!(row.trace_id.as_deref(), Some(trace));
+}
+
+/// Cache-hit policy: a hit is a real request that cost nothing, so its zero-token row
+/// still carries the trace id of the request that was served from the cache.
+#[tokio::test]
+async fn a_cache_hit_stores_the_request_trace_id_on_its_usage_row() {
+    let mock = Mock::start(vec![openai_reply("ok")]).await;
+    let h = harness_with(cached_config(300, 100));
+    h.connect("openai", &mock).await;
+    let body = openai_chat_body("gpt-4.1");
+
+    let (status, _, first) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+
+    let trace = "5f8a7b3c2d1e4f6a9b0c8d7e6f5a4b3c";
+    let (status, headers, _) = h
+        .post_headers(
+            "/v1/chat/completions",
+            body,
+            &[("traceparent", &format!("00-{trace}-00f067aa0ba902b7-01"))],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-rrouter-cache"], "hit");
+
+    let row = h.usage_for(request_id_of(&headers)).await;
+    assert_eq!(row.cost_micros, 0, "a cache hit is free");
+    assert_eq!(row.input_tokens, 0, "no prompt was sent");
+    assert_eq!(row.trace_id.as_deref(), Some(trace));
+}
+
+/// A terminal failure row carries the trace id as well, so the failure can be found from
+/// the trace the client was told.
+#[tokio::test]
+async fn a_failed_request_stores_its_trace_id_on_the_terminal_row() {
+    let mock = Mock::start(vec![MockReply::Json(
+        500,
+        json!({"error": {"message": "boom"}}),
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let trace = "9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a49";
+
+    let (status, headers, _) = h
+        .post_headers(
+            "/v1/chat/completions",
+            openai_chat_body("gpt-4.1"),
+            &[("traceparent", &format!("00-{trace}-00f067aa0ba902b7-01"))],
+        )
+        .await;
+
+    assert!(status.is_server_error(), "upstream failed: {status}");
+    let row = h.usage_for(request_id_of(&headers)).await;
+    assert_eq!(row.status, status.as_u16());
+    assert_eq!(row.trace_id.as_deref(), Some(trace));
+}
+
+#[tokio::test]
+async fn pii_redaction_is_off_by_default() {
+    let mock = Mock::start(vec![openai_reply("write to me at a@b.co")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, _id) = h.create_key().await;
+
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({"model": "gpt-4.1", "messages": [{"role": "user", "content": "mail a@b.co"}]}),
+            &[("authorization", &key)],
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["choices"][0]["message"]["content"], "write to me at a@b.co",
+        "no opt-in, no redaction"
+    );
+    let seen = mock.seen();
+    assert!(
+        seen[0].to_string().contains("a@b.co"),
+        "the prompt reached the provider untouched: {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn pii_is_redacted_on_input_and_output_when_the_key_opts_in() {
+    let reply = "mail a@b.co, card 4111 1111 1111 1111, key sk-rr-0123456789abcdef";
+    let mock = Mock::start(vec![openai_reply(reply)]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"guardrails": {"redact_pii": true}}))
+        .await;
+
+    let (status, _, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({"model": "gpt-4.1", "messages": [{"role": "user", "content": reply}]}),
+            &[("authorization", &key)],
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["choices"][0]["message"]["content"], "mail [email], card [card], key [secret]",
+        "the client receives the redacted body"
+    );
+
+    let upstream = mock.seen()[0].to_string();
+    for placeholder in ["[email]", "[card]", "[secret]"] {
+        assert!(
+            upstream.contains(placeholder),
+            "{placeholder} missing from the upstream body: {upstream}"
+        );
+    }
+    assert!(!upstream.contains("a@b.co"), "{upstream}");
+
+    let (_, _, metrics) = h.get_raw("/metrics").await;
+    for series in [
+        r#"rrouter_pii_redactions_total{stage="input",class="email"}"#,
+        r#"rrouter_pii_redactions_total{stage="output",class="card"}"#,
+    ] {
+        assert!(
+            metric_value(&metrics, series) >= 1,
+            "{series} missing from the scrape"
+        );
+    }
+}
+
+#[tokio::test]
+async fn provider_error_text_is_redacted_for_an_opted_in_key() {
+    let mock = Mock::start(vec![MockReply::Json(
+        400,
+        json!({"error": {"message": "bad prompt for a@b.co"}}),
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"guardrails": {"redact_pii": true}}))
+        .await;
+
+    let (status, headers, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]}),
+            &[("authorization", &key)],
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        !body.to_string().contains("a@b.co"),
+        "the provider error is redacted before it is returned: {body}"
+    );
+
+    let request_id: uuid::Uuid = headers
+        .get("x-request-id")
+        .expect("the failure carries the request id")
+        .to_str()
+        .expect("ascii")
+        .parse()
+        .expect("uuid");
+    let row = h.usage_for(request_id).await;
+    assert!(
+        row.error
+            .as_deref()
+            .is_some_and(|error| error.contains("[email]")),
+        "the stored error is redacted too: {row:?}"
+    );
+    assert!(
+        !row.error.as_deref().unwrap_or("").contains("a@b.co"),
+        "{row:?}"
+    );
+}
+
+/// Every non-empty line is SSE framing; every `data:` payload is JSON (or `[DONE]`).
+fn sse_frames(body: &str) -> Vec<Value> {
+    let mut frames = Vec::new();
+    for line in body.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data == "[DONE]" {
+                continue;
+            }
+            frames.push(
+                serde_json::from_str::<Value>(data)
+                    .unwrap_or_else(|e| panic!("malformed SSE payload {data:?}: {e}")),
+            );
+        } else {
+            assert!(
+                line.is_empty() || line.starts_with("event: ") || line.starts_with("data:"),
+                "unexpected SSE line {line:?}"
+            );
+        }
+    }
+    frames
+}
+
+fn delta_text(frames: &[Value]) -> String {
+    frames
+        .iter()
+        .filter_map(|frame| frame["choices"][0]["delta"]["content"].as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn streamed_text_is_redacted_across_event_boundaries_and_usage_survives() {
+    let wire = concat!(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"mail alice@exam\"}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ple.com now\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n",
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire: wire.to_string(),
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"guardrails": {"redact_pii": true}}))
+        .await;
+
+    let (status, headers, body) = post_raw(
+        &h,
+        "/v1/chat/completions",
+        json!({"model": "codex/gpt-5.6-luna", "stream": true, "messages": [{"role": "user", "content": "hi"}]}),
+        &[("authorization", &key)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let frames = sse_frames(&body);
+    assert_eq!(delta_text(&frames), "mail [email] now");
+    assert!(!body.contains("alice@exam"), "no prefix leak: {body}");
+    assert!(!body.contains("ple.com"), "no suffix leak: {body}");
+    // The terminal frame and the usage it carried survive redaction.
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["choices"][0]["finish_reason"].is_string()),
+        "{body}"
+    );
+    let row = h.usage_for(request_id_of(&headers)).await;
+    assert_eq!(row.output_tokens, 2, "usage is not altered by redaction");
+
+    let (_, _, metrics) = h.get_raw("/metrics").await;
+    assert!(
+        metric_value(
+            &metrics,
+            r#"rrouter_pii_redactions_total{stage="stream",class="email"}"#
+        ) >= 1,
+        "{metrics}"
+    );
+}
+
+#[tokio::test]
+async fn a_card_and_secret_split_across_events_are_redacted() {
+    let wire = concat!(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"card 4111 1111\"}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" 1111 1111 key sk-rr-0123\"}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"456789abcdef done\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\",\"usage\":{\"input_tokens\":1,\"output_tokens\":5}}}\n\n",
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire: wire.to_string(),
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"guardrails": {"redact_pii": true}}))
+        .await;
+
+    let (status, _, body) = post_raw(
+        &h,
+        "/v1/chat/completions",
+        json!({"model": "codex/gpt-5.6-luna", "stream": true, "messages": [{"role": "user", "content": "hi"}]}),
+        &[("authorization", &key)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let text = delta_text(&sse_frames(&body));
+    assert_eq!(text, "card [card] key [secret] done");
+    assert!(!body.contains("4111 1111"), "{body}");
+    assert!(!body.contains("sk-rr-0123"), "{body}");
+}
+
+#[tokio::test]
+async fn tool_call_arguments_are_not_rewritten_while_text_is_redacted() {
+    let wire = concat!(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"mail a@b.co\"}\n\n",
+        "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"send\",\"arguments\":\"\"}}\n\n",
+        "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"to\\\":\\\"a@b.co\\\"}\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r3\",\"usage\":{\"input_tokens\":1,\"output_tokens\":4}}}\n\n",
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire: wire.to_string(),
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"guardrails": {"redact_pii": true}}))
+        .await;
+
+    let (status, _, body) = post_raw(
+        &h,
+        "/v1/chat/completions",
+        json!({"model": "codex/gpt-5.6-luna", "stream": true, "messages": [{"role": "user", "content": "hi"}]}),
+        &[("authorization", &key)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let frames = sse_frames(&body);
+    assert_eq!(delta_text(&frames), "mail [email]", "text is redacted");
+    let arguments: String = frames
+        .iter()
+        .filter_map(|frame| {
+            frame["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str()
+        })
+        .collect();
+    assert!(
+        arguments.contains("a@b.co"),
+        "tool arguments are protocol payloads and stay byte-identical: {arguments}"
+    );
+    assert!(
+        !arguments.contains("[email]"),
+        "a rewritten argument would corrupt the tool call: {arguments}"
+    );
+}
+
+#[tokio::test]
+async fn a_disabled_key_streams_raw_bytes() {
+    let wire = concat!(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"mail a@b.co\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r4\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n",
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire: wire.to_string(),
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+    let (key, _id) = h.create_key().await;
+
+    let (status, _, body) = post_raw(
+        &h,
+        "/v1/chat/completions",
+        json!({"model": "codex/gpt-5.6-luna", "stream": true, "messages": [{"role": "user", "content": "hi"}]}),
+        &[("authorization", &key)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(delta_text(&sse_frames(&body)), "mail a@b.co");
+    assert!(!body.contains("[email]"));
+}
+
+#[tokio::test]
+async fn a_stream_without_a_terminal_frame_still_flushes_the_redacted_tail() {
+    // The upstream ends after one delta with no `completed` event; the decoder synthesizes
+    // Done, and the redaction carry must already have been flushed by then.
+    let wire = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"tail alice@example.com\"}\n\n";
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire: wire.to_string(),
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"guardrails": {"redact_pii": true}}))
+        .await;
+
+    let (status, _, body) = post_raw(
+        &h,
+        "/v1/chat/completions",
+        json!({"model": "codex/gpt-5.6-luna", "stream": true, "messages": [{"role": "user", "content": "hi"}]}),
+        &[("authorization", &key)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(delta_text(&sse_frames(&body)), "tail [email]");
+    assert!(!body.contains("alice@example.com"), "{body}");
+}
+
+// ----- canary and hedged routing ---------------------------------------------------
+
+/// The configured canary provider serves every request at 100%.
+#[tokio::test]
+async fn canary_prefers_the_configured_provider() {
+    let mut cfg = config(false);
+    cfg.canary = Some(rrouter_router::CanaryRule {
+        model: "canary-model".to_string(),
+        provider: "together".to_string(),
+        percent: 100,
+    });
+    let openai = Mock::start(vec![openai_reply("from-openai")]).await;
+    let together = Mock::start(vec![openai_reply("from-together")]).await;
+    let h = harness_with(cfg);
+    h.connect("openai", &openai).await;
+    h.connect("together", &together).await;
+
+    let (status, _, body) = h.chat(None, "canary-model").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "from-together");
+    assert_eq!(together.hits(), 1);
+    assert_eq!(openai.hits(), 0, "the canary provider serves every request");
+}
+
+/// At 0% the same rule changes nothing: the baseline provider keeps the traffic.
+#[tokio::test]
+async fn canary_at_zero_percent_never_switches() {
+    let mut cfg = config(false);
+    cfg.canary = Some(rrouter_router::CanaryRule {
+        model: "canary-model".to_string(),
+        provider: "together".to_string(),
+        percent: 0,
+    });
+    let openai = Mock::start(vec![openai_reply("from-openai")]).await;
+    let together = Mock::start(vec![openai_reply("from-together")]).await;
+    let h = harness_with(cfg);
+    h.connect("openai", &openai).await;
+    h.connect("together", &together).await;
+
+    let (status, _, body) = h.chat(None, "canary-model").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "from-openai");
+    assert_eq!(openai.hits(), 1);
+    assert_eq!(together.hits(), 0);
+}
+
+/// A hedged request answers from the faster provider, and the cancelled leg leaves
+/// neither a usage row nor an attempt row behind.
+#[tokio::test]
+async fn a_hedged_request_answers_once_and_records_one_attempt() {
+    let mut cfg = config(false);
+    cfg.hedge_ms = 20;
+
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let notifier = Arc::clone(&gate);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        notifier.notify_one();
+    });
+    let slow_body = serde_json::to_vec(&json!({
+        "id": "chatcmpl-slow",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "mock-model",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "slow"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 3}
+    }))
+    .expect("json");
+    let slow = Mock::start(vec![MockReply::Chunks(
+        200,
+        "application/json",
+        vec![(slow_body, Some(gate))],
+    )])
+    .await;
+    let fast = Mock::start(vec![openai_reply("fast")]).await;
+    let h = harness_with(cfg);
+    // Both are priority 0, so they are one hedged pair; the catalog orders openai first.
+    h.connect("openai", &slow).await;
+    h.connect("together", &fast).await;
+
+    let started = Instant::now();
+    let (status, headers, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            openai_chat_body("canary-model"),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "the hedge did not wait for the slow leg: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(body["choices"][0]["message"]["content"], "fast");
+    assert_eq!(fast.hits(), 1);
+
+    let request_id = request_id_of(&headers);
+    let row = h.usage_for(request_id).await;
+    assert_eq!(row.provider, "together", "the winning candidate is billed");
+    assert_eq!(row.status, 200);
+    let attempts = h
+        .state
+        .store
+        .attempts_for(request_id)
+        .await
+        .expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        2,
+        "one row per dispatched leg, no duplicates: {attempts:?}"
+    );
+    let winner = attempts
+        .iter()
+        .find(|a| a.status == 200)
+        .expect("the served leg");
+    assert_eq!(winner.provider, "together");
+    let loser = attempts
+        .iter()
+        .find(|a| a.status == 499)
+        .expect("the cancelled leg");
+    assert_eq!(loser.provider, "openai");
+    assert_ne!(winner.attempt, loser.attempt, "attempts stay distinct");
+    assert_eq!(
+        attempts.iter().map(|a| a.attempt).collect::<Vec<_>>(),
+        vec![1, 2],
+        "numbering is contiguous"
+    );
+}
+
+// ----- semantic cache -------------------------------------------------------------
+
+/// One embeddings reply: the vector the mocked provider returns for the next prompt.
+fn embedding_reply(values: &[f32]) -> MockReply {
+    MockReply::Json(
+        200,
+        json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": values}],
+            "usage": {"prompt_tokens": 3, "total_tokens": 3}
+        }),
+    )
+}
+
+fn semantic_config(threshold: f64, embedding_model: &str) -> Config {
+    let mut cfg = config(false);
+    cfg.semantic_cache = rrouter_gateway::config::CacheMode::Sqlite;
+    cfg.semantic_cache_threshold = threshold;
+    cfg.semantic_embedding_model = Some(embedding_model.to_string());
+    cfg.semantic_cache_ttl_secs = 300;
+    cfg.semantic_cache_max_entries = 100;
+    cfg
+}
+
+/// A canonical chat body with no system prompt, so the embedded text is just `content`.
+fn chat_with(content: &str) -> Value {
+    json!({
+        "model": "gpt-4.1",
+        "messages": [{"role": "user", "content": content}]
+    })
+}
+
+/// A near-duplicate prompt is served from the stored response without calling the chat
+/// provider again; the embedding call is internal (no usage row, no attempt row).
+#[tokio::test]
+async fn semantic_cache_serves_a_near_duplicate_prompt() {
+    let mock = Mock::start(vec![
+        embedding_reply(&[1.0, 0.0, 0.0]),
+        openai_reply("semantic answer"),
+        embedding_reply(&[0.995, 0.005, 0.0]),
+    ])
+    .await;
+    let h = harness_with(semantic_config(0.9, "openai/text-embedding-3-small"));
+    h.connect("openai", &mock).await;
+
+    let (status, first_headers, first) = h
+        .post_headers("/v1/chat/completions", chat_with("hello"), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+
+    let (status, headers, second) = h
+        .post_headers("/v1/chat/completions", chat_with("hello there"), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(headers["x-rrouter-cache"], "semantic-hit");
+    assert_eq!(second, first, "a hit is the stored response body");
+    assert_eq!(
+        mock.hits(),
+        3,
+        "one embedding per miss, one chat completion"
+    );
+    assert_eq!(
+        mock.paths(),
+        vec!["/v1/embeddings", "/v1/chat/completions", "/v1/embeddings"],
+        "exactly one embedding call per request"
+    );
+
+    // The embedding is operational: the served request logs one attempt, not two.
+    let first_id = request_id_of(&first_headers);
+    let attempts = h
+        .state
+        .store
+        .attempts_for(first_id)
+        .await
+        .expect("attempts");
+    assert_eq!(attempts.len(), 1, "the embedding call is not an attempt");
+    assert!(
+        h.usage_for(first_id).await.input_tokens > 0,
+        "the served request is billed normally"
+    );
+    let hit_id = request_id_of(&headers);
+    let hit_row = h.usage_for(hit_id).await;
+    assert_eq!(hit_row.status, 200);
+    assert_eq!(hit_row.input_tokens, 0, "a semantic hit costs no tokens");
+    assert_eq!(hit_row.provider, "openai");
+}
+
+/// Similarity below the threshold is a miss and the request is served normally.
+#[tokio::test]
+async fn semantic_cache_misses_below_the_threshold() {
+    let mock = Mock::start(vec![
+        embedding_reply(&[1.0, 0.0, 0.0]),
+        openai_reply("first answer"),
+        embedding_reply(&[0.0, 1.0, 0.0]),
+        openai_reply("second answer"),
+    ])
+    .await;
+    let h = harness_with(semantic_config(0.9, "openai/text-embedding-3-small"));
+    h.connect("openai", &mock).await;
+
+    let (status, _, _) = h
+        .post_headers("/v1/chat/completions", chat_with("hello"), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, headers, body) = h
+        .post_headers("/v1/chat/completions", chat_with("orthogonal prompt"), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "second answer");
+    assert!(
+        headers.get("x-rrouter-cache").is_none(),
+        "a miss is not labelled"
+    );
+    assert_eq!(mock.hits(), 4, "two embeddings, two completions");
+}
+
+/// Entries are scoped by embedding model: a different model never matches the vector the
+/// previous one stored.
+#[tokio::test]
+async fn semantic_cache_never_matches_another_embedding_model() {
+    let mock = Mock::start(vec![
+        embedding_reply(&[1.0, 0.0, 0.0]),
+        openai_reply("first answer"),
+        embedding_reply(&[1.0, 0.0, 0.0]),
+        openai_reply("second answer"),
+    ])
+    .await;
+    let h = harness_with(semantic_config(0.9, "openai/text-embedding-3-small"));
+    h.connect("openai", &mock).await;
+
+    let (status, _, _) = h
+        .post_headers("/v1/chat/completions", chat_with("hello"), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The operator switches embedding models: same vector, different vector space.
+    let mut next = (*h.state.config.load()).clone();
+    next.semantic_embedding_model = Some("openai/text-embedding-3-large".to_string());
+    h.state.config.store(Arc::new(next));
+
+    let (status, headers, body) = h
+        .post_headers("/v1/chat/completions", chat_with("hello"), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "second answer");
+    assert!(
+        headers.get("x-rrouter-cache").is_none(),
+        "another embedding model is another scope"
+    );
+}
+
+/// `x-rrouter-cache: bypass` and streaming requests never pay for an embedding.
+#[tokio::test]
+async fn semantic_cache_bypass_and_streams_skip_the_embedding() {
+    let mock = Mock::start(vec![openai_reply("bypassed"), openai_reply("streamed")]).await;
+    let h = harness_with(semantic_config(0.9, "openai/text-embedding-3-small"));
+    h.connect("openai", &mock).await;
+
+    let (status, _, _) = h
+        .post_headers(
+            "/v1/chat/completions",
+            chat_with("hello"),
+            &[("x-rrouter-cache", "bypass")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, headers, body) = h
+        .post_headers(
+            "/v1/chat/completions",
+            json!({"model": "gpt-4.1", "stream": true, "messages": [{"role": "user", "content": "hello"}]}),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(headers.get("x-rrouter-cache").is_none());
+    assert!(
+        mock.paths().iter().all(|path| path != "/v1/embeddings"),
+        "no embedding call for a bypass or a stream: {:?}",
+        mock.paths()
+    );
+}
+
+/// The exact cache wins before the semantic lookup: a byte-identical repeat must not pay
+/// for an embedding.
+#[tokio::test]
+async fn an_exact_hit_never_reaches_the_semantic_lookup() {
+    let mut cfg = cached_config(300, 100);
+    cfg.semantic_cache = rrouter_gateway::config::CacheMode::Sqlite;
+    cfg.semantic_cache_threshold = 0.9;
+    cfg.semantic_embedding_model = Some("openai/text-embedding-3-small".to_string());
+    let mock = Mock::start(vec![
+        embedding_reply(&[1.0, 0.0, 0.0]),
+        openai_reply("cached answer"),
+    ])
+    .await;
+    let h = harness_with(cfg);
+    h.connect("openai", &mock).await;
+
+    let body = chat_with("hello");
+    let (status, _, first) = h
+        .post_headers("/v1/chat/completions", body.clone(), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+
+    let (status, headers, second) = h.post_headers("/v1/chat/completions", body, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-rrouter-cache"], "hit");
+    assert_eq!(second, first);
+    assert_eq!(mock.hits(), 2, "no second embedding call");
+    assert_eq!(mock.paths(), vec!["/v1/embeddings", "/v1/chat/completions"]);
+}
+
+/// An embedding failure is a miss, never a failed request.
+#[tokio::test]
+async fn a_failed_embedding_falls_through_to_the_provider() {
+    let mock = Mock::start(vec![
+        MockReply::Json(503, json!({"error": {"message": "embedding down"}})),
+        openai_reply("served without cache"),
+    ])
+    .await;
+    let h = harness_with(semantic_config(0.9, "openai/text-embedding-3-small"));
+    h.connect("openai", &mock).await;
+
+    let (status, headers, body) = h
+        .post_headers("/v1/chat/completions", chat_with("hello"), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "served without cache"
+    );
+    assert!(headers.get("x-rrouter-cache").is_none());
+    assert_eq!(mock.hits(), 2, "the embedding was attempted, then the chat");
+}
+
+/// The default is off: no embedding call, no cache header.
+#[tokio::test]
+async fn the_semantic_cache_is_off_by_default() {
+    let mock = Mock::start(vec![openai_reply("plain")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (status, headers, body) = h
+        .post_headers("/v1/chat/completions", chat_with("hello"), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(headers.get("x-rrouter-cache").is_none());
+    assert_eq!(mock.paths(), vec!["/v1/chat/completions"]);
+}
+
+/// Semantic rows are tenant-scoped: two teams asking the identical question never share
+/// an entry, even when their embeddings are identical.
+#[tokio::test]
+async fn semantic_cache_rows_are_tenant_isolated() {
+    let mock = Mock::start(vec![
+        embedding_reply(&[1.0, 0.0, 0.0]),
+        openai_reply("team a answer"),
+        embedding_reply(&[1.0, 0.0, 0.0]),
+        openai_reply("team b answer"),
+    ])
+    .await;
+    let h = harness_with(semantic_config(0.9, "openai/text-embedding-3-small"));
+
+    let (status, core) = h.post("/api/teams", json!({"name": "Core"})).await;
+    assert_eq!(status, StatusCode::CREATED, "{core}");
+    let core = core["data"]["id"].as_str().expect("core id").to_string();
+    let (status, edge) = h.post("/api/teams", json!({"name": "Edge"})).await;
+    assert_eq!(status, StatusCode::CREATED, "{edge}");
+    let edge = edge["data"]["id"].as_str().expect("edge id").to_string();
+
+    h.connect_for_team("openai", &mock, uuid::Uuid::parse_str(&core).expect("uuid"))
+        .await;
+    h.connect_for_team("openai", &mock, uuid::Uuid::parse_str(&edge).expect("uuid"))
+        .await;
+
+    let (status, core_key) = h
+        .post("/api/keys", json!({"name": "core", "team_id": core}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{core_key}");
+    let core_key = core_key["key"].as_str().expect("key").to_string();
+    let (status, edge_key) = h
+        .post("/api/keys", json!({"name": "edge", "team_id": edge}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{edge_key}");
+    let edge_key = edge_key["key"].as_str().expect("key").to_string();
+
+    let core_auth = format!("Bearer {core_key}");
+    let (status, _, first) = h
+        .post_headers(
+            "/v1/chat/completions",
+            chat_with("hello"),
+            &[("authorization", &core_auth)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["choices"][0]["message"]["content"], "team a answer");
+
+    let edge_auth = format!("Bearer {edge_key}");
+    let (status, headers, second) = h
+        .post_headers(
+            "/v1/chat/completions",
+            chat_with("hello"),
+            &[("authorization", &edge_auth)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(
+        second["choices"][0]["message"]["content"], "team b answer",
+        "the other team's entry was not served"
+    );
+    assert!(headers.get("x-rrouter-cache").is_none());
 }

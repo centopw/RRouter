@@ -20,7 +20,16 @@ import { DataTable, type Column } from "../components/table";
 import { ModelPicker } from "../components/model-picker";
 import { Checkbox } from "../components/atoms";
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
-import { qk, useKeyModels, useKeys, useModels, useSystem, useUpdateKey, useUpdateKeyModels } from "../lib/queries";
+import {
+  qk,
+  useKeyModels,
+  useKeys,
+  useModels,
+  useSystem,
+  useTeams,
+  useUpdateKey,
+  useUpdateKeyModels,
+} from "../lib/queries";
 import {
   ApiError,
   api,
@@ -36,6 +45,12 @@ import {
 export default function Keys() {
   const keys = useKeys();
   const system = useSystem();
+  // Team names for the badge; the picker inside the dialogs reads the same list.
+  const teams = useTeams();
+  const teamName = (id: string | null | undefined) =>
+    id === null || id === undefined
+      ? null
+      : (teams.data?.find((team) => team.id === id)?.name ?? id.slice(0, 8));
   const client = useQueryClient();
   const [editing, setEditing] = useState<KeyResult | null>(null);
   const [creating, setCreating] = useState(false);
@@ -67,6 +82,22 @@ export default function Keys() {
           ) : null}
         </span>
       ),
+    },
+    {
+      key: "team",
+      title: "Team",
+      render: (r) => {
+        const name = teamName(r.team_id);
+        return name === null ? (
+          <span className="text-faint" title="not assigned to a team">
+            —
+          </span>
+        ) : (
+          <Badge tone="neutral" title="keys assigned to this team">
+            {name}
+          </Badge>
+        );
+      },
     },
     { key: "status", title: "Status", render: (r) => <Status row={r} /> },
     { key: "limits", title: "Limits", render: (r) => <Limits row={r} /> },
@@ -242,12 +273,20 @@ function Guarded({ guardrails }: { guardrails: Guardrails }) {
   const cap = guardrails.max_prompt_chars;
   // Defaults are dropped on the wire, so a policy that only caps prompts has no `blocked`.
   const blocked = guardrails.blocked ?? [];
-  if (cap === undefined && blocked.length === 0 && !guardrails.scan_output) return null;
+  if (
+    cap === undefined &&
+    blocked.length === 0 &&
+    !guardrails.scan_output &&
+    !guardrails.redact_pii
+  ) {
+    return null;
+  }
   const limits = [
     cap === undefined ? "prompt length: unlimited" : `prompt: at most ${compact(cap)} chars`,
     blocked.length === 0 ? "no blocked phrases" : `blocked: ${blocked.join(", ")}`,
     guardrails.scan_output ? "responses scanned too — a hit blocks the reply" : "prompts only",
-  ];
+    guardrails.redact_pii ? "PII redacted in prompts and response text, including streams" : null,
+  ].filter((line): line is string => line !== null);
   return (
     <Badge title={limits.join("\n")}>
       {blocked.length > 0 ? `${blocked.length} blocked` : "guarded"}
@@ -439,12 +478,15 @@ const SCOPES: ReadonlyArray<{ id: KeyScope; label: string }> = [
 function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [name, setName] = useState("");
   const [scope, setScope] = useState<KeyScope>("inference");
+  const [team, setTeam] = useState("");
+  const teams = useTeams();
   const [rpm, setRpm] = useState("");
   const [tpm, setTpm] = useState("");
   const [tokens, setTokens] = useState("");
   const [budget, setBudget] = useState("");
   const [reset, setReset] = useState<BudgetWindow>("total");
   const [models, setModels] = useState<string[]>([]);
+  const [redact, setRedact] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<unknown>(null);
   const [created, setCreated] = useState<NewKey | null>(null);
@@ -453,7 +495,10 @@ function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated
     setBusy(true);
     setFailure(null);
     try {
-      const key = await api.post<NewKey>("/api/keys", { name: name.trim() || null });
+      const key = await api.post<NewKey>("/api/keys", {
+        name: name.trim() || null,
+        team_id: team === "" ? null : team,
+      });
       const patch: UpdateKey = {
         scope,
         rpm: Number(rpm) || 0,
@@ -461,6 +506,9 @@ function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated
         budget_tokens: Number(tokens) || 0,
         budget_window: reset,
         allowed_models: models.length > 0 ? models : null,
+        // Guardrails are a separate policy document; a fresh key has none, so the toggle
+        // is applied with the same PATCH as the limits.
+        guardrails: redact ? { blocked: [], scan_output: false, redact_pii: true } : null,
       };
       const parsed = parseUsd(budget);
       if (!("problem" in parsed)) patch.budget_micros = parsed.micros;
@@ -525,6 +573,16 @@ function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated
             ariaLabel="key scope"
           />
         </Field>
+        <Field label="team" hint="instance-wide unless assigned; a team owns the key's spend report">
+          <Select value={team} onChange={setTeam} ariaLabel="key team">
+            <option value="">instance-wide</option>
+            {(teams.data ?? []).map((team) => (
+              <option key={team.id} value={team.id}>
+                {team.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="requests / min" hint="empty = unlimited">
             <Input type="number" value={rpm} onChange={setRpm} ariaLabel="requests per minute" />
@@ -552,6 +610,25 @@ function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated
           </Select>
         </Field>
         <ModelPicker selected={models} onChange={setModels} />
+
+        <div className="flex items-start gap-2 text-body text-fg">
+          <Checkbox
+            checked={redact}
+            disabled={busy}
+            ariaLabel="redact PII"
+            onChange={setRedact}
+            className="mt-0.5"
+          />
+          <span>
+            redact PII
+            <span className="mt-0.5 block text-caption text-faint">
+              masks email addresses, phone numbers, card numbers and credential-shaped strings
+              in prompts and in response text, streamed text included (rewritten with a bounded
+              carry). Tool-call argument deltas are not rewritten. Off by default; more
+              guardrails can be added after creation.
+            </span>
+          </span>
+        </div>
         {failure ? <ErrorNote error={failure} /> : null}
       </div>
     </Modal>
@@ -561,6 +638,8 @@ function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated
 function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void }) {
   const [active, setActive] = useState(row.is_active);
   const [scope, setScope] = useState<KeyScope>(row.scope);
+  const [team, setTeam] = useState(row.team_id ?? "");
+  const teams = useTeams();
   const [rpm, setRpm] = useState(row.rpm > 0 ? String(row.rpm) : "");
   const [tpm, setTpm] = useState(row.tpm > 0 ? String(row.tpm) : "");
   const [budget, setBudget] = useState(row.budget_tokens > 0 ? String(row.budget_tokens) : "");
@@ -574,6 +653,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
   );
   const [blocked, setBlocked] = useState<string[]>(row.guardrails?.blocked ?? []);
   const [scanOutput, setScanOutput] = useState(row.guardrails?.scan_output ?? false);
+  const [redact, setRedact] = useState(row.guardrails?.redact_pii ?? false);
   const [term, setTerm] = useState("");
   const [guardProblem, setGuardProblem] = useState<string | null>(null);
 
@@ -673,12 +753,13 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
     }
     setGuardProblem(null);
     const guardrails: Guardrails | null =
-      cap === undefined && blocked.length === 0 && !scanOutput
+      cap === undefined && blocked.length === 0 && !scanOutput && !redact
         ? null
         : {
             ...(cap === undefined ? {} : { max_prompt_chars: cap }),
             blocked,
             scan_output: scanOutput,
+            redact_pii: redact,
           };
     setFailure(null);
     setBusy(true);
@@ -693,6 +774,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
       allowed_models: allowed.length === 0 ? null : allowed,
       expires_at: fromDateInput(expires),
       guardrails,
+      team_id: team === "" ? null : team,
     };
     void (async () => {
       // Limits first, then the map: a failed PUT keeps the modal open with the error and
@@ -730,7 +812,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
           <Checkbox
             rootRef={first}
             checked={active}
-            aria-label="key active"
+            ariaLabel="key active"
             onChange={setActive}
           />
           active
@@ -821,6 +903,17 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
             <option value="daily">daily</option>
             <option value="weekly">weekly</option>
             <option value="monthly">monthly</option>
+          </Select>
+        </Field>
+
+        <Field label="team" hint="instance-wide unless assigned">
+          <Select value={team} onChange={setTeam} ariaLabel="key team" disabled={busy}>
+            <option value="">instance-wide</option>
+            {(teams.data ?? []).map((team) => (
+              <option key={team.id} value={team.id}>
+                {team.name}
+              </option>
+            ))}
           </Select>
         </Field>
 
@@ -1010,7 +1103,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
             <Checkbox
               checked={scanOutput}
               disabled={busy}
-              aria-label="scan responses"
+              ariaLabel="scan responses"
               onChange={setScanOutput}
               className="mt-0.5"
             />
@@ -1019,6 +1112,25 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
               <span className="mt-0.5 block text-caption text-faint">
                 a matching response is refused before it reaches the client, and a stream is
                 cut with an error instead of completing. Needs at least one blocked phrase.
+              </span>
+            </span>
+          </div>
+
+          <div className="flex items-start gap-2 text-body text-fg">
+            <Checkbox
+              checked={redact}
+              disabled={busy}
+              ariaLabel="redact PII"
+              onChange={setRedact}
+              className="mt-0.5"
+            />
+            <span>
+              redact PII
+              <span className="mt-0.5 block text-caption text-faint">
+                masks email addresses, phone numbers, card numbers and credential-shaped
+                strings in the prompt before it is sent and in response text before the client
+                reads it, streamed text included (rewritten with a bounded carry). Tool-call
+                argument deltas are not rewritten. Off by default.
               </span>
             </span>
           </div>

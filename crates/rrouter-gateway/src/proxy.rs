@@ -20,32 +20,79 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use rrouter_auth::{Credentials, ProviderSpec};
 use rrouter_core::{ChatRequest, ChatResponse, Dialect, Error, Part, Result, StreamEvent, Usage};
-use rrouter_router::{Candidate, Plan};
-use rrouter_store::{AttemptRecord, Guardrails, UsageRecord};
+use rrouter_router::{Candidate, Plan, PlanRequest, ProviderPolicy};
+use rrouter_store::{AttemptRecord, ConnectionScope, Guardrails, UsageRecord};
 use serde_json::Value;
 use tokio::sync::OwnedSemaphorePermit;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::config::CacheMode;
 use crate::error::{error_frame, error_response, not_implemented};
 use crate::metrics::Stage;
 use crate::overloaded_response;
-use crate::state::{check_prompt, dialect_of, prompt_text, AppState, Caller, Slot};
+use crate::state::{
+    check_prompt, dialect_of, prompt_text, AppState, Caller, RateLimits, Slot, WindowUsage,
+};
 
 /// Request body limit: a 100k-token request plus base64 images still fits.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// Upstream error bodies are truncated to this many bytes before being passed on.
 const MAX_ERROR_BODY: usize = 4096;
+
+/// Rows one semantic lookup compares. The scan is already scope-filtered in SQL; this
+/// bound keeps a pathological table from turning one request into a million cosine calls.
+const SEMANTIC_SCAN_LIMIT: usize = 512;
 /// Exact-match cache control: `hit`/`miss` on the response, and the client's `bypass`
 /// opt-out on the request.
 const CACHE_HEADER: &str = "x-rrouter-cache";
 
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 
+/// The request's provider policy: the body's `provider` object with the `x-rrouter-*`
+/// headers laid over it. `None` means the request expressed no preference.
+///
+/// Parsed once per request so a validation error is a `400` before any planning, and so
+/// the policy cannot disagree with the body field that will be stripped from the
+/// outbound request (the gateway consumes `provider`; a provider must not see it).
+fn provider_policy(body: &Value, headers: &HeaderMap) -> Result<Option<ProviderPolicy>> {
+    ProviderPolicy::from_request(body, |name| {
+        headers.get(name).and_then(|value| value.to_str().ok())
+    })
+}
+
+/// Admit a request, and record where the key stands whatever the answer.
+///
+/// A request refused by a rate limit still carries the headers: "remaining 0, reset in 1s"
+/// is the actionable form of the 429 the client is about to receive, and it is the same
+/// numbers the next successful response would report.
+async fn admit_or_explain(
+    state: &crate::state::AppState,
+    caller: &Caller,
+    model: &str,
+    trace: &RequestTrace,
+) -> Result<()> {
+    match state.admit(caller, model).await {
+        Ok(limits) => {
+            if let Some(limits) = limits {
+                trace.set_rate_limits(limits);
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if let Some(limits) = state.refused_limits(caller) {
+                trace.set_rate_limits(limits);
+            }
+            Err(err)
+        }
+    }
+}
+
 /// Entry point for `/v1/chat/completions`, `/v1/messages`, `/v1/responses`.
 pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let inbound = dialect_of(req.uri());
-    let trace = RequestTrace::new(Uuid::new_v4());
+    let (parts, body) = req.into_parts();
+    let trace = RequestTrace::new(Uuid::new_v4(), inbound, Some(&parts.headers));
     let started = Instant::now();
     // The slot is taken before the body is read: an overloaded gateway must not spend
     // memory buffering a request it has already decided to refuse.
@@ -53,7 +100,6 @@ pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response
         Slot::Granted(permit) => permit,
         Slot::Full => return trace.respond(started, overloaded_response(inbound)),
     };
-    let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
@@ -73,7 +119,9 @@ pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response
 
 /// `/v1/embeddings`: passthrough for [OI]-compatible providers, `501` otherwise.
 pub async fn embeddings(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    let trace = RequestTrace::new(Uuid::new_v4());
+    let inbound = dialect_of(req.uri());
+    let (parts, body) = req.into_parts();
+    let trace = RequestTrace::new(Uuid::new_v4(), inbound, Some(&parts.headers));
     let started = Instant::now();
     // Held for this whole scope: a non-streaming response releases it when it is built.
     let _permit = match state.try_slot() {
@@ -82,7 +130,6 @@ pub async fn embeddings(State(state): State<Arc<AppState>>, req: Request) -> Res
             return trace.respond(started, overloaded_response(Dialect::OpenAiEmbeddings))
         }
     };
-    let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
@@ -163,14 +210,14 @@ pub async fn compact(State(state): State<Arc<AppState>>, req: Request) -> Respon
 }
 
 async fn special(state: &Arc<AppState>, req: Request, kind: Special) -> Response {
-    let trace = RequestTrace::new(Uuid::new_v4());
+    let (parts, body) = req.into_parts();
+    let trace = RequestTrace::new(Uuid::new_v4(), kind.dialect(), Some(&parts.headers));
     let started = Instant::now();
     // Held for this whole scope: a non-streaming response releases it when it is built.
     let _permit = match state.try_slot() {
         Slot::Granted(permit) => permit,
         Slot::Full => return trace.respond(started, overloaded_response(kind.dialect())),
     };
-    let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
@@ -218,16 +265,26 @@ async fn special_inner(
         let canonical = rrouter_translate::parse_request(kind.dialect(), &body)?;
         check_prompt(&caller, &prompt_text(&canonical))?;
     }
-    state.admit(&caller, &model).await?;
+    admit_or_explain(state, &caller, &model, trace).await?;
+    let policy = provider_policy(&body, headers)?;
+    let config = state.config.load();
+    let canary_seed = canary_seed_for(trace, None);
     let plan = state
         .planner
         .plan(
             state.catalog.as_ref(),
             state.store.as_ref(),
-            &model,
-            false,
-            None,
-            state.config.strategy,
+            PlanRequest {
+                model: &model,
+                stream: false,
+                affinity: None,
+                strategy: config.strategy,
+                policy: policy.as_ref(),
+                allowed_models: caller.allowed_models(),
+                team_id: caller.team_id(),
+                canary: config.canary.as_ref(),
+                canary_seed,
+            },
         )
         .await?;
     // Fallback only makes sense between providers that have the endpoint; asking the
@@ -247,7 +304,9 @@ async fn special_inner(
     let outcome = state
         .dispatcher
         .run(&plan, |c| {
-            trace.time(state, c, |c| send_special(state, &body, kind, c))
+            trace.time(state, c, |c, trace| {
+                send_special(state, headers, &body, kind, c, trace)
+            })
         })
         .await?;
     let value = outcome.result?;
@@ -263,6 +322,7 @@ async fn special_inner(
                 usage,
                 key: caller.key_id(),
                 request_id: trace.request_id,
+                trace_id: trace.trace_id(),
                 started,
                 upstream_ms: 0,
                 ttft: None,
@@ -308,9 +368,11 @@ fn reported_usage(value: &Value) -> Option<Usage> {
 
 async fn send_special(
     state: &Arc<AppState>,
+    client: &HeaderMap,
     body: &Value,
     kind: Special,
     candidate: Candidate,
+    trace: std::sync::Arc<AttemptTrace>,
 ) -> Result<Value> {
     let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
         model: candidate.model.clone(),
@@ -328,12 +390,17 @@ async fn send_special(
         Some(base) => rewrite_base(&kind.url(native), base),
         None => kind.url(native),
     };
+    let url = rrouter_auth::with_query(&url, spec);
     let mut wire = body.clone();
     wire["model"] = Value::String(candidate.model.clone());
     let resp = state
         .http
         .post(&url)
-        .headers(request_headers(spec, &creds)?)
+        .headers({
+            let mut headers = outbound_headers(spec, &creds, Some(client))?;
+            inject_trace_headers(&mut headers, &trace);
+            headers
+        })
         .json(&wire)
         .timeout(state.request_timeout())
         .send()
@@ -420,13 +487,13 @@ pub async fn voices(State(state): State<Arc<AppState>>, req: Request) -> Respons
 }
 
 async fn passthrough(state: &Arc<AppState>, req: Request, kind: Pass) -> Response {
-    let trace = RequestTrace::new(Uuid::new_v4());
+    let (parts, body) = req.into_parts();
+    let trace = RequestTrace::new(Uuid::new_v4(), kind.dialect(), Some(&parts.headers));
     let started = Instant::now();
     let permit = match state.try_slot() {
         Slot::Granted(permit) => permit,
         Slot::Full => return trace.respond(started, overloaded_response(kind.dialect())),
     };
-    let (parts, body) = req.into_parts();
     let raw = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
@@ -483,11 +550,11 @@ async fn passthrough_inner(
     let caller = state.authenticate(headers).await?;
     trace.set_key(caller.key_id());
     match kind {
-        Pass::Voices => voices_inner(state, trace, &caller).await,
+        Pass::Voices => voices_inner(state, headers, trace, &caller).await,
         Pass::Transcriptions => transcriptions_inner(state, headers, raw, trace, &caller).await,
         Pass::Images | Pass::Speech => {
             let body: Value = serde_json::from_slice(raw)?;
-            let Some(plan) = json_plan(state, &body, kind, trace, &caller).await? else {
+            let Some(plan) = json_plan(state, headers, &body, kind, trace, &caller).await? else {
                 return Ok(not_implemented(kind.dialect(), kind.unsupported()));
             };
             let started = Instant::now();
@@ -495,7 +562,9 @@ async fn passthrough_inner(
                 let outcome = state
                     .dispatcher
                     .run(&plan, |c| {
-                        trace.time(state, c, |c| send_speech(state, &body, c))
+                        trace.time(state, c, |c, trace| {
+                            send_speech(state, headers, &body, c, trace)
+                        })
                     })
                     .await?;
                 let audio = outcome.result?;
@@ -515,7 +584,9 @@ async fn passthrough_inner(
             let outcome = state
                 .dispatcher
                 .run(&plan, |c| {
-                    trace.time(state, c, |c| send_json(state, &body, kind, c))
+                    trace.time(state, c, |c, trace| {
+                        send_json(state, headers, &body, kind, c, trace)
+                    })
                 })
                 .await?;
             let (status, value) = outcome.result?;
@@ -560,6 +631,7 @@ fn record_rtk(stats: &rrouter_rtk::Stats) {
 /// apply, and only providers that serve the endpoint stay in the plan.
 async fn json_plan(
     state: &Arc<AppState>,
+    headers: &HeaderMap,
     body: &Value,
     kind: Pass,
     trace: &RequestTrace,
@@ -572,16 +644,26 @@ async fn json_plan(
         .to_string();
     let model = state.mapped_model(caller.key_id(), &requested).await?;
     trace.set_model(&model);
-    state.admit(caller, &model).await?;
+    admit_or_explain(state, caller, &model, trace).await?;
+    let policy = provider_policy(body, headers)?;
+    let config = state.config.load();
+    let canary_seed = canary_seed_for(trace, None);
     let plan = state
         .planner
         .plan(
             state.catalog.as_ref(),
             state.store.as_ref(),
-            &model,
-            false,
-            None,
-            state.config.strategy,
+            PlanRequest {
+                model: &model,
+                stream: false,
+                affinity: None,
+                strategy: config.strategy,
+                policy: policy.as_ref(),
+                allowed_models: caller.allowed_models(),
+                team_id: caller.team_id(),
+                canary: config.canary.as_ref(),
+                canary_seed,
+            },
         )
         .await?;
     Ok(supported(plan, kind))
@@ -620,8 +702,10 @@ fn audio_response(audio: Audio) -> Response {
 /// Native URL (account override applied) and outbound headers for one passthrough attempt.
 async fn prepare_pass(
     state: &Arc<AppState>,
+    client: &HeaderMap,
     kind: Pass,
     candidate: &Candidate,
+    trace: &AttemptTrace,
 ) -> Result<(String, axum::http::HeaderMap)> {
     let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
         model: candidate.model.clone(),
@@ -639,17 +723,21 @@ async fn prepare_pass(
         Some(base) => rewrite_base(native, base),
         None => native.to_string(),
     };
-    Ok((url, request_headers(spec, &creds)?))
+    let mut headers = outbound_headers(spec, &creds, Some(client))?;
+    inject_trace_headers(&mut headers, trace);
+    Ok((rrouter_auth::with_query(&url, spec), headers))
 }
 
 /// One JSON passthrough attempt. The model is the provider's own bare id.
 async fn send_json(
     state: &Arc<AppState>,
+    client: &HeaderMap,
     body: &Value,
     kind: Pass,
     candidate: Candidate,
+    trace: std::sync::Arc<AttemptTrace>,
 ) -> Result<(StatusCode, Value)> {
-    let (url, headers) = prepare_pass(state, kind, &candidate).await?;
+    let (url, headers) = prepare_pass(state, client, kind, &candidate, &trace).await?;
     let mut wire = body.clone();
     wire["model"] = Value::String(candidate.model.clone());
     let resp = state
@@ -665,8 +753,14 @@ async fn send_json(
 }
 
 /// One speech attempt: headers are enough to commit, the body streams to the client.
-async fn send_speech(state: &Arc<AppState>, body: &Value, candidate: Candidate) -> Result<Audio> {
-    let (url, headers) = prepare_pass(state, Pass::Speech, &candidate).await?;
+async fn send_speech(
+    state: &Arc<AppState>,
+    client: &HeaderMap,
+    body: &Value,
+    candidate: Candidate,
+    trace: std::sync::Arc<AttemptTrace>,
+) -> Result<Audio> {
+    let (url, headers) = prepare_pass(state, client, Pass::Speech, &candidate, &trace).await?;
     let mut wire = body.clone();
     wire["model"] = Value::String(candidate.model.clone());
     let resp = state
@@ -694,11 +788,14 @@ async fn send_speech(state: &Arc<AppState>, body: &Value, candidate: Candidate) 
 /// raw bytes are forwarded: re-encoding the form would invalidate the boundary.
 async fn send_multipart(
     state: &Arc<AppState>,
+    client: &HeaderMap,
     raw: &[u8],
     content_type: &HeaderValue,
     candidate: Candidate,
+    trace: std::sync::Arc<AttemptTrace>,
 ) -> Result<(StatusCode, Value)> {
-    let (url, mut headers) = prepare_pass(state, Pass::Transcriptions, &candidate).await?;
+    let (url, mut headers) =
+        prepare_pass(state, client, Pass::Transcriptions, &candidate, &trace).await?;
     headers.insert(header::CONTENT_TYPE, content_type.clone());
     let resp = state
         .http
@@ -712,8 +809,13 @@ async fn send_multipart(
     read_json(&candidate, resp).await
 }
 
-async fn send_voices(state: &Arc<AppState>, candidate: Candidate) -> Result<(StatusCode, Value)> {
-    let (url, headers) = prepare_pass(state, Pass::Voices, &candidate).await?;
+async fn send_voices(
+    state: &Arc<AppState>,
+    client: &HeaderMap,
+    candidate: Candidate,
+    trace: std::sync::Arc<AttemptTrace>,
+) -> Result<(StatusCode, Value)> {
+    let (url, headers) = prepare_pass(state, client, Pass::Voices, &candidate, &trace).await?;
     let resp = state
         .http
         .get(&url)
@@ -761,16 +863,28 @@ async fn transcriptions_inner(
         Some(requested) => {
             let model = state.mapped_model(caller.key_id(), &requested).await?;
             trace.set_model(&model);
-            state.admit(caller, &model).await?;
+            admit_or_explain(state, caller, &model, trace).await?;
+            // A multipart body has no `provider` object; only the headers can carry
+            // routing preferences on this endpoint.
+            let policy = provider_policy(&Value::Null, headers)?;
+            let config = state.config.load();
+            let canary_seed = canary_seed_for(trace, None);
             state
                 .planner
                 .plan(
                     state.catalog.as_ref(),
                     state.store.as_ref(),
-                    &model,
-                    false,
-                    None,
-                    state.config.strategy,
+                    PlanRequest {
+                        model: &model,
+                        stream: false,
+                        affinity: None,
+                        strategy: config.strategy,
+                        policy: policy.as_ref(),
+                        allowed_models: caller.allowed_models(),
+                        team_id: caller.team_id(),
+                        canary: config.canary.as_ref(),
+                        canary_seed,
+                    },
                 )
                 .await?
         }
@@ -778,13 +892,15 @@ async fn transcriptions_inner(
             // No model in the form: the endpoint needs an account, not a model. The
             // allowlist is checked against the empty model, so a key restricted to
             // specific models is told to name one rather than bypassing its list.
-            let Some(candidate) = hint_candidate(state, Pass::Transcriptions).await? else {
+            let Some(candidate) =
+                hint_candidate(state, Pass::Transcriptions, caller.team_id()).await?
+            else {
                 return Err(Error::BadRequest(
                     "missing model and no connected provider serves /v1/audio/transcriptions"
                         .into(),
                 ));
             };
-            state.admit(caller, "").await?;
+            admit_or_explain(state, caller, "", trace).await?;
             Plan {
                 model: candidate.model.clone(),
                 candidates: vec![candidate],
@@ -803,7 +919,9 @@ async fn transcriptions_inner(
     let outcome = state
         .dispatcher
         .run(&plan, |c| {
-            trace.time(state, c, |c| send_multipart(state, raw, content_type, c))
+            trace.time(state, c, |c, trace| {
+                send_multipart(state, headers, raw, content_type, c, trace)
+            })
         })
         .await?;
     let (status, value) = outcome.result?;
@@ -822,16 +940,17 @@ async fn transcriptions_inner(
 
 async fn voices_inner(
     state: &Arc<AppState>,
+    client: &HeaderMap,
     trace: &RequestTrace,
     caller: &Caller,
 ) -> Result<Response> {
-    let Some(candidate) = hint_candidate(state, Pass::Voices).await? else {
+    let Some(candidate) = hint_candidate(state, Pass::Voices, caller.team_id()).await? else {
         return Ok(not_implemented(
             Pass::Voices.dialect(),
             Pass::Voices.unsupported(),
         ));
     };
-    state.admit(caller, "").await?;
+    admit_or_explain(state, caller, "", trace).await?;
     let plan = Plan {
         model: candidate.model.clone(),
         candidates: vec![candidate],
@@ -840,7 +959,9 @@ async fn voices_inner(
     let started = Instant::now();
     let outcome = state
         .dispatcher
-        .run(&plan, |c| trace.time(state, c, |c| send_voices(state, c)))
+        .run(&plan, |c| {
+            trace.time(state, c, |c, trace| send_voices(state, client, c, trace))
+        })
         .await?;
     let (status, value) = outcome.result?;
     record_passthrough(
@@ -857,9 +978,16 @@ async fn voices_inner(
 }
 
 /// First active connection whose provider serves `kind`: the account an endpoint with no
-/// model in its request has to borrow.
-async fn hint_candidate(state: &Arc<AppState>, kind: Pass) -> Result<Option<Candidate>> {
-    let connections = state.store.list_connections(None).await?;
+/// model in its request has to borrow. A team key borrows only its own team's account.
+async fn hint_candidate(
+    state: &Arc<AppState>,
+    kind: Pass,
+    team_id: Option<Uuid>,
+) -> Result<Option<Candidate>> {
+    let connections = state
+        .store
+        .list_connections_scoped(ConnectionScope::for_team(team_id), None)
+        .await?;
     Ok(connections
         .into_iter()
         .filter(|c| c.is_active)
@@ -934,6 +1062,7 @@ fn record_passthrough(
             usage,
             key,
             request_id: trace.request_id,
+            trace_id: trace.trace_id(),
             started,
             upstream_ms: trace.upstream_ms(),
             ttft: None,
@@ -958,6 +1087,9 @@ async fn handle(
     let caller = state.authenticate(headers).await?;
     trace.set_key(caller.key_id());
     let started = Instant::now();
+    // One snapshot for the whole request: planning, cache and usage bookkeeping below all
+    // read the same configuration even if a reload lands mid-request.
+    let config = state.config.load();
 
     let mut body: Value = serde_json::from_slice(raw)?;
     let mut canonical = rrouter_translate::parse_request(inbound, &body)?;
@@ -970,9 +1102,22 @@ async fn handle(
     // governance bookkeeping or dispatch: a refused prompt costs no provider call, no
     // rate-limit slot and no cache entry.
     check_prompt(&caller, &prompt_text(&canonical))?;
+    // PII redaction is an explicit per-key opt-in and runs after the guardrail decision
+    // (a blocked phrase inside an email must still block) and before planning, the cache
+    // key and dispatch. The wire body is redacted, so same-dialect forwarding is covered
+    // too, then the canonical request is refreshed from it.
+    let redact_pii = caller.guardrails().is_some_and(|policy| policy.redact_pii);
+    if redact_pii {
+        let report = crate::redaction::redact_json_body(&mut body);
+        if report.redacted {
+            crate::metrics::pii_redacted(crate::metrics::RedactStage::Input, &report);
+            tracing::debug!(stage = "input", %report, "pii redacted");
+            canonical = rrouter_translate::parse_request(inbound, &body)?;
+        }
+    }
     // Governance runs before planning: an inactive/expired key, a model outside the
     // allowlist, or an exhausted quota must not reach a provider.
-    state.admit(&caller, &model).await?;
+    admit_or_explain(state, &caller, &model, trace).await?;
     // Token Saver runs on the wire body after guardrails: same-dialect forwarding sends
     // this body unchanged, and the canonical parse is refreshed from the compressed text.
     if rtk_enabled(headers) {
@@ -982,15 +1127,27 @@ async fn handle(
         }
     }
     let key_id = caller.key_id();
+    // Routing preferences are read after authentication and after the wire body settled
+    // (Token Saver may have rewritten it), so the policy and the stripped body agree.
+    let policy = provider_policy(&body, headers)?;
+    let affinity = affinity_of(&canonical);
+    let canary_seed = canary_seed_for(trace, Some(affinity));
     let plan = state
         .planner
         .plan(
             state.catalog.as_ref(),
             state.store.as_ref(),
-            &model,
-            canonical.stream,
-            Some(affinity_of(&canonical)),
-            state.config.strategy,
+            PlanRequest {
+                model: &model,
+                stream: canonical.stream,
+                affinity: Some(affinity),
+                strategy: config.strategy,
+                policy: policy.as_ref(),
+                allowed_models: caller.allowed_models(),
+                team_id: caller.team_id(),
+                canary: config.canary.as_ref(),
+                canary_seed,
+            },
         )
         .await?;
     let client_stream = plan.stream || canonical.stream;
@@ -1005,15 +1162,18 @@ async fn handle(
         raw: &body,
         upstream_stream,
         trace,
+        strip_provider: policy.is_some(),
+        client_headers: Some(headers),
+        redact_pii,
     };
 
     // Cache eligibility is decided once, before anything is sent: a non-streaming
-    // client (a stream has no body to store), an enabled backend, no explicit bypass,
-    // and a candidate to key the exact upstream body against.
-    let cache = if state.config.cache == CacheMode::Sqlite
-        && !client_stream
-        && !cache_bypassed(headers)
-        && !plan.candidates.is_empty()
+    // client (a stream has no body to store), no explicit bypass, and a candidate to
+    // key the canonical upstream body against. The exact cache and its semantic
+    // fallback share this key; the semantic cache additionally needs an embedding model.
+    let caching = !client_stream && !cache_bypassed(headers) && !plan.candidates.is_empty();
+    let cache_key = if caching
+        && (config.cache == CacheMode::Sqlite || config.semantic_cache == CacheMode::Sqlite)
     {
         match attempt.cache_key(&plan.candidates[0]) {
             Ok(key) => Some(key),
@@ -1025,52 +1185,106 @@ async fn handle(
     } else {
         None
     };
+    let cache = if config.cache == CacheMode::Sqlite {
+        cache_key.clone()
+    } else {
+        None
+    };
 
+    // Exact entries always win: a byte-identical request never pays for an embedding.
     if let Some(key) = &cache {
         match state.store.cache_get(&key.hash, crate::now_unix()).await {
             Ok(Some(body)) => {
-                // A stored body is client-facing JSON: the text view for this path is
-                // the serialized response, so a response cached before this key's policy
-                // existed (or by another key) is still refused here rather than served.
-                if let Some(policy) = caller.output_guardrails() {
-                    guard_output(
-                        state,
-                        policy,
-                        &body,
-                        Recorded {
-                            candidate: &plan.candidates[0],
-                            model: &plan.model,
-                            endpoint: endpoint_of(inbound),
-                            usage: Usage::default(),
-                            key: key_id,
-                            request_id: trace.request_id,
-                            started,
-                            upstream_ms: 0,
-                            ttft: None,
-                            streamed: false,
-                            status: 200,
-                            error: None,
-                        },
-                    )?;
-                }
-                crate::metrics::cache_hit();
-                trace.set_provider(&plan.candidates[0].provider);
-                record_cache_hit(
+                return serve_cache_hit(
                     state,
+                    &caller,
                     &plan.candidates[0],
                     &plan.model,
                     inbound,
                     key_id,
                     trace,
                     started,
-                );
-                return Ok(cached_response(body));
+                    body,
+                    "hit",
+                    redact_pii,
+                )
+                .await;
             }
             Ok(None) => crate::metrics::cache_miss(),
             // A cache is an optimisation: a store failure must never fail the request.
             Err(e) => {
                 tracing::warn!(error = %e, "response cache read failed");
                 crate::metrics::cache_miss();
+            }
+        }
+    }
+
+    // Semantic fallback, only after an exact miss. Every failure here is a miss, never a
+    // request failure: the embedding provider being down must not take the gateway down
+    // with it. The embedding is kept for the store step so a miss costs one call, not two.
+    let mut semantic_embedding: Option<Vec<f32>> = None;
+    if let (Some(key), Some(embedding_model), CacheMode::Sqlite) = (
+        &cache_key,
+        config.semantic_embedding_model.as_deref(),
+        config.semantic_cache,
+    ) {
+        let prompt = crate::semantic::canonical_prompt(&attempt.canonical);
+        match embed_text(state, caller.team_id(), embedding_model, &prompt).await {
+            Ok(vector) => {
+                let scope = rrouter_store::SemanticCacheScope {
+                    embedding_model,
+                    provider: &key.provider,
+                    model: &key.model,
+                    team_id: caller.team_id(),
+                };
+                match state
+                    .store
+                    .semantic_cache_scan(&scope, crate::now_unix(), SEMANTIC_SCAN_LIMIT)
+                    .await
+                {
+                    Ok(candidates) => {
+                        let mut best: Option<(f32, i64, String)> = None;
+                        for candidate in candidates {
+                            let stored = crate::semantic::decode_embedding(&candidate.embedding);
+                            let score = crate::semantic::cosine(&vector, &stored);
+                            if score >= config.semantic_cache_threshold as f32
+                                && best.as_ref().is_none_or(|(seen, _, _)| score > *seen)
+                            {
+                                best = Some((score, candidate.id, candidate.body));
+                            }
+                        }
+                        if let Some((_score, id, body)) = best {
+                            // Best effort: a lost hit counter must not fail the response.
+                            if let Err(e) = state.store.semantic_cache_hit(id).await {
+                                tracing::warn!(error = %e, "semantic cache hit counter failed");
+                            }
+                            return serve_cache_hit(
+                                state,
+                                &caller,
+                                &plan.candidates[0],
+                                &plan.model,
+                                inbound,
+                                key_id,
+                                trace,
+                                started,
+                                body,
+                                "semantic-hit",
+                                redact_pii,
+                            )
+                            .await;
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "semantic cache read failed"),
+                }
+                semantic_embedding = Some(vector);
+            }
+            Err(e) => {
+                // The prompt is never part of this line: only the failure class, which is
+                // all an operator needs to know the cache is degraded.
+                tracing::warn!(
+                    status = e.status(),
+                    "semantic cache embedding failed; serving without it"
+                );
             }
         }
     }
@@ -1087,7 +1301,7 @@ async fn handle(
                 upstream: attempt.route_dialect(&candidate),
                 client_model: candidate.model.clone(),
             };
-            let assembled = reassemble(&open, bytes).await?;
+            let mut assembled = reassemble(&open, bytes).await?;
             let recorded = Recorded {
                 candidate: &candidate,
                 model: &plan.model,
@@ -1095,6 +1309,7 @@ async fn handle(
                 usage: assembled.usage,
                 key: key_id,
                 request_id: trace.request_id,
+                trace_id: trace.trace_id(),
                 started,
                 upstream_ms: trace.upstream_ms(),
                 ttft: None,
@@ -1107,21 +1322,42 @@ async fn handle(
             if let Some(policy) = caller.output_guardrails() {
                 guard_output(state, policy, &response_text(&assembled), recorded)?;
             }
+            // Redaction happens after the guardrail decision (which must see the original
+            // text) and before the response is built, cached or returned.
+            if redact_pii {
+                let report = crate::redaction::redact_chat_response(&mut assembled);
+                if report.redacted {
+                    crate::metrics::pii_redacted(crate::metrics::RedactStage::Output, &report);
+                    tracing::debug!(stage = "output", %report, "pii redacted");
+                }
+            }
             record_once(state, recorded);
             (
                 candidate,
                 rrouter_translate::build_response(inbound, &assembled)?,
             )
         } else {
-            let (candidate, resp) = complete_traced(
+            let (candidate, mut resp) = complete_traced(
                 state,
                 inbound,
                 &body,
                 key_id,
                 caller.output_guardrails(),
+                Some(headers),
+                policy.as_ref(),
+                caller.allowed_models(),
+                caller.team_id(),
                 trace,
+                redact_pii,
             )
             .await?;
+            if redact_pii {
+                let report = crate::redaction::redact_chat_response(&mut resp);
+                if report.redacted {
+                    crate::metrics::pii_redacted(crate::metrics::RedactStage::Output, &report);
+                    tracing::debug!(stage = "output", %report, "pii redacted");
+                }
+            }
             (
                 candidate,
                 rrouter_translate::build_response(inbound, &resp)?,
@@ -1136,19 +1372,49 @@ async fn handle(
             // or a provider that speaks another dialect, is a different request.
             if served.model == key.model && attempt.route_dialect(&served) == key.dialect {
                 let now = crate::now_unix();
-                let expires_at = now.saturating_add(state.config.cache_ttl_secs as i64);
+                let expires_at = now.saturating_add(config.cache_ttl_secs as i64);
                 if let Err(e) = state
                     .store
-                    .cache_put(
-                        &key.hash,
-                        &text,
-                        now,
-                        expires_at,
-                        state.config.cache_max_entries,
-                    )
+                    .cache_put(&key.hash, &text, now, expires_at, config.cache_max_entries)
                     .await
                 {
                     tracing::warn!(error = %e, "response cache write failed");
+                }
+            }
+        }
+        // Semantic write: only when this request paid for an embedding (a miss), and only
+        // for the provider the scope was computed from. A fallback to another provider is
+        // not stored — a later request looks in the first provider's scope and would
+        // never find it.
+        if let (Some(key), Some(vector), Some(embedding_model)) = (
+            &cache_key,
+            semantic_embedding.as_ref(),
+            config.semantic_embedding_model.as_deref(),
+        ) {
+            if config.semantic_cache == CacheMode::Sqlite
+                && served.provider == key.provider
+                && served.model == key.model
+                && attempt.route_dialect(&served) == key.dialect
+            {
+                let prompt = crate::semantic::canonical_prompt(&attempt.canonical);
+                let now = crate::now_unix();
+                let entry = rrouter_store::SemanticCacheEntry {
+                    prompt_hash: crate::semantic::prompt_hash(&prompt),
+                    embedding_model: embedding_model.to_string(),
+                    provider: served.provider.clone(),
+                    model: served.model.clone(),
+                    team_id: caller.team_id(),
+                    embedding: crate::semantic::encode_embedding(vector),
+                    body: text.clone(),
+                    created_at: now,
+                    expires_at: now.saturating_add(config.semantic_cache_ttl_secs as i64),
+                };
+                if let Err(e) = state
+                    .store
+                    .semantic_cache_put(&entry, config.semantic_cache_max_entries)
+                    .await
+                {
+                    tracing::warn!(error = %e, "semantic cache write failed");
                 }
             }
         }
@@ -1179,6 +1445,7 @@ async fn handle(
             upstream_ms: trace.upstream_ms(),
             key: key_id,
             request_id: trace.request_id,
+            trace_id: trace.trace_id().to_string(),
             // The slot belongs to the stream, not to this handler: it is released when
             // the body ends or the client disconnects, whichever comes first.
             _permit: permit,
@@ -1186,6 +1453,7 @@ async fn handle(
         open,
         bytes,
         caller.output_guardrails().cloned(),
+        redact_pii,
     ))
 }
 
@@ -1213,10 +1481,33 @@ pub async fn complete_for(
     // A probe is still a request: it gets its own id, its attempt rows and its usage
     // row, so nothing it does is invisible in the log. It carries no key's policy: the
     // probe is the operator's own traffic, not a team's.
-    let trace = RequestTrace::new(Uuid::new_v4());
-    complete_traced(state, inbound, body, key, None, &trace)
-        .await
-        .map(|(_, resp)| resp)
+    let trace = RequestTrace::new(Uuid::new_v4(), inbound, None);
+    // No inbound request means no client headers and no header-form policy; a `provider`
+    // object in the probe's own body is still honoured. There is no allowlist either: a
+    // probe is the operator's own traffic, not a key's, so no key's model policy applies
+    // to it (the admin gate already decided the caller may probe at all).
+    let policy = ProviderPolicy::from_body(body)?;
+    // A probe runs with no key and therefore instance-wide; a keyed completion is routed
+    // inside that key's team, exactly as the proxy path is.
+    let team_id = match key {
+        Some(id) => state.store.key_team(id).await?,
+        None => None,
+    };
+    complete_traced(
+        state,
+        inbound,
+        body,
+        key,
+        None,
+        None,
+        policy.as_ref(),
+        None,
+        team_id,
+        &trace,
+        false,
+    )
+    .await
+    .map(|(_, resp)| resp)
 }
 
 /// Both the candidate that answered and its canonical response. The candidate is what
@@ -1224,29 +1515,58 @@ pub async fn complete_for(
 ///
 /// `guardrails` is the paying key's output policy: scanning happens here, before the
 /// usage row is written, so a refusal is one `403` row and never a `200` that the
-/// client did not receive.
+/// client did not receive. `client` is the inbound request's headers (`None` for the
+/// admin probe, which has no client), and `policy` is the routing policy the caller
+/// already parsed from the body plus `x-rrouter-*` headers — parsed once, so the
+/// non-streaming path cannot disagree with the planner's inputs.
+///
+/// `allowed_models` is the paying key's model allowlist. It is a required input here,
+/// not an optional extra: this function builds the plan that actually dispatches on the
+/// non-streaming path, so planning without it would let a provider-scoped allowlist be
+/// bypassed by exactly the requests it exists to constrain (a lower-priority or
+/// differently-spelled provider serving the same model id).
+///
+/// `redact_pii` is the key's redaction opt-in, kept separate from `guardrails`: a key can
+/// opt into redaction without opting into output scanning, and the upstream error path
+/// needs it even when no output policy exists.
+#[allow(clippy::too_many_arguments)]
 async fn complete_traced(
     state: &Arc<AppState>,
     inbound: Dialect,
     body: &Value,
     key: Option<Uuid>,
     guardrails: Option<&Guardrails>,
+    client: Option<&HeaderMap>,
+    policy: Option<&ProviderPolicy>,
+    allowed_models: Option<&[String]>,
+    team_id: Option<Uuid>,
     trace: &RequestTrace,
+    redact_pii: bool,
 ) -> Result<(Candidate, rrouter_core::ChatResponse)> {
     trace.set_key(key);
     let started = Instant::now();
     let canonical = rrouter_translate::parse_request(inbound, body)?;
     let model = state.mapped_model(key, &canonical.model).await?;
     trace.set_model(&model);
+    let config = state.config.load();
+    let affinity = affinity_of(&canonical);
+    let canary_seed = canary_seed_for(trace, Some(affinity));
     let plan = state
         .planner
         .plan(
             state.catalog.as_ref(),
             state.store.as_ref(),
-            &model,
-            canonical.stream,
-            Some(affinity_of(&canonical)),
-            state.config.strategy,
+            PlanRequest {
+                model: &model,
+                stream: canonical.stream,
+                affinity: Some(affinity),
+                strategy: config.strategy,
+                policy,
+                allowed_models,
+                team_id,
+                canary: config.canary.as_ref(),
+                canary_seed,
+            },
         )
         .await?;
     let upstream_stream =
@@ -1258,6 +1578,9 @@ async fn complete_traced(
         raw: body,
         upstream_stream,
         trace,
+        strip_provider: policy.is_some(),
+        client_headers: client,
+        redact_pii,
     };
 
     if !upstream_stream {
@@ -1274,6 +1597,7 @@ async fn complete_traced(
             usage: resp.usage,
             key,
             request_id: trace.request_id,
+            trace_id: trace.trace_id(),
             started,
             upstream_ms: trace.upstream_ms(),
             ttft: None,
@@ -1304,6 +1628,7 @@ async fn complete_traced(
         usage: assembled.usage,
         key,
         request_id: trace.request_id,
+        trace_id: trace.trace_id(),
         started,
         upstream_ms: trace.upstream_ms(),
         ttft: None,
@@ -1477,11 +1802,24 @@ fn drop_unsupported_sampling(provider: &str, body: &mut Value) {
 ///
 /// Only what the provider itself demands is changed: the resolved model id, streaming,
 /// `store:false` for Codex, and a bare-string `input` expanded into a message list.
-fn same_dialect_body(dialect: Dialect, raw: &Value, model: &str, stream: bool) -> Value {
+///
+/// `strip_provider` removes a client `provider` object the gateway already interpreted:
+/// routing preferences are RRouter's to honour, and forwarding them to a single upstream
+/// only invites a strict schema to reject the whole request.
+fn same_dialect_body(
+    dialect: Dialect,
+    raw: &Value,
+    model: &str,
+    stream: bool,
+    strip_provider: bool,
+) -> Value {
     let mut out = raw.clone();
     let Some(obj) = out.as_object_mut() else {
         return out;
     };
+    if strip_provider {
+        obj.remove("provider");
+    }
     obj.insert("model".into(), Value::String(model.to_string()));
     match dialect {
         Dialect::OpenAiResponses => {
@@ -1558,7 +1896,9 @@ fn endpoint(
         Some(base) => rewrite_base(native, base),
         None => native.to_string(),
     };
-    (url, dialect)
+    // Manifest-declared query parameters (`api-version` and friends). A parameter the
+    // connection's own URL already sets wins, which is how a tenant pins a version.
+    (rrouter_auth::with_query(&url, spec), dialect)
 }
 
 /// Keep the native endpoint's path but move it to the override's origin, so tests and
@@ -1575,10 +1915,25 @@ fn rewrite_base(native: &str, override_base: &str) -> String {
     out.to_string()
 }
 
-/// A body the provider can take unmodified because it already speaks that dialect.
-fn request_headers(spec: &ProviderSpec, creds: &Credentials) -> Result<axum::http::HeaderMap> {
+/// Outbound headers for one upstream call: the provider's auth and static headers, plus
+/// the client's own protocol headers that this provider declares it understands.
+///
+/// `client` is the inbound request's header map. Only names in
+/// [`ProviderSpec::passthrough_headers`] are read at all (`anthropic-beta` for the
+/// Claude/Anthropic surface, `openai-beta` for OpenAI's), so a client's `authorization`,
+/// `x-api-key`, `cookie` or `host` can never reach a provider. A header the gateway
+/// already set is unioned, never replaced, so neither side's beta flags are lost.
+fn outbound_headers(
+    spec: &ProviderSpec,
+    creds: &Credentials,
+    client: Option<&axum::http::HeaderMap>,
+) -> Result<axum::http::HeaderMap> {
+    let mut pairs = rrouter_auth::build_headers(spec, creds)?;
+    if let Some(client) = client {
+        rrouter_auth::merge_client_headers(spec, &mut pairs, client);
+    }
     let mut headers = axum::http::HeaderMap::new();
-    for (name, value) in rrouter_auth::build_headers(spec, creds)? {
+    for (name, value) in pairs {
         if let (Ok(name), Ok(value)) = (
             header::HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(&value),
@@ -1590,6 +1945,12 @@ fn request_headers(spec: &ProviderSpec, creds: &Credentials) -> Result<axum::htt
         .entry(header::CONTENT_TYPE)
         .or_insert(HeaderValue::from_static("application/json"));
     Ok(headers)
+}
+
+/// Provider headers with nothing of the client's added, for calls that have no inbound
+/// request (the admin probe).
+fn request_headers(spec: &ProviderSpec, creds: &Credentials) -> Result<axum::http::HeaderMap> {
+    outbound_headers(spec, creds, None)
 }
 
 fn transport_error(e: reqwest::Error) -> Error {
@@ -1631,9 +1992,12 @@ fn stream_only(candidate: &Candidate) -> bool {
 /// One cache lookup: the hashed key plus the exact model id and wire dialect it was
 /// built from. A response may only be stored under it when the candidate that answered
 /// matches both, so a fallback to a different model never poisons the entry.
+#[derive(Debug, Clone)]
 struct CacheKey {
     hash: String,
     model: String,
+    /// Provider the plan would call first: the semantic cache scope dimension.
+    provider: String,
     dialect: Dialect,
 }
 
@@ -1696,11 +2060,72 @@ fn insert_cache_header(resp: &mut Response, state: &'static str) {
 }
 
 /// A stored response: same JSON body the original client received, plus the header
-/// that tells this client it came from the cache.
-fn cached_response(body: String) -> Response {
+/// that tells this client it came from the cache (`hit` or `semantic-hit`).
+fn cached_response(body: String, label: &'static str) -> Response {
     let mut resp = json_text_response(body);
-    insert_cache_header(&mut resp, "hit");
+    insert_cache_header(&mut resp, label);
     resp
+}
+
+/// Serve one cache hit — exact or semantic — through the same policy path a fresh
+/// response takes.
+///
+/// A stored body is client-facing JSON, so it is still subject to this key's output
+/// guardrails (a guardrail added after the row was written must not be bypassed) and to
+/// on-the-way-out redaction. The usage row is a zero-token cache-hit row: the upstream
+/// was not called for this request.
+#[allow(clippy::too_many_arguments)]
+async fn serve_cache_hit(
+    state: &Arc<AppState>,
+    caller: &Caller,
+    candidate: &Candidate,
+    model: &str,
+    inbound: Dialect,
+    key_id: Option<Uuid>,
+    trace: &RequestTrace,
+    started: Instant,
+    body: String,
+    label: &'static str,
+    redact_pii: bool,
+) -> Result<Response> {
+    if let Some(policy) = caller.output_guardrails() {
+        guard_output(
+            state,
+            policy,
+            &body,
+            Recorded {
+                candidate,
+                model,
+                endpoint: endpoint_of(inbound),
+                usage: Usage::default(),
+                key: key_id,
+                request_id: trace.request_id,
+                trace_id: trace.trace_id(),
+                started,
+                upstream_ms: 0,
+                ttft: None,
+                streamed: false,
+                status: 200,
+                error: None,
+            },
+        )?;
+    }
+    crate::metrics::cache_hit();
+    trace.set_provider(&candidate.provider);
+    record_cache_hit(state, candidate, model, inbound, key_id, trace, started);
+    // A cached body may have been written by a key without redaction (or before this
+    // policy existed): re-redact on the way out. Idempotent.
+    let body = if redact_pii {
+        let (redacted, report) = crate::redaction::redact(&body);
+        if report.redacted {
+            crate::metrics::pii_redacted(crate::metrics::RedactStage::Output, &report);
+            tracing::debug!(stage = "output", %report, "pii redacted from cache");
+        }
+        redacted.into_owned()
+    } else {
+        body
+    };
+    Ok(cached_response(body, label))
 }
 
 /// One usage row for a cache hit: the request happened and is joinable to the activity
@@ -1723,6 +2148,7 @@ fn record_cache_hit(
             id: None,
             ts: crate::now_unix(),
             request_id: Some(trace.request_id),
+            trace_id: Some(trace.trace_id().to_string()),
             provider: candidate.provider.clone(),
             model: model.to_string(),
             connection_id: Some(candidate.connection),
@@ -1776,9 +2202,36 @@ struct Attempt<'a> {
     upstream_stream: bool,
     /// Request id and attempt counter shared by every attempt of this request.
     trace: &'a RequestTrace,
+    /// The body carried a `provider` object that the gateway consumed as routing policy:
+    /// strip it before the body reaches an upstream, which has no use for it and may
+    /// reject the field outright.
+    strip_provider: bool,
+    /// The client's inbound headers, for the protocol headers a provider opts into
+    /// forwarding (see [`outbound_headers`]). `None` for the admin probe, which has no
+    /// client.
+    client_headers: Option<&'a axum::http::HeaderMap>,
+    /// The paying key opted into PII redaction: provider error text is redacted before it
+    /// is stored or returned, because an upstream error can echo the prompt.
+    redact_pii: bool,
 }
 
 impl Attempt<'_> {
+    /// Wrap an upstream failure, redacting the text first when the key opted in: a
+    /// provider error often echoes part of the prompt, and this string is both stored on
+    /// the usage row and returned to the client.
+    fn upstream_error(&self, candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
+        if self.redact_pii {
+            let text = String::from_utf8_lossy(bytes);
+            let (redacted, report) = crate::redaction::redact(&text);
+            if report.redacted {
+                crate::metrics::pii_redacted(crate::metrics::RedactStage::Output, &report);
+                let redacted = Bytes::from(redacted.into_owned());
+                return upstream_error(candidate, status, &redacted);
+            }
+        }
+        upstream_error(candidate, status, bytes)
+    }
+
     fn provider(&self, candidate: &Candidate) -> Result<&'static ProviderSpec> {
         rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
             model: candidate.model.clone(),
@@ -1798,15 +2251,22 @@ impl Attempt<'_> {
     /// concurrent attempts all see the client's original values.
     fn outbound(&self, candidate: &Candidate, dialect: Dialect) -> Result<Value> {
         let mut body = if dialect == self.inbound {
-            same_dialect_body(dialect, self.raw, &candidate.model, self.upstream_stream)
+            same_dialect_body(
+                dialect,
+                self.raw,
+                &candidate.model,
+                self.upstream_stream,
+                self.strip_provider,
+            )
         } else {
             let mut request = self.canonical.clone();
             request.model = candidate.model.clone();
-            // Unknown inbound fields travel with the same-dialect hint only, and the
-            // canonical request already carries them with that hint. Replacing `extra`
-            // with the raw client body re-inserted fields the translator had rewritten:
-            // a string `input` overwrote the translated list ("Input must be a list").
-            rrouter_translate::build_request(dialect, &request, self.upstream_stream)?
+            // The provider, not the canonical model, decides how the output cap is
+            // spelled (`max_tokens` vs `max_completion_tokens`) and what to send when the
+            // client named none. `cache_key` goes through this same call, so a cached
+            // entry always matches the bytes this attempt would send.
+            let wire = self.provider(candidate)?.wire_profile();
+            rrouter_translate::build_request_with(dialect, &request, self.upstream_stream, &wire)?
         };
         drop_unsupported_sampling(&candidate.provider, &mut body);
         Ok(body)
@@ -1835,6 +2295,7 @@ impl Attempt<'_> {
         Ok(CacheKey {
             hash: rrouter_store::cache_key(&canonical),
             model: candidate.model.clone(),
+            provider: candidate.provider.clone(),
             dialect,
         })
     }
@@ -1842,6 +2303,7 @@ impl Attempt<'_> {
     async fn prepare(
         &self,
         candidate: &Candidate,
+        trace: &AttemptTrace,
     ) -> Result<(String, Dialect, axum::http::HeaderMap)> {
         let spec = self.provider(candidate)?;
         let creds = self
@@ -1850,18 +2312,26 @@ impl Attempt<'_> {
             .fresh(self.state.store.as_ref(), spec, candidate.connection)
             .await?;
         let (url, dialect) = endpoint(spec, creds.base_url_override.as_deref(), self.inbound);
-        Ok((url, dialect, request_headers(spec, &creds)?))
+        let mut headers = outbound_headers(spec, &creds, self.client_headers)?;
+        inject_trace_headers(&mut headers, trace);
+        Ok((url, dialect, headers))
     }
 
     /// Non-streaming attempt.
     async fn send_once(&self, candidate: Candidate) -> Result<ChatResponse> {
         self.trace
-            .time(self.state, candidate, |c| self.send_once_inner(c))
+            .time(self.state, candidate, |c, trace| {
+                self.send_once_inner(c, trace)
+            })
             .await
     }
 
-    async fn send_once_inner(&self, candidate: Candidate) -> Result<ChatResponse> {
-        let (url, dialect, headers) = self.prepare(&candidate).await?;
+    async fn send_once_inner(
+        &self,
+        candidate: Candidate,
+        trace: std::sync::Arc<AttemptTrace>,
+    ) -> Result<ChatResponse> {
+        let (url, dialect, headers) = self.prepare(&candidate, &trace).await?;
         let wire = self.outbound(&candidate, dialect)?;
         let sent = Instant::now();
         let resp = self
@@ -1878,7 +2348,7 @@ impl Attempt<'_> {
         let status = resp.status();
         if !status.is_success() {
             let bytes = resp.bytes().await.map_err(transport_error)?;
-            return Err(upstream_error(&candidate, status.as_u16(), &bytes));
+            return Err(self.upstream_error(&candidate, status.as_u16(), &bytes));
         }
         let bytes = resp.bytes().await.map_err(transport_error)?;
         let value: Value = serde_json::from_slice(&bytes)?;
@@ -1889,12 +2359,18 @@ impl Attempt<'_> {
     /// dispatcher can still fall back to the next candidate.
     async fn open_stream(&self, candidate: Candidate) -> Result<ByteStream> {
         self.trace
-            .time(self.state, candidate, |c| self.open_stream_inner(c))
+            .time(self.state, candidate, |c, trace| {
+                self.open_stream_inner(c, trace)
+            })
             .await
     }
 
-    async fn open_stream_inner(&self, candidate: Candidate) -> Result<ByteStream> {
-        let (url, dialect, headers) = self.prepare(&candidate).await?;
+    async fn open_stream_inner(
+        &self,
+        candidate: Candidate,
+        trace: std::sync::Arc<AttemptTrace>,
+    ) -> Result<ByteStream> {
+        let (url, dialect, headers) = self.prepare(&candidate, &trace).await?;
         let wire = self.outbound(&candidate, dialect)?;
         let sent = Instant::now();
         let resp = self
@@ -1911,7 +2387,7 @@ impl Attempt<'_> {
         let status = resp.status();
         if !status.is_success() {
             let bytes = resp.bytes().await.map_err(transport_error)?;
-            return Err(upstream_error(&candidate, status.as_u16(), &bytes));
+            return Err(self.upstream_error(&candidate, status.as_u16(), &bytes));
         }
         // Some OpenAI-compatible providers ignore `stream: true` and answer with one JSON
         // body. Forwarding those bytes to the SSE decoder produces an empty, successful
@@ -1968,14 +2444,98 @@ fn json_chat_as_sse(body: &Value, model: &str) -> Bytes {
     Bytes::from(frames)
 }
 
+/// Stable canary seed for one request: the conversation's affinity when the caller has
+/// one (a chat turn keeps its side of an A/B), otherwise a hash of the request id, which
+/// is fixed for the life of the request.
+fn canary_seed_for(trace: &RequestTrace, affinity: Option<u64>) -> u64 {
+    affinity.unwrap_or_else(|| rrouter_router::canary_seed(trace.request_id.as_bytes()))
+}
+
+/// Records an attempt that was cancelled before it produced a verdict.
+///
+/// Dropped when the send future is dropped — a hedged loser, or a client disconnect
+/// during the headers phase. Status `499` means "sent, no verdict"; the number and start
+/// time are the ones the attempt was dispatched with, so attempt numbering stays
+/// contiguous even though the send never finished.
+struct AttemptAbort<'a> {
+    trace: &'a RequestTrace,
+    state: &'a Arc<AppState>,
+    candidate: Candidate,
+    /// The attempt's child context, so the aborted row names the span that was forwarded.
+    child: crate::telemetry::TraceContext,
+    number: u32,
+    started: Instant,
+    settled: bool,
+}
+
+impl Drop for AttemptAbort<'_> {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        self.trace.attempted(
+            self.state,
+            &self.candidate,
+            &self.child,
+            self.number,
+            self.started,
+            499,
+            Some(
+                "attempt aborted before a verdict (hedged loser or client disconnect)".to_string(),
+            ),
+        );
+    }
+}
+
 /// Per-request bookkeeping: the id the client sees, the attempt counter that numbers
 /// the attempt log, and the labels the request-level metrics need.
 ///
 /// One trace is shared by every fallback attempt of one client request, so the rows it
 /// writes can be read back in dispatch order under a single id. A final failure also
 /// writes one terminal usage row, so the dashboard can show the client-facing reason.
+/// One attempt's trace data, as forwarded upstream: the child span plus the inbound
+/// `tracestate` when (and only when) the traceparent was accepted. Owned so the send
+/// future can hold it across await points.
+#[derive(Clone)]
+struct AttemptTrace {
+    context: crate::telemetry::TraceContext,
+    tracestate: Option<String>,
+}
+
+/// Inject this attempt's W3C headers into provider headers.
+///
+/// `insert` semantics on purpose: a provider's static header cannot be duplicated, and an
+/// inbound client `traceparent` is never copied — the value is always our child span. The
+/// `tracestate` is forwarded only when the inbound traceparent was accepted.
+fn inject_trace_headers(headers: &mut axum::http::HeaderMap, trace: &AttemptTrace) {
+    headers.remove("traceparent");
+    headers.remove("tracestate");
+    if let Ok(value) = HeaderValue::from_str(&trace.context.outbound_traceparent()) {
+        headers.insert("traceparent", value);
+    }
+    if let Some(tracestate) = trace.tracestate.as_deref() {
+        if !tracestate.is_empty() {
+            if let Ok(value) = HeaderValue::from_str(tracestate) {
+                headers.insert("tracestate", value);
+            }
+        }
+    }
+}
+
 struct RequestTrace {
     request_id: Uuid,
+    /// Dialect the client spoke, for the dialect-specific rate-limit header names.
+    inbound: Dialect,
+    /// W3C trace context: the inbound trace continued, or a fresh one. Shared by every
+    /// attempt of this request; each attempt mints a child span.
+    trace: crate::telemetry::TraceContext,
+    /// Inbound `tracestate`, kept only when the traceparent was accepted. Forwarded
+    /// verbatim with every attempt's child; absent when the context was generated.
+    tracestate: Option<String>,
+    /// The request span: one per client request, the parent of every attempt span. It
+    /// exists even without the `otel` feature (an inactive span costs almost nothing),
+    /// so enabling export needs no request-path change.
+    span: tracing::Span,
     /// Next attempt number; also gives the label of the last one.
     attempts: AtomicU32,
     /// Milliseconds from sending the upstream request to its response headers. Set by
@@ -1992,16 +2552,40 @@ struct TraceLabels {
     provider: String,
     /// Gateway key that paid for the request.
     key: Option<Uuid>,
+    /// What the key may still spend, once admission succeeded. `None` before admission
+    /// (and for anonymous traffic), so an error raised earlier carries no rate headers.
+    limits: Option<RateLimits>,
 }
 
 impl RequestTrace {
-    fn new(request_id: Uuid) -> Self {
+    /// Start the request's span from the client's headers.
+    ///
+    /// A valid `traceparent` continues that trace with the inbound span as parent; an
+    /// absent or invalid one starts a fresh trace (the fallback is counted in
+    /// `telemetry`). Never fails: a broken header must not fail a request.
+    fn new(request_id: Uuid, inbound: Dialect, headers: Option<&HeaderMap>) -> Self {
+        let traceparent = headers
+            .and_then(|headers| headers.get("traceparent"))
+            .and_then(|value| value.to_str().ok());
+        let tracestate = headers
+            .and_then(|headers| headers.get("tracestate"))
+            .and_then(|value| value.to_str().ok());
+        let started = crate::telemetry::start(traceparent, tracestate);
         Self {
             request_id,
+            inbound,
+            span: crate::telemetry::request_span(request_id, inbound, &started.context),
+            trace: started.context,
+            tracestate: started.tracestate,
             attempts: AtomicU32::new(0),
             upstream_ms: AtomicU32::new(0),
             inner: Mutex::new(TraceLabels::default()),
         }
+    }
+
+    /// The 32-hex trace id the client sees as `x-trace-id`.
+    fn trace_id(&self) -> &str {
+        &self.trace.trace_id
     }
 
     fn labels(&self) -> MutexGuard<'_, TraceLabels> {
@@ -2011,6 +2595,72 @@ impl RequestTrace {
 
     fn set_key(&self, key: Option<Uuid>) {
         self.labels().key = key;
+    }
+
+    /// Remember what the key may still spend. Called once, right after admission.
+    fn set_rate_limits(&self, limits: RateLimits) {
+        self.labels().limits = Some(limits);
+    }
+
+    /// Attach the rate-limit headers admission produced.
+    ///
+    /// Two vocabularies, one source: OpenAI-style `x-ratelimit-*` for every inbound
+    /// dialect, and Anthropic's `anthropic-ratelimit-*` as well when the client speaks
+    /// Messages (its SDK reads only those). A limit the key does not have is omitted
+    /// rather than reported as zero. Budgets use `x-rrouter-budget-remaining-*` because
+    /// they are durable spend, not a per-minute window.
+    fn apply_rate_headers(&self, headers: &mut HeaderMap) {
+        let limits = self.labels().limits;
+        let Some(limits) = limits else {
+            return;
+        };
+        let mut set = |name: &'static str, value: String| {
+            if let (Ok(name), Ok(value)) = (
+                header::HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(&value),
+            ) {
+                headers.insert(name, value);
+            }
+        };
+        let reset = |window: WindowUsage| format!("{}s", window.reset_in.as_secs().max(1));
+        if let Some(window) = limits.requests {
+            set("x-ratelimit-limit-requests", window.limit.to_string());
+            set(
+                "x-ratelimit-remaining-requests",
+                window.remaining.to_string(),
+            );
+            set("x-ratelimit-reset-requests", reset(window));
+            if self.inbound == Dialect::AnthropicMessages {
+                set(
+                    "anthropic-ratelimit-requests-limit",
+                    window.limit.to_string(),
+                );
+                set(
+                    "anthropic-ratelimit-requests-remaining",
+                    window.remaining.to_string(),
+                );
+                set("anthropic-ratelimit-requests-reset", reset(window));
+            }
+        }
+        if let Some(window) = limits.tokens {
+            set("x-ratelimit-limit-tokens", window.limit.to_string());
+            set("x-ratelimit-remaining-tokens", window.remaining.to_string());
+            set("x-ratelimit-reset-tokens", reset(window));
+            if self.inbound == Dialect::AnthropicMessages {
+                set("anthropic-ratelimit-tokens-limit", window.limit.to_string());
+                set(
+                    "anthropic-ratelimit-tokens-remaining",
+                    window.remaining.to_string(),
+                );
+                set("anthropic-ratelimit-tokens-reset", reset(window));
+            }
+        }
+        if let Some(remaining) = limits.budget_tokens_remaining {
+            set("x-rrouter-budget-remaining-tokens", remaining.to_string());
+        }
+        if let Some(remaining) = limits.budget_micros_remaining {
+            set("x-rrouter-budget-remaining-micros", remaining.to_string());
+        }
     }
 
     fn set_upstream_ms(&self, elapsed: std::time::Duration) {
@@ -2045,10 +2695,15 @@ impl RequestTrace {
     }
 
     /// Record one finished attempt: its row, its counter, and the last-tried provider.
+    // The identity of the attempt (target, child span, number, start) plus its outcome is
+    // deliberately one call: splitting it would let a caller log a row with a different
+    // span than the one forwarded.
+    #[allow(clippy::too_many_arguments)]
     fn attempted(
         &self,
         state: &Arc<AppState>,
         candidate: &Candidate,
+        child: &crate::telemetry::TraceContext,
         number: u32,
         started: Instant,
         status: u16,
@@ -2060,6 +2715,18 @@ impl RequestTrace {
             labels.key
         };
         crate::metrics::attempt_finished(&candidate.provider, status);
+        // The ids make one request's fallbacks joinable, and they match the traceparent
+        // forwarded to the provider for this attempt.
+        tracing::info!(
+            trace_id = %self.trace.trace_id,
+            span_id = %child.span_id,
+            parent_span_id = %child.parent_span_id.as_deref().unwrap_or(""),
+            provider = %candidate.provider,
+            model = %candidate.model,
+            status,
+            latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+            "attempt"
+        );
         // Every successful attempt feeds `least_latency`. Fire and forget: a routing
         // hint must never delay or fail the response.
         if status == 200 {
@@ -2098,23 +2765,59 @@ impl RequestTrace {
         send: F,
     ) -> Result<T>
     where
-        F: FnOnce(Candidate) -> Fut,
+        F: FnOnce(Candidate, std::sync::Arc<AttemptTrace>) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
         let (number, started) = self.next_attempt();
         let target = candidate.clone();
-        let result = send(candidate).await;
-        match &result {
-            Ok(_) => self.attempted(state, &target, number, started, 200, None),
+        // One child context per attempt: the header forwarded upstream and the attempt
+        // log below name the same span, and hedged/retried attempts each get a new one.
+        let child = self.trace.child(&mut crate::telemetry::RandomIds);
+        let attempt_trace = std::sync::Arc::new(AttemptTrace {
+            context: child.clone(),
+            tracestate: self.tracestate.clone(),
+        });
+        let logged_child = child;
+        let mut abort = AttemptAbort {
+            trace: self,
+            state,
+            candidate: target.clone(),
+            child: logged_child.clone(),
+            number,
+            started,
+            settled: false,
+        };
+        // One span per attempt, parented on the request span. The send runs inside it so
+        // the exported duration is the upstream call; the outcome is recorded before the
+        // span closes.
+        let span =
+            crate::telemetry::attempt_span(&self.span, &target.provider, &target.model, number);
+        let result = send(candidate, std::sync::Arc::clone(&attempt_trace))
+            .instrument(span.clone())
+            .await;
+        // The send produced a verdict: the guard must not report a second outcome.
+        abort.settled = true;
+        drop(abort);
+        let status = match &result {
+            Ok(_) => 200,
+            Err(e) => attempt_status(e),
+        };
+        span.record("status", status);
+        if let Err(e) = &result {
+            span.record("error", tracing::field::display(e));
+        }
+        span.in_scope(|| match &result {
+            Ok(_) => self.attempted(state, &target, &logged_child, number, started, status, None),
             Err(e) => self.attempted(
                 state,
                 &target,
+                &logged_child,
                 number,
                 started,
-                attempt_status(e),
+                status,
                 Some(e.to_string()),
             ),
-        }
+        });
         result
     }
 
@@ -2127,6 +2830,12 @@ impl RequestTrace {
         if let Ok(value) = HeaderValue::from_str(&self.request_id.to_string()) {
             resp.headers_mut().insert("x-request-id", value);
         }
+        // The trace id joins this response to the access line and to every consumer that
+        // continues the trace.
+        if let Ok(value) = HeaderValue::from_str(self.trace_id()) {
+            resp.headers_mut().insert("x-trace-id", value);
+        }
+        self.apply_rate_headers(resp.headers_mut());
         resp
     }
 
@@ -2170,6 +2879,7 @@ impl RequestTrace {
             id: None,
             ts: crate::now_unix(),
             request_id: Some(self.request_id),
+            trace_id: Some(self.trace_id().to_string()),
             provider,
             model,
             connection_id: None,
@@ -2188,7 +2898,7 @@ impl RequestTrace {
             error: Some(err.to_string()),
         };
         let store = Arc::clone(&state.store);
-        let access_log = state.config.access_log;
+        let access_log = state.config.load().access_log;
         tokio::spawn(async move {
             match store.record_usage(&rec).await {
                 Err(e) => tracing::warn!(error = %e, "failure record failed"),
@@ -2257,6 +2967,9 @@ struct Wire {
     first_output: Option<Instant>,
     /// The key's output policy, when the response text must be scanned.
     guardrails: Option<Guardrails>,
+    /// The key opted into PII redaction: text deltas are transformed before encoding,
+    /// with a bounded carry so matches split across deltas are still caught.
+    stream_redactor: Option<crate::redaction::StreamRedactor>,
     /// The message the client was sent when a guardrail ended the stream. `Some` means
     /// nothing else was forwarded and the usage row says `403`.
     blocked: Option<String>,
@@ -2269,6 +2982,7 @@ impl Wire {
         client_model: &str,
         incoming: ByteStream,
         guardrails: Option<Guardrails>,
+        redact_pii: bool,
     ) -> Self {
         Self {
             incoming,
@@ -2281,6 +2995,7 @@ impl Wire {
             failed: false,
             first_output: None,
             guardrails,
+            stream_redactor: redact_pii.then(crate::redaction::StreamRedactor::new),
             blocked: None,
         }
     }
@@ -2318,11 +3033,38 @@ impl Wire {
             {
                 self.first_output = Some(Instant::now());
             }
+            // Redact text before it is encoded. A delta may be entirely held (empty
+            // output) until enough following text arrives to prove no match spans the
+            // cut; tool-call arguments and other structured payloads are protocol data
+            // and are deliberately not rewritten.
+            let mut ev = ev;
+            if let Some(redactor) = self.stream_redactor.as_mut() {
+                match &ev {
+                    StreamEvent::TextDelta(text) => {
+                        let (ready, report) = redactor.push(text);
+                        record_stream_redaction(&report);
+                        if ready.is_empty() {
+                            continue;
+                        }
+                        ev = StreamEvent::TextDelta(ready);
+                    }
+                    StreamEvent::ReasoningDelta(text) => {
+                        let (ready, report) = redactor.push(text);
+                        record_stream_redaction(&report);
+                        if ready.is_empty() {
+                            continue;
+                        }
+                        ev = StreamEvent::ReasoningDelta(ready);
+                    }
+                    _ => {}
+                }
+            }
             if let Some(message) = self.blocked_by(&ev) {
-                // Everything still queued belongs to the response after the hit, so it is
-                // dropped instead of encoded. `failed` ends the stream after this frame.
+                // A guardrail hit discards the carry on purpose: the held tail may be the
+                // beginning of the blocked term, and a policy refusal never emits it.
                 crate::metrics::guardrail_blocked(Stage::Output);
                 self.blocked = Some(message.clone());
+                self.stream_redactor = None;
                 self.pending.clear();
                 self.failed = true;
                 let err = Error::Forbidden {
@@ -2332,6 +3074,17 @@ impl Wire {
                 return Some(join(out, Bytes::from(error_frame(self.inbound, &err))));
             }
             if let StreamEvent::Done { usage, .. } = &ev {
+                // Flush the redaction carry before the terminal frame so the client gets
+                // the redacted tail in the same event order as the provider sent it.
+                match self.flush_stream_tail() {
+                    Ok(Some(bytes)) => out = Some(join(out, bytes)),
+                    Ok(None) => {}
+                    Err(e) => {
+                        self.failed = true;
+                        self.pending.clear();
+                        return Some(join(out, Bytes::from(error_frame(self.inbound, &e))));
+                    }
+                }
                 self.usage = Some(usage.unwrap_or_default());
                 self.finished = true;
             }
@@ -2340,12 +3093,56 @@ impl Wire {
                 Ok(bytes) => out = Some(join(out, bytes)),
                 Err(e) => {
                     self.failed = true;
+                    self.stream_redactor = None;
                     self.pending.clear();
                     return Some(join(out, Bytes::from(error_frame(self.inbound, &e))));
                 }
             }
         }
         out
+    }
+    /// Encode whatever the redactor still holds, as a normal text delta. Called before a
+    /// terminal `Done`, and before an error frame, so buffered text is neither leaked nor
+    /// silently dropped when a stream ends early.
+    fn flush_stream_tail(&mut self) -> rrouter_core::Result<Option<Bytes>> {
+        self.flush_stream_tail_mode(false)
+    }
+
+    /// `interrupted` drops an unterminated PII-looking tail instead of emitting it: after
+    /// an error there is no complete match to replace, and a prefix must not leak.
+    fn flush_stream_tail_mode(&mut self, interrupted: bool) -> rrouter_core::Result<Option<Bytes>> {
+        let Some(redactor) = self.stream_redactor.as_mut() else {
+            return Ok(None);
+        };
+        let (tail, report) = if interrupted {
+            redactor.finish_interrupted()
+        } else {
+            redactor.finish()
+        };
+        record_stream_redaction(&report);
+        if tail.is_empty() {
+            return Ok(None);
+        }
+        let bytes = self.encoder.encode(&StreamEvent::TextDelta(tail))?;
+        Ok((!bytes.is_empty()).then_some(bytes))
+    }
+
+    /// Flush the redaction tail, then build one terminal error frame.
+    fn close_with_error(&mut self, err: Error) -> Bytes {
+        let tail = match self.flush_stream_tail_mode(true) {
+            Ok(tail) => tail,
+            Err(e) => return Bytes::from(error_frame(self.inbound, &e)),
+        };
+        let frame = Bytes::from(error_frame(self.inbound, &err));
+        tail.map_or(frame.clone(), |bytes| join(Some(bytes), frame))
+    }
+}
+
+/// Count one streaming redaction and log the class breakdown, never the text.
+fn record_stream_redaction(report: &crate::redaction::RedactionReport) {
+    if report.redacted {
+        crate::metrics::pii_redacted(crate::metrics::RedactStage::Stream, report);
+        tracing::debug!(stage = "stream", %report, "pii redacted from stream delta");
     }
 }
 
@@ -2381,18 +3178,23 @@ impl Stream for Wire {
                     }
                     Err(e) => {
                         this.failed = true;
-                        return Poll::Ready(Some(Bytes::from(error_frame(this.inbound, &e))));
+                        let frame = this.close_with_error(e);
+                        return Poll::Ready(Some(frame));
                     }
                 },
                 Poll::Ready(Some(Err(e))) => {
                     this.failed = true;
-                    return Poll::Ready(Some(Bytes::from(error_frame(this.inbound, &e))));
+                    let frame = this.close_with_error(e);
+                    return Poll::Ready(Some(frame));
                 }
                 Poll::Ready(None) => {
                     this.finished = true;
                     return match this.decoder.finish() {
                         Ok(events) => Poll::Ready(this.drain_events(events)),
-                        Err(e) => Poll::Ready(Some(Bytes::from(error_frame(this.inbound, &e)))),
+                        Err(e) => {
+                            this.failed = true;
+                            Poll::Ready(Some(this.close_with_error(e)))
+                        }
                     };
                 }
             }
@@ -2413,6 +3215,8 @@ struct PendingRecord {
     key: Option<Uuid>,
     /// Id already echoed to the client, so the usage row joins the attempt log.
     request_id: Uuid,
+    /// W3C trace id, captured while the request is still in scope.
+    trace_id: String,
     /// This request's concurrency slot. `ResponseStream` owns it until the body ends or
     /// is dropped, which is the whole release protocol.
     _permit: Option<OwnedSemaphorePermit>,
@@ -2426,11 +3230,17 @@ struct ResponseStream {
 }
 
 impl ResponseStream {
-    fn commit(&mut self, ok: bool) {
+    /// Record the one usage row. Called exactly once: a normal end takes `pending`, and
+    /// the `Drop` that follows finds `None`.
+    fn commit(&mut self, completed: bool) {
         let Some(pending) = self.pending.take() else {
             return;
         };
-        let tokens = self.inner.usage.unwrap_or_default();
+        // Counts are known only once the upstream's terminal usage frame decoded. `None`
+        // means the client left (or the upstream stopped) before any cost could be
+        // attributed; `Some` is what the row must report.
+        let usage = self.inner.usage;
+        let tokens = usage.unwrap_or_default();
         let ttft = self
             .inner
             .first_output
@@ -2450,6 +3260,7 @@ impl ResponseStream {
                 usage: tokens,
                 key: pending.key,
                 request_id: pending.request_id,
+                trace_id: &pending.trace_id,
                 started: pending.started,
                 upstream_ms: pending.upstream_ms,
                 ttft,
@@ -2458,9 +3269,10 @@ impl ResponseStream {
                 error,
             },
         );
-        if !ok {
+        if !completed {
             tracing::debug!(
                 provider = %pending.candidate.provider,
+                usage_known = usage.is_some(),
                 "client disconnected mid-stream"
             );
         }
@@ -2496,6 +3308,7 @@ fn stream_response(
     open: StreamRoute,
     bytes: ByteStream,
     guardrails: Option<Guardrails>,
+    redact_pii: bool,
 ) -> Response {
     let wire = Wire::new(
         inbound,
@@ -2503,6 +3316,7 @@ fn stream_response(
         &open.client_model,
         bytes,
         guardrails,
+        redact_pii,
     );
     let stream = ResponseStream {
         inner: wire,
@@ -2545,6 +3359,8 @@ struct Recorded<'a> {
     key: Option<Uuid>,
     /// Id already echoed to the client, so the row can be found from its header.
     request_id: Uuid,
+    /// W3C trace id of the request, so the access line joins the trace.
+    trace_id: &'a str,
     started: Instant,
     /// Time to the winning attempt's upstream response headers.
     upstream_ms: u32,
@@ -2571,6 +3387,7 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
         id: None,
         ts: crate::now_unix(),
         request_id: Some(r.request_id),
+        trace_id: Some(r.trace_id.to_string()),
         provider: candidate.provider.clone(),
         model: r.model.to_string(),
         connection_id: Some(candidate.connection),
@@ -2639,9 +3456,13 @@ fn response_text(response: &ChatResponse) -> String {
     segments.join("\n")
 }
 
+/// Write one usage row off the response path, priced first.
+///
+/// The row carries its own `trace_id`, so the access line and the stored row cannot
+/// disagree about which trace the request belonged to.
 fn spawn_record(state: &AppState, mut rec: UsageRecord) {
     let store = Arc::clone(&state.store);
-    let access_log = state.config.access_log;
+    let access_log = state.config.load().access_log;
     // Usage accounting must never fail a request or delay the response — and the same
     // applies to pricing it. The price is read here rather than on the response path,
     // which is why no memo cache (and no invalidation hook in `routes/models.rs`) is
@@ -2669,6 +3490,7 @@ fn access_line(rec: &UsageRecord) {
     let request_id = rec.request_id.map(|id| id.to_string()).unwrap_or_default();
     tracing::info!(
         request_id = %request_id,
+        trace_id = rec.trace_id.as_deref().unwrap_or(""),
         provider = %rec.provider,
         model = %rec.model,
         status = rec.status,
@@ -2678,6 +3500,150 @@ fn access_line(rec: &UsageRecord) {
         endpoint = rec.endpoint.as_deref().unwrap_or(""),
         "request"
     );
+}
+
+/// Embed one text with the operator's configured embedding model.
+///
+/// This is an *internal* call: it goes through the planner and dispatcher directly, so it
+/// can never re-enter the response cache (no recursion), and it records no usage row or
+/// attempt row of its own — the semantic cache's embedding spend is operational, not the
+/// client's tokens. Failures go back to the caller, which treats them as a plain miss.
+async fn embed_text(
+    state: &Arc<AppState>,
+    team_id: Option<Uuid>,
+    model_ref: &str,
+    text: &str,
+) -> Result<Vec<f32>> {
+    let config = state.config.load();
+    let plan = state
+        .planner
+        .plan(
+            state.catalog.as_ref(),
+            state.store.as_ref(),
+            PlanRequest {
+                model: model_ref,
+                stream: false,
+                affinity: None,
+                strategy: config.strategy,
+                policy: None,
+                allowed_models: None,
+                team_id,
+                canary: None,
+                canary_seed: 0,
+            },
+        )
+        .await?;
+    // Exactly one send, no retries: the cache is an optimisation, and a retry storm
+    // behind a degraded embedding provider would spend money for a request that can
+    // simply miss. The breaker is shared, so an unhealthy embedding account is still
+    // skipped for the attempts that follow.
+    let dispatcher =
+        rrouter_router::Dispatcher::with_shared_breaker(state.dispatcher.breaker_arc())
+            .with_max_attempts(1)
+            .with_hedge(None)
+            .with_retry_policy(rrouter_router::dispatch::RetryPolicy {
+                attempts: 0,
+                ..rrouter_router::dispatch::RetryPolicy::default()
+            });
+    let state = Arc::clone(state);
+    let text = text.to_string();
+    let outcome = dispatcher
+        .run(&plan, move |candidate| {
+            let state = Arc::clone(&state);
+            let text = text.clone();
+            async move { send_embedding_once(&state, candidate, &text).await }
+        })
+        .await?;
+    outcome.result
+}
+
+/// One embeddings POST, parsed down to its vector.
+///
+/// The provider's own `/embeddings` surface is used (the manifest's chat URL rewritten),
+/// exactly as `/v1/embeddings` does; a provider without an embeddings dialect fails
+/// cleanly so the caller can fall back to a miss.
+async fn send_embedding_once(
+    state: &AppState,
+    candidate: Candidate,
+    text: &str,
+) -> Result<Vec<f32>> {
+    let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
+        model: candidate.model.clone(),
+        detail: format!("unknown provider {}", candidate.provider),
+    })?;
+    if !matches!(
+        spec.default_dialect,
+        Dialect::OpenAiChat | Dialect::OpenAiEmbeddings
+    ) {
+        return Err(Error::NoRoute {
+            model: candidate.model.clone(),
+            detail: format!("{} has no embeddings endpoint", candidate.provider),
+        });
+    }
+    let creds = state
+        .refresher
+        .fresh(state.store.as_ref(), spec, candidate.connection)
+        .await?;
+    let url = creds
+        .base_url_override
+        .clone()
+        .map(|base| rewrite_embeddings(&base, spec.base_url))
+        .unwrap_or_else(|| embeddings_url(spec.base_url));
+    let outbound = request_headers(spec, &creds)?;
+    let body = serde_json::json!({ "model": candidate.model, "input": text });
+    let resp = state
+        .http
+        .post(&url)
+        .headers(outbound)
+        .json(&body)
+        .timeout(state.request_timeout())
+        .send()
+        .await
+        .map_err(transport_error)?;
+    let status = resp.status();
+    let bytes = resp.bytes().await.map_err(transport_error)?;
+    if !status.is_success() {
+        return Err(Error::Upstream {
+            provider: candidate.provider.clone(),
+            status: status.as_u16(),
+            body: String::from_utf8_lossy(&bytes).chars().take(512).collect(),
+            payload: None,
+        });
+    }
+    let value: Value = serde_json::from_slice(&bytes)?;
+    let vector = value
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.get("embedding"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::Upstream {
+            provider: candidate.provider.clone(),
+            status: status.as_u16(),
+            body: "embedding response carried no vector".to_string(),
+            payload: None,
+        })?;
+    let mut out = Vec::with_capacity(vector.len());
+    for item in vector {
+        let Some(number) = item.as_f64() else {
+            return Err(Error::Upstream {
+                provider: candidate.provider.clone(),
+                status: status.as_u16(),
+                body: "embedding vector is not numeric".to_string(),
+                payload: None,
+            });
+        };
+        out.push(number as f32);
+    }
+    if out.is_empty() {
+        return Err(Error::Upstream {
+            provider: candidate.provider.clone(),
+            status: status.as_u16(),
+            body: "empty embedding vector".to_string(),
+            payload: None,
+        });
+    }
+    Ok(out)
 }
 
 async fn embeddings_inner(
@@ -2696,16 +3662,26 @@ async fn embeddings_inner(
         .to_string();
     let model = state.mapped_model(caller.key_id(), &requested).await?;
     trace.set_model(&model);
-    state.admit(&caller, &model).await?;
+    admit_or_explain(state, &caller, &model, trace).await?;
+    let policy = provider_policy(&body, headers)?;
+    let config = state.config.load();
+    let canary_seed = canary_seed_for(trace, None);
     let plan = state
         .planner
         .plan(
             state.catalog.as_ref(),
             state.store.as_ref(),
-            &model,
-            false,
-            None,
-            state.config.strategy,
+            PlanRequest {
+                model: &model,
+                stream: false,
+                affinity: None,
+                strategy: config.strategy,
+                policy: policy.as_ref(),
+                allowed_models: caller.allowed_models(),
+                team_id: caller.team_id(),
+                canary: config.canary.as_ref(),
+                canary_seed,
+            },
         )
         .await?;
     let candidate = plan
@@ -2738,10 +3714,16 @@ async fn embeddings_inner(
         .clone()
         .map(|base| rewrite_embeddings(&base, spec.base_url))
         .unwrap_or_else(|| embeddings_url(spec.base_url));
-    let outbound = request_headers(spec, &creds)?;
+    let (number, started) = trace.next_attempt();
+    let child = trace.trace.child(&mut crate::telemetry::RandomIds);
+    let attempt_trace = AttemptTrace {
+        context: child.clone(),
+        tracestate: trace.tracestate.clone(),
+    };
+    let mut outbound = request_headers(spec, &creds)?;
+    inject_trace_headers(&mut outbound, &attempt_trace);
     // The upstream body is relayed verbatim, status included, so the attempt is logged
     // around the send itself and its status is the upstream's own.
-    let (number, started) = trace.next_attempt();
     let sent = state
         .http
         .post(&url)
@@ -2755,6 +3737,7 @@ async fn embeddings_inner(
             trace.attempted(
                 state,
                 &candidate,
+                &child,
                 number,
                 started,
                 resp.status().as_u16(),
@@ -2767,6 +3750,7 @@ async fn embeddings_inner(
             trace.attempted(
                 state,
                 &candidate,
+                &child,
                 number,
                 started,
                 attempt_status(&err),
@@ -2792,6 +3776,7 @@ async fn embeddings_inner(
                     usage: embedding_usage(&value),
                     key: caller.key_id(),
                     request_id: trace.request_id,
+                    trace_id: trace.trace_id(),
                     started,
                     upstream_ms: 0,
                     ttft: None,
@@ -2841,6 +3826,74 @@ fn embeddings_url(base_url: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A provider whose manifest declares a transport query parameter (`api-version`),
+    /// which the built-in registry has no instance of today.
+    fn spec_with_api_version() -> ProviderSpec {
+        ProviderSpec {
+            id: "acme",
+            display: "Acme AI",
+            kind: rrouter_auth::registry::ProviderKind::ApiKey,
+            base_url: "https://api.acme.ai/v1/chat/completions",
+            base_url_requires_override: false,
+            responses_url: None,
+            models_url: None,
+            messages_url: None,
+            images_url: None,
+            audio_speech_url: None,
+            audio_transcriptions_url: None,
+            audio_voices_url: None,
+            default_dialect: Dialect::OpenAiChat,
+            auth: rrouter_auth::registry::AuthStyle::Bearer,
+            extra_headers: &[],
+            auth_header: "",
+            query: &[("api-version", "2024-10-21")],
+            max_tokens_key: rrouter_translate::MaxTokensKey::MaxTokens,
+            passthrough_headers: &[],
+            default_max_tokens: None,
+            refresh: None,
+            profile_url: None,
+            login: None,
+            stream_only: false,
+        }
+    }
+
+    /// Manifest-declared query parameters are part of the transport contract.
+    #[test]
+    fn endpoint_appends_a_manifest_declared_query_parameter() {
+        let (url, dialect) = endpoint(&spec_with_api_version(), None, Dialect::OpenAiChat);
+        assert_eq!(dialect, Dialect::OpenAiChat);
+        assert!(
+            url.ends_with("chat/completions?api-version=2024-10-21"),
+            "{url}"
+        );
+    }
+
+    /// A tenant that pins a version in its connection URL wins, and the parameter is
+    /// never sent twice.
+    #[test]
+    fn endpoint_keeps_a_query_the_connection_already_sets() {
+        let (url, _) = endpoint(
+            &spec_with_api_version(),
+            Some("http://127.0.0.1:9?api-version=preview"),
+            Dialect::OpenAiChat,
+        );
+        assert!(url.contains("api-version=preview"), "{url}");
+        assert_eq!(url.matches("api-version").count(), 1, "{url}");
+        assert!(
+            url.starts_with("http://127.0.0.1:9/v1/chat/completions"),
+            "{url}"
+        );
+    }
+
+    /// Azure's v1 GA surface declares no `api-version`, so none may be invented.
+    #[test]
+    fn azure_declares_no_query_parameter() {
+        let spec = rrouter_auth::get("azure").expect("azure manifest");
+        assert!(spec.query.is_empty(), "the GA surface needs no api-version");
+        let (url, _) = endpoint(spec, None, Dialect::OpenAiChat);
+        assert!(!url.contains("api-version"), "{url}");
+    }
+
     #[test]
     fn embeddings_url_rewrites_chat_suffix() {
         assert_eq!(
@@ -2886,6 +3939,7 @@ mod tests {
             id: None,
             ts: 0,
             request_id,
+            trace_id: Some("0123456789abcdef0123456789abcdef".into()),
             provider: "openai".into(),
             model: "gpt-4o".into(),
             connection_id: None,
@@ -2928,6 +3982,10 @@ mod tests {
         assert_eq!(line["level"], "INFO");
         assert_eq!(fields["message"], "request");
         assert_eq!(fields["request_id"], request_id.to_string());
+        assert_eq!(
+            fields["trace_id"], "0123456789abcdef0123456789abcdef",
+            "the access line joins the trace"
+        );
         assert_eq!(fields["provider"], "openai");
         assert_eq!(fields["model"], "gpt-4o");
         assert_eq!(fields["status"], 200);
@@ -2939,5 +3997,135 @@ mod tests {
             "no key, no key_id: {fields}"
         );
         assert!(!text.contains("input_tokens"), "no token material: {text}");
+    }
+
+    /// The gateway interprets `provider` itself, so the upstream body must not carry it:
+    /// a strict provider schema would reject the field, and no provider could act on it.
+    #[test]
+    fn a_missing_traceparent_starts_a_fresh_trace() {
+        let trace = RequestTrace::new(Uuid::new_v4(), Dialect::OpenAiChat, None);
+        let id = trace.trace_id();
+        assert_eq!(id.len(), 32);
+        assert!(id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert!(trace.trace.parent_span_id.is_none());
+        assert_eq!(trace.trace.span_id.len(), 16);
+    }
+
+    #[test]
+    fn an_inbound_traceparent_is_continued_and_echoed() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            HeaderValue::from_static("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        );
+        let trace = RequestTrace::new(Uuid::new_v4(), Dialect::OpenAiChat, Some(&headers));
+
+        assert_eq!(trace.trace_id(), "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(
+            trace.trace.parent_span_id.as_deref(),
+            Some("00f067aa0ba902b7")
+        );
+        assert_ne!(trace.trace.span_id, "00f067aa0ba902b7", "a new server span");
+        assert!(trace.trace.sampled);
+
+        let response = trace.respond(Instant::now(), Response::new(Body::empty()));
+        assert_eq!(
+            response
+                .headers()
+                .get("x-trace-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("4bf92f3577b34da6a3ce929d0e0e4736")
+        );
+        assert!(response.headers().get("x-request-id").is_some());
+    }
+
+    #[test]
+    fn an_invalid_traceparent_is_not_continued() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("traceparent", HeaderValue::from_static("00-nope"));
+        let trace = RequestTrace::new(Uuid::new_v4(), Dialect::OpenAiChat, Some(&headers));
+        assert!(trace.trace.parent_span_id.is_none());
+        assert_eq!(trace.trace_id().len(), 32);
+    }
+
+    /// The gateway interprets `provider` itself, so the upstream body must not carry it:
+    /// a strict provider schema would reject the field, and no provider could act on it.
+    #[test]
+    fn provider_object_is_stripped_from_the_upstream_body() {
+        let raw = serde_json::json!({
+            "model": "client/name",
+            "provider": {"order": ["openai"], "zdr": true},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let kept = same_dialect_body(Dialect::OpenAiChat, &raw, "gpt-4.1", false, false);
+        assert!(kept.get("provider").is_some());
+        let stripped = same_dialect_body(Dialect::OpenAiChat, &raw, "gpt-4.1", false, true);
+        assert!(stripped.get("provider").is_none());
+        // Only the routing field is removed.
+        assert_eq!(stripped["model"], "gpt-4.1");
+        assert_eq!(stripped["messages"][0]["content"], "hi");
+        // The client's body is never mutated in place: attempts clone it.
+        assert!(raw.get("provider").is_some());
+    }
+
+    /// The passthrough allowlist is what keeps a client's credentials home: only the
+    /// names a provider declares are read, and the gateway's own flags are unioned.
+    #[test]
+    fn outbound_headers_forward_only_declared_client_headers() {
+        let spec = rrouter_auth::get("claude").expect("claude");
+        let creds = Credentials {
+            access_token: Some("gw-token".into()),
+            ..Credentials::default()
+        };
+        let mut client = HeaderMap::new();
+        client.insert("anthropic-beta", HeaderValue::from_static("client-flag"));
+        client.insert("openai-beta", HeaderValue::from_static("assistants=v2"));
+        client.insert("authorization", HeaderValue::from_static("Bearer CLIENT"));
+
+        let headers = outbound_headers(spec, &creds, Some(&client)).expect("headers");
+        let beta = headers
+            .get("anthropic-beta")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(beta.contains("client-flag"), "beta was {beta:?}");
+        assert!(beta.contains("oauth-2025-04-20"), "beta was {beta:?}");
+        assert!(
+            headers.get("openai-beta").is_none(),
+            "claude declares only anthropic-beta"
+        );
+        assert!(
+            headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.contains("gw-token") && !v.contains("CLIENT")),
+            "the client's authorization must never replace the gateway's"
+        );
+    }
+
+    #[test]
+    fn request_policy_reads_headers_and_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-rrouter-data-policy", HeaderValue::from_static("deny"));
+        let body = serde_json::json!({"provider": {"only": ["anthropic"]}});
+        let policy = provider_policy(&body, &headers)
+            .expect("policy")
+            .expect("some");
+        assert_eq!(policy.only, ["anthropic"]);
+        assert!(matches!(
+            policy.data_collection,
+            Some(rrouter_router::DataCollection::Deny)
+        ));
+        assert!(provider_policy(&serde_json::json!({}), &HeaderMap::new())
+            .expect("policy")
+            .is_none());
+    }
+
+    #[test]
+    fn malformed_request_policy_is_a_bad_request() {
+        let body = serde_json::json!({"provider": {"allow_fallbacks": "sometimes"}});
+        let err = provider_policy(&body, &HeaderMap::new()).expect_err("bad value");
+        assert_eq!(err.status(), 400);
     }
 }

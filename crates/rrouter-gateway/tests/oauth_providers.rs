@@ -26,7 +26,7 @@ fn test_state() -> Arc<AppState> {
             .timeout(Duration::from_secs(5))
             .build()
             .expect("client"),
-        config: Config {
+        config: rrouter_gateway::config::ConfigSnapshot::from(Config {
             host: "127.0.0.1".parse().expect("host"),
             port: 0,
             data_dir: std::env::temp_dir(),
@@ -52,11 +52,18 @@ fn test_state() -> Arc<AppState> {
             usage_retention_days: 0,
             log_format: rrouter_gateway::config::LogFormat::Text,
             access_log: true,
-        },
+            hedge_ms: 0,
+            canary: None,
+            semantic_cache: rrouter_gateway::config::CacheMode::Off,
+            semantic_cache_threshold: 0.92,
+            semantic_embedding_model: None,
+            semantic_cache_ttl_secs: 3600,
+            semantic_cache_max_entries: 1000,
+        }),
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
-        concurrency: None,
+        concurrency: std::sync::RwLock::new(None),
         auth: rrouter_gateway::auth::Auth::load(&std::env::temp_dir(), false),
     })
 }

@@ -230,15 +230,55 @@ pub async fn registry_list(State(state): State<Arc<AppState>>) -> Response {
 
 /// `GET /api/models/providers`: every routable provider, with whether it has an active
 /// connection and whether it can enumerate its own models.
-pub async fn providers(State(state): State<Arc<AppState>>) -> Response {
-    let active: BTreeSet<String> = match state.store.list_connections(None).await {
-        Ok(connections) => connections
-            .into_iter()
-            .filter(|conn| conn.is_active)
-            .map(|conn| conn.provider)
-            .collect(),
+/// A copy-pasteable origin for the provider's base-URL field, or `None` when the manifest
+/// declares no usable host.
+///
+/// For a placeholder manifest (`RESOURCE.openai.azure.com`) the first host label becomes
+/// `<resource>`, so the example shows the *shape* to fill in instead of a value that the
+/// save validation would refuse. Only the origin is returned: an override is an origin and
+/// the gateway grafts the provider's endpoint path onto it (see `proxy::endpoint`).
+fn base_url_example(spec: &rrouter_auth::ProviderSpec) -> Option<String> {
+    let (scheme, rest) = spec.base_url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit('@').next()?;
+    let host = authority.split(':').next()?;
+    if host.is_empty() {
+        return None;
+    }
+    let placeholder = spec.base_url_requires_override
+        || rrouter_auth::manifest::is_placeholder_host(spec.base_url);
+    if placeholder {
+        let (_, tail) = host.split_once('.')?;
+        return Some(format!("{scheme}://<resource>.{tail}"));
+    }
+    Some(format!("{scheme}://{host}"))
+}
+
+/// `GET /api/models/providers` — the provider catalog with this caller's reach.
+///
+/// `has_connection` and `scope` are computed from the connections the caller may see, so a
+/// team account is never told that another team (or the instance) has an account it cannot
+/// use. For global authority the answer is the whole instance, exactly as before.
+pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let scope = match super::teams::reader_teams(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(response) => return *response,
+    };
+    let connections = match state.store.list_connections(None).await {
+        Ok(connections) => connections,
         Err(e) => return admin_error(&e),
     };
+    let mut active: BTreeSet<String> = BTreeSet::new();
+    let mut shared: BTreeSet<String> = BTreeSet::new();
+    for conn in connections
+        .into_iter()
+        .filter(|conn| conn.is_active && super::connections::in_scope(conn, &scope))
+    {
+        if conn.team_id.is_none() {
+            shared.insert(conn.provider.clone());
+        }
+        active.insert(conn.provider);
+    }
     let mut data: Vec<Value> = rrouter_auth::all()
         .map(|spec| {
             json!({
@@ -252,7 +292,23 @@ pub async fn providers(State(state): State<Arc<AppState>>) -> Response {
                     rrouter_auth::ProviderKind::Local => "local",
                 },
                 "has_connection": active.contains(spec.id),
+                // `global` = a shared instance account the caller can see (serves
+                // non-team keys); `team` = only a team-owned account is reachable;
+                // `none` = nothing. A team account never sees a shared row, so it can
+                // never be told `global` from the instance's own accounts.
+                "scope": if shared.contains(spec.id) {
+                    "global"
+                } else if active.contains(spec.id) {
+                    "team"
+                } else {
+                    "none"
+                },
                 "listed": models_registry::can_list(spec.id),
+                // A provider whose manifest host is a placeholder (Azure OpenAI's
+                // `RESOURCE.openai.azure.com`) cannot route until the connection supplies
+                // its own resource URL, so the dashboard must ask for one.
+                "requires_base_url_override": spec.base_url_requires_override,
+                "base_url_example": base_url_example(spec),
             })
         })
         .collect();

@@ -13,6 +13,7 @@ export function Button({
   className,
   arrow,
   size = "md",
+  ariaLabel,
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -25,6 +26,8 @@ export function Button({
   arrow?: boolean;
   /** `lg` is the auth/primary-action height: 44px, comfortably tappable. */
   size?: "md" | "lg";
+  /** Required when the button is icon-only. */
+  ariaLabel?: string;
 }) {
   const styles: Record<ButtonVariant, string> = {
     primary:
@@ -39,10 +42,11 @@ export function Button({
     <button
       type={type}
       title={title}
+      aria-label={ariaLabel}
       onClick={onClick}
       disabled={disabled}
       className={cx(
-        "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-full transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed",
+        "inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-full transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed",
         size === "lg" ? "h-11 px-5 text-body" : "h-8 px-3.5 text-body",
         styles[variant],
         className,

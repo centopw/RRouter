@@ -617,7 +617,11 @@ pub fn parse_model_ids(body: &Value) -> Vec<String> {
 /// (its models arrive through the ChatGPT OAuth session), so the UI offers the custom
 /// form instead of a fetch button.
 pub fn can_list(provider: &str) -> bool {
-    provider != "codex"
+    // Neither publishes a plain model list: Codex answers through a Responses backend
+    // with no catalog, and Azure exposes deployments per resource, not a model list
+    // (each deployment is registered as a custom model instead). The dashboard hides
+    // the fetch button for these, so it cannot promise something the API never returns.
+    !matches!(provider, "codex" | "azure")
 }
 
 /// Replace every `synced` row with a fresh models.dev download. Returns
@@ -668,6 +672,18 @@ pub fn spawn_daily_sync(state: std::sync::Arc<AppState>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A provider with no plain model list must not offer a fetch button: Codex speaks a
+    /// Responses backend, Azure exposes per-resource deployments (registered as custom
+    /// models), so a "fetch" would promise rows the API never returns.
+    #[test]
+    fn providers_without_a_plain_model_list_cannot_be_fetched() {
+        assert!(!can_list("codex"));
+        assert!(!can_list("azure"));
+        assert!(can_list("openai"));
+        assert!(can_list("mistral"));
+        assert!(can_list("claude"));
+    }
 
     /// The registry lists current models newest-first and retired/synced-deprecated
     /// rows last, whatever order the store returned.

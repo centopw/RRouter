@@ -8,13 +8,17 @@ export function Checkbox({
   checked,
   onChange,
   label,
+  ariaLabel,
   disabled = false,
   className,
   rootRef,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
+  /** Visible label: rendered beside the control and used as its accessible name. */
   label?: string;
+  /** Accessible name only, for a control whose text sits in a sibling block. */
+  ariaLabel?: string;
   disabled?: boolean;
   className?: string;
   rootRef?: Ref<HTMLButtonElement>;
@@ -25,7 +29,7 @@ export function Checkbox({
       checked={checked}
       onCheckedChange={(next) => onChange(next === true)}
       disabled={disabled}
-      aria-label={label}
+      aria-label={ariaLabel ?? label}
       className={cx(
         "flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border bg-surface text-white transition-colors",
         "data-[state=checked]:border-accent data-[state=checked]:bg-accent",

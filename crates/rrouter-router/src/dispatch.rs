@@ -20,6 +20,14 @@
 //! 5. Non-retryable failures return immediately: retrying a 400 on another
 //!    account just burns requests.
 //! 6. Success closes the breaker and returns the winning candidate.
+//! 7. Hedging (opt-in, [`Dispatcher::with_hedge`], `RROUTER_HEDGE_MS`) applies to
+//!    non-streaming runs only: when the first two eligible candidates share a priority
+//!    tier, the second starts after the delay without an answer. The first answer wins and
+//!    the other send is cancelled (its breaker slot is released without a verdict). A
+//!    retryable failure on a raced candidate is not retried on that candidate — the hedge
+//!    is the retry — and if both fail the remaining candidates continue sequentially
+//!    inside the same send budget. There is no hedge on a single candidate, across
+//!    priority tiers, or when the delay would overrun the headers deadline.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -134,6 +142,8 @@ pub struct Dispatcher {
     max_attempts: usize,
     /// Shared with [`crate::Dispatcher::run_streaming`], which retries on the same curve.
     pub(crate) retry: RetryPolicy,
+    /// Hedge delay for non-streaming runs. `None` = strictly sequential (the default).
+    hedge: Option<Duration>,
 }
 
 impl Dispatcher {
@@ -142,6 +152,7 @@ impl Dispatcher {
             breaker: Arc::new(breaker),
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             retry: RetryPolicy::default(),
+            hedge: None,
         }
     }
 
@@ -151,6 +162,7 @@ impl Dispatcher {
             breaker,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             retry: RetryPolicy::default(),
+            hedge: None,
         }
     }
 
@@ -163,6 +175,19 @@ impl Dispatcher {
     pub fn with_max_attempts(mut self, max_attempts: usize) -> Self {
         self.max_attempts = max_attempts.max(1);
         self
+    }
+
+    /// Enable hedged non-streaming runs: after `hedge` without an answer from the first
+    /// candidate, the next eligible candidate of the **same priority** is started in
+    /// parallel. `None` or a zero delay keeps the strictly sequential behaviour.
+    pub fn with_hedge(mut self, hedge: Option<Duration>) -> Self {
+        self.hedge = hedge.filter(|delay| !delay.is_zero());
+        self
+    }
+
+    /// The hedge delay in effect, if any.
+    pub fn hedge(&self) -> Option<Duration> {
+        self.hedge
     }
 
     /// Override the per-candidate retry policy (default [`RetryPolicy::default`]).
@@ -189,6 +214,13 @@ impl Dispatcher {
     /// [`RetryPolicy::delay`], up to its `attempts` extra tries and the
     /// [`Dispatcher::max_attempts`] send cap. Only an exhausted candidate counts as a
     /// breaker failure, so retries do not trip an account faster than a hard failure.
+    ///
+    /// With [`Dispatcher::with_hedge`] set, the first two eligible candidates of the
+    /// first priority group race once: the second starts after the delay without an
+    /// answer. The first answer wins and the other send is dropped; a retryable failure
+    /// on either leg is not retried on that candidate (the hedge is the retry), and if
+    /// both fail the remaining candidates are tried sequentially inside the same send
+    /// budget.
     pub async fn run<T, F, Fut>(&self, plan: &Plan, send: F) -> Result<AttemptOutcome<T>>
     where
         F: Fn(Candidate) -> Fut,
@@ -207,6 +239,37 @@ impl Dispatcher {
 
         let mut last: Option<Error> = None;
         let mut sends = 0usize;
+        if let Some(hedge) = self.hedge {
+            if let Some(outcome) = self
+                .run_hedged(
+                    plan, &mut order, &send, hedge, deadline, &mut sends, &mut last,
+                )
+                .await
+            {
+                return Ok(outcome);
+            }
+        }
+        self.run_remaining(plan, order, sends, last, deadline, &send)
+            .await
+    }
+
+    /// The sequential fallback loop, over the candidates `order` still holds.
+    ///
+    /// Split out of [`Dispatcher::run`] so a hedged opener can hand over a partially
+    /// spent send budget and the error it already has, instead of restarting.
+    async fn run_remaining<T, F, Fut>(
+        &self,
+        plan: &Plan,
+        mut order: std::collections::VecDeque<usize>,
+        mut sends: usize,
+        mut last: Option<Error>,
+        deadline: Option<Instant>,
+        send: &F,
+    ) -> Result<AttemptOutcome<T>>
+    where
+        F: Fn(Candidate) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
         while sends < self.max_attempts {
             let Some((candidate, mut claim)) = self.next_claim(plan, &mut order).await else {
                 break;
@@ -273,6 +336,240 @@ impl Dispatcher {
         // The last upstream error is the most informative thing to return: the
         // cap and the skip rules only decide *when* to stop, not what failed.
         Err(last.unwrap_or_else(|| no_route(plan, "no attempt could be sent")))
+    }
+
+    /// Race the first two eligible candidates of the first priority group.
+    ///
+    /// `Some(outcome)` decides the request (success, or a non-retryable error the
+    /// caller returns). `None` means both legs failed without a verdict worth returning
+    /// and the caller continues the sequential fallback over the remaining `order`.
+    ///
+    /// Nothing here can exceed the budget: the race needs two sends and is skipped when
+    /// [`Dispatcher::max_attempts`] is 1 or the delay would overrun the headers deadline.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_hedged<T, F, Fut>(
+        &self,
+        plan: &Plan,
+        order: &mut std::collections::VecDeque<usize>,
+        send: &F,
+        hedge: Duration,
+        deadline: Option<Instant>,
+        sends: &mut usize,
+        last: &mut Option<Error>,
+    ) -> Option<AttemptOutcome<T>>
+    where
+        F: Fn(Candidate) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        if self.max_attempts < 2 || !within_budget(deadline, hedge) {
+            return None;
+        }
+        let (a, b) = self.hedge_pair(plan, order)?;
+        let primary = plan.candidates[a].clone();
+        let secondary = plan.candidates[b].clone();
+
+        // Both slots are claimed before either send starts. If the breaker refuses one,
+        // hand the pair back to the sequential loop, which owns the skip/wait rule.
+        let Ok(p_ticket) = self.breaker.claim(primary.connection) else {
+            return None;
+        };
+        let Ok(h_ticket) = self.breaker.claim(secondary.connection) else {
+            self.breaker.release_probe(primary.connection, p_ticket);
+            return None;
+        };
+        let mut p_claim = ProbeClaim {
+            breaker: Arc::clone(&self.breaker),
+            conn: primary.connection,
+            ticket: p_ticket,
+        };
+        let mut h_claim = ProbeClaim {
+            breaker: Arc::clone(&self.breaker),
+            conn: secondary.connection,
+            ticket: h_ticket,
+        };
+        order.retain(|idx| *idx != a && *idx != b);
+
+        let primary_fut = send(primary.clone());
+        tokio::pin!(primary_fut);
+
+        // The first leg runs alone until the threshold elapses. `biased` makes the
+        // primary win a tie, so an immediate answer is never delayed by the race.
+        let early = tokio::select! {
+            biased;
+            result = &mut primary_fut => Some(result),
+            () = tokio::time::sleep(hedge) => None,
+        };
+
+        let Some(result) = early else {
+            // Threshold elapsed: start the hedge and take the first answer.
+            *sends += 2;
+            let hedge_fut = send(secondary.clone());
+            tokio::pin!(hedge_fut);
+            let (primary_first, result) = tokio::select! {
+                biased;
+                result = &mut primary_fut => (true, result),
+                result = &mut hedge_fut => (false, result),
+            };
+            if primary_first {
+                return match result {
+                    Ok(resp) => {
+                        p_claim.disarm();
+                        self.breaker.record_success(primary.connection);
+                        // The hedge is dropped: its send is cancelled and its probe slot
+                        // is released without judging the account.
+                        drop(h_claim);
+                        Some(AttemptOutcome {
+                            candidate: primary,
+                            result: Ok(resp),
+                        })
+                    }
+                    Err(err) if !err.is_retryable_upstream() => {
+                        p_claim.disarm();
+                        self.breaker.record_success(primary.connection);
+                        drop(h_claim);
+                        Some(AttemptOutcome {
+                            candidate: primary,
+                            result: Err(err),
+                        })
+                    }
+                    Err(err) => {
+                        p_claim.disarm();
+                        self.breaker.record_failure(
+                            primary.connection,
+                            status_of(&err),
+                            retry_after(&err),
+                        );
+                        // The hedge is still in flight and may still answer: wait for it
+                        // rather than spending another candidate.
+                        let result = hedge_fut.await;
+                        self.settle_hedge(secondary, &mut h_claim, result, last)
+                    }
+                };
+            }
+            return match result {
+                Ok(resp) => {
+                    h_claim.disarm();
+                    self.breaker.record_success(secondary.connection);
+                    // Cancel the primary leg: dropping the future aborts its request and
+                    // releases its probe slot.
+                    drop(p_claim);
+                    Some(AttemptOutcome {
+                        candidate: secondary,
+                        result: Ok(resp),
+                    })
+                }
+                Err(err) if !err.is_retryable_upstream() => {
+                    h_claim.disarm();
+                    self.breaker.record_success(secondary.connection);
+                    drop(p_claim);
+                    Some(AttemptOutcome {
+                        candidate: secondary,
+                        result: Err(err),
+                    })
+                }
+                Err(err) => {
+                    h_claim.disarm();
+                    self.breaker.record_failure(
+                        secondary.connection,
+                        status_of(&err),
+                        retry_after(&err),
+                    );
+                    let result = primary_fut.await;
+                    self.settle_hedge(primary, &mut p_claim, result, last)
+                }
+            };
+        };
+
+        // The primary answered before the threshold: the hedge never started.
+        *sends += 1;
+        match result {
+            Ok(resp) => {
+                p_claim.disarm();
+                self.breaker.record_success(primary.connection);
+                drop(h_claim);
+                Some(AttemptOutcome {
+                    candidate: primary,
+                    result: Ok(resp),
+                })
+            }
+            Err(err) if !err.is_retryable_upstream() => {
+                p_claim.disarm();
+                self.breaker.record_success(primary.connection);
+                drop(h_claim);
+                Some(AttemptOutcome {
+                    candidate: primary,
+                    result: Err(err),
+                })
+            }
+            Err(err) => {
+                // A retryable failure before the hedge started: the waiting candidate
+                // takes its turn immediately, inside the same budget.
+                p_claim.disarm();
+                self.breaker
+                    .record_failure(primary.connection, status_of(&err), retry_after(&err));
+                *last = Some(err);
+                drop(h_claim);
+                order.push_front(b);
+                None
+            }
+        }
+    }
+
+    /// Finish a hedge race whose other leg already failed.
+    ///
+    /// Returns a decided outcome for success and for a non-retryable error; a retryable
+    /// failure records one breaker failure and returns `None`, so `run` continues the
+    /// sequential fallback over the remaining candidates.
+    fn settle_hedge<T>(
+        &self,
+        candidate: Candidate,
+        claim: &mut ProbeClaim,
+        result: Result<T>,
+        last: &mut Option<Error>,
+    ) -> Option<AttemptOutcome<T>> {
+        match result {
+            Ok(resp) => {
+                claim.disarm();
+                self.breaker.record_success(candidate.connection);
+                Some(AttemptOutcome {
+                    candidate,
+                    result: Ok(resp),
+                })
+            }
+            Err(err) if !err.is_retryable_upstream() => {
+                claim.disarm();
+                self.breaker.record_success(candidate.connection);
+                Some(AttemptOutcome {
+                    candidate,
+                    result: Err(err),
+                })
+            }
+            Err(err) => {
+                claim.disarm();
+                self.breaker.record_failure(
+                    candidate.connection,
+                    status_of(&err),
+                    retry_after(&err),
+                );
+                *last = Some(err);
+                None
+            }
+        }
+    }
+
+    /// The two candidates a hedge may race: the first two eligible entries whose
+    /// priorities are equal and whose connections differ. `None` means "do not hedge".
+    fn hedge_pair(
+        &self,
+        plan: &Plan,
+        order: &std::collections::VecDeque<usize>,
+    ) -> Option<(usize, usize)> {
+        let mut indices = order.iter();
+        let a = *indices.next()?;
+        let b = *indices.next()?;
+        let (first, second) = (&plan.candidates[a], &plan.candidates[b]);
+        (first.priority == second.priority && first.connection != second.connection)
+            .then_some((a, b))
     }
 
     /// Pop the next candidate whose send is permitted *now*, claiming its

@@ -1,5 +1,16 @@
-import { memo, useCallback, useDeferredValue, useMemo, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
+import * as Popover from "@radix-ui/react-popover";
+import { CircleNotch, DotsThree, Play } from "@phosphor-icons/react";
 import {
   Badge,
   Button,
@@ -10,28 +21,72 @@ import {
   Input,
   Modal,
   ConfirmDialog,
+  EmptyState,
   PageHeader,
   Select,
   cx,
 } from "../components/ui";
-import { DataTable, type Column } from "../components/table";
+import { DataTable, PaginationBar, type Column } from "../components/table";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS, CapabilityChips } from "../components/capability-chips";
 import { Checkbox, Heading, Toggle } from "../components/atoms";
 import { compact } from "../lib/format";
+import { usePhone } from "../lib/media";
 import { compareModels } from "../lib/models";
 import { useToast } from "../components/toast";
-import { qk, useModelProviders, useModels } from "../lib/queries";
+import { qk, useIsAdmin, useModelProviders, useModels } from "../lib/queries";
 import { api, type Capabilities, type Model, type ModelProvider, type ModelTest, type SyncResult } from "../lib/api";
 
 const ALL = "all";
+/** Page sizes the registry offers; 50 is the default because it fills a laptop viewport. */
+const SIZES = [25, 50, 100, 200] as const;
+const DEFAULT_SIZE = 50;
 
 export default function Models() {
   const models = useModels();
   const providers = useModelProviders();
-    const client = useQueryClient();
+  const isAdmin = useIsAdmin();
+  const phone = usePhone();
+  const client = useQueryClient();
+  const [params, setParams] = useSearchParams();
 
-  const [provider, setProvider] = useState(ALL);
-  const [query, setQuery] = useState("");
+  // The URL is the filter. The palette's `/models?q=<ref>`, a reload and a back/forward
+  // step all land on the same rows; the input is only a local draft while typing.
+  const urlQuery = params.get("q") ?? "";
+  const provider = params.get("provider") ?? ALL;
+  const requestedSize = Number(params.get("size") ?? DEFAULT_SIZE);
+  const size: number = (SIZES as readonly number[]).includes(requestedSize)
+    ? requestedSize
+    : DEFAULT_SIZE;
+
+  const [draft, setDraft] = useState(urlQuery);
+  useEffect(() => setDraft(urlQuery), [urlQuery]);
+
+  /** Write filters to the URL, dropping defaults so a clean view has a clean link. */
+  const setFilters = useCallback(
+    (patch: Record<string, string | null>, replace = false) => {
+      const next = new URLSearchParams(params);
+      for (const [key, value] of Object.entries(patch)) {
+        const defaulted =
+          value === null ||
+          value === "" ||
+          (key === "provider" && value === ALL) ||
+          (key === "size" && Number(value) === DEFAULT_SIZE) ||
+          (key === "page" && Number(value) === 1);
+        if (defaulted) next.delete(key);
+        else next.set(key, value);
+      }
+      setParams(next, { replace });
+    },
+    [params, setParams],
+  );
+
+  // One history entry per pause, not per keystroke: typing replaces, navigation pushes.
+  useEffect(() => {
+    if (draft === urlQuery) return;
+    const timer = window.setTimeout(() => setFilters({ q: draft, page: "1" }, true), 200);
+    return () => window.clearTimeout(timer);
+  }, [draft, urlQuery, setFilters]);
+
   const [customOpen, setCustomOpen] = useState(false);
 
   // Modal re-focuses itself whenever `onClose` changes identity, so keep it stable or
@@ -101,161 +156,206 @@ export default function Models() {
     [models.data],
   );
 
-  // 9k rows re-render on every keystroke otherwise; the input stays synchronous while
-  // the table catches up.
-  const deferredQuery = useDeferredValue(query);
-  const rows = useMemo(() => {
-    if (!models.data) return undefined;
-    const q = deferredQuery.trim().toLowerCase();
+  const appliedQuery = useDeferredValue(urlQuery);
+  const filtered = useMemo(() => {
+    const q = appliedQuery.trim().toLowerCase();
     return all.filter(
       (m) =>
         (provider === ALL || m.provider === provider) &&
         (!q || m.ref.toLowerCase().includes(q) || (m.display ?? "").toLowerCase().includes(q)),
     );
-  }, [all, models.data, provider, deferredQuery]);
+  }, [all, provider, appliedQuery]);
+
+  // Clamped, not corrected in the URL: a stale `?page=9` shows the last page instead of an
+  // empty table, and the next click writes the real number.
+  const lastPage = Math.max(1, Math.ceil(filtered.length / size));
+  const rawPage = Number(params.get("page") ?? "1");
+  const page = Math.min(Math.max(1, Number.isFinite(rawPage) ? rawPage : 1), lastPage);
+  const pageRows = useMemo(
+    () => filtered.slice((page - 1) * size, page * size),
+    [filtered, page, size],
+  );
 
   // Pending ids rather than whole mutation objects: the column list must keep the same
-  // identity while the toolbar is being typed into, or every keystroke re-renders 9k rows.
+  // identity while the toolbar is being typed into.
   const testTarget = test.isPending ? (test.variables?.ref ?? null) : null;
   const toggleTarget = toggle.isPending ? (toggle.variables?.id ?? null) : null;
   const removeTarget = remove.isPending ? (remove.variables?.ref ?? null) : null;
   const [deleting, setDeleting] = useState<Model | null>(null);
   const [editing, setEditing] = useState<Model | null>(null);
 
-  const columns = useMemo<Array<Column<Model>>>(() => [
-    {
-      key: "provider",
-      title: "provider",
-      width: "8.5rem",
-      render: (m) => <span className="text-muted">{m.provider}</span>,
-    },
-    {
-      key: "model",
-      title: "model",
-      render: (m) => (
-        <div className="min-w-[190px] max-w-[300px]">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <span
-              title={m.ref}
-              className={cx(
-                "truncate font-mono text-small",
-                m.enabled ? "text-fg" : "text-faint",
-              )}
-            >
-              {m.ref}
-            </span>
-            {m.deprecated ? (
-              <Badge tone="warn" title="this family is retired by its provider">
-                deprecated
-              </Badge>
-            ) : null}
-          </div>
-          {m.display && m.display !== m.id ? (
-            <div className="mt-0.5 truncate text-caption text-faint">{m.display}</div>
-          ) : null}
-        </div>
-      ),
-    },
-    {
-      key: "context",
-      title: "context",
-      align: "right",
-      width: "5rem",
-      render: (m) => <span className="text-muted">{compact(m.context)}</span>,
-    },
-    {
-      key: "max_output",
-      title: "max\u00A0out",
-      align: "right",
-      width: "6.5rem",
-      render: (m) => <span className="text-muted">{compact(m.max_output)}</span>,
-    },
-    {
-      key: "cost",
-      title: "price\u00A0/1M",
-      align: "right",
-      width: "8rem",
-      render: (m) =>
-        m.cost ? (
-          <span
-            className="whitespace-nowrap text-muted tnum"
-            title={
-              "input $" +
-              m.cost.input +
-              " · output $" +
-              m.cost.output +
-              (m.cost.cache_read === undefined ? "" : ` · cache read $${m.cost.cache_read}`)
-            }
-          >
-            ${m.cost.input.toFixed(2)} / ${m.cost.output.toFixed(2)}
-          </span>
-        ) : (
-          <span className="text-faint">—</span>
-        ),
-    },
-    {
-      key: "source",
-      title: "source",
-      width: "6rem",
-      render: (m) => <Badge tone={m.source === "custom" ? "accent" : "neutral"}>{m.source}</Badge>,
-    },
-    {
-      key: "capabilities",
-      title: "capabilities",
-      width: "15rem",
-      render: (m) => <CapabilityChips capabilities={m.capabilities} />,
-    },
-    {
-      key: "enabled",
-      title: "enabled",
-      width: "5rem",
-      render: (m) => {
-        const pending = toggleTarget === m.id;
-        return (
-          <Toggle
-            size="sm"
-            checked={m.enabled}
-            label={`${m.ref} ${m.enabled ? "enabled" : "disabled"}`}
-            disabled={pending}
-            onChange={() => toggle.mutate(m)}
-          />
-        );
-      },
-    },
-    {
-      key: "actions",
-      title: "",
-      align: "right",
-      render: (m) => {
-        const pending = testTarget === m.ref;
-        return (
-          <div className="flex items-center justify-end gap-1.5">
-            <Button onClick={() => setEditing(m)} title="edit display, limits, price and capabilities">
-              edit
-            </Button>
-            <Button
-              variant="quiet"
-              onClick={() => test.mutate(m)}
-              disabled={pending}
-              title={`send a 16-token completion to ${m.ref}`}
-            >
-              {pending ? "testing…" : "test"}
-            </Button>
-            {m.source === "custom" ? (
-              <Button
-                variant="danger"
-                onClick={() => setDeleting(m)}
-                disabled={removeTarget === m.ref}
-                title="delete this custom row"
+  const clearFilters = () => {
+    setDraft("");
+    setParams(new URLSearchParams(), { replace: false });
+  };
+
+  const columns = useMemo<Array<Column<Model>>>(() => {
+    const list: Array<Column<Model>> = [
+      {
+        key: "model",
+        title: "model",
+        render: (m) => (
+          <div className="flex min-w-[190px] max-w-[360px] flex-col">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="sr-only">Model </span>
+              <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.06em] text-muted">
+                {m.provider}
+              </span>
+              <span
+                title={m.ref}
+                className={cx(
+                  // `min-w-0` matters: a truncating flex item keeps its full intrinsic
+                  // width otherwise, and the table's auto layout would then scroll.
+                  "min-w-0 truncate font-mono text-small",
+                  m.enabled ? "text-fg" : "text-faint",
+                )}
               >
-                delete
-              </Button>
+                {m.id}
+              </span>
+              {m.source === "custom" ? (
+                <Badge tone="accent" title="added by an operator, not synced from the provider">
+                  custom
+                </Badge>
+              ) : null}
+              {m.deprecated ? (
+                <Badge tone="warn" title="this family is retired by its provider">
+                  deprecated
+                </Badge>
+              ) : null}
+            </div>
+            {m.display && m.display !== m.id ? (
+              <div className="mt-0.5 min-w-0 truncate text-caption text-faint">{m.display}</div>
             ) : null}
+            {/* Below xl the secondary columns are gone; their values ride in this cell
+                instead of forcing a horizontal scroll. */}
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption text-faint xl:hidden">
+              <span className="whitespace-nowrap tnum">ctx {compact(m.context)}</span>
+              <span className="whitespace-nowrap tnum">max {compact(m.max_output)}</span>
+              {priceLabel(m) ? (
+                <span className="whitespace-nowrap tnum lg:hidden">{priceLabel(m)}</span>
+              ) : null}
+              <CapabilityChips capabilities={m.capabilities} max={2} subject={m.ref} />
+            </div>
           </div>
-        );
+        ),
       },
-    },
-  ], [testTarget, toggleTarget, removeTarget]);
+      {
+        key: "context",
+        title: "context",
+        align: "right",
+        width: "4.5rem",
+        className: "hidden xl:table-cell",
+        render: (m) => <span className="text-muted">{compact(m.context)}</span>,
+      },
+      {
+        key: "max_output",
+        title: "max\u00A0out",
+        align: "right",
+        width: "5.5rem",
+        className: "hidden xl:table-cell",
+        render: (m) => <span className="text-muted">{compact(m.max_output)}</span>,
+      },
+      {
+        key: "cost",
+        title: "price\u00A0/1M",
+        align: "right",
+        width: "7.5rem",
+        className: "hidden lg:table-cell",
+        render: (m) =>
+          m.cost ? (
+            <span
+              className="whitespace-nowrap text-muted tnum"
+              title={priceTitle(m)}
+            >
+              {priceLabel(m)}
+            </span>
+          ) : (
+            <span className="text-faint">—</span>
+          ),
+      },
+      {
+        key: "capabilities",
+        title: "capabilities",
+        width: "9.5rem",
+        className: "hidden xl:table-cell",
+        render: (m) => (
+          <CapabilityChips capabilities={m.capabilities} max={2} subject={m.ref} />
+        ),
+      },
+      {
+        key: "enabled",
+        title: "enabled",
+        width: "4.5rem",
+        render: (m) => {
+          // A reader sees the state; only an admin can flip it.
+          if (!isAdmin) {
+            return <Badge tone={m.enabled ? "pos" : "neutral"}>{m.enabled ? "on" : "off"}</Badge>;
+          }
+          const pending = toggleTarget === m.id;
+          return (
+            <Toggle
+              size="sm"
+              checked={m.enabled}
+              label={`${m.ref} ${m.enabled ? "enabled" : "disabled"}`}
+              disabled={pending}
+              onChange={() => toggle.mutate(m)}
+            />
+          );
+        },
+      },
+      {
+        key: "actions",
+        title: "Actions",
+        srOnlyTitle: true,
+        align: "right",
+        width: "5rem",
+        render: (m) => (
+          <div className="flex items-center justify-end gap-1">
+            <TestButton
+              model={m}
+              pending={testTarget === m.ref}
+              onTest={() => test.mutate(m)}
+            />
+            <RowMenu
+              model={m}
+              pendingDelete={removeTarget === m.ref}
+              onEdit={() => setEditing(m)}
+              onDelete={() => setDeleting(m)}
+            />
+          </div>
+        ),
+      },
+    ];
+    // A reader sees the registry, not the controls that change it.
+    return isAdmin ? list : list.filter((column) => column.key !== "actions");
+  }, [isAdmin, testTarget, toggleTarget, removeTarget]);
+
+  const filteredOut = appliedQuery.trim() !== "" || provider !== ALL;
+  const providerName = providers.data?.find((p) => p.id === provider)?.display ?? provider;
+  const emptyState = filteredOut ? (
+    <div className="flex flex-col items-center gap-2">
+      <p>
+        No models match{" "}
+        {appliedQuery.trim() !== "" ? <span className="font-mono text-fg">{appliedQuery}</span> : null}
+        {appliedQuery.trim() !== "" && provider !== ALL ? " in " : null}
+        {provider !== ALL ? <span className="text-fg">{providerName}</span> : null}.
+      </p>
+      <Button variant="ghost" onClick={clearFilters}>
+        Clear filters
+      </Button>
+    </div>
+  ) : (
+    "no models for this provider"
+  );
+
+  const pagination = {
+    page,
+    size,
+    total: filtered.length,
+    label: "models",
+    onPage: (next: number) => setFilters({ page: String(next) }),
+    onSize: (next: number) => setFilters({ size: String(next), page: "1" }),
+  };
 
   return (
     <>
@@ -281,7 +381,7 @@ export default function Models() {
               <Select
                 ariaLabel="provider filter"
                 value={provider}
-                onChange={setProvider}
+                onChange={(next) => setFilters({ provider: next, page: "1" })}
               >
                 <option value={ALL}>all providers</option>
                 {(providers.data ?? []).map((p) => (
@@ -291,17 +391,19 @@ export default function Models() {
                 ))}
               </Select>
             </div>
-            <div className="w-[180px]">
+            <div className="w-[200px]">
               <Input
-                value={query}
-                onChange={setQuery}
+                value={draft}
+                onChange={setDraft}
                 placeholder="filter models…"
                 ariaLabel="filter models"
               />
             </div>
-            <Button variant="primary" onClick={() => setCustomOpen(true)}>
-              add custom model
-            </Button>
+            {isAdmin ? (
+              <Button variant="primary" onClick={() => setCustomOpen(true)}>
+                add custom model
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -324,25 +426,52 @@ export default function Models() {
       ) : null}
 
       {!models.isLoading && all.length === 0 ? (
-        <EmptyRegistry onSync={() => sync.mutate()} syncing={sync.isPending} />
+        <EmptyRegistry onSync={() => sync.mutate()} syncing={sync.isPending} canAdmin={isAdmin} />
       ) : (
         <Card>
           <CardHeader
             title="Registry"
             action={
               <span className="text-caption text-faint tnum">
-                {rows ? `${rows.length} of ${all.length} models` : "loading…"}
+                {filteredOut
+                  ? `${filtered.length.toLocaleString()} of ${all.length.toLocaleString()} models`
+                  : `${all.length.toLocaleString()} models`}
               </span>
             }
           />
-          <RegistryTable
-            columns={columns}
-            rows={rows}
-            empty={
-              deferredQuery || provider !== ALL ? "no models match this filter" : "no models for this provider"
-            }
-            loading={models.isLoading}
-          />
+          {phone && pageRows.length > 0 ? (
+            <>
+              <ModelCards
+                rows={pageRows}
+                isAdmin={isAdmin}
+                testTarget={testTarget}
+                toggleTarget={toggleTarget}
+                removeTarget={removeTarget}
+                onTest={(model) => test.mutate(model)}
+                onToggle={(model) => toggle.mutate(model)}
+                onEdit={setEditing}
+                onDelete={setDeleting}
+              />
+              <PaginationBar pagination={pagination} />
+            </>
+          ) : phone ? (
+            <EmptyState>{emptyState}</EmptyState>
+          ) : (
+            <DataTable
+              columns={columns}
+              rows={pageRows}
+              rowKey={rowKey}
+              loading={models.isLoading}
+              rowHeaderKey="model"
+              stickyRight="actions"
+              tableLayout="fixed"
+              maxBodyHeight="clamp(18rem, calc(100vh - 21rem), 52rem)"
+              scrollLabel="Models registry"
+              caption="Models registry: every model this gateway can route"
+              empty={emptyState}
+              pagination={pagination}
+            />
+          )}
         </Card>
       )}
 
@@ -365,6 +494,245 @@ export default function Models() {
         />
       ) : null}
     </>
+  );
+}
+
+/** A test is one icon: a word per row made the name repeat and the column jump. */
+function TestButton({
+  model,
+  pending,
+  onTest,
+}: {
+  model: Model;
+  pending: boolean;
+  onTest: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onTest}
+      disabled={pending}
+      aria-busy={pending || undefined}
+      aria-label={
+        pending ? `Testing ${model.ref}` : `Send a test completion to ${model.ref}`
+      }
+      title={`Send a 16-token completion to ${model.ref}`}
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-3 hover:text-fg disabled:opacity-70"
+    >
+      {pending ? (
+        <CircleNotch size={15} className="animate-spin" aria-hidden />
+      ) : (
+        <Play size={14} aria-hidden />
+      )}
+    </button>
+  );
+}
+
+/**
+ * Edit and delete live behind one trigger, so the row keeps a stable width.
+ *
+ * Menu semantics (one tab stop, arrows/Home/End inside) are hand-rolled: Radix Popover
+ * already owns focus restore and Escape, and a `@radix-ui/react-dropdown-menu` dependency
+ * for two items in one page was not worth the bundle.
+ */
+function RowMenu({
+  model,
+  pendingDelete,
+  onEdit,
+  onDelete,
+}: {
+  model: Model;
+  pendingDelete: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const surface = useRef<HTMLDivElement>(null);
+  const items = () =>
+    [...(surface.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
+  const focusItem = (index: number) => {
+    const list = items();
+    if (list.length === 0) return;
+    list[(index + list.length) % list.length]?.focus();
+  };
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const index = items().indexOf(document.activeElement as HTMLElement);
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        focusItem(index + 1);
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        focusItem(index <= 0 ? -1 : index - 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        focusItem(0);
+        break;
+      case "End":
+        event.preventDefault();
+        focusItem(-1);
+        break;
+      default:
+        break;
+    }
+  };
+  const item =
+    "flex h-8 items-center rounded-[var(--radius-input)] px-2 text-left text-small text-fg hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent-text";
+  return (
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          aria-label={`More actions for ${model.ref}`}
+          aria-haspopup="menu"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+        >
+          <DotsThree size={18} weight="bold" aria-hidden />
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          ref={surface}
+          role="menu"
+          side="bottom"
+          align="end"
+          sideOffset={4}
+          aria-label={`Actions for ${model.ref}`}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            window.requestAnimationFrame(() => focusItem(0));
+          }}
+          onKeyDown={onKeyDown}
+          className="popover-panel z-50 flex w-56 flex-col rounded-[var(--radius-card)] border border-line bg-surface p-1 shadow-lg focus:outline-none"
+        >
+          <Popover.Close asChild>
+            <button type="button" role="menuitem" tabIndex={-1} onClick={onEdit} className={item}>
+              Edit limits and price
+            </button>
+          </Popover.Close>
+          {model.source === "custom" ? (
+            <Popover.Close asChild>
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                onClick={onDelete}
+                disabled={pendingDelete}
+                className={cx(item, "text-[var(--color-neg-ink)] hover:bg-[var(--color-neg-tint)]")}
+              >
+                Delete custom model
+              </button>
+            </Popover.Close>
+          ) : null}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
+/** Below `sm` a row becomes a card: four table columns at 390 would scroll sideways. */
+function ModelCards({
+  rows,
+  isAdmin,
+  testTarget,
+  toggleTarget,
+  removeTarget,
+  onTest,
+  onToggle,
+  onEdit,
+  onDelete,
+}: {
+  rows: Model[];
+  isAdmin: boolean;
+  testTarget: string | null;
+  toggleTarget: string | null;
+  removeTarget: string | null;
+  onTest: (model: Model) => void;
+  onToggle: (model: Model) => void;
+  onEdit: (model: Model) => void;
+  onDelete: (model: Model) => void;
+}) {
+  return (
+    <ul aria-label="Models registry" className="flex flex-col">
+      {rows.map((m) => (
+        <li
+          key={m.ref}
+          className="border-b border-[var(--color-rule)] px-4 py-3 last:border-b-0"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.06em] text-muted">
+                  {m.provider}
+                </span>
+                <h3
+                  className={cx(
+                    "min-w-0 truncate font-mono text-small",
+                    m.enabled ? "text-fg" : "text-faint",
+                  )}
+                >
+                  {m.id}
+                </h3>
+                {m.source === "custom" ? (
+                  <Badge tone="accent" title="added by an operator, not synced from the provider">
+                    custom
+                  </Badge>
+                ) : null}
+                {m.deprecated ? (
+                  <Badge tone="warn" title="this family is retired by its provider">
+                    deprecated
+                  </Badge>
+                ) : null}
+              </div>
+              {m.display && m.display !== m.id ? (
+                <p className="mt-0.5 truncate text-caption text-faint">{m.display}</p>
+              ) : null}
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-caption text-faint">
+                <span className="whitespace-nowrap tnum">ctx {compact(m.context)}</span>
+                <span className="whitespace-nowrap tnum">max {compact(m.max_output)}</span>
+                {m.cost ? (
+                  <span className="whitespace-nowrap tnum" title={priceTitle(m)}>
+                    {cardPrice(m)}
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-1.5">
+                <CapabilityChips capabilities={m.capabilities} max={2} subject={m.ref} />
+              </div>
+            </div>
+            <div className="flex shrink-0 flex-col items-end gap-2">
+              {isAdmin ? (
+                <Toggle
+                  size="sm"
+                  checked={m.enabled}
+                  label={`${m.ref} ${m.enabled ? "enabled" : "disabled"}`}
+                  disabled={toggleTarget === m.id}
+                  onChange={() => onToggle(m)}
+                />
+              ) : (
+                <Badge tone={m.enabled ? "pos" : "neutral"}>{m.enabled ? "on" : "off"}</Badge>
+              )}
+              {isAdmin ? (
+                <div className="flex items-center gap-1">
+                  <TestButton
+                    model={m}
+                    pending={testTarget === m.ref}
+                    onTest={() => onTest(m)}
+                  />
+                  <RowMenu
+                    model={m}
+                    pendingDelete={removeTarget === m.ref}
+                    onEdit={() => onEdit(m)}
+                    onDelete={() => onDelete(m)}
+                  />
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -533,7 +901,15 @@ function CustomModelModal({
 const rowKey = (model: Model) => model.ref;
 
 /** Nothing here means nothing is connected: models come from providers, not catalogs. */
-function EmptyRegistry({ onSync, syncing }: { onSync: () => void; syncing: boolean }) {
+function EmptyRegistry({
+  onSync,
+  syncing,
+  canAdmin,
+}: {
+  onSync: () => void;
+  syncing: boolean;
+  canAdmin: boolean;
+}) {
   return (
     <Card className="px-6 py-12 text-center">
       <Heading level={2} className="text-heading font-medium">No models yet</Heading>
@@ -544,35 +920,43 @@ function EmptyRegistry({ onSync, syncing }: { onSync: () => void; syncing: boole
         </a>
         . Metadata such as context window, capabilities, and price is filled in from models.dev when you sync.
       </p>
-      <div className="mt-5 flex justify-center gap-2">
-        <Button variant="primary" onClick={onSync} disabled={syncing}>
-          {syncing ? "syncing…" : "sync metadata"}
-        </Button>
-        <a
-          href="/app/providers"
-          className="inline-flex h-8 items-center rounded-lg border border-line-strong bg-surface-2 px-3 text-body text-fg hover:border-[var(--color-line-strong)]"
-        >
-          go to providers
-        </a>
-      </div>
+      {canAdmin ? (
+        <div className="mt-5 flex justify-center gap-2">
+          <Button variant="primary" onClick={onSync} disabled={syncing}>
+            {syncing ? "syncing…" : "sync metadata"}
+          </Button>
+          <a
+            href="/app/providers"
+            className="inline-flex h-8 items-center rounded-lg border border-line-strong bg-surface-2 px-3 text-body text-fg hover:border-[var(--color-line-strong)]"
+          >
+            go to providers
+          </a>
+        </div>
+      ) : null}
     </Card>
   );
 }
 
-/** The table is the expensive part: memoized so toolbar edits never reconcile 9k rows. */
-const RegistryTable = memo(function RegistryTable({
-  columns,
-  rows,
-  empty,
-  loading,
-}: {
-  columns: Array<Column<Model>>;
-  rows: Model[] | undefined;
-  empty: string;
-  loading: boolean;
-}) {
-  return <DataTable columns={columns} rows={rows} rowKey={rowKey} empty={empty} loading={loading} />;
-});
+/** `$2.50 / $10.00`, in the units the `price /1M` column names. */
+function priceLabel(model: Model): string | null {
+  return model.cost
+    ? `$${model.cost.input.toFixed(2)} / $${model.cost.output.toFixed(2)}`
+    : null;
+}
+
+/** A card has no column header, so the unit is spelled out. */
+function cardPrice(model: Model): string | null {
+  return model.cost
+    ? `$${model.cost.input.toFixed(2)} in / $${model.cost.output.toFixed(2)} out`
+    : null;
+}
+
+function priceTitle(model: Model): string {
+  if (!model.cost) return "";
+  const cache =
+    model.cost.cache_read === undefined ? "" : ` · cache read $${model.cost.cache_read}`;
+  return `input $${model.cost.input} · output $${model.cost.output}${cache} · per 1M tokens`;
+}
 
 /** "" and non-positive input mean "unknown", never zero. */
 function numeric(value: string): number | null {

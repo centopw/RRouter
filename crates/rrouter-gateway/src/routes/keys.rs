@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use rrouter_core::Error;
 use rrouter_store::{window_start, ApiKey, ApiKeyPatch, BudgetWindow, KeyModel, KeyScope};
@@ -29,7 +30,13 @@ use crate::state::AppState;
 /// The row shape shared by `GET /api/keys`, `POST` and `PATCH`. `spent_tokens` and
 /// `spent_micros` are durable SQL sums over `usage` for this key, scoped to its
 /// `budget_window`, not stored counters.
-fn row(key: &ApiKey, spent: u64, spent_micros: u64, models: &[KeyModel]) -> Value {
+fn row(
+    key: &ApiKey,
+    spent: u64,
+    spent_micros: u64,
+    models: &[KeyModel],
+    team_id: Option<Uuid>,
+) -> Value {
     json!({
         "id": key.id.to_string(),
         "name": key.name,
@@ -46,6 +53,7 @@ fn row(key: &ApiKey, spent: u64, spent_micros: u64, models: &[KeyModel]) -> Valu
         "allowed_models": key.allowed_models,
         "expires_at": key.expires_at,
         "guardrails": key.guardrails,
+        "team_id": team_id.map(|team| team.to_string()),
         "models": models_value(models),
     })
 }
@@ -61,6 +69,7 @@ fn models_value(models: &[KeyModel]) -> Value {
 }
 
 async fn view(state: &AppState, key: &ApiKey) -> Value {
+    let team_id = state.store.key_team(key.id).await.ok().flatten();
     let since = window_start(key.budget_window, crate::now_unix());
     let spent = state.store.api_key_spend(key.id, since).await.unwrap_or(0);
     let spent_micros = state
@@ -69,39 +78,58 @@ async fn view(state: &AppState, key: &ApiKey) -> Value {
         .await
         .unwrap_or(0);
     let models = state.store.key_models(key.id).await.unwrap_or_default();
-    row(key, spent, spent_micros, &models)
+    row(key, spent, spent_micros, &models, team_id)
 }
 
-pub async fn list(State(state): State<Arc<AppState>>) -> Response {
-    let keys = match state.store.list_api_keys().await {
+/// `GET /api/keys[?team_id=]` — every key, or one team's. The filter is what a team
+/// report uses, and it can never widen a caller's authority: the route is admin-only.
+pub async fn list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<Vec<(String, String)>>,
+) -> Response {
+    let team = query
+        .iter()
+        .find(|(key, _)| key == "team_id")
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty());
+    let keys = match team {
+        None => state.store.list_api_keys().await,
+        Some(raw) => match uuid::Uuid::parse_str(raw) {
+            Ok(team) => state.store.list_api_keys_in_team(team).await,
+            Err(_) => return admin_error(&Error::BadRequest("team_id must be a uuid".into())),
+        },
+    };
+    let keys = match keys {
         Ok(keys) => keys,
         Err(e) => return admin_error(&e),
     };
-    // Each key is measured over its own window, so the spend is one aggregate per
-    // distinct window start (at most four), never one query per key.
+    match project(&state, &keys).await {
+        Ok(data) => ok_json(json!({ "data": data })),
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// The row projection shared by the admin list and the team-scoped list.
+///
+/// Spend is one aggregate per distinct window start (at most four), never one query per
+/// key; mappings and tenancy are one query each. `row()` is the only shape either caller
+/// emits, so a new field cannot appear on one list and not the other.
+async fn project(state: &AppState, keys: &[ApiKey]) -> Result<Vec<Value>, Error> {
     let now = crate::now_unix();
     let mut spend: HashMap<Option<i64>, HashMap<Uuid, u64>> = HashMap::new();
     let mut cost: HashMap<Option<i64>, HashMap<Uuid, u64>> = HashMap::new();
-    for key in &keys {
+    for key in keys {
         let since = window_start(key.budget_window, now);
         if spend.contains_key(&since) {
             continue;
         }
-        match state.store.api_key_spend_all(since).await {
-            Ok(s) => spend.insert(since, s),
-            Err(e) => return admin_error(&e),
-        };
-        match state.store.api_key_cost_spend_all(since).await {
-            Ok(c) => cost.insert(since, c),
-            Err(e) => return admin_error(&e),
-        };
+        spend.insert(since, state.store.api_key_spend_all(since).await?);
+        cost.insert(since, state.store.api_key_cost_spend_all(since).await?);
     }
-    // One query for every key's mapping, so the list stays O(1) in statement count.
-    let models = match state.store.key_models_all().await {
-        Ok(models) => models,
-        Err(e) => return admin_error(&e),
-    };
-    let data: Vec<Value> = keys
+    let models = state.store.key_models_all().await?;
+    // Tenancy in one more query: a key absent from the map is instance-wide.
+    let teams = state.store.key_teams().await?;
+    Ok(keys
         .iter()
         .map(|k| {
             let since = window_start(k.budget_window, now);
@@ -117,29 +145,72 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
                     .copied()
                     .unwrap_or(0),
                 models.get(&k.id).map(Vec::as_slice).unwrap_or_default(),
+                teams.get(&k.id).copied().flatten(),
             )
         })
-        .collect();
-    ok_json(json!({ "data": data }))
+        .collect())
+}
+
+/// `GET /api/teams/{id}/keys` — one team's key rows, in the same projection as the admin
+/// list. The caller's authority is checked by `routes::teams`; the plaintext and the hash
+/// are not part of `row()` at all.
+pub(crate) async fn rows_for_team(state: &AppState, team_id: Uuid) -> Result<Vec<Value>, Error> {
+    let keys = state.store.list_api_keys_in_team(team_id).await?;
+    project(state, &keys).await
 }
 
 /// Creates a key and returns the plaintext **once**; only its hash is stored.
 ///
 /// The new key starts unlimited; every limit is set afterwards with `PATCH`.
-pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response {
+pub async fn create(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    body: Body,
+) -> Response {
     let value = match body_json(body).await {
         Ok(v) => v,
         Err(resp) => return *resp,
     };
     let name = super::models::str_field(&value, "name");
-    match state.store.create_api_key(name.as_deref()).await {
-        Ok((plaintext, key)) => ok_json(json!({
-            "key": plaintext,
-            "id": key.id.to_string(),
-            "name": key.name,
-            "created_at": key.created_at,
-            "notice": "store this key now; it cannot be shown again",
-        })),
+    // A create has no assignment to preserve: absent and `null` both mean instance-wide.
+    let team_id = match cut_team_id(&value) {
+        Ok(team) => team.flatten(),
+        Err(e) => return admin_error(&e),
+    };
+    match state
+        .store
+        .create_api_key_in_team(name.as_deref(), team_id)
+        .await
+    {
+        Ok((plaintext, key)) => {
+            // The plaintext is returned once and never recorded: the audit row names the
+            // key and its scope, nothing that authenticates.
+            let actor = super::auth::actor(&state, &headers).await;
+            super::auth::audit(
+                &state,
+                "key_created",
+                Some(&actor),
+                &crate::auth::client_ip(&headers, peer.0),
+                &format!(
+                    "key {} · name {} · scope {}{}",
+                    key.id,
+                    key.name.as_deref().unwrap_or("—"),
+                    key.scope.as_str(),
+                    team_id
+                        .map(|team| format!(" · team {team}"))
+                        .unwrap_or_default()
+                ),
+            )
+            .await;
+            ok_json(json!({
+                "key": plaintext,
+                "id": key.id.to_string(),
+                "name": key.name,
+                "created_at": key.created_at,
+                "notice": "store this key now; it cannot be shown again",
+            }))
+        }
         Err(e) => admin_error(&e),
     }
 }
@@ -150,6 +221,8 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
 /// `guardrails` (null clears; `{}` is the same as no policy). Returns the merged row.
 pub async fn update(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
@@ -164,26 +237,130 @@ pub async fn update(
         Ok(patch) => patch,
         Err(e) => return admin_error(&e),
     };
+    // Tenancy is applied separately: it is not traffic policy, and a body that only moves
+    // a key between teams must not rewrite its limits. `null` releases the key back to
+    // instance-wide, which is what every pre-v23 key was.
+    let team_change = match cut_team_id(&value) {
+        Ok(team) => team,
+        Err(e) => return admin_error(&e),
+    };
+    // Validate the destination before writing anything: a patch that names a missing team
+    // must not leave the limits half-applied.
+    if let Some(Some(team)) = team_change {
+        match state.store.team(team).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return admin_error(&Error::NotFound(format!("team {team}"))),
+            Err(e) => return admin_error(&e),
+        }
+    }
     match state.store.update_api_key(uuid, &patch).await {
-        Ok(Some(key)) => ok_json(view(&state, &key).await),
+        Ok(Some(key)) => {
+            if let Some(team) = team_change {
+                match state.store.set_api_key_team(uuid, team).await {
+                    Ok(true) => {}
+                    Ok(false) => return admin_error(&Error::NotFound(format!("key {uuid}"))),
+                    Err(e) => return admin_error(&e),
+                }
+            }
+            // Which policy fields moved, never their secret values; scope and window
+            // carry the new value because those two decide what the key may do.
+            let actor = super::auth::actor(&state, &headers).await;
+            let mut detail = format!(
+                "key {} · {}",
+                key.id,
+                describe_patch(&patch, key.scope, key.budget_window)
+            );
+            match team_change {
+                Some(Some(team)) => detail.push_str(&format!(" · team {team}")),
+                Some(None) => detail.push_str(" · team cleared"),
+                None => {}
+            }
+            super::auth::audit(
+                &state,
+                "key_updated",
+                Some(&actor),
+                &crate::auth::client_ip(&headers, peer.0),
+                &detail,
+            )
+            .await;
+            ok_json(view(&state, &key).await)
+        }
         Ok(None) => admin_error(&Error::NotFound(format!("key {uuid}"))),
         Err(e) => admin_error(&e),
     }
 }
 
-pub async fn remove(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+pub async fn remove(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    Path(id): Path<String>,
+) -> Response {
     let Ok(uuid) = uuid::Uuid::parse_str(&id) else {
         return admin_error(&Error::BadRequest("key id must be a uuid".into()));
     };
+    // Read the name before the row goes: the audit row should outlive it.
+    let name = state
+        .store
+        .get_api_key(uuid)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|key| key.name);
     match state.store.delete_api_key(uuid).await {
         Ok(true) => {
             // A deleted key's windows must not survive into a future id.
             state.counters.forget(uuid);
+            let actor = super::auth::actor(&state, &headers).await;
+            super::auth::audit(
+                &state,
+                "key_deleted",
+                Some(&actor),
+                &crate::auth::client_ip(&headers, peer.0),
+                &format!("key {uuid} · name {}", name.as_deref().unwrap_or("—")),
+            )
+            .await;
             ok_json(json!({ "deleted": true, "id": uuid.to_string() }))
         }
         Ok(false) => admin_error(&Error::NotFound(format!("key {uuid}"))),
         Err(e) => admin_error(&e),
     }
+}
+
+/// Name the policy fields a patch touches, for the audit row.
+///
+/// Only names, never values: a budget's amount is not secret but a diff of eight numbers
+/// is unreadable, while "scope, budget_micros" answers the question an audit asks. Scope
+/// and window do carry their new value because those decide what the key may do and when
+/// its spend resets.
+fn describe_patch(patch: &ApiKeyPatch, scope: KeyScope, window: BudgetWindow) -> String {
+    let mut fields: Vec<&str> = Vec::new();
+    for (present, name) in [
+        (patch.is_active.is_some(), "is_active"),
+        (patch.scope.is_some(), "scope"),
+        (patch.rpm.is_some(), "rpm"),
+        (patch.tpm.is_some(), "tpm"),
+        (patch.budget_tokens.is_some(), "budget_tokens"),
+        (patch.budget_micros.is_some(), "budget_micros"),
+        (patch.budget_window.is_some(), "budget_window"),
+        (patch.allowed_models.is_some(), "allowed_models"),
+        (patch.expires_at.is_some(), "expires_at"),
+        (patch.guardrails.is_some(), "guardrails"),
+    ] {
+        if present {
+            fields.push(name);
+        }
+    }
+    let changed = if fields.is_empty() {
+        "no changes".to_string()
+    } else {
+        fields.join(", ")
+    };
+    format!(
+        "{changed} · now scope {} window {}",
+        scope.as_str(),
+        window.as_str()
+    )
 }
 
 /// `GET /api/keys/{id}/models` — the key's model mapping, in `from` order.
@@ -264,6 +441,26 @@ fn models_from(value: &Value) -> Result<Vec<KeyModel>, Error> {
         });
     }
     Ok(out)
+}
+
+/// Read `team_id` out of a key body, distinguishing "not mentioned" from "clear it".
+///
+/// `None` leaves the assignment alone (the PATCH contract for absent fields), `Some(None)`
+/// releases the key to instance-wide, and `Some(Some(id))` moves it to that team.
+fn cut_team_id(value: &Value) -> Result<Option<Option<Uuid>>, Error> {
+    let Some(raw) = value.get("team_id") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(Some(None));
+    }
+    let Some(text) = raw.as_str() else {
+        return Err(Error::BadRequest("team_id must be a uuid or null".into()));
+    };
+    match Uuid::parse_str(text) {
+        Ok(id) => Ok(Some(Some(id))),
+        Err(_) => Err(Error::BadRequest("team_id must be a uuid or null".into())),
+    }
 }
 
 /// Decode a PATCH body: absent fields are left alone, an explicit `null` clears a

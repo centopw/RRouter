@@ -12,6 +12,14 @@ const KINDS = [
   "setup",
   "invitation_created",
   "invitation_accepted",
+  "key_created",
+  "key_updated",
+  "key_deleted",
+  "team_created",
+  "team_updated",
+  "team_deleted",
+  "team_member_added",
+  "team_member_removed",
   "password_reset",
   "password_changed",
   "password_change_failed",
@@ -62,7 +70,7 @@ export default function Audit() {
     <>
       <PageHeader
         title="Audit"
-        subtitle="Security events for this gateway: sign-ins, invitations, role changes, resets and session revocations."
+        subtitle="Security events for this gateway: sign-ins, invitations, role changes, API key changes, resets and session revocations."
         actions={
           <Button variant="quiet" onClick={() => void audit.refetch()} disabled={audit.isFetching}>
             {audit.isFetching ? "refreshing…" : "Refresh"}

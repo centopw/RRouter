@@ -1,6 +1,11 @@
 //! SQLite persistence for RRouter: encrypted provider credentials, gateway API keys,
 //! model aliases/catalog, combos, and usage records.
 //!
+//! Provider connections carry an optional owning team (`connections.team_id`). Reads pick
+//! a [`ConnectionScope`]: `Global` is the instance view (admin/reporting and non-team
+//! keys), `Team` is strict tenant isolation, and a shared row (`team_id IS NULL`) is
+//! visible only to `Global`. The filter lives in SQL so no caller can forget it.
+//!
 //! # Concurrency model
 //!
 //! `rusqlite` is synchronous. This crate wraps ONE `std::sync::Mutex<rusqlite::Connection>`
@@ -22,21 +27,37 @@
 
 mod audit;
 mod crypto;
+mod evals;
 mod migrations;
 mod store;
+mod teams;
 mod users;
+mod webhooks;
 
 pub use audit::AuditEvent;
 pub use crypto::KEY_FILE_NAME;
+pub use evals::{
+    eval_passes, EvalCase, EvalResult, EvalRun, EvalRunStatus, EvalSuite, EvalSummary,
+    EVAL_RUN_PAGE, MAX_EVAL_CASES, MAX_EVAL_MODEL, MAX_EVAL_NAME, MAX_EVAL_TEXT,
+};
+pub use migrations::SCHEMA_VERSION;
 pub use rrouter_auth::{CredentialStore, Credentials};
 pub use store::{
     cache_key, window_reset, window_start, AccountQuota, AccountQuotaState, AccountUsage, ApiKey,
-    ApiKeyPatch, AttemptRecord, BudgetWindow, CacheEntry, Combo, Connection, ExhaustedAccounts,
-    Guardrails, KeyModel, KeyScope, ModelAlias, ModelCost, ModelRow, PromptTemplate,
-    PromptTemplateVersion, PruneReport, StatusFilter, Store, UsageBucket, UsageModelBucket,
-    UsageQuery, UsageRecord, UsageSummary, API_KEY_PREFIX,
+    ApiKeyPatch, AttemptRecord, BudgetWindow, CacheEntry, Combo, Connection, ConnectionScope,
+    ExhaustedAccounts, Guardrails, KeyModel, KeyScope, ModelAlias, ModelCost, ModelRow,
+    PromptTemplate, PromptTemplateVersion, PruneReport, SemanticCacheCandidate, SemanticCacheEntry,
+    SemanticCacheScope, StatusFilter, Store, UsageBucket, UsageModelBucket, UsageQuery,
+    UsageRecord, UsageSummary, API_KEY_PREFIX,
 };
+pub use teams::{normalize_name, Team, TeamMember, TeamPatch, TeamRole, TeamSpend, MAX_TEAM_NAME};
 pub use users::{
     hash_password, hash_secret, normalize_email, random_recovery_codes, random_setup_code,
-    random_token, verify_password, Invite, SessionInfo, User, UserRole,
+    random_token, verify_password, Invite, SessionInfo, User, UserRole, MAX_SESSION_IP,
+    MAX_SESSION_USER_AGENT,
+};
+pub use webhooks::{
+    OutboxEvent, OutboxStatus, WebhookEndpoint, WebhookPatch, DELIVERY_LEASE_SECS, MAX_EVENT_TYPES,
+    MAX_PAYLOAD_LEN, MAX_SECRET_ENV_LEN, MAX_URL_LEN, MAX_WEBHOOKS, OUTBOX_RETENTION_SECS,
+    STATUS_DEAD, STATUS_DELIVERED, STATUS_DELIVERING, STATUS_PENDING, STATUS_UNMATCHED,
 };
