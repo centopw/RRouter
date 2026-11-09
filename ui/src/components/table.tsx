@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { EmptyState, cx } from "./ui";
 
 /**
@@ -6,8 +6,11 @@ import { EmptyState, cx } from "./ui";
  *
  * `thead` sticks, the right-hand actions column sticks, and the scroll container is a
  * named, focusable region so a keyboard or screen-reader user can reach the overflow
- * without hunting for a scrollbar. Pagination is controlled: the caller slices, this only
- * paints the footer — one table never decides how much data a page fetches.
+ * without hunting for a scrollbar.
+ *
+ * Pagination: controlled wins. A caller that passes `pagination` slices its own rows
+ * (server-side or ahead of time) and this only paints the footer. Without the prop the
+ * table paginates itself at 25 rows a page, so no page can render rows without controls.
  */
 
 export type Column<T> = {
@@ -40,6 +43,8 @@ export type Pagination = {
 };
 
 const DEFAULT_SIZES = [25, 50, 100, 200];
+/** Page size an unpaginated table starts with; the footer offers the others. */
+const AUTO_PAGE_SIZE = 25;
 
 export function DataTable<T>({
   columns,
@@ -80,6 +85,30 @@ export function DataTable<T>({
    */
   tableLayout?: "auto" | "fixed";
 }) {
+  // Controlled pagination wins; otherwise the table owns page and size.
+  const controlled = pagination !== undefined;
+  const [autoPage, setAutoPage] = useState(1);
+  const [autoSize, setAutoSize] = useState(AUTO_PAGE_SIZE);
+  const total = rows?.length ?? 0;
+  const autoLast = Math.max(1, Math.ceil(total / autoSize));
+  const page = controlled ? pagination.page : Math.min(autoPage, autoLast);
+
+  // A smaller dataset starts at the top; growth keeps the current page when it is still
+  // valid. A size change also starts at the top, like every other table footer.
+  const previousTotal = useRef(total);
+  useEffect(() => {
+    if (controlled) return;
+    if (total < previousTotal.current) {
+      setAutoPage(1);
+    } else {
+      setAutoPage((current) => Math.min(current, autoLast));
+    }
+    previousTotal.current = total;
+  }, [controlled, total, autoLast]);
+  useEffect(() => {
+    if (!controlled) setAutoPage(1);
+  }, [controlled, autoSize]);
+
   if (!rows) {
     return (
       <div className="px-5 py-10 text-center text-body text-faint">
@@ -88,10 +117,35 @@ export function DataTable<T>({
     );
   }
   if (rows.length === 0) {
-    return <EmptyState>{empty ?? "nothing here yet"}</EmptyState>;
+    // An empty page in controlled mode keeps its footer: the reader may need to page
+    // back. An auto table with no rows has nothing to paginate and stays a plain empty
+    // state.
+    const footer = controlled && pagination.total > 0
+      ? <PaginationBar pagination={pagination} />
+      : null;
+    return (
+      <>
+        <EmptyState>{empty ?? "nothing here yet"}</EmptyState>
+        {footer}
+      </>
+    );
   }
 
   const label = scrollLabel ?? caption ?? "table";
+  const pageRows = controlled
+    ? rows
+    : rows.slice((page - 1) * autoSize, page * autoSize);
+  const footer: Pagination = pagination ?? {
+    page,
+    size: autoSize,
+    total,
+    label: scrollLabel ?? caption ?? "rows",
+    onPage: setAutoPage,
+    onSize: (next) => {
+      setAutoSize(next);
+      setAutoPage(1);
+    },
+  };
 
   // A bounded table is its own scrollport; an unbounded one must not be, or a page ends
   // up with two vertical scrollbars (the table's and the shell's).
@@ -137,7 +191,7 @@ export function DataTable<T>({
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
+            {pageRows.map((row) => (
               <tr key={rowKey(row)} className="group">
                 {columns.map((column) => {
                   const content = column.render(row);
@@ -170,7 +224,7 @@ export function DataTable<T>({
           </tbody>
         </table>
       </div>
-      {pagination ? <PaginationBar pagination={pagination} /> : null}
+      {pagination !== undefined || total > 0 ? <PaginationBar pagination={footer} /> : null}
     </div>
   );
 }

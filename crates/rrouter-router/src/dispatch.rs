@@ -1,12 +1,16 @@
 //! The fallback engine for non-streaming attempts.
 //!
 //! Rules, in order:
-//! 1. A candidate whose breaker is open is skipped, not attempted.
+//! 1. A candidate whose connection breaker is open **or whose model is cooling down**
+//!    after a 429 is skipped, not attempted. A model 429 is scoped to that
+//!    `(connection, model)` and never parks the account's other models.
 //! 2. If *nothing* is eligible but some candidate opens within
 //!    [`MAX_SKIP_WAIT`], sleep at most that long and retry it once. This keeps a
 //!    client from paying a 30 s breaker window for a 300 ms blip, and it is the
 //!    only ordering wait this module performs; a 429/5xx mid-flight never waits
-//!    here beyond the retry backoff in rule 3.
+//!    here beyond the retry backoff in rule 3. If every candidate is still cooling
+//!    down, the run returns `429 all_candidates_cooling_down` with `Retry-After`
+//!    instead of pretending the model has no route (an empty plan stays `404`).
 //! 3. A retryable failure is retried on the **same** candidate up to
 //!    [`RetryPolicy::attempts`] extra times, sleeping an exponentially backed-off,
 //!    jittered `min(base * 2^n, max)` between sends (capped by an upstream
@@ -229,12 +233,9 @@ impl Dispatcher {
         // The budget covers ordering too: the skipped-candidate wait below is part of
         // the headers phase the caller timed.
         let deadline = self.retry.deadline();
-        let mut order = self.attempt_order(plan).await;
+        let (mut order, earliest) = self.attempt_order(plan).await;
         if order.is_empty() {
-            return Err(no_route(
-                plan,
-                "every candidate is blocked by its circuit breaker",
-            ));
+            return Err(blocked_plan(plan, earliest));
         }
 
         let mut last: Option<Error> = None;
@@ -282,7 +283,8 @@ impl Dispatcher {
                     Ok(resp) => {
                         // Disarm before settling so `Drop` cannot double-report.
                         claim.disarm();
-                        self.breaker.record_success(candidate.connection);
+                        self.breaker
+                            .record_success_for(candidate.connection, &candidate.model);
                         return Ok(AttemptOutcome {
                             candidate,
                             result: Ok(resp),
@@ -293,7 +295,8 @@ impl Dispatcher {
                         // nothing about the account: the upstream answered sanely. Releasing the
                         // probe keeps it eligible instead of counting a client 400 toward a trip.
                         claim.disarm();
-                        self.breaker.record_success(candidate.connection);
+                        self.breaker
+                            .record_success_for(candidate.connection, &candidate.model);
                         return Ok(AttemptOutcome {
                             candidate,
                             result: Err(err),
@@ -321,8 +324,9 @@ impl Dispatcher {
                         // Retries exhausted (or no time left): one breaker failure for
                         // the candidate, then the next one.
                         claim.disarm();
-                        self.breaker.record_failure(
+                        self.breaker.record_failure_for(
                             candidate.connection,
+                            &candidate.model,
                             status_of(&err),
                             retry_after(&err),
                         );
@@ -370,10 +374,16 @@ impl Dispatcher {
 
         // Both slots are claimed before either send starts. If the breaker refuses one,
         // hand the pair back to the sequential loop, which owns the skip/wait rule.
-        let Ok(p_ticket) = self.breaker.claim(primary.connection) else {
+        let Ok(p_ticket) = self
+            .breaker
+            .claim_candidate(primary.connection, &primary.model)
+        else {
             return None;
         };
-        let Ok(h_ticket) = self.breaker.claim(secondary.connection) else {
+        let Ok(h_ticket) = self
+            .breaker
+            .claim_candidate(secondary.connection, &secondary.model)
+        else {
             self.breaker.release_probe(primary.connection, p_ticket);
             return None;
         };
@@ -414,7 +424,8 @@ impl Dispatcher {
                 return match result {
                     Ok(resp) => {
                         p_claim.disarm();
-                        self.breaker.record_success(primary.connection);
+                        self.breaker
+                            .record_success_for(primary.connection, &primary.model);
                         // The hedge is dropped: its send is cancelled and its probe slot
                         // is released without judging the account.
                         drop(h_claim);
@@ -425,7 +436,8 @@ impl Dispatcher {
                     }
                     Err(err) if !err.is_retryable_upstream() => {
                         p_claim.disarm();
-                        self.breaker.record_success(primary.connection);
+                        self.breaker
+                            .record_success_for(primary.connection, &primary.model);
                         drop(h_claim);
                         Some(AttemptOutcome {
                             candidate: primary,
@@ -434,8 +446,9 @@ impl Dispatcher {
                     }
                     Err(err) => {
                         p_claim.disarm();
-                        self.breaker.record_failure(
+                        self.breaker.record_failure_for(
                             primary.connection,
+                            &primary.model,
                             status_of(&err),
                             retry_after(&err),
                         );
@@ -449,7 +462,8 @@ impl Dispatcher {
             return match result {
                 Ok(resp) => {
                     h_claim.disarm();
-                    self.breaker.record_success(secondary.connection);
+                    self.breaker
+                        .record_success_for(secondary.connection, &secondary.model);
                     // Cancel the primary leg: dropping the future aborts its request and
                     // releases its probe slot.
                     drop(p_claim);
@@ -460,7 +474,8 @@ impl Dispatcher {
                 }
                 Err(err) if !err.is_retryable_upstream() => {
                     h_claim.disarm();
-                    self.breaker.record_success(secondary.connection);
+                    self.breaker
+                        .record_success_for(secondary.connection, &secondary.model);
                     drop(p_claim);
                     Some(AttemptOutcome {
                         candidate: secondary,
@@ -469,8 +484,9 @@ impl Dispatcher {
                 }
                 Err(err) => {
                     h_claim.disarm();
-                    self.breaker.record_failure(
+                    self.breaker.record_failure_for(
                         secondary.connection,
+                        &secondary.model,
                         status_of(&err),
                         retry_after(&err),
                     );
@@ -485,7 +501,8 @@ impl Dispatcher {
         match result {
             Ok(resp) => {
                 p_claim.disarm();
-                self.breaker.record_success(primary.connection);
+                self.breaker
+                    .record_success_for(primary.connection, &primary.model);
                 drop(h_claim);
                 Some(AttemptOutcome {
                     candidate: primary,
@@ -494,7 +511,8 @@ impl Dispatcher {
             }
             Err(err) if !err.is_retryable_upstream() => {
                 p_claim.disarm();
-                self.breaker.record_success(primary.connection);
+                self.breaker
+                    .record_success_for(primary.connection, &primary.model);
                 drop(h_claim);
                 Some(AttemptOutcome {
                     candidate: primary,
@@ -505,8 +523,12 @@ impl Dispatcher {
                 // A retryable failure before the hedge started: the waiting candidate
                 // takes its turn immediately, inside the same budget.
                 p_claim.disarm();
-                self.breaker
-                    .record_failure(primary.connection, status_of(&err), retry_after(&err));
+                self.breaker.record_failure_for(
+                    primary.connection,
+                    &primary.model,
+                    status_of(&err),
+                    retry_after(&err),
+                );
                 *last = Some(err);
                 drop(h_claim);
                 order.push_front(b);
@@ -530,7 +552,8 @@ impl Dispatcher {
         match result {
             Ok(resp) => {
                 claim.disarm();
-                self.breaker.record_success(candidate.connection);
+                self.breaker
+                    .record_success_for(candidate.connection, &candidate.model);
                 Some(AttemptOutcome {
                     candidate,
                     result: Ok(resp),
@@ -538,7 +561,8 @@ impl Dispatcher {
             }
             Err(err) if !err.is_retryable_upstream() => {
                 claim.disarm();
-                self.breaker.record_success(candidate.connection);
+                self.breaker
+                    .record_success_for(candidate.connection, &candidate.model);
                 Some(AttemptOutcome {
                     candidate,
                     result: Err(err),
@@ -546,8 +570,9 @@ impl Dispatcher {
             }
             Err(err) => {
                 claim.disarm();
-                self.breaker.record_failure(
+                self.breaker.record_failure_for(
                     candidate.connection,
+                    &candidate.model,
                     status_of(&err),
                     retry_after(&err),
                 );
@@ -584,7 +609,10 @@ impl Dispatcher {
     ) -> Option<(Candidate, ProbeClaim)> {
         while let Some(idx) = order.pop_front() {
             let candidate = plan.candidates[idx].clone();
-            if let Ok(ticket) = self.breaker.claim(candidate.connection) {
+            if let Ok(ticket) = self
+                .breaker
+                .claim_candidate(candidate.connection, &candidate.model)
+            {
                 let claim = ProbeClaim {
                     breaker: Arc::clone(&self.breaker),
                     conn: candidate.connection,
@@ -602,14 +630,22 @@ impl Dispatcher {
     ///
     /// This is a read-only ranking: probe slots are claimed in [`Dispatcher::next_claim`],
     /// immediately before the attempt, so an unsent candidate never holds one.
-    pub(crate) async fn attempt_order(&self, plan: &Plan) -> std::collections::VecDeque<usize> {
+    pub(crate) async fn attempt_order(
+        &self,
+        plan: &Plan,
+    ) -> (std::collections::VecDeque<usize>, Option<Duration>) {
         let mut eligible = std::collections::VecDeque::with_capacity(plan.candidates.len());
         let mut skipped: Vec<(usize, Duration)> = Vec::new();
+        let mut earliest: Option<Duration> = None;
         for (idx, c) in plan.candidates.iter().enumerate() {
-            match self.breaker.check(c.connection) {
+            match self.breaker.check_candidate(c.connection, &c.model) {
                 None => eligible.push_back(idx),
-                Some(wait) if wait <= MAX_SKIP_WAIT => skipped.push((idx, wait)),
-                Some(_) => {}
+                Some(wait) => {
+                    earliest = Some(earliest.map_or(wait, |seen| seen.min(wait)));
+                    if wait <= MAX_SKIP_WAIT {
+                        skipped.push((idx, wait));
+                    }
+                }
             }
         }
         if eligible.is_empty() && !skipped.is_empty() {
@@ -619,15 +655,17 @@ impl Dispatcher {
             skipped.sort_by_key(|(_, wait)| *wait);
             let (idx, wait) = skipped[0];
             tokio::time::sleep(wait.min(MAX_SKIP_WAIT)).await;
-            if self
+            let candidate = &plan.candidates[idx];
+            if let Some(wait) = self
                 .breaker
-                .check(plan.candidates[idx].connection)
-                .is_none()
+                .check_candidate(candidate.connection, &candidate.model)
             {
+                earliest = Some(earliest.map_or(wait, |seen| seen.min(wait)));
+            } else {
                 eligible.push_back(idx);
             }
         }
-        eligible
+        (eligible, earliest)
     }
 }
 
@@ -662,6 +700,23 @@ pub(crate) fn no_route(plan: &Plan, detail: &str) -> Error {
     Error::NoRoute {
         model: plan.model.clone(),
         detail: detail.to_string(),
+    }
+}
+
+/// No candidate can be sent because every one is cooling down. An actually empty
+/// plan remains a `404`; a breaker wait is a `429` with `Retry-After`, never a 404.
+pub(crate) fn blocked_plan(plan: &Plan, wait: Option<Duration>) -> Error {
+    if plan.candidates.is_empty() {
+        return no_route(plan, "no candidates");
+    }
+    let secs = wait.unwrap_or(Duration::from_secs(1)).as_secs().max(1);
+    Error::Limited {
+        code: "all_candidates_cooling_down",
+        message: format!(
+            "every candidate for model {} is cooling down; retry in {secs}s",
+            plan.model
+        ),
+        retry_after_secs: secs,
     }
 }
 

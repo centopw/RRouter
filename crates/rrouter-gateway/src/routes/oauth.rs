@@ -170,7 +170,9 @@ pub async fn complete(
         .await
     {
         Ok(conn) => {
-            super::models::spawn_initial_fetch(Arc::clone(&state), conn.id);
+            // The dashboard invalidates its model query as soon as this response lands,
+            // so wait (bounded) for the provider's catalogue instead of racing it.
+            super::models::wait_initial_fetch(Arc::clone(&state), conn.id).await;
             ok_json(json!({
                 "id": conn.id.to_string(),
                 "provider": conn.provider,

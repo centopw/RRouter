@@ -235,6 +235,7 @@ fn combo_cursor_survives_a_restart_and_concurrent_starts_do_not_collide() {
 /// must remove these too, or the replay runs `ALTER TABLE … ADD COLUMN` on a column the
 /// file still has. Indexes go first: SQLite refuses to drop a column an index covers.
 const UNDO_AFTER_V24: &str = "\
+    DROP TABLE IF EXISTS model_preferences; \
     DROP TABLE IF EXISTS user_model_preferences; \
     DROP TABLE IF EXISTS model_preset_versions; DROP TABLE IF EXISTS model_presets; \
     DROP TABLE IF EXISTS semantic_cache; \
@@ -1583,6 +1584,62 @@ fn aliases_and_disabled_models_upsert_list_delete() {
         );
         s.set_disabled("gpt-4o", false).await.expect("enable");
         assert_eq!(s.disabled_models().await.expect("dis"), vec!["o3"]);
+    });
+}
+
+#[test]
+fn model_preferences_round_trip_replace_and_clear() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        assert!(s.model_preferences().await.expect("list").is_empty());
+        assert!(s
+            .model_preference("claude-haiku-5-5")
+            .await
+            .expect("none")
+            .is_none());
+
+        let first = s
+            .set_model_preference("  claude-haiku-5-5  ", "  opencode ")
+            .await
+            .expect("set");
+        assert_eq!(first.model, "claude-haiku-5-5");
+        assert_eq!(first.provider, "opencode");
+        assert_eq!(
+            s.model_preference("claude-haiku-5-5")
+                .await
+                .expect("get")
+                .expect("some"),
+            first
+        );
+
+        let replaced = s
+            .set_model_preference("claude-haiku-5-5", "claude")
+            .await
+            .expect("replace");
+        assert_eq!(replaced.provider, "claude");
+        assert_eq!(s.model_preferences().await.expect("list").len(), 1);
+
+        // The provider need not be connected; the store only bounds and trims it.
+        s.set_model_preference("disconnected-model", "unconnected-provider")
+            .await
+            .expect("preference survives disconnect");
+        assert!(s.set_model_preference("", "claude").await.is_err());
+        assert!(s.set_model_preference("model", " ").await.is_err());
+
+        assert!(s
+            .clear_model_preference("claude-haiku-5-5")
+            .await
+            .expect("clear"));
+        assert!(!s
+            .clear_model_preference("claude-haiku-5-5")
+            .await
+            .expect("idempotent"));
+        assert!(s
+            .model_preference("claude-haiku-5-5")
+            .await
+            .expect("none")
+            .is_none());
     });
 }
 

@@ -48,12 +48,9 @@ impl Dispatcher {
         Fut: Future<Output = Result<ByteStream>>,
     {
         let deadline = self.retry.deadline();
-        let mut order = self.attempt_order(plan).await;
+        let (mut order, earliest) = self.attempt_order(plan).await;
         if order.is_empty() {
-            return Err(no_route(
-                plan,
-                "every candidate is blocked by its circuit breaker",
-            ));
+            return Err(crate::dispatch::blocked_plan(plan, earliest));
         }
 
         let mut last: Option<Error> = None;
@@ -71,14 +68,19 @@ impl Dispatcher {
                         // Nothing has been polled yet, so no byte reached the client:
                         // this attempt is a success even if the body fails later.
                         claim.disarm();
-                        let committed =
-                            Committed::new(stream, self.breaker_arc(), candidate.connection);
+                        let committed = Committed::new(
+                            stream,
+                            self.breaker_arc(),
+                            candidate.connection,
+                            candidate.model.clone(),
+                        );
                         return Ok((candidate, Box::pin(committed)));
                     }
                     Err(err) if !err.is_retryable_upstream() => {
                         // The account answered sanely; the request was bad. Release the probe.
                         claim.disarm();
-                        self.breaker.record_success(candidate.connection);
+                        self.breaker
+                            .record_success_for(candidate.connection, &candidate.model);
                         return Err(err);
                     }
                     Err(err) => {
@@ -103,8 +105,9 @@ impl Dispatcher {
                         // Retries exhausted (or no time left): one breaker failure for
                         // the candidate, then the next one.
                         claim.disarm();
-                        self.breaker.record_failure(
+                        self.breaker.record_failure_for(
                             candidate.connection,
+                            &candidate.model,
                             status_of(&err),
                             retry_after(&err),
                         );
@@ -130,16 +133,23 @@ struct Committed {
     inner: ByteStream,
     breaker: std::sync::Arc<Breaker>,
     conn: uuid::Uuid,
+    model: String,
     /// `true` once success *or* failure has been reported to the breaker.
     settled: bool,
 }
 
 impl Committed {
-    fn new(inner: ByteStream, breaker: std::sync::Arc<Breaker>, conn: uuid::Uuid) -> Self {
+    fn new(
+        inner: ByteStream,
+        breaker: std::sync::Arc<Breaker>,
+        conn: uuid::Uuid,
+        model: String,
+    ) -> Self {
         Self {
             inner,
             breaker,
             conn,
+            model,
             settled: false,
         }
     }
@@ -147,7 +157,7 @@ impl Committed {
     fn settle_success(&mut self) {
         if !self.settled {
             self.settled = true;
-            self.breaker.record_success(self.conn);
+            self.breaker.record_success_for(self.conn, &self.model);
         }
     }
 }
@@ -175,8 +185,12 @@ impl Stream for Committed {
                 this.settled = true;
                 // Mid-stream: the commit point has passed, so record the failure
                 // and surface it. The gateway emits one error event and stops.
-                this.breaker
-                    .record_failure(this.conn, status_of(&err), retry_after(&err));
+                this.breaker.record_failure_for(
+                    this.conn,
+                    &this.model,
+                    status_of(&err),
+                    retry_after(&err),
+                );
                 Poll::Ready(Some(Err(err)))
             }
             Poll::Ready(None) => {

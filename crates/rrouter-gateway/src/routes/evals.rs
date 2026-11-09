@@ -56,6 +56,10 @@ pub const RUN_PARALLELISM: usize = 4;
 pub const CASE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Tokens a case may answer with: evals judge a fact, not an essay.
 const CASE_MAX_TOKENS: u32 = 256;
+/// The judge answers one boolean, nothing else.
+const JUDGE_MAX_TOKENS: u32 = 128;
+/// Strict judge instruction; the parser accepts a JSON object only.
+const JUDGE_SYSTEM_PROMPT: &str = "You are an eval judge. Return only JSON {\"pass\":true|false}";
 /// Largest upstream body a case will read before giving up on it.
 const MAX_CASE_BODY: usize = 64 * 1024;
 
@@ -70,6 +74,7 @@ fn suite_json(suite: &EvalSuite, cases: usize) -> Value {
         "id": suite.id.to_string(),
         "name": suite.name,
         "description": suite.description,
+        "system_prompt": suite.system_prompt,
         "cases": cases,
         "created_at": suite.created_at,
         "updated_at": suite.updated_at,
@@ -92,6 +97,7 @@ fn run_json(run: &EvalRun, done: usize, total: usize) -> Value {
         "id": run.id.to_string(),
         "suite_id": run.suite_id.to_string(),
         "model": run.model,
+        "judge_model": run.judge_model,
         "status": run.status.as_str(),
         "created_at": run.created_at,
         "completed_at": run.completed_at,
@@ -170,7 +176,7 @@ pub async fn get_suite(State(state): State<Arc<AppState>>, Path(id): Path<String
     }))
 }
 
-/// `POST /api/evals/suites` — `{name, description?}`.
+/// `POST /api/evals/suites` — `{name, description?, system_prompt?}`.
 pub async fn create_suite(State(state): State<Arc<AppState>>, body: Body) -> Response {
     let value = match body_json(body).await {
         Ok(value) => value,
@@ -180,7 +186,20 @@ pub async fn create_suite(State(state): State<Arc<AppState>>, body: Body) -> Res
         return admin_error(&Error::BadRequest("a suite name is required".into()));
     };
     let description = value.get("description").and_then(Value::as_str);
-    match state.store.create_eval_suite(name, description).await {
+    let system_prompt = match value.get("system_prompt") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(prompt)) => Some(prompt.as_str()),
+        Some(_) => {
+            return admin_error(&Error::BadRequest(
+                "system_prompt must be a string or null".into(),
+            ))
+        }
+    };
+    match state
+        .store
+        .create_eval_suite(name, description, system_prompt)
+        .await
+    {
         Ok(suite) => (
             StatusCode::CREATED,
             axum::Json(json!({ "data": suite_json(&suite, 0) })),
@@ -190,7 +209,8 @@ pub async fn create_suite(State(state): State<Arc<AppState>>, body: Body) -> Res
     }
 }
 
-/// `PATCH /api/evals/suites/{id}` — `{name?, description?}`; `null` clears the description.
+/// `PATCH /api/evals/suites/{id}` — `{name?, description?, system_prompt?}`; `null`
+/// clears a nullable field.
 pub async fn update_suite(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -206,7 +226,21 @@ pub async fn update_suite(
     };
     let name = value.get("name").and_then(Value::as_str);
     let description = value.get("description").map(|raw| raw.as_str());
-    match state.store.update_eval_suite(id, name, description).await {
+    let system_prompt = match value.get("system_prompt") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(prompt)) => Some(Some(prompt.as_str())),
+        Some(_) => {
+            return admin_error(&Error::BadRequest(
+                "system_prompt must be a string or null".into(),
+            ))
+        }
+    };
+    match state
+        .store
+        .update_eval_suite(id, name, description, system_prompt)
+        .await
+    {
         Ok(Some(suite)) => {
             let cases = state.store.eval_case_count(id).await.unwrap_or(0);
             ok_json(json!({ "data": suite_json(&suite, cases) }))
@@ -293,7 +327,8 @@ pub async fn delete_case(
 
 // ----- runs ----------------------------------------------------------------------
 
-/// `POST /api/evals/runs` — `{suite_id, model, api_key?}`, answered with `202`.
+/// `POST /api/evals/runs` — `{suite_id, model, judge_model?, api_key?}`, answered with
+/// `202`.
 pub async fn start_run(State(state): State<Arc<AppState>>, body: Body) -> Response {
     let value = match body_json(body).await {
         Ok(value) => value,
@@ -316,7 +351,16 @@ pub async fn start_run(State(state): State<Arc<AppState>>, body: Body) -> Respon
     if cases == 0 {
         return admin_error(&Error::BadRequest("the suite has no cases to run".into()));
     }
-    let run = match state.store.create_eval_run(suite, model).await {
+    let judge_model = match value.get("judge_model") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(judge)) => Some(judge.as_str()),
+        Some(_) => {
+            return admin_error(&Error::BadRequest(
+                "judge_model must be a string or null".into(),
+            ))
+        }
+    };
+    let run = match state.store.create_eval_run(suite, model, judge_model).await {
         Ok(run) => run,
         Err(e) => return admin_error(&e),
     };
@@ -446,6 +490,35 @@ pub(crate) fn spawn_run(state: Arc<AppState>, run_id: Uuid, api_key: Option<Stri
             Ok(None) | Err(_) => return,
         };
         let started = Instant::now();
+        let suite = match state.store.eval_suite(run.suite_id).await {
+            Ok(Some(suite)) => suite,
+            Ok(None) => {
+                let summary = EvalSummary {
+                    cases: 0,
+                    errors: 1,
+                    error: Some(format!("suite {} no longer exists", run.suite_id)),
+                    ..EvalSummary::default()
+                };
+                let _ = state
+                    .store
+                    .complete_eval_run(run_id, EvalRunStatus::Failed, summary)
+                    .await;
+                return;
+            }
+            Err(e) => {
+                let summary = EvalSummary {
+                    cases: 0,
+                    errors: 1,
+                    error: Some(e.to_string()),
+                    ..EvalSummary::default()
+                };
+                let _ = state
+                    .store
+                    .complete_eval_run(run_id, EvalRunStatus::Failed, summary)
+                    .await;
+                return;
+            }
+        };
         let cases = match state.store.eval_cases(run.suite_id).await {
             Ok(cases) => cases,
             Err(e) => {
@@ -472,15 +545,27 @@ pub(crate) fn spawn_run(state: Arc<AppState>, run_id: Uuid, api_key: Option<Stri
         }
 
         let model = run.model.clone();
+        let judge_model = run.judge_model.clone();
+        let system_prompt = suite.system_prompt.clone();
         let store = Arc::clone(&state.store);
         let outcomes: Vec<CaseOutcome> = stream::iter(cases.iter().cloned())
             .map(|case| {
                 let state = Arc::clone(&state);
                 let store = Arc::clone(&store);
                 let model = model.clone();
+                let judge = judge_model.clone();
+                let system = system_prompt.clone();
                 let key = api_key.clone();
                 async move {
-                    let outcome = execute_case(&state, &model, &case, key.as_deref()).await;
+                    let outcome = execute_case(
+                        &state,
+                        &model,
+                        &case,
+                        key.as_deref(),
+                        system.as_deref(),
+                        judge.as_deref(),
+                    )
+                    .await;
                     // Persist as each case finishes, so a long run is observable and a
                     // crash leaves the finished cases recorded.
                     let _ = store
@@ -535,77 +620,51 @@ async fn execute_case(
     model: &str,
     case: &EvalCase,
     api_key: Option<&str>,
+    system_prompt: Option<&str>,
+    judge_model: Option<&str>,
 ) -> CaseOutcome {
+    let mut messages = Vec::with_capacity(2);
+    if let Some(system) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
+        messages.push(json!({ "role": "system", "content": system }));
+    }
+    messages.push(json!({ "role": "user", "content": case.input }));
     let body = json!({
         "model": model,
         "max_tokens": CASE_MAX_TOKENS,
-        "messages": [{ "role": "user", "content": case.input }],
+        "messages": messages,
     });
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri("/v1/chat/completions")
-        .header("content-type", "application/json");
-    if let Some(key) = api_key {
-        builder = builder.header("authorization", format!("Bearer {key}"));
-    }
-    let Ok(request) = builder.body(Body::from(body.to_string())) else {
-        return CaseOutcome {
-            case_id: case.id,
-            output: None,
-            score: None,
-            latency_ms: 0,
-            error: Some("could not build the request".into()),
-        };
-    };
     let started = Instant::now();
-    let response = tokio::time::timeout(
-        CASE_TIMEOUT,
-        crate::proxy::proxy(State(Arc::clone(state)), request),
-    )
-    .await;
+    let outcome = gateway_chat(state, body, api_key, CASE_TIMEOUT).await;
     let latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
 
-    let (output, error) = match response {
-        Err(_) => (
-            None,
-            Some(format!("timed out after {}s", CASE_TIMEOUT.as_secs())),
-        ),
-        Ok(response) => {
-            let status = response.status();
-            let bytes = axum::body::to_bytes(response.into_body(), MAX_CASE_BODY)
-                .await
-                .unwrap_or_default();
-            let raw = String::from_utf8_lossy(&bytes).to_string();
-            let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-            if !status.is_success() {
-                let message = value
-                    .get("error")
-                    .and_then(|error| error.get("message").or(Some(error)))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("gateway answered {status}"));
-                (None, Some(message))
-            } else {
-                match response_text(&value) {
-                    Some(text) if !text.trim().is_empty() => (Some(text), None),
-                    _ => (None, Some("the model returned no text".into())),
-                }
-            }
-        }
+    let (output, mut error) = match outcome {
+        Err(message) => (None, Some(message)),
+        Ok(value) => match response_text(&value) {
+            Some(text) if !text.trim().is_empty() => (Some(text), None),
+            _ => (None, Some("the model returned no text".into())),
+        },
     };
 
     // The run credential must never reach storage: scrub it from anything a provider or
     // the gateway might have echoed back.
     let output = output.map(|text| scrub(text, api_key));
-    let error = error.map(|text| scrub(text, api_key));
+    error = error.map(|text| scrub(text, api_key));
     let score = match (&error, &case.expected, &output) {
-        (None, Some(expected), Some(output)) => {
-            Some(if rrouter_store::eval_passes(output, expected) {
+        (None, Some(expected), Some(output)) => match judge_model {
+            Some(judge) => match judge_case(state, judge, expected, output, api_key).await {
+                Ok(pass) => Some(if pass { 1.0 } else { 0.0 }),
+                Err(message) => {
+                    // A judge failure is a case error, never a silent false pass/fail.
+                    error = Some(scrub(message, api_key));
+                    None
+                }
+            },
+            None => Some(if rrouter_store::eval_passes(output, expected) {
                 1.0
             } else {
                 0.0
-            })
-        }
+            }),
+        },
         _ => None,
     };
     CaseOutcome {
@@ -615,6 +674,98 @@ async fn execute_case(
         latency_ms,
         error,
     }
+}
+
+/// POST one internal chat body through the gateway and return its JSON response.
+///
+/// Both the case call and the judge call use this path: budgets, routing, retries and
+/// usage accounting see them as ordinary `/v1` traffic.
+async fn gateway_chat(
+    state: &Arc<AppState>,
+    body: Value,
+    api_key: Option<&str>,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json");
+    if let Some(key) = api_key {
+        builder = builder.header("authorization", format!("Bearer {key}"));
+    }
+    let request = builder
+        .body(Body::from(body.to_string()))
+        .map_err(|_| "could not build the request".to_string())?;
+    let response = tokio::time::timeout(
+        timeout,
+        crate::proxy::proxy(State(Arc::clone(state)), request),
+    )
+    .await
+    .map_err(|_| format!("timed out after {}s", timeout.as_secs()))?;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), MAX_CASE_BODY)
+        .await
+        .unwrap_or_default();
+    let raw = String::from_utf8_lossy(&bytes).to_string();
+    let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    if !status.is_success() {
+        let message = value
+            .get("error")
+            .and_then(|error| error.get("message").or(Some(error)))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("gateway answered {status}"));
+        return Err(message);
+    }
+    Ok(value)
+}
+
+/// Ask the judge model whether `output` satisfies `criterion`.
+///
+/// A judge failure is returned as a human-readable case error; it never becomes a score.
+async fn judge_case(
+    state: &Arc<AppState>,
+    judge_model: &str,
+    criterion: &str,
+    output: &str,
+    api_key: Option<&str>,
+) -> Result<bool, String> {
+    let user = format!(
+        "Criterion:\n{criterion}\n\nCandidate output:\n{output}\n\nDoes the candidate \
+         output satisfy the criterion?"
+    );
+    let body = json!({
+        "model": judge_model,
+        "max_tokens": JUDGE_MAX_TOKENS,
+        "messages": [
+            { "role": "system", "content": JUDGE_SYSTEM_PROMPT },
+            { "role": "user", "content": user }
+        ],
+    });
+    let value = gateway_chat(state, body, api_key, CASE_TIMEOUT).await?;
+    let text = response_text(&value).ok_or_else(|| "the judge returned no text".to_string())?;
+    parse_judge(&text)
+}
+
+/// Parse `{"pass": true|false}` from judge text, tolerating code fences and prose around
+/// the object. Anything else is an error, not a guess.
+fn parse_judge(text: &str) -> Result<bool, String> {
+    let text = text.trim();
+    let start = text
+        .find('{')
+        .ok_or_else(|| "the judge did not return JSON".to_string())?;
+    let end = text
+        .rfind('}')
+        .ok_or_else(|| "the judge did not return JSON".to_string())?;
+    if end < start {
+        return Err("the judge did not return JSON".into());
+    }
+    let value: Value = serde_json::from_str(&text[start..=end])
+        .map_err(|e| format!("the judge returned invalid JSON: {e}"))?;
+    value
+        .get("pass")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "the judge JSON has no boolean pass field".to_string())
 }
 
 /// The assistant text from an OpenAI-chat-shaped body.

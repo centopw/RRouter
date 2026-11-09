@@ -25,6 +25,10 @@ pub const API_KEY_PREFIX: &str = "sk-rr-";
 const API_KEY_SECRET_HEX_LEN: usize = 32;
 /// Longest smart-router model reference.
 pub const MAX_COMBO_ROUTER_MODEL: usize = 200;
+/// Longest bare model id in a provider preference.
+pub const MAX_MODEL_PREFERENCE_MODEL: usize = 200;
+/// Longest provider id in a provider preference.
+pub const MAX_MODEL_PREFERENCE_PROVIDER: usize = 100;
 
 /// A stored provider credential set. `credentials` comes from the encrypted `data` blob.
 #[derive(Debug, Clone)]
@@ -477,6 +481,14 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 pub struct ModelAlias {
     pub alias: String,
     pub target: String,
+}
+
+/// One operator choice: a bare model id is routed to this provider first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelPreference {
+    pub model: String,
+    pub provider: String,
+    pub updated_at: i64,
 }
 
 /// One per-key model mapping: the client's `from` ref is routed as `to`.
@@ -1995,6 +2007,98 @@ impl Store {
             )
             .optional()
             .map_err(migrations::db_err)
+    }
+
+    // ----- per-model provider preferences ------------------------------------------
+
+    /// The preference for one bare model id.
+    pub async fn model_preference(&self, model: &str) -> Result<Option<ModelPreference>> {
+        self.conn()
+            .query_row(
+                "SELECT model, provider, updated_at FROM model_preferences WHERE model = ?1",
+                params![model.trim()],
+                |r| {
+                    Ok(ModelPreference {
+                        model: r.get(0)?,
+                        provider: r.get(1)?,
+                        updated_at: r.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(migrations::db_err)
+    }
+
+    /// Every preference, by model id.
+    pub async fn model_preferences(&self) -> Result<Vec<ModelPreference>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT model, provider, updated_at FROM model_preferences ORDER BY model ASC")
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ModelPreference {
+                    model: r.get(0)?,
+                    provider: r.get(1)?,
+                    updated_at: r.get(2)?,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        rows.map(|row| row.map_err(migrations::db_err)).collect()
+    }
+
+    /// Set or replace one model's preferred provider. The provider does not have to be
+    /// connected now; the preference is a routing hint that survives disconnect.
+    pub async fn set_model_preference(
+        &self,
+        model: &str,
+        provider: &str,
+    ) -> Result<ModelPreference> {
+        let model = model.trim();
+        let provider = provider.trim();
+        if model.is_empty() {
+            return Err(Error::BadRequest("a model id is required".into()));
+        }
+        if model.chars().count() > MAX_MODEL_PREFERENCE_MODEL {
+            return Err(Error::BadRequest(format!(
+                "a model id is limited to {MAX_MODEL_PREFERENCE_MODEL} characters"
+            )));
+        }
+        if provider.is_empty() {
+            return Err(Error::BadRequest("a provider is required".into()));
+        }
+        if provider.chars().count() > MAX_MODEL_PREFERENCE_PROVIDER {
+            return Err(Error::BadRequest(format!(
+                "a provider is limited to {MAX_MODEL_PREFERENCE_PROVIDER} characters"
+            )));
+        }
+        let stamp = now();
+        self.conn()
+            .execute(
+                "INSERT INTO model_preferences (model, provider, updated_at) \
+                 VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(model) DO UPDATE SET \
+                 provider = excluded.provider, updated_at = excluded.updated_at",
+                params![model, provider, stamp],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(ModelPreference {
+            model: model.to_string(),
+            provider: provider.to_string(),
+            updated_at: stamp,
+        })
+    }
+
+    /// Remove one preference. `true` means a row existed.
+    pub async fn clear_model_preference(&self, model: &str) -> Result<bool> {
+        let n = self
+            .conn()
+            .execute(
+                "DELETE FROM model_preferences WHERE model = ?1",
+                params![model.trim()],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
     }
 
     pub async fn list_aliases(&self) -> Result<Vec<ModelAlias>> {

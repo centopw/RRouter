@@ -90,6 +90,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/usage/series", get(routes::usage::series))
         .route("/usage/{request_id}", get(routes::usage::detail))
         .route("/models", get(routes::models::registry_list))
+        .route("/models/preferences", get(routes::models::list_preferences))
         // The preset library: metadata for every preset plus each account's active choice.
         // Mutations live on the admin router; activation is a session preference (below).
         .route("/model-presets", get(routes::model_presets::list))
@@ -186,6 +187,7 @@ pub fn app(state: Arc<AppState>) -> Router {
             post(routes::models::custom).delete(routes::models::delete_custom),
         )
         .route("/models/test", post(routes::models::test))
+        .route("/models/preference", put(routes::models::put_preference))
         .route("/route/explain", post(routes::explain::explain))
         .route(
             "/combos",

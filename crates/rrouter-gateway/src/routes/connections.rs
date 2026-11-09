@@ -323,8 +323,9 @@ pub async fn create(
                     return admin_error(&e);
                 }
             }
-            // List this provider's own models now, so the registry is useful immediately.
-            super::models::spawn_initial_fetch(Arc::clone(&state), created.id);
+            // List this provider's own models before responding, bounded: the dashboard's
+            // model invalidation then sees the rows, while a slow provider is detached.
+            super::models::wait_initial_fetch(Arc::clone(&state), created.id).await;
             match state.store.get_connection(created.id).await {
                 Ok(Some(c)) => {
                     (StatusCode::CREATED, axum::Json(ConnectionView::from(&c))).into_response()
@@ -402,6 +403,12 @@ pub async fn update(
         if let Err(e) = state.store.set_connection_owner(uuid, team_id, owner).await {
             return admin_error(&e);
         }
+    }
+    // A credential or endpoint edit can change which catalogue the account serves.
+    // Refresh before responding so an immediate UI invalidate sees the new rows; name,
+    // team, priority, weight and active-only edits do not pay for a provider call.
+    if value.get("credentials").is_some() || value.get("base_url_override").is_some() {
+        super::models::wait_initial_fetch(Arc::clone(&state), uuid).await;
     }
     match state.store.get_connection(uuid).await {
         Ok(Some(c)) => {

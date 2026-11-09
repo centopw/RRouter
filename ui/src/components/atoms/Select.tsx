@@ -51,6 +51,10 @@ export function Select({
   const options = useMemo(() => readOptions(children), [children]);
   const selected = options.find((option) => option.value === value);
   const [open, setOpen] = useState(false);
+  // Focus is tracked in state: the global `:focus-visible` rule and the layered utility
+  // variants fight over the trigger (the rule is unlayered, so it wins), and a plain
+  // conditional class is the one form that renders reliably.
+  const [focused, setFocused] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -121,13 +125,27 @@ export function Select({
           disabled={disabled}
           aria-label={ariaLabel}
           onKeyDown={onKeyDown}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          // Inline, because the global unlayered `:focus-visible` rule and the utility
+          // cascade both outrank conditional classes here (the arbitrary variants were
+          // generated but lost). Inline styles win, and the ring stays the blue accent.
+          style={
+            focused
+              ? {
+                  borderColor: "var(--color-accent-2)",
+                  boxShadow: plain
+                    ? "0 0 0 2px rgba(12, 102, 228, 0.18)"
+                    : "0 0 0 2px rgba(12, 102, 228, 0.25)",
+                }
+              : undefined
+          }
           className={cx(
             plain
-              ? "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-full border border-transparent bg-transparent px-2 text-left text-small text-ink-soft hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+              ? "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-full border border-transparent bg-transparent px-2 text-left text-small text-ink-soft hover:bg-surface-3 focus-visible:outline-none! outline-0!"
               : control,
-            !plain &&
-              "flex items-center justify-between gap-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text",
-            !plain && open && "border-accent-text",
+            !plain && "flex items-center justify-between gap-2 text-left focus-visible:outline-none! outline-0!",
+            !plain && open && "border-[var(--color-accent-2)]",
             className,
           )}
         >
@@ -149,7 +167,7 @@ export function Select({
         >
           <div id={listId} role="listbox" aria-label={ariaLabel}>
             {options.length > 4 ? (
-              <div className="flex items-center gap-2 border-b border-line bg-surface px-2.5 py-2 focus-within:border-accent-text">
+              <div className="flex items-center gap-2 border-b border-line bg-surface px-2.5 py-2 focus-within:border-accent-text focus-within:ring-2 focus-within:ring-[var(--color-accent-text)]/20">
                 <MagnifyingGlass size={14} aria-hidden className="text-faint" />
                 <input
                   autoFocus
@@ -161,7 +179,7 @@ export function Select({
                   onKeyDown={onKeyDown}
                   placeholder="filter…"
                   aria-label={`filter ${ariaLabel}`}
-                  className="h-6 w-full bg-transparent text-small text-fg placeholder:text-faint focus:outline-none"
+                  className="h-6 w-full bg-transparent text-small text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none! outline-0!"
                 />
                 <X
                   size={13}
@@ -185,7 +203,7 @@ export function Select({
                     onMouseEnter={() => setActive(index)}
                     onClick={() => choose(option)}
                     className={cx(
-                      "flex w-full items-center gap-2 px-3 py-1.5 text-left text-small",
+                      "flex w-full items-center gap-2 px-3 py-1.5 text-left text-small focus-visible:outline-none! outline-0!",
                       index === active && "bg-[var(--color-selected)]",
                       option.value === value ? "font-medium text-fg" : "text-fg",
                       option.disabled && "cursor-not-allowed text-faint",

@@ -11,7 +11,19 @@ type Api = {
   info: (title: string, detail?: string) => void;
 };
 
-const ToastContext = createContext<Api | null>(null);
+/**
+ * Toasts are ambient feedback, so the context defaults to a no-op API: a page must never
+ * fail because the provider is missing. That happens for real under HMR and when a build
+ * splits `toast.tsx` into two chunks — the page then resolves a different context instance
+ * than the provider populated, and a throwing hook would take the whole route down.
+ */
+const noopToast: Api = {
+  success: () => {},
+  error: () => {},
+  info: () => {},
+};
+
+const ToastContext = createContext<Api>(noopToast);
 
 /** Transient feedback built on Radix Toast; announcements and dismissal are Radix's. */
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -81,8 +93,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   );
 }
 
+let warnedMissingProvider = false;
+
+/** Never throws: without a provider the returned API does nothing. */
 export function useToast(): Api {
   const api = useContext(ToastContext);
-  if (!api) throw new Error("useToast must be used inside ToastProvider");
+  if (import.meta.env.DEV && api === noopToast && !warnedMissingProvider) {
+    warnedMissingProvider = true;
+    console.warn(
+      "useToast: no ToastProvider above this component (a duplicate toast.tsx module instance will do this); toasts are disabled here.",
+    );
+  }
   return api;
 }

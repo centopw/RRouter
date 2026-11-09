@@ -3,14 +3,15 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import * as Popover from "@radix-ui/react-popover";
 import { ProviderIcon, providerBrand } from "../components/provider-icon";
-import { DotsThree, Sliders } from "@phosphor-icons/react";
-import { Grid, SectionLabel, Stack } from "../components/atoms";
+import { DotsThree, MagnifyingGlass, Sliders, X } from "@phosphor-icons/react";
+import { SectionLabel, Stack } from "../components/atoms";
 import {
   Badge,
   Button,
@@ -118,6 +119,18 @@ export default function Providers() {
     void client.invalidateQueries({ queryKey: qk.models });
     void client.invalidateQueries({ queryKey: qk.modelProviders });
     void client.invalidateQueries({ queryKey: qk.system });
+  };
+
+  /**
+   * A new connection's model list is fetched by the gateway in the background, so the
+   * immediate invalidation can land before it exists. One follow-up read picks it up; this
+   * is a single retry, not an interval.
+   */
+  const refreshRegistrySoon = () => {
+    window.setTimeout(() => {
+      void client.invalidateQueries({ queryKey: qk.models });
+      void client.invalidateQueries({ queryKey: qk.modelProviders });
+    }, 1500);
   };
 
   const remove = useMutation({
@@ -620,6 +633,7 @@ export default function Providers() {
         onConnected={(label, warning) => {
           setAdding(false);
           invalidate();
+          refreshRegistrySoon();
           setNotice({
             tone: warning ? "neg" : "pos",
             text: warning ? `${label} connected, with a warning: ${warning}` : `${label} connected`,
@@ -664,6 +678,7 @@ export default function Providers() {
             setSignIn(null);
             setAuthWindow(null);
             invalidate();
+            refreshRegistrySoon();
             setNotice({
               tone: warning ? "neg" : "pos",
               text: warning ? `${label} connected, with a warning: ${warning}` : `${label} connected`,
@@ -1078,8 +1093,31 @@ function AddProviderFlow({
   providers: ModelProvider[];
   onConnected: (label: string, warning: string | null) => void;
 }) {
+  // Scoped to the registered list: the custom endpoint cards above are actions, not
+  // providers, so filtering never hides them.
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  // An empty box lists what this step is for (API keys). A search answers the question
+  // the operator actually asked, so it also finds sign-in providers ("codex", "google"),
+  // whose row opens their own flow instead of the key form.
+  const oauthById = new Map(subscriptionProviders.map((provider) => [provider.id, provider]));
+  const directory = needle === "" ? keyProviders : providers;
+  const matching = directory.filter((provider) => matchesProvider(needle, provider));
+
+  useEffect(() => {
+    // A new step or a new kind is a new list: a stale filter would look like a missing provider.
+    if (step !== "provider") setQuery("");
+  }, [step, kind]);
+
   return (
     <Modal
+      onEscapeKeyDown={(event) => {
+        // The search box consumes the first Escape; a second one still closes the dialog.
+        if (query !== "") {
+          event.preventDefault();
+          setQuery("");
+        }
+      }}
       title={
         step === "kind"
           ? "Add a provider"
@@ -1150,7 +1188,9 @@ function AddProviderFlow({
         <Stack gap="lg">
           <div>
             <SectionLabel className="mb-2">custom endpoint</SectionLabel>
-            <Grid cols={2} gap="sm">
+            {/* One column on a phone: two 170px cards truncate both descriptions past
+                usefulness. */}
+            <div className="grid gap-2 sm:grid-cols-2">
               {([
                 { protocol: "openai", title: "Custom OpenAI", body: "Any OpenAI-compatible chat API" },
                 { protocol: "anthropic", title: "Custom Anthropic", body: "Any Anthropic Messages API" },
@@ -1175,20 +1215,88 @@ function AddProviderFlow({
                   </button>
                 );
               })}
-            </Grid>
+            </div>
           </div>
-          <div>
-            <SectionLabel className="mb-2">registered providers</SectionLabel>
-            <ProviderList
-              empty="No API-key provider is registered."
-              items={keyProviders.map((p) => ({
-                id: p.id,
-                title: p.display,
-                meta: p.listed ? "lists its models" : "add models manually",
-                scope: p.scope,
-                onClick: () => onChooseKey(p.id),
-              }))}
-            />
+          <div className="min-w-0">
+            <div className="mb-2 flex items-baseline justify-between gap-3">
+              <SectionLabel>registered providers</SectionLabel>
+              <span className="text-caption text-faint tnum" aria-live="polite">
+                {needle === ""
+                  ? `${keyProviders.length} available`
+                  : `${matching.length} of ${providers.length}`}
+              </span>
+            </div>
+            <div className="relative mb-2">
+              <MagnifyingGlass
+                size={14}
+                aria-hidden
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
+              />
+              <input
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" && query !== "") {
+                    event.preventDefault();
+                    setQuery("");
+                  }
+                }}
+                aria-label="Search providers"
+                placeholder="Search providers…"
+                autoComplete="off"
+                spellCheck={false}
+                className="h-8 w-full min-w-0 rounded-[var(--radius-input)] border border-line-strong bg-surface pl-8 pr-8 text-body text-fg placeholder:text-faint focus:border-[var(--color-accent-text)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-text)]/25 [&::-webkit-search-cancel-button]:hidden"
+              />
+              {query !== "" ? (
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  aria-label="Clear provider search"
+                  className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+                >
+                  <X size={12} aria-hidden />
+                </button>
+              ) : null}
+            </div>
+            {/* A fixed-height list: filtering changes what is inside the box, never the
+                box, so the cards below stay put while the operator types. */}
+            <div className="h-[min(40vh,320px)] overflow-y-auto pr-1">
+              <ProviderList
+                empty={
+                  needle === "" ? (
+                    <p className="px-1 py-3 text-body text-faint">
+                      No API-key provider is registered.
+                    </p>
+                  ) : (
+                    <div className="flex flex-col items-start gap-2 px-1 py-3">
+                      <p className="text-body text-faint">
+                        No providers match <span className="text-fg">“{query.trim()}”</span>.
+                      </p>
+                      <Button variant="quiet" onClick={() => setQuery("")}>
+                        clear search
+                      </Button>
+                    </div>
+                  )
+                }
+                items={matching.map((p) => {
+                  const signIn = oauthById.get(p.id);
+                  return {
+                    id: p.id,
+                    title: p.display,
+                    meta: signIn
+                      ? signIn.flow === "device_code"
+                        ? "device code sign-in"
+                        : "browser sign-in"
+                      : p.listed
+                        ? "lists its models"
+                        : "add models manually",
+                    scope: p.scope,
+                    onClick: () => (signIn ? onChooseOAuth(signIn) : onChooseKey(p.id)),
+                  };
+                })}
+              />
+            </div>
           </div>
           <div className="rounded-lg border border-dashed border-line-strong bg-surface-2 px-3 py-3">
             <span className="block text-small font-medium">Missing your favorite provider?</span>
@@ -1244,6 +1352,43 @@ function Choice({ title, body, onClick }: { title: string; body: string; onClick
   );
 }
 
+/**
+ * Extra names an operator might type for a provider. The matcher also covers the display
+ * name and the id, so this table only holds the words neither of those contains
+ * ("google" for Gemini, "chatgpt" for Codex, "microsoft" for Azure, …).
+ */
+const PROVIDER_ALIASES: Record<string, string[]> = {
+  claude: ["anthropic"],
+  anthropic: ["claude"],
+  codex: ["chatgpt", "openai"],
+  openai: ["gpt", "chatgpt", "codex"],
+  azure: ["microsoft", "openai"],
+  gemini: ["google"],
+  "google-antigravity": ["google", "antigravity", "gemini", "cloud code assist"],
+  github: ["copilot"],
+  xai: ["grok"],
+  mistral: ["mixtral"],
+  ollama: ["local"],
+  jina: ["rerank"],
+};
+
+/** Does a provider answer to this search? Display, id and aliases, prefix-matched. */
+function matchesProvider(
+  needle: string,
+  provider: { id: string; display: string },
+): boolean {
+  if (needle === "") return true;
+  if (
+    provider.display.toLowerCase().includes(needle) ||
+    provider.id.toLowerCase().includes(needle)
+  ) {
+    return true;
+  }
+  return (PROVIDER_ALIASES[provider.id] ?? []).some(
+    (alias) => alias.startsWith(needle) || needle.startsWith(alias),
+  );
+}
+
 /** Both spellings render the same: the spec id and the short alias. */
 function isAntigravity(id: string): boolean {
   return id === "google-antigravity" || id === "antigravity";
@@ -1261,9 +1406,9 @@ function ProviderList({
     scope: ModelProvider["scope"];
     onClick: () => void;
   }>;
-  empty: string;
+  empty: ReactNode;
 }) {
-  if (items.length === 0) return <p className="text-body text-faint">{empty}</p>;
+  if (items.length === 0) return <>{empty}</>;
   return (
     <ul className="flex flex-col gap-1.5">
       {items.map((item) => (

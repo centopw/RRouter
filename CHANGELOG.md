@@ -13,6 +13,29 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - `POST /api/route/explain`: the ordered plan a request would execute — providers,
   connections, priorities, dialects and cached subscription headroom — without dispatching.
 
+## 0.4.5 — 2026-11-09
+
+### Added
+- Evals context and judging: a suite-level system prompt is prepended to every case, and runs can name an optional judge model that scores `expected` as a semantic criterion. Results expose the criterion, model output and errors; schema v32 adds `eval_suites.system_prompt` and `eval_runs.judge_model`.
+- Per-model preferred provider: the Models coverage popover can pin a provider for a bare model id; `/v1/models` advertises it as `owned_by`, bare requests route there first, explicit `provider/model` still wins, and schema v33 adds `model_preferences`.
+- Multi-provider model UX: coverage counts and provider tags, a shared-only filter, and peer details with price/state.
+- Provider model auto-fetch now waits up to 8s on connection create, OAuth completion and credential/base-URL edits, then detaches; the dashboard performs one follow-up registry read.
+
+### Changed
+- Models separates enabled rows from a dedicated Disabled models table; hidden-from-preset rows stay separate.
+- `/v1/models` omits disabled models; re-enabling restores them.
+- 429 breaker cooldowns are scoped to `(connection, model)`, so a free-tier 429 no longer blocks other models on the same connection. Exhausted plans return 429 `all_candidates_cooling_down` with `Retry-After`, not 404.
+- Evals page redesigned around suite context, run settings, cases and expandable results.
+- Every `DataTable` paginates itself when no controlled pagination is supplied (25/50/100/200).
+- API Keys, Providers and Models tables fit their cards; Logs keeps the four filter selects on one row at desktop widths.
+- Provider search in the API-key drawer matches names, ids and aliases.
+
+### Fixed
+- `useToast` no longer crashes a route when its provider context is unavailable.
+- `GET /v1/models` respects disabled models and preferred-provider ownership.
+- 429s from OpenCode free models no longer poison unrelated models.
+- API Keys table no longer overflows its card at 1440/1024/390.
+
 ## 0.4.4 — 2026-11-09
 
 ### Added

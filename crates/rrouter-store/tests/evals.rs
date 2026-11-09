@@ -5,7 +5,8 @@
 //! this file is about the invariants the runner depends on.
 
 use rrouter_store::{
-    eval_passes, EvalRunStatus, EvalSummary, Store, MAX_EVAL_CASES, MAX_EVAL_TEXT,
+    eval_passes, EvalRunStatus, EvalSummary, Store, MAX_EVAL_CASES, MAX_EVAL_MODEL,
+    MAX_EVAL_SYSTEM_PROMPT, MAX_EVAL_TEXT,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -24,7 +25,11 @@ fn a_suite_round_trips_and_its_name_is_unique() {
     rt.block_on(async {
         let store = store();
         let suite = store
-            .create_eval_suite("  support smoke  ", Some("  prompts the bot must answer  "))
+            .create_eval_suite(
+                "  support smoke  ",
+                Some("  prompts the bot must answer  "),
+                Some("  You are support. Cite policy.  "),
+            )
             .await
             .expect("create");
         assert_eq!(suite.name, "support smoke", "trimmed");
@@ -32,19 +37,32 @@ fn a_suite_round_trips_and_its_name_is_unique() {
             suite.description.as_deref(),
             Some("prompts the bot must answer")
         );
-
+        assert_eq!(
+            suite.system_prompt.as_deref(),
+            Some("You are support. Cite policy."),
+            "system prompt is trimmed and stored"
+        );
         assert!(store
-            .create_eval_suite("support smoke", None)
+            .create_eval_suite(
+                "too much context",
+                None,
+                Some(&"x".repeat(MAX_EVAL_SYSTEM_PROMPT + 1)),
+            )
             .await
             .is_err());
-        assert!(store.create_eval_suite("   ", None).await.is_err());
+
         assert!(store
-            .create_eval_suite(&"x".repeat(81), None)
+            .create_eval_suite("support smoke", None, None)
+            .await
+            .is_err());
+        assert!(store.create_eval_suite("   ", None, None).await.is_err());
+        assert!(store
+            .create_eval_suite(&"x".repeat(81), None, None)
             .await
             .is_err());
 
         let second = store
-            .create_eval_suite("alpha", None)
+            .create_eval_suite("alpha", None, None)
             .await
             .expect("second");
         let listed: Vec<String> = store
@@ -57,21 +75,28 @@ fn a_suite_round_trips_and_its_name_is_unique() {
         assert_eq!(listed, vec!["alpha", "support smoke"], "ordered by name");
 
         let renamed = store
-            .update_eval_suite(suite.id, Some("renamed"), Some(None))
+            .update_eval_suite(suite.id, Some("renamed"), Some(None), Some(None))
             .await
             .expect("update")
             .expect("exists");
         assert_eq!(renamed.name, "renamed");
         assert_eq!(renamed.description, None, "null clears the description");
+        assert_eq!(renamed.system_prompt, None, "null clears the context");
         assert!(renamed.updated_at >= suite.updated_at);
+        let contextual = store
+            .update_eval_suite(suite.id, None, None, Some(Some("  policy v2  ")))
+            .await
+            .expect("update")
+            .expect("exists");
+        assert_eq!(contextual.system_prompt.as_deref(), Some("policy v2"));
 
         // A duplicate rename is refused, and renaming onto itself is fine.
         assert!(store
-            .update_eval_suite(second.id, Some("renamed"), None)
+            .update_eval_suite(second.id, Some("renamed"), None, None)
             .await
             .is_err());
         assert!(store
-            .update_eval_suite(second.id, Some("alpha"), None)
+            .update_eval_suite(second.id, Some("alpha"), None, None)
             .await
             .expect("self rename")
             .is_some());
@@ -87,7 +112,10 @@ fn cases_are_validated_bounded_and_ordered() {
     let rt = rt();
     rt.block_on(async {
         let store = store();
-        let suite = store.create_eval_suite("core", None).await.expect("suite");
+        let suite = store
+            .create_eval_suite("core", None, None)
+            .await
+            .expect("suite");
 
         let first = store
             .create_eval_case(suite.id, None, "  What is 2+2?  ", Some("4"))
@@ -150,7 +178,10 @@ fn a_run_starts_once_and_completes_once() {
     let rt = rt();
     rt.block_on(async {
         let store = store();
-        let suite = store.create_eval_suite("core", None).await.expect("suite");
+        let suite = store
+            .create_eval_suite("core", None, None)
+            .await
+            .expect("suite");
         let case_a = store
             .create_eval_case(suite.id, None, "a", Some("yes"))
             .await
@@ -161,13 +192,30 @@ fn a_run_starts_once_and_completes_once() {
             .expect("case");
 
         let run = store
-            .create_eval_run(suite.id, "openai/gpt-4.1")
+            .create_eval_run(suite.id, "openai/gpt-4.1", Some("openai/gpt-4.1-mini"))
             .await
             .expect("run");
         assert_eq!(run.status, EvalRunStatus::Pending);
-        assert!(store.create_eval_run(suite.id, "  ").await.is_err());
+        assert_eq!(
+            run.judge_model.as_deref(),
+            Some("openai/gpt-4.1-mini"),
+            "judge model round-trips"
+        );
         assert!(store
-            .create_eval_run(Uuid::new_v4(), "openai/gpt-4.1")
+            .create_eval_run(suite.id, "openai/gpt-4.1", Some("   "))
+            .await
+            .is_err());
+        assert!(store
+            .create_eval_run(
+                suite.id,
+                "openai/gpt-4.1",
+                Some(&"x".repeat(MAX_EVAL_MODEL + 1))
+            )
+            .await
+            .is_err());
+        assert!(store.create_eval_run(suite.id, "  ", None).await.is_err());
+        assert!(store
+            .create_eval_run(Uuid::new_v4(), "openai/gpt-4.1", None)
             .await
             .is_err());
 
@@ -250,17 +298,48 @@ fn a_run_starts_once_and_completes_once() {
 }
 
 #[test]
+fn a_run_can_name_a_judge_model_or_leave_it_null() {
+    let rt = rt();
+    rt.block_on(async {
+        let store = store();
+        let suite = store
+            .create_eval_suite("judge", None, None)
+            .await
+            .expect("suite");
+        let plain = store
+            .create_eval_run(suite.id, "openai/gpt-4.1", None)
+            .await
+            .expect("plain run");
+        assert_eq!(plain.judge_model, None, "no judge keeps the old behavior");
+        let judged = store
+            .create_eval_run(suite.id, "openai/gpt-4.1", Some(" openai/gpt-4.1-mini "))
+            .await
+            .expect("judged run");
+        assert_eq!(
+            judged.judge_model.as_deref(),
+            Some("openai/gpt-4.1-mini"),
+            "judge model is trimmed and round-trips"
+        );
+        let read = store.eval_run(judged.id).await.expect("read").expect("run");
+        assert_eq!(read.judge_model, judged.judge_model);
+    });
+}
+
+#[test]
 fn deleting_a_suite_removes_cases_runs_and_results() {
     let rt = rt();
     rt.block_on(async {
         let store = store();
-        let suite = store.create_eval_suite("core", None).await.expect("suite");
+        let suite = store
+            .create_eval_suite("core", None, None)
+            .await
+            .expect("suite");
         let case = store
             .create_eval_case(suite.id, None, "prompt", Some("answer"))
             .await
             .expect("case");
         let run = store
-            .create_eval_run(suite.id, "openai/gpt-4.1")
+            .create_eval_run(suite.id, "openai/gpt-4.1", None)
             .await
             .expect("run");
         store
@@ -295,13 +374,16 @@ fn a_restart_fails_the_runs_it_left_active() {
     let rt = rt();
     rt.block_on(async {
         let store = store();
-        let suite = store.create_eval_suite("core", None).await.expect("suite");
+        let suite = store
+            .create_eval_suite("core", None, None)
+            .await
+            .expect("suite");
         let pending = store
-            .create_eval_run(suite.id, "openai/gpt-4.1")
+            .create_eval_run(suite.id, "openai/gpt-4.1", None)
             .await
             .expect("pending");
         let running = store
-            .create_eval_run(suite.id, "openai/gpt-4.1")
+            .create_eval_run(suite.id, "openai/gpt-4.1", None)
             .await
             .expect("running");
         store

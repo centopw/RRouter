@@ -5,6 +5,15 @@
 //! closed → open → half-open breaker: consecutive failures trip it, the open
 //! window is time-based, and reopening admits exactly one probe at a time so a
 //! recovered account is picked up without a thundering herd.
+//!
+//! # Two scopes
+//!
+//! Auth failures (401/403), server errors (5xx) and transport failures say the
+//! *account* is unhealthy: they open the connection-wide breaker above. A 429 is
+//! different — a free-tier or per-model limit belongs to `(connection, model)`, so it
+//! starts a model cooldown and leaves the connection and every other model eligible.
+//! Dispatchers must record through [`Breaker::record_failure_for`] (which carries the
+//! candidate's model), never the low-level `record_failure` for a 429.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -47,6 +56,13 @@ struct Policy {
     probes: u8,
 }
 
+/// One model's 429 cooldown on one connection. Model limits are independent: a
+/// free-tier exhaustion is a fact about that model, not the account's transport.
+struct ModelEntry {
+    until: Instant,
+    strikes: u32,
+}
+
 struct Entry {
     state: BreakerState,
     consecutive_failures: u32,
@@ -74,6 +90,8 @@ impl Entry {
 pub struct Breaker {
     policy: Policy,
     entries: Mutex<HashMap<Uuid, Entry>>,
+    /// `(connection, model)` → the 429 cooldown for that model on that account.
+    model_entries: Mutex<HashMap<(Uuid, String), ModelEntry>>,
 }
 
 impl Default for Breaker {
@@ -96,6 +114,7 @@ impl Breaker {
                 probes: probes.max(1),
             },
             entries: Mutex::new(HashMap::new()),
+            model_entries: Mutex::new(HashMap::new()),
         }
     }
 
@@ -103,6 +122,61 @@ impl Breaker {
         // A poisoned map only means another task panicked mid-update; the map is
         // still structurally sound, so recover instead of propagating the panic.
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn model_lock(&self) -> std::sync::MutexGuard<'_, HashMap<(Uuid, String), ModelEntry>> {
+        self.model_entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Model-scoped cooldown, independent of the connection breaker.
+    pub fn check_model(&self, conn: Uuid, model: &str) -> Option<Duration> {
+        self.check_model_at(conn, model, Instant::now())
+    }
+
+    /// Clock-injected form of [`Breaker::check_model`]. An expired cooldown is
+    /// removed so a long-lived process does not accumulate stale keys.
+    pub fn check_model_at(&self, conn: Uuid, model: &str, now: Instant) -> Option<Duration> {
+        let mut map = self.model_lock();
+        let key = (conn, model.to_string());
+        let entry = map.get(&key)?;
+        if now >= entry.until {
+            map.remove(&key);
+            return None;
+        }
+        Some(entry.until.duration_since(now))
+    }
+
+    /// Earliest time both the connection and this model are eligible.
+    pub fn check_candidate(&self, conn: Uuid, model: &str) -> Option<Duration> {
+        self.check_candidate_at(conn, model, Instant::now())
+    }
+
+    pub fn check_candidate_at(&self, conn: Uuid, model: &str, now: Instant) -> Option<Duration> {
+        let connection = self.check_at(conn, now);
+        let model = self.check_model_at(conn, model, now);
+        match (connection, model) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(wait), None) | (None, Some(wait)) => Some(wait),
+            (None, None) => None,
+        }
+    }
+
+    /// Claim a candidate: a model cooldown is a plain skip (no probe slot), while the
+    /// connection-wide half-open probe is claimed exactly as before.
+    pub fn claim_candidate(&self, conn: Uuid, model: &str) -> Result<ProbeTicket, Duration> {
+        self.claim_candidate_at(conn, model, Instant::now())
+    }
+
+    pub fn claim_candidate_at(
+        &self,
+        conn: Uuid,
+        model: &str,
+        now: Instant,
+    ) -> Result<ProbeTicket, Duration> {
+        if let Some(wait) = self.check_model_at(conn, model, now) {
+            return Err(wait);
+        }
+        self.claim_at(conn, now)
     }
 
     /// `None` → eligible now. `Some(wait)` → skip this candidate, earliest retry
@@ -170,6 +244,58 @@ impl Breaker {
         entry.rate_limit_strikes = 0;
     }
 
+    /// Success for one model: clears that model's 429 cooldown **and** applies the
+    /// existing connection-wide success reset.
+    pub fn record_success_for(&self, conn: Uuid, model: &str) {
+        self.model_lock().remove(&(conn, model.to_string()));
+        self.record_success(conn);
+    }
+
+    /// Record a failure with the candidate's model.
+    ///
+    /// 429 is model-scoped: it starts an exponential cooldown for `(conn, model)` and
+    /// does not open the connection-wide breaker. Every other status keeps the
+    /// connection-wide behaviour, including the half-open semantics.
+    pub fn record_failure_for(
+        &self,
+        conn: Uuid,
+        model: &str,
+        status: u16,
+        retry_after: Option<Duration>,
+    ) {
+        self.record_failure_for_at(conn, model, status, retry_after, Instant::now());
+    }
+
+    pub fn record_failure_for_at(
+        &self,
+        conn: Uuid,
+        model: &str,
+        status: u16,
+        retry_after: Option<Duration>,
+        now: Instant,
+    ) {
+        if status == 429 {
+            let mut map = self.model_lock();
+            let entry = map.entry((conn, model.to_string())).or_insert(ModelEntry {
+                until: now,
+                strikes: 0,
+            });
+            entry.strikes = entry.strikes.saturating_add(1);
+            let exponential = BACKOFF_BASE
+                .checked_mul(1u32 << (entry.strikes - 1).min(16))
+                .unwrap_or(BACKOFF_CAP)
+                .min(BACKOFF_CAP);
+            let wait = retry_after.unwrap_or(exponential).min(BACKOFF_CAP);
+            entry.until = now + wait;
+            drop(map);
+            // The account itself answered: a half-open probe is not re-opened by a
+            // model-specific limit. Other models on this connection stay eligible.
+            self.record_success(conn);
+            return;
+        }
+        self.record_failure_at(conn, status, retry_after, now);
+    }
+
     /// Give back a claimed half-open probe slot without judging the attempt.
     ///
     /// Used when a request is cancelled before it produced a verdict (client
@@ -193,8 +319,10 @@ impl Breaker {
         }
     }
 
-    /// 429 → exponential backoff (30,60,120,… capped 3600 s, honoring `Retry-After`);
-    /// 5xx → 30 s; 401/403 → 300 s; anything else counts toward tripping.
+    /// Connection-wide failure recording. 5xx → 30 s; 401/403 → 300 s; anything else
+    /// counts toward tripping. A 429 passed here keeps the historical connection-wide
+    /// behaviour for direct callers; dispatchers use [`Breaker::record_failure_for`],
+    /// which scopes a 429 to the model.
     pub fn record_failure(&self, conn: Uuid, status: u16, retry_after: Option<Duration>) {
         self.record_failure_at(conn, status, retry_after, Instant::now());
     }

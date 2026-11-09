@@ -73,6 +73,14 @@ fn is_registered_provider(id: &str) -> bool {
     rrouter_auth::registry::get(id).is_some()
 }
 
+/// Does the client's spelling name one provider explicitly? A preference keyed by a
+/// bare model id must not reorder an explicit `provider/model` request.
+fn explicit_provider(model: &str) -> bool {
+    model
+        .split_once('/')
+        .is_some_and(|(provider, _)| is_registered_provider(provider))
+}
+
 /// Prefix that forces combo interpretation even when a combo name collides with
 /// a model id.
 const COMBO_PREFIX: &str = "combo:";
@@ -604,6 +612,18 @@ impl Planner {
         if let Some(rule) = req.canary {
             if rule.model == model && canary_selected(rule, req.canary_seed) {
                 canary_first(&mut candidates, &rule.provider);
+            }
+        }
+
+        // Operator per-model preference. It is deliberately stronger than priority,
+        // strategy, headroom and canary: the operator said this provider should serve
+        // this bare id. Explicit `provider/model` requests skip it, and a later
+        // request-scoped `provider.order` still wins because that is the client's own
+        // explicit choice for this request. A preference for a provider with no
+        // surviving candidate is a no-op, so disconnected/disabled providers fall back.
+        if !explicit_provider(model) {
+            if let Some(preferred) = store.model_preference(model).await? {
+                candidates.sort_by_key(|candidate| candidate.provider != preferred.provider);
             }
         }
 

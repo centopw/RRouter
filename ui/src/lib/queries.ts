@@ -667,7 +667,7 @@ function invalidateEvals(client: ReturnType<typeof useQueryClient>, suiteId?: st
 export function useCreateEvalSuite() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (input: { name: string; description?: string }) =>
+    mutationFn: (input: { name: string; description?: string; system_prompt?: string }) =>
       api.post<EvalSuite>("/api/evals/suites", input),
     onSuccess: () => invalidateEvals(client),
   });
@@ -676,8 +676,13 @@ export function useCreateEvalSuite() {
 export function useUpdateEvalSuite() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: { name?: string; description?: string | null } }) =>
-      api.patch<EvalSuite>(`/api/evals/suites/${encodeURIComponent(id)}`, patch),
+    mutationFn: ({
+      id,
+      patch,
+    }: {
+      id: string;
+      patch: { name?: string; description?: string | null; system_prompt?: string | null };
+    }) => api.patch<EvalSuite>(`/api/evals/suites/${encodeURIComponent(id)}`, patch),
     onSuccess: (_body, { id }) => invalidateEvals(client, id),
   });
 }
@@ -719,10 +724,21 @@ export function useDeleteEvalCase() {
 export function useStartEvalRun() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ suiteId, model, apiKey }: { suiteId: string; model: string; apiKey?: string }) =>
+    mutationFn: ({
+      suiteId,
+      model,
+      judgeModel,
+      apiKey,
+    }: {
+      suiteId: string;
+      model: string;
+      judgeModel?: string;
+      apiKey?: string;
+    }) =>
       api.post<{ data: EvalRun }>("/api/evals/runs", {
         suite_id: suiteId,
         model,
+        ...(judgeModel ? { judge_model: judgeModel } : {}),
         ...(apiKey ? { api_key: apiKey } : {}),
       }),
     onSuccess: (_body, { suiteId }) => invalidateEvals(client, suiteId),

@@ -13,6 +13,7 @@ export function Modal({
   width = "md",
   description,
   variant = "drawer",
+  onEscapeKeyDown,
 }: {
   title: string;
   open: boolean;
@@ -25,6 +26,11 @@ export function Modal({
   description?: string;
   /** Right-hand side sheet by default; small centred dialog for confirmations. */
   variant?: "drawer" | "dialog";
+  /**
+   * Last look at Escape before the dialog closes: `preventDefault` keeps it open, which is
+   * what a field that consumes the first Escape (a search that clears) needs.
+   */
+  onEscapeKeyDown?: (event: KeyboardEvent) => void;
 }) {
   const drawer = variant === "drawer";
   const dialogWidths = { md: "max-w-[560px]", lg: "max-w-[720px]", xl: "max-w-[900px]" } as const;
@@ -39,6 +45,7 @@ export function Modal({
           )}
         />
         <Dialog.Content
+          onEscapeKeyDown={onEscapeKeyDown}
           className={cx(
             "fixed z-50 flex w-full flex-col overflow-hidden border bg-surface shadow-[0_24px_64px_rgba(16,18,20,0.22)] focus:outline-none",
             drawer

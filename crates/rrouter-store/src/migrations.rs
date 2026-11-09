@@ -12,13 +12,36 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 31;
+pub const SCHEMA_VERSION: i64 = 33;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33,
 ];
+
+/// V33: per-model preferred provider. A bare model id can be served by several
+/// providers; the operator picks one and routing places that provider's candidates
+/// first. The provider is stored as text and is deliberately not a foreign key: a
+/// preference survives its provider being disconnected, so reconnecting restores the
+/// choice instead of silently dropping it.
+const V33: &str = r#"
+CREATE TABLE IF NOT EXISTS model_preferences (
+  model      TEXT PRIMARY KEY,
+  provider   TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+"#;
+
+/// V32: eval context and optional judge. A suite can carry the system prompt every case
+/// is sent with — a support suite without policy context grades plausible answers as
+/// failures. A run can name a judge model that scores natural-language criteria; NULL
+/// keeps the pre-v32 literal containment check. Both columns are nullable and no existing
+/// row is rewritten.
+const V32: &str = r#"
+ALTER TABLE eval_suites ADD COLUMN system_prompt TEXT;
+ALTER TABLE eval_runs ADD COLUMN judge_model TEXT;
+"#;
 
 /// V31: combo strategies. `combos` gains the strategy that orders its model list at
 /// request time, the decision model a smart combo asks, and the durable round-robin
@@ -1351,6 +1374,79 @@ mod tests {
             (None, None, None, None),
             "a queued result has no answer yet"
         );
+    }
+
+    /// v32 → v33: the preference table lands empty and accepts its first row.
+    #[test]
+    fn upgrades_from_v32_landing_v33_model_preferences() {
+        let mut c = Connection::open_in_memory().expect("open");
+        at_version(&mut c, 32);
+        assert_eq!(user_version(&c), 32);
+        assert!(!has_table(&c, "model_preferences"));
+        migrate(&mut c).expect("upgrade");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+        assert!(has_table(&c, "model_preferences"));
+        c.execute(
+            "INSERT INTO model_preferences (model, provider, updated_at) \
+             VALUES ('claude-haiku-5-5', 'opencode', 7)",
+            [],
+        )
+        .expect("preference insert");
+        let (provider, updated): (String, i64) = c
+            .query_row(
+                "SELECT provider, updated_at FROM model_preferences \
+                 WHERE model = 'claude-haiku-5-5'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("preference row");
+        assert_eq!(provider, "opencode");
+        assert_eq!(updated, 7);
+    }
+
+    /// v31 → v32: eval context and judge columns land nullable, leaving existing suites
+    /// and runs unchanged.
+    #[test]
+    fn upgrades_from_v31_landing_v32_eval_context_and_judge() {
+        let mut c = Connection::open_in_memory().expect("open");
+        at_version(&mut c, 31);
+        assert_eq!(user_version(&c), 31);
+        assert!(!has_column(&c, "eval_suites", "system_prompt"));
+        assert!(!has_column(&c, "eval_runs", "judge_model"));
+        c.execute(
+            "INSERT INTO eval_suites (id, name, description, created_at, updated_at) \
+             VALUES ('suite-1', 'legacy', 'before', 1, 1)",
+            [],
+        )
+        .expect("legacy suite");
+        c.execute(
+            "INSERT INTO eval_runs (id, suite_id, model, status, created_at) \
+             VALUES ('run-1', 'suite-1', 'openai/gpt-4.1', 'completed', 1)",
+            [],
+        )
+        .expect("legacy run");
+
+        migrate(&mut c).expect("upgrade");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+        assert!(has_column(&c, "eval_suites", "system_prompt"));
+        assert!(has_column(&c, "eval_runs", "judge_model"));
+        let (description, system_prompt): (Option<String>, Option<String>) = c
+            .query_row(
+                "SELECT description, system_prompt FROM eval_suites WHERE id = 'suite-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("suite survives");
+        assert_eq!(description.as_deref(), Some("before"));
+        assert_eq!(system_prompt, None);
+        let judge: Option<String> = c
+            .query_row(
+                "SELECT judge_model FROM eval_runs WHERE id = 'run-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("run survives");
+        assert_eq!(judge, None);
     }
 
     /// v30 → v31: combo strategy columns land with fallback defaults and an existing

@@ -5818,6 +5818,44 @@ async fn account_quota_skips_an_exhausted_account_for_a_healthier_one() {
     assert_eq!(live.hits(), 1, "the healthy account serves the request");
 }
 
+/// A model-scoped 429 cooldown must surface as a 429 with `Retry-After`, not the
+/// 404 the old empty-plan path produced.
+#[tokio::test]
+async fn all_candidates_cooling_down_is_429_with_retry_after() {
+    let mock = Mock::start(vec![]).await;
+    let h = harness(false);
+    let connection = h.connect("openai", &mock).await;
+    h.state.dispatcher.breaker_arc().record_failure_for(
+        connection,
+        "gpt-4.1",
+        429,
+        Some(Duration::from_secs(42)),
+    );
+
+    let (status, headers, body) = h.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(
+        body["error"]["code"], "all_candidates_cooling_down",
+        "{body}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("gpt-4.1")),
+        "{body}"
+    );
+    let retry_after: u64 = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("Retry-After header");
+    assert!(
+        (41..=42).contains(&retry_after),
+        "Retry-After reflects the cooldown: {retry_after} {body}"
+    );
+    assert_eq!(mock.hits(), 0, "a cooling candidate is not sent");
+}
+
 /// When every candidate is exhausted the request fails with `429 quota_exhausted`
 /// before any provider call, and the reset is advertised in `Retry-After`.
 #[tokio::test]

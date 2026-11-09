@@ -72,11 +72,22 @@ export default function Keys() {
     {
       key: "name",
       title: "Name",
+      width: "18%",
+      className: "min-w-0",
       render: (r) => (
-        <span className="flex items-center gap-1.5">
-          <span className="font-medium">{r.name ?? <span className="text-faint">unnamed</span>}</span>
+        <span
+          className="flex min-w-0 items-center gap-1.5"
+          // Hidden columns (at narrow widths) stay available here as a row summary.
+          title={rowSummary(r, teamName(r.team_id))}
+        >
+          <span className="min-w-0 truncate font-medium">
+            {r.name ?? <span className="text-faint">unnamed</span>}
+          </span>
           {r.scope === "admin" ? (
-            <Badge tone="accent" title="manages the gateway; cannot call /v1 or spend tokens">
+            <Badge
+              tone="accent"
+              title="manages the gateway; cannot call /v1 or spend tokens"
+            >
               admin
             </Badge>
           ) : null}
@@ -86,6 +97,8 @@ export default function Keys() {
     {
       key: "team",
       title: "Team",
+      width: "8rem",
+      className: "hidden xl:table-cell",
       render: (r) => {
         const name = teamName(r.team_id);
         return name === null ? (
@@ -99,25 +112,49 @@ export default function Keys() {
         );
       },
     },
-    { key: "status", title: "Status", render: (r) => <Status row={r} /> },
-    { key: "limits", title: "Limits", render: (r) => <Limits row={r} /> },
-    { key: "spend", title: "Spend", render: (r) => <Spend row={r} /> },
-    { key: "models", title: "Models", render: (r) => <Models row={r} /> },
+    { key: "status", title: "Status", width: "7rem", render: (r) => <Status row={r} /> },
+    { key: "limits", title: "Limits", width: "24%", className: "min-w-0", render: (r) => <Limits row={r} /> },
+    {
+      key: "spend",
+      title: "Spend",
+      width: "8rem",
+      className: "hidden xl:table-cell",
+      render: (r) => <Spend row={r} />,
+    },
+    {
+      key: "models",
+      title: "Models",
+      width: "8rem",
+      className: "hidden 2xl:table-cell",
+      render: (r) => <Models row={r} />,
+    },
     {
       key: "created",
       title: "Created",
+      width: "8.5rem",
+      className: "hidden 2xl:table-cell",
       render: (r) => <span className="whitespace-nowrap text-muted">{when(r.created_at)}</span>,
     },
     {
       key: "actions",
       title: "",
       align: "right",
+      width: "6.5rem",
       render: (r) => (
-        <div className="flex items-center justify-end gap-1.5">
-          <Button onClick={() => setEditing(r)} title={`edit limits for ${r.name ?? r.id}`}>
+        <div className="flex flex-col items-stretch gap-1 sm:items-end">
+          <Button
+            onClick={() => setEditing(r)}
+            title={`edit limits for ${r.name ?? r.id}`}
+            ariaLabel={`edit limits for ${r.name ?? r.id}`}
+          >
             edit
           </Button>
-          <Button variant="danger" onClick={() => setRevoking(r)}>
+          <Button
+            variant="danger"
+            onClick={() => setRevoking(r)}
+            title={`delete key ${r.name ?? r.id}`}
+            ariaLabel={`delete key ${r.name ?? r.id}`}
+          >
             delete
           </Button>
         </div>
@@ -169,6 +206,9 @@ export default function Keys() {
           rowKey={(r) => r.id}
           loading={keys.isLoading}
           empty="No keys yet. Create one above to require authentication on /v1."
+          tableLayout="fixed"
+          stickyRight="actions"
+          scrollLabel="API keys"
         />
         <div className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-3 text-caption text-faint">
           <span>endpoint</span>
@@ -205,6 +245,29 @@ export default function Keys() {
   );
 }
 
+/** Everything hidden by a narrow breakpoint, kept as the row's title/aria summary. */
+function rowSummary(row: KeyResult, team: string | null): string {
+  const limits = [
+    row.rpm > 0 ? `${compact(row.rpm)} rpm` : "unlimited rpm",
+    row.tpm > 0 ? `${compact(row.tpm)} tpm` : "unlimited tpm",
+    row.budget_tokens > 0 ? `${compact(row.budget_tokens)} tokens` : "unlimited tokens",
+    row.budget_micros > 0 ? `${usd(row.budget_micros)} budget` : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
+  const models =
+    row.allowed_models === null || row.allowed_models.length === 0
+      ? "all models"
+      : `${row.allowed_models.length} models`;
+  return [
+    `team ${team ?? "none"}`,
+    `spend ${usd(row.spent_micros)} · ${compact(row.spent_tokens)} tokens used`,
+    `limits ${limits}`,
+    `models ${models}`,
+    `created ${when(row.created_at)}`,
+  ].join(" · ");
+}
+
 /** Inactive outranks expired: a revoked key is disabled whatever its date says. */
 function statusOf(row: KeyResult): { label: string; tone: "pos" | "neutral" | "warn"; dot: "pos" | "warn" | "muted" } {
   if (!row.is_active) return { label: "disabled", tone: "neutral", dot: "muted" };
@@ -234,8 +297,18 @@ function Limits({ row }: { row: KeyResult }) {
     [row.tpm, "tpm"],
     [row.budget_tokens, "tokens"],
   ];
+  const summary = [
+    ...parts.map(([value, unit]) => (value > 0 ? `${compact(value)} ${unit}` : `unlimited ${unit}`)),
+    row.budget_micros > 0 ? usd(row.budget_micros) : null,
+    (row.budget_micros > 0 || row.budget_tokens > 0) && row.budget_window !== "total"
+      ? row.budget_window
+      : null,
+    row.guardrails ? "guarded" : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
   return (
-    <span className="whitespace-nowrap text-small">
+    <span className="block min-w-0 text-small leading-snug" title={summary}>
       {parts.map(([value, unit], i) => (
         <span key={unit}>
           {i > 0 ? <span className="text-faint"> · </span> : null}
@@ -259,7 +332,7 @@ function Limits({ row }: { row: KeyResult }) {
         </span>
       ) : null}
       {row.guardrails ? (
-        <span>
+        <span className="whitespace-nowrap">
           <span className="text-faint"> · </span>
           <Guarded guardrails={row.guardrails} />
         </span>
@@ -326,8 +399,8 @@ function Spend({ row }: { row: KeyResult }) {
   const reached = row.spent_micros >= budget;
   const share = Math.min(100, (row.spent_micros / budget) * 100);
   return (
-    <div className="min-w-[132px]" title={title}>
-      <div className="flex items-baseline gap-1 font-mono text-small tnum">
+    <div className="min-w-0" title={title}>
+      <div className="flex flex-wrap items-baseline gap-1 font-mono text-small tnum">
         <span className={reached ? "text-neg" : "text-fg"}>{usd(row.spent_micros)}</span>
         <span className="text-faint">/ {usd(budget)}</span>
         {now ? <span className="text-caption text-faint">{now}</span> : null}
@@ -358,7 +431,7 @@ function Models({ row }: { row: KeyResult }) {
     ...mapped.map((m) => `${m.from} → ${m.to}`),
   ].join("\n");
   return (
-    <span className="whitespace-nowrap text-muted" title={title}>
+    <span className="block min-w-0 truncate text-muted" title={title}>
       {scope}
       {mapped.length > 0 ? (
         <span className="text-faint"> · {mapped.length} mapped</span>

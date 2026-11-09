@@ -52,16 +52,16 @@ curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | s
 ```
 
 ```sh
-# pin the newest published release (v0.4.4) / choose a directory
-RROUTER_VERSION=v0.4.4 RROUTER_INSTALL_DIR="$HOME/bin" \
+# pin the newest published release (v0.4.5) / choose a directory
+RROUTER_VERSION=v0.4.5 RROUTER_INSTALL_DIR="$HOME/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
 
 # see what it would do
 RROUTER_DRY_RUN=1 curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | sh
 ```
 
-`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.4 is
-the newest. The workspace is 0.4.4 — tag artifacts are published by the release workflow.
+`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.5 is
+the newest. The workspace is 0.4.5 — tag artifacts are published by the release workflow.
 
 ## Quick start
 
@@ -574,7 +574,7 @@ from the matching `## <version>` section of `CHANGELOG.md` by
 `ghcr.io/centopw/rrouter:0.2.0`, `:0.2`, `:latest`, and a `:sha-…` manifest, cutting the
 v0.4.4 31-minute QEMU path to an expected ~12–16 minutes cold. The installer verifies the
 checksum before installing, so a corrupted download never lands in `$PATH`. Verify notes
-before tagging with `python3 scripts/release-notes.py v0.4.4 --check`; the full flow and
+before tagging with `python3 scripts/release-notes.py v0.4.5 --check`; the full flow and
 timings are in [`docs/RELEASES.md`](docs/RELEASES.md#5-the-pipeline).
 
 ## License

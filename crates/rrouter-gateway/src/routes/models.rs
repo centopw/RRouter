@@ -21,11 +21,28 @@ use crate::state::AppState;
 /// Models a client can actually call: the registry (already limited to connected
 /// providers) plus aliases and combos.
 pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
-    let mut entries: BTreeMap<String, String> = BTreeMap::new();
+    // One entry per id. A model row carries the operator's preferred provider for that
+    // bare id; use it for `owned_by` only when that provider actually serves the id.
+    let mut entries: BTreeMap<String, (String, Option<String>, bool)> = BTreeMap::new();
     match models_registry::list(&state).await {
         Ok(items) => {
             for item in items {
-                entries.entry(item.id).or_insert(item.provider);
+                // A disabled model is not callable and must not be advertised. Other
+                // enabled providers of the same id still list it below.
+                if !item.enabled {
+                    continue;
+                }
+                let entry = entries.entry(item.id).or_insert((
+                    item.provider.clone(),
+                    item.preferred_provider.clone(),
+                    false,
+                ));
+                if let Some(preferred) = &item.preferred_provider {
+                    entry.1 = Some(preferred.clone());
+                    if item.provider == *preferred {
+                        entry.2 = true;
+                    }
+                }
             }
         }
         Err(e) => return admin_error(&e),
@@ -34,21 +51,26 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
         for alias in aliases {
             entries
                 .entry(alias.alias)
-                .or_insert_with(|| "rrouter".to_string());
+                .or_insert_with(|| ("rrouter".to_string(), None, false));
         }
     }
     if let Ok(combos) = state.store.list_combos().await {
         for combo in combos {
             entries
                 .entry(combo.name)
-                .or_insert_with(|| "rrouter".to_string());
+                .or_insert_with(|| ("rrouter".to_string(), None, false));
         }
     }
 
     let created = crate::now_unix();
     let data: Vec<Value> = entries
         .into_iter()
-        .map(|(id, owned_by)| {
+        .map(|(id, (fallback, preferred, preferred_serves))| {
+            let owned_by = if preferred_serves {
+                preferred.unwrap_or(fallback)
+            } else {
+                fallback
+            };
             json!({ "id": id, "object": "model", "owned_by": owned_by, "created": created })
         })
         .collect();
@@ -116,26 +138,53 @@ async fn routable_owner(state: &AppState, reference: &str) -> rrouter_core::Resu
     Ok(None)
 }
 
-/// Fetch a connection's models in the background, right after it is added.
+/// How long a connection create/update waits for the provider's model list before
+/// detaching the fetch. Long enough for a normal catalogue, short enough that a slow
+/// provider does not hold the admin response hostage.
+pub const INITIAL_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Fetch a connection's models once, for a caller that already owns a task.
 ///
-/// The registry lists a provider's real catalog without an extra click; a provider
-/// that cannot enumerate (codex) or a failed fetch is logged and otherwise ignored —
-/// the catalog rows remain.
-pub fn spawn_initial_fetch(state: Arc<AppState>, id: Uuid) {
-    tokio::spawn(async move {
-        let Ok(Some(conn)) = state.store.get_connection(id).await else {
-            return;
-        };
-        let Some(spec) = rrouter_auth::get(&conn.provider) else {
-            return;
-        };
-        if !models_registry::can_list(spec.id) {
-            return;
-        }
-        if let Err(e) = fetch_upstream(&state, spec, &conn).await {
-            tracing::debug!(provider = %conn.provider, error = %e, "initial model fetch failed");
-        }
-    });
+/// The registry lists a provider's real catalog without an extra click; a provider that
+/// cannot enumerate (codex) or a failed fetch is logged and otherwise ignored — the
+/// catalog rows remain.
+pub async fn initial_fetch(state: Arc<AppState>, id: Uuid) {
+    let Ok(Some(conn)) = state.store.get_connection(id).await else {
+        return;
+    };
+    let Some(spec) = rrouter_auth::get(&conn.provider) else {
+        return;
+    };
+    if !models_registry::can_list(spec.id) {
+        return;
+    }
+    if let Err(e) = fetch_upstream(&state, spec, &conn).await {
+        tracing::debug!(provider = %conn.provider, error = %e, "initial model fetch failed");
+    }
+}
+
+/// Spawn [`initial_fetch`]; the returned handle is awaitable or droppable.
+pub fn spawn_initial_fetch(state: Arc<AppState>, id: Uuid) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(initial_fetch(state, id))
+}
+
+/// Await the initial fetch for at most `bound`.
+///
+/// A timed-out handle is dropped, which detaches (not aborts) the spawned task: the
+/// catalogue still lands a moment later and the admin request returns now.
+pub async fn wait_initial_fetch_within(state: Arc<AppState>, id: Uuid, bound: std::time::Duration) {
+    let handle = spawn_initial_fetch(state, id);
+    if tokio::time::timeout(bound, handle).await.is_err() {
+        tracing::debug!(
+            connection = %id,
+            "initial model fetch still running after the bound; detached"
+        );
+    }
+}
+
+/// The production bound for connection create/update and OAuth completion.
+pub async fn wait_initial_fetch(state: Arc<AppState>, id: Uuid) {
+    wait_initial_fetch_within(state, id, INITIAL_FETCH_TIMEOUT).await;
 }
 
 pub async fn list_aliases(State(state): State<Arc<AppState>>) -> Response {
@@ -226,6 +275,79 @@ pub async fn registry_list(State(state): State<Arc<AppState>>) -> Response {
         Ok(items) => ok_json(json!({ "data": items })),
         Err(e) => admin_error(&e),
     }
+}
+
+/// `GET /api/models/preferences` — `{data:[{model,provider,updated_at}]}`.
+pub async fn list_preferences(State(state): State<Arc<AppState>>) -> Response {
+    match state.store.model_preferences().await {
+        Ok(preferences) => ok_json(json!({ "data": preference_rows(&preferences) })),
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// `PUT /api/models/preference` — `{model, provider}` sets; `provider:null` clears.
+/// Returns the updated preference list plus a `{model: provider}` map.
+pub async fn put_preference(State(state): State<Arc<AppState>>, body: Body) -> Response {
+    let value = match body_json(body).await {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let Some(model) = value.get("model").and_then(Value::as_str) else {
+        return admin_error(&Error::BadRequest("model is required".into()));
+    };
+    match value.get("provider") {
+        Some(Value::Null) => {
+            if let Err(e) = state.store.clear_model_preference(model).await {
+                return admin_error(&e);
+            }
+        }
+        Some(Value::String(provider)) => {
+            if let Err(e) = state.store.set_model_preference(model, provider).await {
+                return admin_error(&e);
+            }
+        }
+        None => {
+            return admin_error(&Error::BadRequest(
+                "provider is required (null clears the preference)".into(),
+            ))
+        }
+        Some(_) => {
+            return admin_error(&Error::BadRequest(
+                "provider must be a string or null".into(),
+            ))
+        }
+    }
+    match state.store.model_preferences().await {
+        Ok(preferences) => {
+            let map: Map<String, Value> = preferences
+                .iter()
+                .map(|preference| {
+                    (
+                        preference.model.clone(),
+                        Value::String(preference.provider.clone()),
+                    )
+                })
+                .collect();
+            ok_json(json!({
+                "data": preference_rows(&preferences),
+                "preferences": map,
+            }))
+        }
+        Err(e) => admin_error(&e),
+    }
+}
+
+fn preference_rows(preferences: &[rrouter_store::ModelPreference]) -> Vec<Value> {
+    preferences
+        .iter()
+        .map(|preference| {
+            json!({
+                "model": preference.model,
+                "provider": preference.provider,
+                "updated_at": preference.updated_at,
+            })
+        })
+        .collect()
 }
 
 /// `GET /api/models/providers`: every routable provider, with whether it has an active

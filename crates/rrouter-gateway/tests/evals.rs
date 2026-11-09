@@ -61,15 +61,48 @@ async fn mock_chat(State(mock): State<Arc<Mock>>, body: String) -> Response {
         tokio::time::sleep(mock.delay).await;
     }
     let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    let prompt = value
+    let messages = value
         .get("messages")
-        .and_then(|messages| messages.get(0))
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let text = |message: &Value| {
+        message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let system = messages
+        .iter()
+        .find(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+        .map(text)
+        .unwrap_or_default();
+    let prompt = messages.last().map(text).unwrap_or_default();
     mock.in_flight.fetch_sub(1, Ordering::SeqCst);
     mock.hits.fetch_add(1, Ordering::SeqCst);
+
+    if system.contains("eval judge") {
+        let answer = if prompt.contains("JUDGE_BAD") {
+            "not json"
+        } else if prompt.contains("JUDGE_FAIL") {
+            "{\"pass\":false}"
+        } else {
+            "```json\n{\"pass\":true}\n```"
+        };
+        return Json(json!({
+            "id": "chatcmpl-judge",
+            "created": 1,
+            "model": "gpt-4.1",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": answer},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+        }))
+        .into_response();
+    }
 
     if prompt.contains("FAIL500") {
         return (
@@ -295,13 +328,12 @@ impl H {
 
     /// Start a run and poll until it finishes.
     async fn run_to_completion(&self, owner: &str, suite_id: &str, model: &str) -> Value {
-        let (status, body) = self
-            .post(
-                "/api/evals/runs",
-                json!({"suite_id": suite_id, "model": model}),
-                &csrf(owner),
-            )
-            .await;
+        self.run_to_completion_body(owner, json!({"suite_id": suite_id, "model": model}))
+            .await
+    }
+
+    async fn run_to_completion_body(&self, owner: &str, body: Value) -> Value {
+        let (status, body) = self.post("/api/evals/runs", body, &csrf(owner)).await;
         assert_eq!(status, StatusCode::ACCEPTED, "start: {body}");
         let id = body["data"]["id"].as_str().expect("run id").to_string();
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -377,6 +409,14 @@ async fn suite_and_case_round_trip_with_validation() {
         .post(
             "/api/evals/suites",
             json!({"name": "support smoke"}),
+            &csrf(&owner),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = h
+        .post(
+            "/api/evals/suites",
+            json!({"name": "bad context", "system_prompt": 5}),
             &csrf(&owner),
         )
         .await;
@@ -638,4 +678,133 @@ async fn the_run_credential_never_reaches_a_result() {
     assert_eq!(results[0]["output"], "[redacted]");
     let (_, run_list) = h.get("/api/evals/runs", &auth(&owner)).await;
     assert!(!run_list.to_string().contains(secret), "{run_list}");
+}
+
+/// The suite system prompt is the first message of every case request.
+#[tokio::test]
+async fn suite_system_prompt_precedes_each_case() {
+    let (mock, url) = start_mock(Duration::ZERO).await;
+    let h = harness();
+    h.connect("openai", &url).await;
+    let owner = h.setup().await;
+    let (status, created) = h
+        .post(
+            "/api/evals/suites",
+            json!({
+                "name": "support policy",
+                "system_prompt": "You are support. Cite the refund policy.",
+            }),
+            &csrf(&owner),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["data"]["system_prompt"],
+        "You are support. Cite the refund policy."
+    );
+    let suite = created["data"]["id"]
+        .as_str()
+        .expect("suite id")
+        .to_string();
+    add_case(&h, &owner, &suite, "Can I get a refund?", Some("30 days")).await;
+
+    let finished = h.run_to_completion(&owner, &suite, "openai/gpt-4.1").await;
+    assert_eq!(finished["data"]["status"], "completed");
+
+    let sent: Value =
+        serde_json::from_str(&mock.last_body.lock().expect("body lock")).expect("json body");
+    let messages = sent["messages"].as_array().expect("messages");
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(
+        messages[0]["content"],
+        "You are support. Cite the refund policy."
+    );
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "Can I get a refund?");
+
+    // `null` clears the context, and the view says so.
+    let (status, _, cleared) = h
+        .call(
+            Method::PATCH,
+            &format!("/api/evals/suites/{suite}"),
+            Some(json!({"system_prompt": null})),
+            &csrf(&owner),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["data"]["system_prompt"], Value::Null);
+}
+
+/// A run-level judge replaces containment with an LLM verdict. The judge call is an
+/// ordinary gateway completion, so the mock sees two upstream calls per scored case.
+#[tokio::test]
+async fn judge_model_scores_criteria_and_round_trips_on_the_run() {
+    let (mock, url) = start_mock(Duration::ZERO).await;
+    let h = harness();
+    h.connect("openai", &url).await;
+    let owner = h.setup().await;
+    let suite = create_suite(&h, &owner, "judged").await;
+    add_case(&h, &owner, &suite, "first case", Some("JUDGE_PASS")).await;
+    add_case(&h, &owner, &suite, "second case", Some("JUDGE_FAIL")).await;
+
+    let (status, body) = h
+        .post(
+            "/api/evals/runs",
+            json!({"suite_id": suite, "model": "openai/gpt-4.1", "judge_model": true}),
+            &csrf(&owner),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let finished = h
+        .run_to_completion_body(
+            &owner,
+            json!({
+                "suite_id": suite,
+                "model": "openai/gpt-4.1",
+                "judge_model": "openai/gpt-4.1",
+            }),
+        )
+        .await;
+    assert_eq!(finished["data"]["status"], "completed", "{finished}");
+    assert_eq!(finished["data"]["judge_model"], "openai/gpt-4.1");
+    let results = finished["results"].as_array().expect("results");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["score"], 1.0);
+    assert_eq!(results[0]["passed"], true);
+    assert_eq!(results[1]["score"], 0.0);
+    assert_eq!(results[1]["passed"], false);
+    let summary = &finished["data"]["summary"];
+    assert_eq!(summary["passed"], 1);
+    assert_eq!(summary["failed"], 1);
+    assert_eq!(summary["errors"], 0);
+    assert_eq!(mock.hits(), 4, "two cases plus two judge calls");
+}
+
+/// A judge that answers garbage becomes a case error, never a guessed score.
+#[tokio::test]
+async fn judge_parse_failure_is_a_case_error_not_a_score() {
+    let (_mock, url) = start_mock(Duration::ZERO).await;
+    let h = harness();
+    h.connect("openai", &url).await;
+    let owner = h.setup().await;
+    let suite = create_suite(&h, &owner, "bad judge").await;
+    add_case(&h, &owner, &suite, "needs judge", Some("JUDGE_BAD")).await;
+
+    let finished = h
+        .run_to_completion_body(
+            &owner,
+            json!({
+                "suite_id": suite,
+                "model": "openai/gpt-4.1",
+                "judge_model": "openai/gpt-4.1",
+            }),
+        )
+        .await;
+    let result = &finished["results"][0];
+    assert_eq!(result["score"], Value::Null, "{finished}");
+    assert_eq!(result["passed"], Value::Null, "{finished}");
+    let error = result["error"].as_str().expect("error text");
+    assert!(error.contains("judge"), "{error}");
+    assert_eq!(finished["data"]["summary"]["errors"], 1, "{finished}");
 }

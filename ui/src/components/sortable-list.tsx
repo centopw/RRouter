@@ -358,6 +358,7 @@ export function SortableCards({
   canHide,
   onHide,
   render,
+  empty,
 }: {
   rows: LayoutRow[];
   onReorder: (from: string, to: string) => void;
@@ -366,6 +367,8 @@ export function SortableCards({
   onHide: (ref: string) => void;
   /** The card body the page already knows how to draw for a model. */
   render: (model: Model) => ReactNode;
+  /** What an empty card list says; the table already takes one, so cards must too. */
+  empty?: ReactNode;
 }) {
   return (
     <SortableLayout
@@ -373,6 +376,7 @@ export function SortableCards({
       onReorder={onReorder}
       reducedMotion={reducedMotion}
       overlay={(row) => <DragPreview row={row} />}
+      empty={empty}
     >
       <ul aria-label="Models registry" className="flex flex-col">
         {rows.map((row) => (

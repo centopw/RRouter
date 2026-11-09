@@ -39,7 +39,8 @@ pub use audit::AuditEvent;
 pub use crypto::KEY_FILE_NAME;
 pub use evals::{
     eval_passes, EvalCase, EvalResult, EvalRun, EvalRunStatus, EvalSuite, EvalSummary,
-    EVAL_RUN_PAGE, MAX_EVAL_CASES, MAX_EVAL_MODEL, MAX_EVAL_NAME, MAX_EVAL_TEXT,
+    EVAL_RUN_PAGE, MAX_EVAL_CASES, MAX_EVAL_MODEL, MAX_EVAL_NAME, MAX_EVAL_SYSTEM_PROMPT,
+    MAX_EVAL_TEXT,
 };
 pub use migrations::SCHEMA_VERSION;
 pub use presets::{
@@ -53,9 +54,10 @@ pub use store::{
     cache_key, window_reset, window_start, AccountQuota, AccountQuotaState, AccountUsage, ApiKey,
     ApiKeyPatch, AttemptRecord, BudgetWindow, CacheEntry, Combo, ComboStrategy, Connection,
     ConnectionScope, ExhaustedAccounts, Guardrails, KeyModel, KeyScope, ModelAlias, ModelCost,
-    ModelRow, PromptTemplate, PromptTemplateVersion, PruneReport, SemanticCacheCandidate,
-    SemanticCacheEntry, SemanticCacheScope, StatusFilter, Store, UsageBucket, UsageModelBucket,
-    UsageQuery, UsageRecord, UsageSummary, API_KEY_PREFIX, MAX_COMBO_ROUTER_MODEL,
+    ModelPreference, ModelRow, PromptTemplate, PromptTemplateVersion, PruneReport,
+    SemanticCacheCandidate, SemanticCacheEntry, SemanticCacheScope, StatusFilter, Store,
+    UsageBucket, UsageModelBucket, UsageQuery, UsageRecord, UsageSummary, API_KEY_PREFIX,
+    MAX_COMBO_ROUTER_MODEL, MAX_MODEL_PREFERENCE_MODEL, MAX_MODEL_PREFERENCE_PROVIDER,
 };
 pub use teams::{normalize_name, Team, TeamMember, TeamPatch, TeamRole, TeamSpend, MAX_TEAM_NAME};
 pub use users::{

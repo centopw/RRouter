@@ -141,22 +141,28 @@ export default function Logs() {
       ) : null}
 
       <Card>
-        <div className="flex flex-col gap-2 border-b border-line px-5 py-3 min-[900px]:flex-row min-[900px]:items-center">
+        {/* The four selects are one row from 900px up. The segmented control only shares
+          that row (and the loaded/clear meta joins it) from 1100px, where four columns
+          still fit their labels instead of collapsing to "All …". */}
+        <div className="flex flex-col gap-2 border-b border-line px-5 py-3 min-[1100px]:flex-row min-[1100px]:items-center">
           <Segmented
             options={RANGES.map((r) => ({ id: r.id, label: r.label }))}
             value={rangeId}
             onChange={setRangeId}
             ariaLabel="time range"
-            className="shrink-0"
+            className="shrink-0 self-start min-[1100px]:self-center"
           />
-          <Divider vertical className="hidden min-[900px]:block" />
-          <div className="grid min-w-0 flex-1 grid-cols-2 gap-2 min-[700px]:flex min-[700px]:flex-wrap min-[700px]:items-center">
-            <Select className="w-full min-[700px]:w-[140px]" value={status} onChange={(v) => setStatus(v as Status)} ariaLabel="status">
+          <Divider vertical className="hidden min-[1100px]:block" />
+          {/* Four columns from 900px: the selects share the row instead of wrapping
+              ("All keys" used to drop to a second line on a narrow desktop). Below 900
+              two columns stay readable; each cell truncates its own label. */}
+          <div className="grid min-w-0 flex-1 grid-cols-2 gap-2 min-[900px]:grid-cols-4">
+            <Select className="w-full min-w-0" value={status} onChange={(v) => setStatus(v as Status)} ariaLabel="status">
               <option value="all">All statuses</option>
               <option value="errors">Errors</option>
               <option value="2xx">2xx only</option>
             </Select>
-            <Select className="w-full min-[700px]:w-[150px]" value={provider} onChange={setProvider} ariaLabel="provider">
+            <Select className="w-full min-w-0" value={provider} onChange={setProvider} ariaLabel="provider">
               <option value={ALL}>All providers</option>
               {providers.map((p) => (
                 <option key={p} value={p}>
@@ -164,7 +170,7 @@ export default function Logs() {
                 </option>
               ))}
             </Select>
-            <Select className="w-full min-[700px]:w-[210px]" value={model} onChange={setModel} ariaLabel="model">
+            <Select className="w-full min-w-0" value={model} onChange={setModel} ariaLabel="model">
               <option value={ALL}>All models</option>
               {modelGroups.map(([p, list]) => (
                 <optgroup key={p} label={p}>
@@ -176,7 +182,7 @@ export default function Logs() {
                 </optgroup>
               ))}
             </Select>
-            <Select className="w-full min-[700px]:w-[150px]" value={keyId} onChange={setKeyId} ariaLabel="key">
+            <Select className="w-full min-w-0" value={keyId} onChange={setKeyId} ariaLabel="key">
               <option value={ALL}>All keys</option>
               {(keys.data ?? []).map((k) => (
                 <option key={k.id} value={k.id}>
@@ -184,14 +190,14 @@ export default function Logs() {
                 </option>
               ))}
             </Select>
+          </div>
+          <span className="flex shrink-0 items-center gap-2 text-caption text-faint tnum min-[1100px]:text-right">
             {dirty ? (
-              <Button variant="quiet" onClick={clearFilters} className="justify-self-start">
+              <Button variant="quiet" onClick={clearFilters}>
                 clear filters
               </Button>
             ) : null}
-          </div>
-          <span className="shrink-0 text-caption text-faint tnum min-[900px]:text-right">
-            {loaded.length.toLocaleString()} loaded
+            <span>{loaded.length.toLocaleString()} loaded</span>
           </span>
         </div>
 

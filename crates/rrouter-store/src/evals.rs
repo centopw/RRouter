@@ -37,6 +37,8 @@ pub const MAX_EVAL_NAME: usize = 80;
 pub const MAX_EVAL_TEXT: usize = 8_000;
 /// Longest model reference a run may name.
 pub const MAX_EVAL_MODEL: usize = 200;
+/// Longest suite system prompt. Generous: it is policy context, not a single sentence.
+pub const MAX_EVAL_SYSTEM_PROMPT: usize = 16_000;
 /// Cases a suite may hold. A suite is a smoke set, not a benchmark corpus.
 pub const MAX_EVAL_CASES: usize = 200;
 /// Runs returned by a list call.
@@ -92,6 +94,8 @@ pub struct EvalSuite {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
+    /// System prompt prepended to every case in this suite, or `None`.
+    pub system_prompt: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -114,6 +118,8 @@ pub struct EvalRun {
     pub id: Uuid,
     pub suite_id: Uuid,
     pub model: String,
+    /// Optional decision model for judging natural-language criteria.
+    pub judge_model: Option<String>,
     pub status: EvalRunStatus,
     pub created_at: i64,
     pub completed_at: Option<i64>,
@@ -168,17 +174,19 @@ impl EvalSummary {
     }
 }
 
-const SUITE_COLUMNS: &str = "id, name, description, created_at, updated_at";
+const SUITE_COLUMNS: &str = "id, name, description, system_prompt, created_at, updated_at";
 const CASE_COLUMNS: &str = "id, suite_id, name, input, expected, created_at";
-const RUN_COLUMNS: &str = "id, suite_id, model, status, created_at, completed_at, summary";
+const RUN_COLUMNS: &str =
+    "id, suite_id, model, status, created_at, completed_at, summary, judge_model";
 
 fn row_to_suite(r: &Row<'_>) -> rusqlite::Result<EvalSuite> {
     Ok(EvalSuite {
         id: uuid_col(0, r.get(0)?)?,
         name: r.get(1)?,
         description: r.get(2)?,
-        created_at: r.get(3)?,
-        updated_at: r.get(4)?,
+        system_prompt: r.get(3)?,
+        created_at: r.get(4)?,
+        updated_at: r.get(5)?,
     })
 }
 
@@ -200,6 +208,7 @@ fn row_to_run(r: &Row<'_>) -> rusqlite::Result<EvalRun> {
         id: uuid_col(0, r.get(0)?)?,
         suite_id: uuid_col(1, r.get(1)?)?,
         model: r.get(2)?,
+        judge_model: r.get(7)?,
         status: EvalRunStatus::from_stored(&status),
         created_at: r.get(4)?,
         completed_at: r.get(5)?,
@@ -263,6 +272,23 @@ fn check_text(raw: &str, what: &str) -> Result<String> {
     Ok(text)
 }
 
+/// Validate optional suite context. Empty/whitespace is "no prompt", never an error.
+fn check_system_prompt(raw: Option<&str>) -> Result<Option<String>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let prompt = raw.trim();
+    if prompt.is_empty() {
+        return Ok(None);
+    }
+    if prompt.chars().count() > MAX_EVAL_SYSTEM_PROMPT {
+        return Err(Error::BadRequest(format!(
+            "a suite system prompt is limited to {MAX_EVAL_SYSTEM_PROMPT} characters"
+        )));
+    }
+    Ok(Some(prompt.to_string()))
+}
+
 /// Does `output` satisfy `expected`? Case-insensitive containment: an expectation names
 /// the fact the answer must state, not the whole sentence it must be.
 pub fn eval_passes(output: &str, expected: &str) -> bool {
@@ -281,6 +307,7 @@ impl Store {
         &self,
         name: &str,
         description: Option<&str>,
+        system_prompt: Option<&str>,
     ) -> Result<EvalSuite> {
         let name = check_name(name, "suite name")?;
         if self.eval_suite_by_name(&name).await?.is_some() {
@@ -294,17 +321,20 @@ impl Store {
                 .map(str::trim)
                 .filter(|d| !d.is_empty())
                 .map(str::to_string),
+            system_prompt: check_system_prompt(system_prompt)?,
             created_at: stamp,
             updated_at: stamp,
         };
         self.conn()
             .execute(
-                "INSERT INTO eval_suites (id, name, description, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO eval_suites \
+                 (id, name, description, system_prompt, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     suite.id.to_string(),
                     suite.name,
                     suite.description,
+                    suite.system_prompt,
                     suite.created_at,
                     suite.updated_at
                 ],
@@ -355,6 +385,7 @@ impl Store {
         id: Uuid,
         name: Option<&str>,
         description: Option<Option<&str>>,
+        system_prompt: Option<Option<&str>>,
     ) -> Result<Option<EvalSuite>> {
         let Some(mut suite) = self.eval_suite(id).await? else {
             return Ok(None);
@@ -374,14 +405,19 @@ impl Store {
                 .filter(|d| !d.is_empty())
                 .map(str::to_string);
         }
+        if let Some(system_prompt) = system_prompt {
+            suite.system_prompt = check_system_prompt(system_prompt)?;
+        }
         suite.updated_at = now();
         self.conn()
             .execute(
-                "UPDATE eval_suites SET name = ?2, description = ?3, updated_at = ?4 WHERE id = ?1",
+                "UPDATE eval_suites SET name = ?2, description = ?3, system_prompt = ?4, \
+                 updated_at = ?5 WHERE id = ?1",
                 params![
                     id.to_string(),
                     suite.name,
                     suite.description,
+                    suite.system_prompt,
                     suite.updated_at
                 ],
             )
@@ -506,7 +542,12 @@ impl Store {
     // ----- runs --------------------------------------------------------------------
 
     /// Create a run in `pending`. The caller starts the runner; the store only records.
-    pub async fn create_eval_run(&self, suite_id: Uuid, model: &str) -> Result<EvalRun> {
+    pub async fn create_eval_run(
+        &self,
+        suite_id: Uuid,
+        model: &str,
+        judge_model: Option<&str>,
+    ) -> Result<EvalRun> {
         if self.eval_suite(suite_id).await?.is_none() {
             return Err(Error::NotFound(format!("suite {suite_id}")));
         }
@@ -519,10 +560,26 @@ impl Store {
                 "a model reference is limited to {MAX_EVAL_MODEL} characters"
             )));
         }
+        let judge_model = match judge_model {
+            None => None,
+            Some(raw) => {
+                let judge = raw.trim();
+                if judge.is_empty() {
+                    return Err(Error::BadRequest("judge_model must not be empty".into()));
+                }
+                if judge.chars().count() > MAX_EVAL_MODEL {
+                    return Err(Error::BadRequest(format!(
+                        "a judge model reference is limited to {MAX_EVAL_MODEL} characters"
+                    )));
+                }
+                Some(judge.to_string())
+            }
+        };
         let run = EvalRun {
             id: Uuid::new_v4(),
             suite_id,
             model: model.to_string(),
+            judge_model,
             status: EvalRunStatus::Pending,
             created_at: now(),
             completed_at: None,
@@ -530,12 +587,14 @@ impl Store {
         };
         self.conn()
             .execute(
-                "INSERT INTO eval_runs (id, suite_id, model, status, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO eval_runs \
+                 (id, suite_id, model, judge_model, status, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     run.id.to_string(),
                     suite_id.to_string(),
                     run.model,
+                    run.judge_model,
                     run.status.as_str(),
                     run.created_at
                 ],

@@ -10,7 +10,7 @@ import {
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import * as Popover from "@radix-ui/react-popover";
-import { CircleNotch, DotsThree, Play } from "@phosphor-icons/react";
+import { CircleNotch, DotsThree, Play, Star } from "@phosphor-icons/react";
 import {
   Badge,
   Button,
@@ -31,7 +31,9 @@ import { PresetBar } from "../components/model-presets";
 import { InactiveList, SortableCards, SortableTable, type LayoutRow } from "../components/sortable-list";
 import { layoutFor, useLayoutDraft } from "../lib/layout-draft";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS, CapabilityChips } from "../components/capability-chips";
-import { Checkbox, Heading, Toggle } from "../components/atoms";
+import { ProviderIcon } from "../components/provider-icon";
+import { Checkbox, Heading, IconButton, Toggle } from "../components/atoms";
+import { FilterChip } from "../components/atoms/FilterChip";
 import { compact } from "../lib/format";
 import { usePhone, useReducedMotion } from "../lib/media";
 import { compareModels } from "../lib/models";
@@ -199,6 +201,16 @@ export default function Models() {
   });
 
   const toast = useToast();
+  // One preference per canonical id, shared by every provider row of it; `null` clears.
+  const prefer = useMutation({
+    mutationFn: ({ model, provider }: { model: string; provider: string | null }) =>
+      api.put<{ model: string; preferred_provider: string | null }>("/api/models/preference", {
+        model,
+        provider,
+      }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.models }),
+  });
+
   const remove = useMutation({
     mutationFn: (model: Model) =>
       api.del<{ deleted: boolean }>(
@@ -206,6 +218,17 @@ export default function Models() {
       ),
     onSuccess: invalidateRegistry,
   });
+
+  // The catalog lists every provider this binary can route; only a connected one can have
+  // models, so only those belong in a filter.
+  const connected = useMemo(
+    () => (providers.data ?? []).filter((p) => p.has_connection),
+    [providers.data],
+  );
+  // A stale `?provider=azure` (disconnected since the link was copied) falls back to the
+  // whole list instead of an empty table.
+  const effectiveProvider =
+    provider === ALL || connected.some((p) => p.id === provider) ? provider : ALL;
 
   const all = useMemo(
     () =>
@@ -215,15 +238,46 @@ export default function Models() {
     [models.data],
   );
 
+  // Coverage is computed from the whole registry, not the filtered page: the same model
+  // served by two providers must say so even when a filter hides one of them.
+  const coverage = useMemo(() => {
+    const map = new Map<string, Model[]>();
+    for (const model of all) {
+      const peers = map.get(model.id);
+      if (peers) peers.push(model);
+      else map.set(model.id, [model]);
+    }
+    return map;
+  }, [all]);
+  const uniqueIds = coverage.size;
+  const sharedCount = useMemo(
+    () => [...coverage.values()].filter((peers) => peers.length > 1).length,
+    [coverage],
+  );
+  const isShared = (id: string) => (coverage.get(id)?.length ?? 0) > 1;
+  const providerDisplay = useMemo(
+    () => new Map((providers.data ?? []).map((p) => [p.id, p.display] as const)),
+    [providers.data],
+  );
+
+  const sharedOnly = params.get("shared") === "1";
   const appliedQuery = useDeferredValue(urlQuery);
-  const filtered = useMemo(() => {
+  const matchesRegistry = (m: Model) => {
     const q = appliedQuery.trim().toLowerCase();
-    return all.filter(
-      (m) =>
-        (provider === ALL || m.provider === provider) &&
-        (!q || m.ref.toLowerCase().includes(q) || (m.display ?? "").toLowerCase().includes(q)),
+    return (
+      (effectiveProvider === ALL || m.provider === effectiveProvider) &&
+      (!sharedOnly || (coverage.get(m.id)?.length ?? 0) > 1) &&
+      (!q || m.ref.toLowerCase().includes(q) || (m.display ?? "").toLowerCase().includes(q))
     );
-  }, [all, provider, appliedQuery]);
+  };
+  const filtered = useMemo(
+    () => all.filter((m) => m.enabled && matchesRegistry(m)),
+    [all, effectiveProvider, appliedQuery, sharedOnly, coverage],
+  );
+  const registryDisabled = useMemo(
+    () => all.filter((m) => !m.enabled && matchesRegistry(m)),
+    [all, effectiveProvider, appliedQuery, sharedOnly, coverage],
+  );
 
   // Clamped, not corrected in the URL: a stale `?page=9` shows the last page instead of an
   // empty table, and the next click writes the real number.
@@ -245,14 +299,18 @@ export default function Models() {
   const matchesRow = (row: LayoutRow) => {
     const needle = appliedQuery.trim().toLowerCase();
     const owner = row.model?.provider ?? row.ref.split("/")[0];
-    if (provider !== ALL && owner !== provider) return false;
+    if (effectiveProvider !== ALL && owner !== effectiveProvider) return false;
+    if (sharedOnly && !(row.model && isShared(row.model.id))) return false;
     return (
       !needle ||
       row.ref.toLowerCase().includes(needle) ||
       (row.model?.display ?? "").toLowerCase().includes(needle)
     );
   };
-  const activeRows = layoutDraft.entries
+  // Only an enabled model belongs in the active list; a disabled one moves to its own
+  // table. Rows hidden from the preset stay hidden-only even when they are disabled too,
+  // so no model appears twice.
+  const visibleRows = layoutDraft.entries
     .filter((entry) => entry.visible)
     .map<LayoutRow>((entry) => ({
       ref: entry.ref,
@@ -261,6 +319,8 @@ export default function Models() {
       isNew: false,
     }))
     .filter(matchesRow);
+  const activeRows = visibleRows.filter((row) => row.model?.enabled !== false);
+  const disabledRows = visibleRows.filter((row) => row.model?.enabled === false);
   const newRows = all
     .filter((model) => !entryRefs.has(model.ref))
     .map<LayoutRow>((model) => ({ ref: model.ref, model, visible: false, isNew: true }))
@@ -283,11 +343,29 @@ export default function Models() {
     Math.max(1, Number(params.get("ipage") ?? "1") || 1),
     Math.max(1, Math.ceil((hiddenRows.length + newRows.length) / size)),
   );
+  // The disabled table serves both modes: the preset's visible entries and the plain
+  // registry fallback, which has no layout to split.
+  const disabledModels = presetsReady
+    ? disabledRows.flatMap((row) => (row.model ? [row.model] : []))
+    : registryDisabled;
+  const disabledPage = Math.min(
+    Math.max(1, Number(params.get("dpage") ?? "1") || 1),
+    Math.max(1, Math.ceil(disabledModels.length / size)),
+  );
   const activeSlice = activeRows.slice((activePage - 1) * size, activePage * size);
+  const disabledSlice = disabledModels.slice((disabledPage - 1) * size, disabledPage * size);
   const inactiveSlice = [...hiddenRows, ...newRows].slice(
     (inactivePage - 1) * size,
     inactivePage * size,
   );
+  const disabledPagination = {
+    page: disabledPage,
+    size,
+    total: disabledModels.length,
+    label: "disabled",
+    onPage: (next: number) => setFilters({ dpage: String(next) }),
+    onSize: (next: number) => setFilters({ size: String(next), dpage: "1" }),
+  };
 
   // Auto-include is a policy, not a button: a preset that opts in adopts every registry
   // model it has never stored, and the debounced save persists them.
@@ -346,6 +424,18 @@ export default function Models() {
               >
                 {m.id}
               </span>
+              <CoveragePeers
+                model={m}
+                peers={coverage.get(m.id) ?? []}
+                displayOf={(id: string) => providerDisplay.get(id) ?? id}
+                onPick={(id: string) => setFilters({ provider: id, page: "1" })}
+                onPrefer={(provider: string | null) => prefer.mutate({ model: m.id, provider })}
+              />
+              {m.preferred_provider === m.provider ? (
+                <Badge tone="accent" title={`preferred provider for ${m.id}`}>
+                  preferred
+                </Badge>
+              ) : null}
               {m.source === "custom" ? (
                 <Badge tone="accent" title="added by an operator, not synced from the provider">
                   custom
@@ -463,17 +553,51 @@ export default function Models() {
     ];
     // A reader sees the registry, not the controls that change it.
     return isAdmin ? list : list.filter((column) => column.key !== "actions");
-  }, [isAdmin, testTarget, toggleTarget, removeTarget, presetId]);
+  }, [isAdmin, testTarget, toggleTarget, removeTarget, presetId, coverage, providerDisplay]);
 
-  const filteredOut = appliedQuery.trim() !== "" || provider !== ALL;
-  const providerName = providers.data?.find((p) => p.id === provider)?.display ?? provider;
-  const emptyState = filteredOut ? (
+  const filteredOut = appliedQuery.trim() !== "" || effectiveProvider !== ALL;
+  const providerName =
+    connected.find((p) => p.id === effectiveProvider)?.display ?? effectiveProvider;
+  const coverageBar = (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-2">
+      <span className="text-caption text-faint tnum">
+        {all.length.toLocaleString()} models · {uniqueIds.toLocaleString()} unique ids ·{" "}
+        {sharedCount.toLocaleString()} shared by 2+ providers
+      </span>
+      <FilterChip
+        on={sharedOnly}
+        onClick={() => setFilters({ shared: sharedOnly ? null : "1", page: "1", ipage: "1" })}
+        ariaLabel="Show only models served by more than one provider"
+      >
+        shared only{sharedOnly ? "" : sharedCount > 0 ? ` · ${sharedCount}` : ""}
+      </FilterChip>
+    </div>
+  );
+
+  const emptyState = sharedOnly ? (
+    <div className="flex flex-col items-center gap-2">
+      <p>
+        No model is served by more than one provider
+        {filteredOut ? " with these filters" : ""}.
+      </p>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <Button variant="ghost" onClick={() => setFilters({ shared: null, page: "1" })}>
+          Show all models
+        </Button>
+        {filteredOut ? (
+          <Button variant="quiet" onClick={clearFilters}>
+            Clear filters
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  ) : filteredOut ? (
     <div className="flex flex-col items-center gap-2">
       <p>
         No models match{" "}
         {appliedQuery.trim() !== "" ? <span className="font-mono text-fg">{appliedQuery}</span> : null}
-        {appliedQuery.trim() !== "" && provider !== ALL ? " in " : null}
-        {provider !== ALL ? <span className="text-fg">{providerName}</span> : null}.
+        {appliedQuery.trim() !== "" && effectiveProvider !== ALL ? " in " : null}
+        {effectiveProvider !== ALL ? <span className="text-fg">{providerName}</span> : null}.
       </p>
       <Button variant="ghost" onClick={clearFilters}>
         Clear filters
@@ -482,6 +606,66 @@ export default function Models() {
   ) : (
     "no models for this provider"
   );
+
+  // The disabled table and the "everything is disabled" empty state reference emptyState,
+  // so they are built after it.
+  const activeEmpty =
+    disabledModels.length > 0 ? (
+      <div className="flex flex-col items-center gap-2">
+        <p>Every model that matches is disabled.</p>
+        <p className="text-caption text-faint">
+          Enable one in Disabled models below to route through it again.
+        </p>
+      </div>
+    ) : (
+      emptyState
+    );
+
+  const disabledCard =
+    disabledModels.length === 0 ? null : (
+      <Card className="mt-4">
+        <CardHeader
+          title="Disabled models"
+          action={
+            <span className="text-caption text-faint tnum">
+              {disabledModels.length.toLocaleString()} disabled · not routable until enabled
+            </span>
+          }
+        />
+        {phone ? (
+          <>
+          <ModelCards
+            rows={disabledSlice}
+            isAdmin={isAdmin}
+            testTarget={testTarget}
+            toggleTarget={toggleTarget}
+            removeTarget={removeTarget}
+            onTest={(m) => test.mutate(m)}
+            onToggle={(m) => toggle.mutate(m)}
+            onEdit={setEditing}
+            onDelete={setDeleting}
+            coverageFor={(id) => coverage.get(id) ?? []}
+            displayOfProvider={(id) => providerDisplay.get(id) ?? id}
+            onPickProvider={(id) => setFilters({ provider: id, page: "1" })}
+            onPreferPreference={(model, provider) => prefer.mutate({ model: model.id, provider })}
+          />
+          <PaginationBar pagination={disabledPagination} />
+          </>
+        ) : (
+          <DataTable
+            columns={columns}
+            rows={disabledSlice}
+            rowKey={rowKey}
+            tableLayout="fixed"
+            stickyRight="actions"
+            scrollLabel="Disabled models"
+            empty="No disabled models match these filters."
+            pagination={disabledPagination}
+          />
+        )}
+      </Card>
+    );
+
 
   const pagination = {
     page,
@@ -515,11 +699,11 @@ export default function Models() {
             <div className="w-[190px]">
               <Select
                 ariaLabel="provider filter"
-                value={provider}
+                value={effectiveProvider}
                 onChange={(next) => setFilters({ provider: next, page: "1" })}
               >
                 <option value={ALL}>all providers</option>
-                {(providers.data ?? []).map((p) => (
+                {connected.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.display}
                   </option>
@@ -582,7 +766,7 @@ export default function Models() {
             conflict={Boolean(layoutDraft.conflict)}
             error={layoutDraft.error}
             autoInclude={layoutDraft.autoInclude}
-            counts={`${activeRows.length.toLocaleString()} active · ${hiddenCount.toLocaleString()} hidden${
+            counts={`${activeRows.length.toLocaleString()} active · ${disabledRows.length.toLocaleString()} disabled · ${hiddenCount.toLocaleString()} hidden${
               newRows.length > 0 && !layoutDraft.autoInclude
                 ? ` · ${newRows.length.toLocaleString()} new`
                 : ""
@@ -677,6 +861,7 @@ export default function Models() {
                 </span>
               }
             />
+            {coverageBar}
             {phone ? (
               <SortableCards
                 rows={activeSlice}
@@ -684,6 +869,7 @@ export default function Models() {
                 reducedMotion={reduceMotion}
                 canHide={!layoutDraft.conflict}
                 onHide={(ref) => hideRow.current(ref)}
+                empty={activeEmpty}
                 render={(model) => (
                   <ModelCardBody
                     model={model}
@@ -696,6 +882,10 @@ export default function Models() {
                     onEdit={setEditing}
                     onDelete={setDeleting}
                     onHide={(ref) => hideRow.current(ref)}
+                    coverageFor={(id) => coverage.get(id) ?? []}
+                    displayOfProvider={(id) => providerDisplay.get(id) ?? id}
+                    onPickProvider={(id) => setFilters({ provider: id, page: "1" })}
+                    onPreferPreference={(model, provider) => prefer.mutate({ model: model.id, provider })}
                   />
                 )}
               />
@@ -708,7 +898,7 @@ export default function Models() {
                 reducedMotion={reduceMotion}
                 canHide={!layoutDraft.conflict}
                 scrollLabel="Active models"
-                empty={emptyState}
+                empty={activeEmpty}
               />
             )}
             <PaginationBar
@@ -722,6 +912,8 @@ export default function Models() {
               }}
             />
           </Card>
+
+          {disabledCard}
 
           {hiddenCount + newRows.length > 0 ? (
             <Card className="mt-4">
@@ -746,7 +938,7 @@ export default function Models() {
                 }
                 note="Hide a model to keep it out of this preset's order. It stays routable."
               />
-              {hiddenRows.length + newRows.length > size ? (
+              {hiddenRows.length + newRows.length > 0 ? (
                 <div className="border-t border-line">
                   <PaginationBar
                     pagination={{
@@ -777,6 +969,7 @@ export default function Models() {
               </span>
             }
           />
+          {coverageBar}
           {phone && pageRows.length > 0 ? (
             <>
               <ModelCards
@@ -789,6 +982,10 @@ export default function Models() {
                 onToggle={(model) => toggle.mutate(model)}
                 onEdit={setEditing}
                 onDelete={setDeleting}
+                coverageFor={(id) => coverage.get(id) ?? []}
+                displayOfProvider={(id) => providerDisplay.get(id) ?? id}
+                onPickProvider={(id) => setFilters({ provider: id, page: "1" })}
+                onPreferPreference={(model, provider) => prefer.mutate({ model: model.id, provider })}
               />
               <PaginationBar pagination={pagination} />
             </>
@@ -814,7 +1011,7 @@ export default function Models() {
 
       {editing ? (
         <CustomModelModal
-          providers={providers.data}
+          providers={connected}
           defaultProvider={editing.provider}
           initial={editing}
           onClose={() => setEditing(null)}
@@ -824,8 +1021,8 @@ export default function Models() {
 
       {customOpen ? (
         <CustomModelModal
-          providers={providers.data}
-          defaultProvider={provider !== ALL ? provider : ""}
+          providers={connected}
+          defaultProvider={effectiveProvider !== ALL ? effectiveProvider : ""}
           onClose={closeCustom}
           onSaved={invalidateRegistry}
         />
@@ -989,6 +1186,10 @@ function ModelCards({
   onToggle,
   onEdit,
   onDelete,
+  coverageFor,
+  displayOfProvider,
+  onPickProvider,
+  onPreferPreference,
 }: {
   rows: Model[];
   isAdmin: boolean;
@@ -999,6 +1200,10 @@ function ModelCards({
   onToggle: (model: Model) => void;
   onEdit: (model: Model) => void;
   onDelete: (model: Model) => void;
+  coverageFor: (id: string) => Model[];
+  displayOfProvider: (id: string) => string;
+  onPickProvider: (id: string) => void;
+  onPreferPreference: (model: Model, provider: string | null) => void;
 }) {
   return (
     <ul aria-label="Models registry" className="flex flex-col">
@@ -1017,6 +1222,10 @@ function ModelCards({
             onToggle={onToggle}
             onEdit={onEdit}
             onDelete={onDelete}
+            coverageFor={coverageFor}
+            displayOfProvider={displayOfProvider}
+            onPickProvider={onPickProvider}
+            onPreferPreference={onPreferPreference}
           />
         </li>
       ))}
@@ -1036,6 +1245,10 @@ function ModelCardBody({
   onEdit,
   onDelete,
   onHide,
+  coverageFor,
+  displayOfProvider,
+  onPickProvider,
+  onPreferPreference,
 }: {
   model: Model;
   isAdmin: boolean;
@@ -1047,6 +1260,10 @@ function ModelCardBody({
   onEdit: (model: Model) => void;
   onDelete: (model: Model) => void;
   onHide?: (ref: string) => void;
+  coverageFor: (id: string) => Model[];
+  displayOfProvider: (id: string) => string;
+  onPickProvider: (id: string) => void;
+  onPreferPreference: (model: Model, provider: string | null) => void;
 }) {
   return (
           <div className="flex items-start justify-between gap-3">
@@ -1063,6 +1280,18 @@ function ModelCardBody({
                 >
                   {m.id}
                 </h3>
+                <CoveragePeers
+                  model={m}
+                  peers={coverageFor(m.id)}
+                  displayOf={displayOfProvider}
+                  onPick={onPickProvider}
+                  onPrefer={(provider) => onPreferPreference(m, provider)}
+                />
+                {m.preferred_provider === m.provider ? (
+                  <Badge tone="accent" title={`preferred provider for ${m.id}`}>
+                    preferred
+                  </Badge>
+                ) : null}
                 {m.source === "custom" ? (
                   <Badge tone="accent" title="added by an operator, not synced from the provider">
                     custom
@@ -1206,6 +1435,11 @@ function CustomModelModal({
                   {p.display}
                 </option>
               ))}
+              {/* Editing a row whose provider lost its connection still needs a selected
+                  option; the value never changes while this select is disabled. */}
+              {form.provider !== "" && !(providers ?? []).some((p) => p.id === form.provider) ? (
+                <option value={form.provider}>{form.provider} (not connected)</option>
+              ) : null}
             </Select>
           </Field>
           <Field label="model id" hint="the only free-text model field">
@@ -1351,4 +1585,117 @@ function numeric(value: string): number | null {
   if (!trimmed) return null;
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
+}
+
+/**
+ * "2 providers" for a canonical model id, with the peers behind a popover. The row itself
+ * stays one provider: enabling, testing and pricing are per connection, so rows are never
+ * merged; this only says the same id is routable elsewhere and lets the operator jump there.
+ */
+function CoveragePeers({
+  model,
+  peers,
+  displayOf,
+  onPick,
+  onPrefer,
+}: {
+  model: Model;
+  peers: Model[];
+  displayOf: (provider: string) => string;
+  onPick: (provider: string) => void;
+  /** `null` clears the preference; the same id carries it on every provider row. */
+  onPrefer: (provider: string | null) => void;
+}) {
+  if (peers.length < 2) return null;
+  const preferred = model.preferred_provider ?? null;
+  const preferredMissing = preferred !== null && !peers.some((peer) => peer.provider === preferred);
+  const refs = peers.map((peer) => peer.ref).join("\n");
+  return (
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          aria-label={`${peers.length} providers serve ${model.id}`}
+          aria-haspopup="dialog"
+          title={refs}
+          className="inline-flex h-5 shrink-0 items-center rounded-full border border-line bg-surface-2 px-1.5 text-caption text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline-none! outline-0!"
+        >
+          {peers.length} providers
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side="bottom"
+          align="start"
+          sideOffset={4}
+          aria-label={`Providers serving ${model.id}`}
+          className="popover-panel z-50 w-80 rounded-[var(--radius-card)] border border-line bg-surface p-1.5 shadow-lg focus:outline-none"
+        >
+          <p className="px-1 pb-1 text-caption text-faint">
+            <span className="font-mono text-muted">{model.id}</span> is served by
+          </p>
+          <ul className="flex flex-col">
+            {peers.map((peer) => {
+              const isPreferred = preferred === peer.provider;
+              return (
+                <li key={peer.ref} className="flex items-center gap-1">
+                  <Popover.Close asChild>
+                    <button
+                      type="button"
+                      onClick={() => onPick(peer.provider)}
+                      className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-input)] px-1.5 py-1.5 text-left text-small hover:bg-surface-3 focus-visible:outline-none! outline-0!"
+                    >
+                      <ProviderIcon provider={peer.provider} size={14} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-fg">{displayOf(peer.provider)}</span>
+                        <span className="block truncate font-mono text-caption text-faint">
+                          {peer.ref}
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-caption text-faint tnum">
+                        {priceLabel(peer) ?? "no price"}
+                      </span>
+                      <Badge tone={peer.enabled ? "pos" : "neutral"}>
+                        {peer.enabled ? "on" : "off"}
+                      </Badge>
+                    </button>
+                  </Popover.Close>
+                  <IconButton
+                    label={
+                      isPreferred
+                        ? `Clear the preferred provider for ${model.id}`
+                        : `Use ${displayOf(peer.provider)} as the preferred provider for ${model.id}`
+                    }
+                    aria-pressed={isPreferred}
+                    onClick={() => onPrefer(isPreferred ? null : peer.provider)}
+                    className={isPreferred ? "text-[var(--color-accent-text)]" : undefined}
+                  >
+                    <Star size={14} weight={isPreferred ? "fill" : "regular"} aria-hidden />
+                  </IconButton>
+                </li>
+              );
+            })}
+          </ul>
+          {preferredMissing ? (
+            <p
+              role="status"
+              className="mt-1 flex items-center justify-between gap-2 rounded-[6px] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-2 py-1.5 text-caption leading-relaxed text-[var(--color-warn-ink)]"
+            >
+              <span className="min-w-0">
+                preferred provider <span className="font-mono">{preferred}</span> is not connected
+                right now
+              </span>
+              <button
+                type="button"
+                onClick={() => onPrefer(null)}
+                className="shrink-0 underline underline-offset-2"
+              >
+                clear
+              </button>
+            </p>
+          ) : null}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
 }

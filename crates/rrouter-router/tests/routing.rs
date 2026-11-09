@@ -113,6 +113,25 @@ fn plan_of(n: usize) -> Plan {
     }
 }
 
+/// One connection serving several models; priorities are equal so only the model
+/// scope can separate them.
+fn plan_models(connection: Uuid, models: &[&str]) -> Plan {
+    Plan {
+        model: "combo".into(),
+        candidates: models
+            .iter()
+            .map(|model| Candidate {
+                provider: "p".into(),
+                model: (*model).to_string(),
+                connection,
+                priority: 0,
+                dialect: rrouter_core::Dialect::OpenAiChat,
+            })
+            .collect(),
+        stream: false,
+    }
+}
+
 #[tokio::test]
 async fn alias_resolves_one_hop_without_looping() {
     let store = Store::open_in_memory().unwrap();
@@ -401,6 +420,91 @@ async fn combo_start_rotates_the_expanded_candidates() {
         .unwrap();
     assert_eq!(filtered.candidates.len(), 1);
     assert_eq!(filtered.candidates[0].connection, openai);
+}
+
+/// A bare model id with a stored preference puts that provider first even when it is
+/// lower priority. Explicit provider refs and a missing/disabled preferred provider keep
+/// the normal order.
+#[tokio::test]
+async fn model_preference_wins_for_bare_ids_and_is_ignored_explicitly() {
+    let store = Store::open_in_memory().unwrap();
+    let openai = conn(&store, "openai", "gpt-4.1", 0).await;
+    let github = conn(&store, "github", "gpt-4.1", 1).await;
+    let planner = Planner::new();
+    let request = |model: &'static str| PlanRequest {
+        model,
+        stream: false,
+        affinity: None,
+        strategy: Strategy::Priority,
+        policy: None,
+        allowed_models: None,
+        team_id: None,
+        canary: None,
+        canary_seed: 0,
+        combo_start: None,
+    };
+
+    let plain = planner
+        .plan(&Catalog::builtin(), &store, request("gpt-4.1"))
+        .await
+        .expect("plain");
+    assert_eq!(plain.candidates[0].connection, openai, "priority order");
+
+    store
+        .set_model_preference("gpt-4.1", "github")
+        .await
+        .expect("preference");
+    let preferred = planner
+        .plan(&Catalog::builtin(), &store, request("gpt-4.1"))
+        .await
+        .expect("preferred");
+    assert_eq!(
+        preferred.candidates[0].connection, github,
+        "operator preference outranks priority"
+    );
+    assert_eq!(
+        preferred
+            .candidates
+            .iter()
+            .map(|c| c.connection)
+            .collect::<Vec<_>>(),
+        vec![github, openai],
+        "the rest stays as fallback"
+    );
+
+    let explicit = planner
+        .plan(&Catalog::builtin(), &store, request("openai/gpt-4.1"))
+        .await
+        .expect("explicit");
+    assert_eq!(explicit.candidates.len(), 1);
+    assert_eq!(explicit.candidates[0].connection, openai);
+
+    // A preference for a disconnected provider is a no-op, not a broken route.
+    store
+        .set_connection_active(github, false)
+        .await
+        .expect("disable");
+    let fallback = planner
+        .plan(&Catalog::builtin(), &store, request("gpt-4.1"))
+        .await
+        .expect("fallback");
+    assert_eq!(fallback.candidates[0].connection, openai);
+    assert!(fallback.candidates.iter().all(|c| c.connection != github));
+
+    // A preference naming a provider that does not serve the id is also a no-op.
+    store
+        .set_connection_active(github, true)
+        .await
+        .expect("enable");
+    store
+        .set_model_preference("gpt-4.1", "nowhere")
+        .await
+        .expect("absent provider");
+    let absent = planner
+        .plan(&Catalog::builtin(), &store, request("gpt-4.1"))
+        .await
+        .expect("absent");
+    assert_eq!(absent.candidates[0].connection, openai);
 }
 
 #[tokio::test]
@@ -1476,8 +1580,14 @@ async fn rate_limited_account_is_not_retried_before_failing_over() {
         started.elapsed()
     );
     assert!(
-        !breaker.is_available(limited),
-        "the rate-limited account must be parked"
+        breaker
+            .check_model(limited, &plan.candidates[0].model)
+            .is_some(),
+        "the rate-limited model must be parked"
+    );
+    assert!(
+        breaker.is_available(limited),
+        "the connection itself must stay eligible for other models"
     );
 }
 
@@ -2027,4 +2137,190 @@ async fn a_failed_hedge_race_never_exceeds_the_send_budget() {
         2,
         "the race spent the whole two-send budget"
     );
+}
+
+/// A 429 is a model fact: the same connection's other models stay eligible.
+#[tokio::test]
+async fn model_rate_limit_does_not_block_a_sibling_model() {
+    let connection = Uuid::new_v4();
+    let plan = plan_models(connection, &["a", "b"]);
+    let breaker = Arc::new(Breaker::new());
+    let dispatcher = Dispatcher::with_shared_breaker(Arc::clone(&breaker));
+    let outcome = dispatcher
+        .run(&plan, |candidate| async move {
+            if candidate.model == "a" {
+                Err(upstream(429))
+            } else {
+                Ok(resp(&candidate.model))
+            }
+        })
+        .await
+        .expect("model b answers");
+    assert_eq!(outcome.candidate.model, "b");
+    assert!(
+        breaker.check_model(connection, "a").is_some(),
+        "the limited model cools down"
+    );
+    assert!(
+        breaker.check_model(connection, "b").is_none(),
+        "the sibling model is untouched"
+    );
+    assert!(
+        breaker.check(connection).is_none(),
+        "the connection-wide breaker stays closed"
+    );
+}
+
+/// The streaming path uses the same model-scoped settlement at open time.
+#[tokio::test]
+async fn streamed_model_rate_limit_does_not_block_a_sibling_model() {
+    let connection = Uuid::new_v4();
+    let plan = plan_models(connection, &["a", "b"]);
+    let breaker = Arc::new(Breaker::new());
+    let dispatcher = Dispatcher::with_shared_breaker(Arc::clone(&breaker));
+    let (candidate, stream) = dispatcher
+        .run_streaming(&plan, |candidate| async move {
+            if candidate.model == "a" {
+                Err(upstream(429))
+            } else {
+                Ok(byte_stream(futures_util::stream::once(async {
+                    Ok(Bytes::from_static(b"ok"))
+                })))
+            }
+        })
+        .await
+        .expect("model b streams");
+    assert_eq!(candidate.model, "b");
+    assert_eq!(collect_stream(stream).await.expect("body"), b"ok");
+    assert!(breaker.check_model(connection, "a").is_some());
+    assert!(breaker.check(connection).is_none());
+}
+
+/// Auth and server failures keep opening the connection-wide breaker.
+#[test]
+fn connection_wide_failures_still_block_every_model() {
+    for status in [401, 403, 500, 503] {
+        let breaker = Breaker::new();
+        let connection = Uuid::new_v4();
+        for _ in 0..3 {
+            breaker.record_failure_for(connection, "a", status, None);
+        }
+        assert!(
+            breaker.check(connection).is_some(),
+            "status {status} must open the connection breaker"
+        );
+        assert!(
+            breaker.check_model(connection, "a").is_none(),
+            "status {status} is not a model cooldown"
+        );
+    }
+}
+
+/// A 429 cooldown is bounded in time and a success for that model clears it early.
+#[test]
+fn model_cooldown_expires_and_success_clears_it() {
+    let breaker = Breaker::new();
+    let connection = Uuid::new_v4();
+    let now = Instant::now();
+    breaker.record_failure_for_at(connection, "a", 429, Some(Duration::from_secs(30)), now);
+    assert_eq!(
+        breaker
+            .check_model_at(connection, "a", now)
+            .map(|w| w.as_secs()),
+        Some(30)
+    );
+    assert!(
+        breaker
+            .check_model_at(connection, "a", now + Duration::from_secs(31))
+            .is_none(),
+        "the cooldown expires"
+    );
+
+    breaker.record_failure_for_at(connection, "b", 429, None, now);
+    assert!(breaker.check_model_at(connection, "b", now).is_some());
+    breaker.record_success_for(connection, "b");
+    assert!(breaker.check_model(connection, "b").is_none());
+}
+
+/// A hedged pair skips only the model that is cooling; the sibling is still eligible,
+/// and the cooldown never consumes a connection probe slot.
+#[tokio::test]
+async fn a_hedge_skips_a_cooling_model_on_the_same_connection() {
+    let connection = Uuid::new_v4();
+    let plan = plan_models(connection, &["a", "b"]);
+    let breaker = Arc::new(Breaker::new());
+    breaker.record_failure_for_at(
+        connection,
+        "a",
+        429,
+        Some(Duration::from_secs(30)),
+        Instant::now(),
+    );
+    let dispatcher = Dispatcher::with_shared_breaker(Arc::clone(&breaker))
+        .with_max_attempts(4)
+        .with_hedge(Some(Duration::from_millis(20)))
+        .with_retry_policy(RetryPolicy {
+            attempts: 0,
+            ..RetryPolicy::default()
+        });
+    let sent: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let outcome = dispatcher
+        .run(&plan, |candidate| {
+            let sent = Arc::clone(&sent);
+            async move {
+                sent.lock().unwrap().push(candidate.model.clone());
+                Ok(resp(&candidate.model))
+            }
+        })
+        .await
+        .expect("the sibling model answers");
+    assert_eq!(outcome.candidate.model, "b");
+    assert_eq!(*sent.lock().unwrap(), vec!["b".to_string()]);
+    assert!(
+        breaker.check_model(connection, "a").is_some(),
+        "model a stays cooling down"
+    );
+    assert!(
+        breaker.check(connection).is_none(),
+        "a model cooldown must not open the connection breaker"
+    );
+}
+
+/// Every candidate cooling down is a 429 with a stable code and Retry-After data,
+/// while a genuinely empty plan stays 404.
+#[tokio::test]
+async fn all_candidates_cooling_down_is_a_429_not_a_404() {
+    let connection = Uuid::new_v4();
+    let plan = plan_models(connection, &["a", "b"]);
+    let breaker = Arc::new(Breaker::new());
+    let now = Instant::now();
+    for model in ["a", "b"] {
+        breaker.record_failure_for_at(connection, model, 429, None, now);
+    }
+    let dispatcher = Dispatcher::with_shared_breaker(Arc::clone(&breaker));
+    let error = dispatcher
+        .run(&plan, |_| async { Ok(resp("never sent")) })
+        .await
+        .expect_err("nothing is eligible");
+    assert_eq!(error.status(), 429, "{error:?}");
+    assert_eq!(error.code(), Some("all_candidates_cooling_down"));
+    assert!(
+        error.to_string().contains("combo"),
+        "the message names the model: {error}"
+    );
+    assert!(
+        error.retry_after_secs().is_some_and(|secs| secs >= 29),
+        "{error:?}"
+    );
+
+    let empty = Plan {
+        model: "missing".into(),
+        candidates: Vec::new(),
+        stream: false,
+    };
+    let error = dispatcher
+        .run(&empty, |_| async { Ok(resp("never sent")) })
+        .await
+        .expect_err("empty plan");
+    assert_eq!(error.status(), 404, "{error:?}");
 }

@@ -2,6 +2,7 @@
 //! Same harness style as `tests/proxy.rs`: the real router over `oneshot`, plus a real
 //! local mock upstream where a provider call is involved.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -47,6 +48,37 @@ async fn mock_chat(State(_mock): State<Mock>) -> Response {
         "usage": {"prompt_tokens": 3, "completion_tokens": 1},
     }))
     .into_response()
+}
+
+#[derive(Clone)]
+struct SlowMock {
+    delay: Duration,
+    hits: Arc<AtomicUsize>,
+}
+
+async fn slow_models(State(mock): State<SlowMock>) -> Response {
+    mock.hits.fetch_add(1, Ordering::SeqCst);
+    tokio::time::sleep(mock.delay).await;
+    mock_models(State(Mock)).await
+}
+
+/// A catalogue that answers after `delay`, for the bounded-wait test.
+async fn start_slow_mock(delay: Duration) -> (String, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = Router::new()
+        .route("/v1/models", get(slow_models))
+        .with_state(SlowMock {
+            delay,
+            hits: Arc::clone(&hits),
+        });
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    (format!("http://{addr}"), hits)
 }
 
 /// Serve both the model list and a chat completion on one origin.
@@ -282,6 +314,100 @@ async fn catalog_rows_have_nine_capabilities_and_are_sorted_newest_first() {
     assert_eq!(codex["max_output"], 128_000);
 }
 
+/// A preference is the same on every provider row of an id, and drives `/v1/models`
+/// `owned_by` only when the named provider actually serves the id.
+#[tokio::test]
+async fn model_preferences_drive_api_rows_and_v1_owned_by() {
+    let h = harness();
+    for provider in ["openai", "github"] {
+        h.connect(provider, "http://127.0.0.1:9").await;
+        let (status, body) = h
+            .post(
+                "/api/models/custom",
+                json!({"provider": provider, "id": "shared-model"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    for provider in ["openai", "github"] {
+        let (_, body) = h.get("/api/models").await;
+        let row = body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .find(|row| row["id"] == "shared-model" && row["provider"] == provider)
+            .unwrap_or_else(|| panic!("shared row {provider} missing: {body}"));
+        assert_eq!(row["preferred_provider"], Value::Null);
+    }
+    let (_, body) = h.get("/api/models/preferences").await;
+    assert_eq!(body["data"].as_array().expect("data").len(), 0);
+
+    let (status, body) = h
+        .send(
+            "PUT",
+            "/api/models/preference",
+            json!({"model": "shared-model", "provider": "github"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["preferences"]["shared-model"], "github");
+    assert_eq!(body["data"][0]["provider"], "github");
+
+    for provider in ["openai", "github"] {
+        let (_, body) = h.get("/api/models").await;
+        let row = body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .find(|row| row["id"] == "shared-model" && row["provider"] == provider)
+            .expect("shared row");
+        assert_eq!(
+            row["preferred_provider"], "github",
+            "both rows carry the same preference: {row}"
+        );
+    }
+    let (_, models) = h.get("/v1/models").await;
+    let shared: Vec<&Value> = models["data"]
+        .as_array()
+        .expect("v1 data")
+        .iter()
+        .filter(|row| row["id"] == "shared-model")
+        .collect();
+    assert_eq!(shared.len(), 1, "one entry per id");
+    assert_eq!(shared[0]["owned_by"], "github");
+
+    let (status, body) = h
+        .send(
+            "PUT",
+            "/api/models/preference",
+            json!({"model": "shared-model", "provider": null}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["preferences"].get("shared-model").is_none(), "{body}");
+    let (_, models) = h.get("/v1/models").await;
+    let shared = models["data"]
+        .as_array()
+        .expect("v1 data")
+        .iter()
+        .find(|row| row["id"] == "shared-model")
+        .expect("shared entry");
+    assert_eq!(
+        shared["owned_by"], "github",
+        "clearing restores the registry's first provider (sorted order)"
+    );
+
+    let (status, body) = h
+        .send(
+            "PUT",
+            "/api/models/preference",
+            json!({"model": "shared-model", "provider": 5}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
 #[tokio::test]
 async fn custom_row_wins_over_a_catalog_id_of_the_same_provider() {
     let h = harness();
@@ -432,6 +558,88 @@ async fn disabled_models_flips_enabled_to_false() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(h.item("codex/shared-id").await["enabled"], true);
+}
+
+/// `/v1/models` must not advertise a disabled model, and re-enabling restores it.
+/// A shared id stays listed while one of its providers is connected.
+#[tokio::test]
+async fn v1_models_omits_disabled_models_and_keeps_preferred_ownership() {
+    let h = harness();
+    for provider in ["openai", "github"] {
+        h.connect(provider, "http://127.0.0.1:9").await;
+        let (status, body) = h
+            .post(
+                "/api/models/custom",
+                json!({"provider": provider, "id": "shared-id"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    h.send(
+        "PUT",
+        "/api/models/preference",
+        json!({"model": "shared-id", "provider": "github"}),
+    )
+    .await;
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shared = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|row| row["id"] == "shared-id")
+        .expect("enabled shared id");
+    assert_eq!(shared["owned_by"], "github", "preference still wins");
+
+    let (status, body) = h.send("PUT", "/api/disabled/shared-id", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = h.get("/v1/models").await;
+    assert!(
+        !body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .any(|row| row["id"] == "shared-id"),
+        "a disabled model is not advertised: {body}"
+    );
+
+    let (status, _) = h
+        .send("PUT", "/api/disabled/shared-id/enable", Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = h.get("/v1/models").await;
+    let shared = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|row| row["id"] == "shared-id")
+        .expect("re-enabled id returns");
+    assert_eq!(shared["owned_by"], "github");
+
+    // One provider disconnected: the id still lists through the other, and ownership
+    // falls back because the preferred provider no longer serves it.
+    h.state
+        .store
+        .set_connection_active(
+            h.state
+                .store
+                .list_connections(Some("github"))
+                .await
+                .expect("connections")[0]
+                .id,
+            false,
+        )
+        .await
+        .expect("disable connection");
+    let (_, body) = h.get("/v1/models").await;
+    let shared = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|row| row["id"] == "shared-id")
+        .expect("one enabled provider still lists the id");
+    assert_eq!(shared["owned_by"], "openai");
 }
 
 /// The registry answers one question: what can this gateway call right now.
@@ -1000,4 +1208,109 @@ async fn providers_without_the_flag_stay_unchanged() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+/// Creating a connection waits for the catalogue, so a dashboard invalidation fired
+/// immediately after the 201 sees the provider's rows.
+#[tokio::test]
+async fn connection_create_returns_after_the_model_fetch() {
+    let h = harness();
+    let mock = start_mock().await;
+    let (status, created) = h
+        .post(
+            "/api/connections",
+            json!({
+                "provider": "openai",
+                "auth_type": "api_key",
+                "name": "catalogue",
+                "credentials": {
+                    "api_key": "test-key",
+                    "base_url_override": mock,
+                },
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let rows = h.state.store.list_models().await.expect("models");
+    assert!(
+        rows.iter()
+            .any(|row| row.provider == "openai" && row.model == "alpha"),
+        "the rows exist before the response: {rows:?}"
+    );
+}
+
+/// Credential edits refresh the catalogue; name-only edits do not need a provider call.
+#[tokio::test]
+async fn connection_update_refreshes_models_on_credential_change() {
+    let h = harness();
+    let mock = start_mock().await;
+    let id = h.connect("openai", &mock).await;
+    h.state
+        .store
+        .clear_models_by_source("upstream")
+        .await
+        .expect("clear");
+
+    let (status, updated) = h
+        .send(
+            "PATCH",
+            &format!("/api/connections/{id}"),
+            json!({"name": "renamed"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert!(
+        h.state
+            .store
+            .list_models()
+            .await
+            .expect("models")
+            .is_empty(),
+        "a name-only edit must not fetch"
+    );
+
+    let (status, updated) = h
+        .send(
+            "PATCH",
+            &format!("/api/connections/{id}"),
+            json!({"credentials": {"api_key": "rotated"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let rows = h.state.store.list_models().await.expect("models");
+    assert!(
+        rows.iter()
+            .any(|row| row.provider == "openai" && row.model == "alpha"),
+        "a credential edit refreshes before responding: {rows:?}"
+    );
+}
+
+/// The wait is a bound, not a cancellation: a timed-out fetch keeps running and writes
+/// its rows afterwards.
+#[tokio::test]
+async fn a_timed_out_initial_fetch_is_detached_not_aborted() {
+    let h = harness();
+    let (mock, hits) = start_slow_mock(Duration::from_millis(400)).await;
+    let id = uuid::Uuid::parse_str(&h.connect("openai", &mock).await).expect("id");
+
+    let started = Instant::now();
+    rrouter_gateway::routes::models::wait_initial_fetch_within(
+        Arc::clone(&h.state),
+        id,
+        Duration::from_millis(50),
+    )
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the wait must return at its bound, not the provider's pace"
+    );
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(hits.load(Ordering::SeqCst) >= 1, "the detached task ran");
+    let rows = h.state.store.list_models().await.expect("models");
+    assert!(
+        rows.iter()
+            .any(|row| row.provider == "openai" && row.model == "alpha"),
+        "the detached task wrote its rows: {rows:?}"
+    );
 }

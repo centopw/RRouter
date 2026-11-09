@@ -425,6 +425,8 @@ export type EvalSuite = {
   id: string;
   name: string;
   description: string | null;
+  /** Prepended to every case as a system message; null/empty = no system message. */
+  system_prompt: string | null;
   cases: number;
   created_at: number;
   updated_at: number;
@@ -456,6 +458,8 @@ export type EvalRun = {
   id: string;
   suite_id: string;
   model: string;
+  /** Optional decision model that judged the output semantically; null = literal check. */
+  judge_model: string | null;
   status: EvalRunStatus;
   created_at: number;
   completed_at: number | null;
@@ -699,6 +703,11 @@ export type Model = {
   available: boolean;
   /** A family its provider retired (or models.dev marks deprecated): listed last. */
   deprecated: boolean;
+  /**
+   * The provider the operator chose for this model id. It is the same on every provider
+   * row of that id; `null` (or absent on an older build) means "no preference".
+   */
+  preferred_provider?: string | null;
 };
 
 export type ModelProvider = {
