@@ -417,6 +417,8 @@ export type KeyResult = {
 
 /** Exactly the fields `PATCH /api/keys/{id}` accepts; null clears a nullable field. */
 export type UpdateKey = Partial<{
+  /** Display name; empty string and null both mean unnamed. */
+  name: string | null;
   is_active: boolean;
   /** `admin` keys manage the gateway instead of calling `/v1`. */
   scope: KeyScope;

@@ -482,6 +482,88 @@ fn api_key_lifecycle_and_no_plaintext_in_db_file() {
 // ----- 4b. virtual-key governance ---------------------------------------------------
 
 #[test]
+fn api_key_name_can_be_renamed_trimmed_and_cleared() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let (_, key) = s.create_api_key(Some("laptop")).await.expect("key");
+        let renamed = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    name: Some(Some("  production key  ".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("rename")
+            .expect("exists");
+        assert_eq!(renamed.name.as_deref(), Some("production key"));
+        assert_eq!(renamed.rpm, key.rpm, "other fields are untouched");
+
+        let cleared = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    name: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("clear")
+            .expect("exists");
+        assert_eq!(cleared.name, None);
+
+        // Whitespace only is the same instruction as `null`: nothing to display.
+        let named = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    name: Some(Some("edge".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("rename")
+            .expect("exists");
+        assert_eq!(named.name.as_deref(), Some("edge"));
+        let blanked = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    name: Some(Some("   ".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("blank")
+            .expect("exists");
+        assert_eq!(blanked.name, None, "whitespace only clears the name");
+
+        let error = s
+            .update_api_key(
+                key.id,
+                &ApiKeyPatch {
+                    name: Some(Some("x".repeat(rrouter_store::MAX_API_KEY_NAME + 1))),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("overlong name");
+        assert_eq!(error.status(), 400, "{error}");
+        assert_eq!(
+            s.get_api_key(key.id)
+                .await
+                .expect("get")
+                .expect("exists")
+                .name,
+            None,
+            "a refused patch writes nothing"
+        );
+    });
+}
+
+#[test]
 fn api_key_limits_default_then_patch_merges_and_clears() {
     let store = Store::open_in_memory().expect("mem");
     let s = &store;

@@ -15,10 +15,12 @@ import {
   Select,
   PageHeader,
   ConfirmDialog,
+  cx,
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import { ModelPicker } from "../components/model-picker";
-import { Checkbox } from "../components/atoms";
+import { Checkbox, IconButton } from "../components/atoms";
+import { PencilSimple, Trash } from "@phosphor-icons/react";
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
 import {
   qk,
@@ -70,94 +72,46 @@ export default function Keys() {
 
   const columns: Array<Column<KeyResult>> = [
     {
-      key: "name",
-      title: "Name",
-      width: "18%",
+      key: "key",
+      title: "Key",
+      width: "42%",
       className: "min-w-0",
-      render: (r) => (
-        <span
-          className="flex min-w-0 items-center gap-1.5"
-          // Hidden columns (at narrow widths) stay available here as a row summary.
-          title={rowSummary(r, teamName(r.team_id))}
-        >
-          <span className="min-w-0 truncate font-medium">
-            {r.name ?? <span className="text-faint">unnamed</span>}
-          </span>
-          {r.scope === "admin" ? (
-            <Badge
-              tone="accent"
-              title="manages the gateway; cannot call /v1 or spend tokens"
-            >
-              admin
-            </Badge>
-          ) : null}
-        </span>
-      ),
+      render: (r) => <KeyCell row={r} team={teamName(r.team_id)} />,
     },
     {
-      key: "team",
-      title: "Team",
-      width: "8rem",
-      className: "hidden xl:table-cell",
-      render: (r) => {
-        const name = teamName(r.team_id);
-        return name === null ? (
-          <span className="text-faint" title="not assigned to a team">
-            —
-          </span>
-        ) : (
-          <Badge tone="neutral" title="keys assigned to this team">
-            {name}
-          </Badge>
-        );
-      },
+      key: "limits",
+      title: "Limits",
+      className: "min-w-0",
+      render: (r) => <Limits row={r} />,
     },
-    { key: "status", title: "Status", width: "7rem", render: (r) => <Status row={r} /> },
-    { key: "limits", title: "Limits", width: "24%", className: "min-w-0", render: (r) => <Limits row={r} /> },
     {
       key: "spend",
       title: "Spend",
-      width: "8rem",
-      className: "hidden xl:table-cell",
+      width: "9.5rem",
+      className: "hidden md:table-cell",
       render: (r) => <Spend row={r} />,
     },
     {
-      key: "models",
-      title: "Models",
-      width: "8rem",
-      className: "hidden 2xl:table-cell",
-      render: (r) => <Models row={r} />,
-    },
-    {
-      key: "created",
-      title: "Created",
-      width: "8.5rem",
-      className: "hidden 2xl:table-cell",
-      render: (r) => <span className="whitespace-nowrap text-muted">{when(r.created_at)}</span>,
-    },
-    {
       key: "actions",
-      title: "",
+      title: "Actions",
       align: "right",
-      width: "6.5rem",
+      width: "5rem",
       render: (r) => (
-        <div className="flex flex-col items-stretch gap-1 sm:items-end">
-          <Button
+        <span className="flex justify-end gap-0.5">
+          <IconButton
+            label={`Edit key settings for ${r.name ?? r.id}`}
             onClick={() => setEditing(r)}
-            title={`edit limits for ${r.name ?? r.id}`}
-            ariaLabel={`edit limits for ${r.name ?? r.id}`}
           >
-            edit
-          </Button>
-          <Button
-            variant="danger"
+            <PencilSimple size={15} aria-hidden />
+          </IconButton>
+          <IconButton
+            label={`Delete key ${r.name ?? r.id}`}
             onClick={() => setRevoking(r)}
-            title={`delete key ${r.name ?? r.id}`}
-            ariaLabel={`delete key ${r.name ?? r.id}`}
+            className="hover:bg-[var(--color-neg-tint)] hover:text-[var(--color-neg-ink)]"
           >
-            delete
-          </Button>
-        </div>
+            <Trash size={15} aria-hidden />
+          </IconButton>
+        </span>
       ),
     },
   ];
@@ -207,6 +161,7 @@ export default function Keys() {
           loading={keys.isLoading}
           empty="No keys yet. Create one above to require authentication on /v1."
           tableLayout="fixed"
+          rowHeaderKey="key"
           stickyRight="actions"
           scrollLabel="API keys"
         />
@@ -239,7 +194,7 @@ export default function Keys() {
       ) : null}
 
       {editing ? (
-        <KeyLimitsModal key={editing.id} row={editing} onClose={closeEdit} />
+        <KeySettingsModal key={editing.id} row={editing} onClose={closeEdit} />
       ) : null}
     </>
   );
@@ -255,10 +210,7 @@ function rowSummary(row: KeyResult, team: string | null): string {
   ]
     .filter((part): part is string => part !== null)
     .join(" · ");
-  const models =
-    row.allowed_models === null || row.allowed_models.length === 0
-      ? "all models"
-      : `${row.allowed_models.length} models`;
+  const models = modelScopeLabel(row);
   return [
     `team ${team ?? "none"}`,
     `spend ${usd(row.spent_micros)} · ${compact(row.spent_tokens)} tokens used`,
@@ -289,6 +241,63 @@ function Status({ row }: { row: KeyResult }) {
       {label}
     </Badge>
   );
+}
+
+/** One key's identity: name, live status, tenancy/scope badges, and where it sits. */
+function KeyCell({ row, team }: { row: KeyResult; team: string | null }) {
+  const scope = modelScopeLabel(row);
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        <span
+          className="min-w-0 basis-full truncate text-body font-semibold text-fg min-[520px]:basis-auto"
+          title={rowSummary(row, team)}
+        >
+          {row.name ?? <span className="font-normal text-faint">unnamed</span>}
+        </span>
+        <Status row={row} />
+      </div>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-caption text-faint">
+        {row.scope === "admin" ? (
+          <Badge tone="accent" title="manages the gateway; cannot call /v1 or spend tokens">
+            admin
+          </Badge>
+        ) : null}
+        {team === null ? (
+          <Badge tone="neutral" title="not assigned to a team; serves instance-wide keys">
+            shared
+          </Badge>
+        ) : (
+          <Badge tone="neutral" title="keys assigned to this team">
+            {team}
+          </Badge>
+        )}
+        <span
+          className="min-w-0 flex-1 basis-40 break-words"
+          title={`created ${when(row.created_at)} · ${scope}`}
+        >
+          created {createdDay(row.created_at)} · {scope}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function createdDay(ts: number): string {
+  return new Date(ts * 1000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function modelScopeLabel(row: KeyResult): string {
+  const allowed = row.allowed_models;
+  const mapped = row.models?.length ?? 0;
+  const scope =
+    allowed === null || allowed.length === 0
+      ? "all models"
+      : `${allowed.length} ${allowed.length === 1 ? "model" : "models"}`;
+  return mapped > 0 ? `${scope} · ${mapped} mapped` : scope;
 }
 
 function Limits({ row }: { row: KeyResult }) {
@@ -332,7 +341,7 @@ function Limits({ row }: { row: KeyResult }) {
         </span>
       ) : null}
       {row.guardrails ? (
-        <span className="whitespace-nowrap">
+        <span>
           <span className="text-faint"> · </span>
           <Guarded guardrails={row.guardrails} />
         </span>
@@ -416,27 +425,6 @@ function Spend({ row }: { row: KeyResult }) {
       </span>
       {reached ? <span className="mt-1 block text-caption text-neg">budget reached</span> : null}
     </div>
-  );
-}
-
-function Models({ row }: { row: KeyResult }) {
-  const list = row.allowed_models;
-  const mapped = row.models ?? [];
-  const many = list !== null && list.length > 0;
-  const scope = many
-    ? `${list.length} ${list.length === 1 ? "model" : "models"}`
-    : "All models";
-  const title = [
-    ...(many ? list : ["any model"]),
-    ...mapped.map((m) => `${m.from} → ${m.to}`),
-  ].join("\n");
-  return (
-    <span className="block min-w-0 truncate text-muted" title={title}>
-      {scope}
-      {mapped.length > 0 ? (
-        <span className="text-faint"> · {mapped.length} mapped</span>
-      ) : null}
-    </span>
   );
 }
 
@@ -708,7 +696,10 @@ function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated
   );
 }
 
-function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void }) {
+const MAX_KEY_NAME = 100;
+
+function KeySettingsModal({ row, onClose }: { row: KeyResult; onClose: () => void }) {
+  const [name, setName] = useState(row.name ?? "");
   const [active, setActive] = useState(row.is_active);
   const [scope, setScope] = useState<KeyScope>(row.scope);
   const [team, setTeam] = useState(row.team_id ?? "");
@@ -738,6 +729,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
   const [problem, setProblem] = useState<string | null>(null);
   const [failure, setFailure] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
+  const nameInvalid = [...name.trim()].length > MAX_KEY_NAME;
 
   // Only refs the registry lists are offered as targets; a null set means it has not loaded.
   const catalog = useModels();
@@ -803,6 +795,8 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
         : `${pairs.length} rewrite${pairs.length === 1 ? "" : "s"}`;
 
   const submit = () => {
+    const trimmedName = name.trim();
+    if ([...trimmedName].length > MAX_KEY_NAME) return;
     const parsed = parseUsd(budgetUsd);
     if ("problem" in parsed) {
       setBudgetProblem(parsed.problem);
@@ -837,6 +831,7 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
     setFailure(null);
     setBusy(true);
     const patch: UpdateKey = {
+      name: trimmedName === "" ? null : trimmedName,
       is_active: active,
       scope,
       rpm: toCount(rpm),
@@ -867,20 +862,43 @@ function KeyLimitsModal({ row, onClose }: { row: KeyResult; onClose: () => void 
 
   return (
     <Modal
-      title="Key limits"
+      title="Key settings"
       width="lg"
       open
       onClose={onClose}
       footer={
         <>
           <Button onClick={onClose}>cancel</Button>
-          <Button variant="primary" disabled={busy} onClick={submit}>
+          <Button variant="primary" disabled={busy || nameInvalid} onClick={submit}>
             {busy ? "saving…" : "save"}
           </Button>
         </>
       }
     >
       <div className="flex flex-col gap-4">
+        <div className="flex min-w-0 flex-col gap-1">
+          <Field label="name" hint="how this key appears in logs and budgets">
+            <Input
+              value={name}
+              onChange={(value) => {
+                setName(value);
+                setFailure(null);
+              }}
+              placeholder="empty = unnamed"
+              ariaLabel="key name"
+              disabled={busy}
+            />
+          </Field>
+          <span
+            role={nameInvalid ? "alert" : undefined}
+            className={cx("text-caption", nameInvalid ? "text-neg" : "text-faint")}
+          >
+            {nameInvalid
+              ? `a key name is limited to ${MAX_KEY_NAME} characters`
+              : `${[...name.trim()].length}/${MAX_KEY_NAME} characters · empty means unnamed`}
+          </span>
+        </div>
+
         <div className="flex items-center gap-2 text-body text-fg">
           <Checkbox
             rootRef={first}

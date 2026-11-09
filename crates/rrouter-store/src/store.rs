@@ -23,6 +23,8 @@ use rrouter_auth::{CredentialStore, Credentials};
 /// Prefix of every gateway API key. The remainder is 32 hex chars of CSPRNG output.
 pub const API_KEY_PREFIX: &str = "sk-rr-";
 const API_KEY_SECRET_HEX_LEN: usize = 32;
+/// Longest human-readable API-key name.
+pub const MAX_API_KEY_NAME: usize = 100;
 /// Longest smart-router model reference.
 pub const MAX_COMBO_ROUTER_MODEL: usize = 200;
 /// Longest bare model id in a provider preference.
@@ -274,6 +276,8 @@ impl Guardrails {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApiKeyPatch {
     pub is_active: Option<bool>,
+    /// `Some(None)` clears the display name; a string is trimmed before storage.
+    pub name: Option<Option<String>>,
     /// `inference` (spend) or `admin` (administer). Not nullable: a key is always one.
     pub scope: Option<KeyScope>,
     pub rpm: Option<u32>,
@@ -297,6 +301,13 @@ impl ApiKeyPatch {
     pub fn apply(&self, key: &mut ApiKey) {
         if let Some(v) = self.is_active {
             key.is_active = v;
+        }
+        if let Some(name) = &self.name {
+            key.name = name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string);
         }
         if let Some(v) = self.scope {
             key.scope = v;
@@ -1764,6 +1775,13 @@ impl Store {
         if let Some(Some(policy)) = &patch.guardrails {
             policy.validate()?;
         }
+        if let Some(Some(name)) = &patch.name {
+            if name.trim().chars().count() > MAX_API_KEY_NAME {
+                return Err(Error::BadRequest(format!(
+                    "a key name is limited to {MAX_API_KEY_NAME} characters"
+                )));
+            }
+        }
         patch.apply(&mut key);
         let allowed = match &key.allowed_models {
             Some(models) => Some(serde_json::to_string(models)?),
@@ -1776,7 +1794,7 @@ impl Store {
         conn.execute(
             "UPDATE api_keys SET is_active = ?2, rpm = ?3, tpm = ?4, budget_tokens = ?5, \
              allowed_models = ?6, expires_at = ?7, budget_micros = ?8, budget_window = ?9, \
-             guardrails = ?10, scope = ?11 WHERE id = ?1",
+             guardrails = ?10, scope = ?11, name = ?12 WHERE id = ?1",
             params![
                 id.to_string(),
                 key.is_active as i64,
@@ -1789,6 +1807,7 @@ impl Store {
                 key.budget_window.as_str(),
                 guardrails,
                 key.scope.as_str(),
+                key.name,
             ],
         )
         .map_err(migrations::db_err)?;

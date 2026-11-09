@@ -862,6 +862,92 @@ async fn key_create_update_and_delete_are_audited() {
     );
 }
 
+/// The parts of a rename the store's own test and `tests/proxy.rs` do not cover: a blank
+/// name clears, an unrelated patch leaves the name alone, the cap counts characters, and
+/// the trail records the field without ever holding the secret.
+#[tokio::test]
+async fn key_name_patch_clears_blanks_and_keeps_the_trail_clean() {
+    let h = harness();
+    let (owner, _) = h.setup().await;
+    let headers = auth_headers(&owner);
+
+    let (status, _, created) = h
+        .post("/api/keys", json!({"name": "laptop"}), &csrf(&owner))
+        .await;
+    assert_eq!(status, StatusCode::OK, "create: {created}");
+    let id = created["id"].as_str().expect("id").to_string();
+    let plaintext = created["key"].as_str().expect("plaintext").to_string();
+    let uri = format!("/api/keys/{id}");
+
+    // Whitespace alone is a clear, like `null`.
+    let (status, _, blanked) = h
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(json!({"name": "   "})),
+            &csrf(&owner),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "blank: {blanked}");
+    assert_eq!(blanked["name"], Value::Null);
+
+    // A patch that does not mention the name leaves it alone.
+    let (_, _, named) = h
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(json!({"name": "edge gateway"})),
+            &csrf(&owner),
+        )
+        .await;
+    assert_eq!(named["name"], "edge gateway");
+    let (status, _, patched) = h
+        .call(Method::PATCH, &uri, Some(json!({"rpm": 45})), &csrf(&owner))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(
+        patched["name"], "edge gateway",
+        "an unrelated patch kept it"
+    );
+    assert_eq!(patched["rpm"], 45);
+
+    // The cap counts characters: 100 multibyte characters fit, 200 bytes notwithstanding.
+    let fits = "é".repeat(rrouter_store::MAX_API_KEY_NAME);
+    let (status, _, stored) = h
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(json!({ "name": fits })),
+            &csrf(&owner),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "100 characters: {stored}");
+    assert_eq!(stored["name"], fits);
+
+    // Every rename is audited by field name, never by secret.
+    let (status, _, audit) = h
+        .call(Method::GET, "/api/audit?limit=50", None, &headers)
+        .await;
+    assert_eq!(status, StatusCode::OK, "audit: {audit}");
+    let rows = audit["data"].as_array().expect("rows");
+    assert!(
+        rows.iter().any(|row| {
+            row["kind"] == "key_updated"
+                && row["detail"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .split('·')
+                    .nth(1)
+                    .is_some_and(|fields| fields.split(',').any(|field| field.trim() == "name"))
+        }),
+        "a rename names the field: {audit}"
+    );
+    assert!(
+        !audit.to_string().contains(&plaintext),
+        "the plaintext key must never be audited"
+    );
+}
+
 /// A successful and a failed password sign-in both land in the trail, under the email
 /// that was attempted, with no credential material.
 #[tokio::test]

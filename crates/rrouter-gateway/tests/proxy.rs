@@ -1706,6 +1706,42 @@ async fn streaming_records_time_to_first_output() {
 
 /// A disabled key is a governance decision, not a missing credential: `403` with a
 /// stable code, and it holds even when keys are optional for everyone else.
+/// PATCH accepts a display name: trimmed, clearable with null, and bounded.
+#[tokio::test]
+async fn key_name_patch_round_trips_and_validates() {
+    let h = harness(false);
+    let (_, id) = h.create_key().await;
+
+    let row = h
+        .patch_key(&id, json!({"name": "  production key  "}))
+        .await;
+    assert_eq!(row["name"], "production key");
+    let (status, body) = h.get("/api/keys").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"][0]["name"], "production key");
+
+    let row = h.patch_key(&id, json!({"name": null})).await;
+    assert_eq!(row["name"], Value::Null);
+
+    for invalid in [
+        json!({"name": "x".repeat(rrouter_store::MAX_API_KEY_NAME + 1)}),
+        json!({"name": 42}),
+        json!({"name": false}),
+    ] {
+        let (status, body) = h
+            .call(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/keys/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(invalid.to_string()))
+                    .expect("request"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
 #[tokio::test]
 async fn inactive_key_is_rejected_with_403_even_when_keys_are_optional() {
     let mock = Mock::start(vec![openai_reply("never")]).await;

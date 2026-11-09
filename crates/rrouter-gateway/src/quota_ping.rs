@@ -230,10 +230,9 @@ async fn send_ping(
             let spec = rrouter_auth::get("codex").ok_or("unknown codex provider")?;
             let mut headers =
                 rrouter_auth::build_headers(spec, creds).map_err(|e| e.to_string())?;
-            if let Some(account) = crate::provider_usage::codex_account_id(
-                creds.id_token.as_deref(),
-                &creds.extra,
-            ) {
+            if let Some(account) =
+                crate::provider_usage::codex_account_id(creds.id_token.as_deref(), &creds.extra)
+            {
                 headers.push(("ChatGPT-Account-Id".into(), account));
             }
             headers.push(("content-type".into(), "application/json".into()));

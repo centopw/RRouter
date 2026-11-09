@@ -13,6 +13,12 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - `POST /api/route/explain`: the ordered plan a request would execute — providers,
   connections, priorities, dialects and cached subscription headroom — without dispatching.
 
+## 0.5.1 — 2026-11-09
+
+### Changed
+- API Keys is a compact four-column list (Key, Limits, Spend, Actions): identity and status are together, limits wrap, spend is secondary, and edit/delete are horizontal sticky actions instead of a tall clipped column.
+- Key settings can rename a key. `PATCH /api/keys/{id}` accepts `name` (trimmed, null/blank clears, 100 characters), and the edit modal exposes it alongside limits and guardrails.
+
 ## 0.5.0 — 2026-11-09
 
 ### Added

@@ -20,7 +20,9 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use rrouter_core::Error;
-use rrouter_store::{window_start, ApiKey, ApiKeyPatch, BudgetWindow, KeyModel, KeyScope};
+use rrouter_store::{
+    window_start, ApiKey, ApiKeyPatch, BudgetWindow, KeyModel, KeyScope, MAX_API_KEY_NAME,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -215,10 +217,11 @@ pub async fn create(
     }
 }
 
-/// `PATCH /api/keys/{id}` — any subset of `is_active`, `scope` (`inference` or `admin`),
-/// `rpm`, `tpm`, `budget_tokens`, `budget_micros`, `budget_window` (`total`, `daily`,
-/// `weekly`, `monthly`), `allowed_models` (null clears), `expires_at` (null clears),
-/// `guardrails` (null clears; `{}` is the same as no policy). Returns the merged row.
+/// `PATCH /api/keys/{id}` — any subset of `is_active`, `name` (trimmed; null or blank
+/// clears; 100 characters at most), `scope` (`inference` or `admin`), `rpm`, `tpm`,
+/// `budget_tokens`, `budget_micros`, `budget_window` (`total`, `daily`, `weekly`,
+/// `monthly`), `allowed_models` (null clears), `expires_at` (null clears), `guardrails`
+/// (null clears; `{}` is the same as no policy). Returns the merged row.
 pub async fn update(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -337,6 +340,7 @@ fn describe_patch(patch: &ApiKeyPatch, scope: KeyScope, window: BudgetWindow) ->
     let mut fields: Vec<&str> = Vec::new();
     for (present, name) in [
         (patch.is_active.is_some(), "is_active"),
+        (patch.name.is_some(), "name"),
         (patch.scope.is_some(), "scope"),
         (patch.rpm.is_some(), "rpm"),
         (patch.tpm.is_some(), "tpm"),
@@ -482,6 +486,8 @@ fn patch_from(value: &Value) -> Result<ApiKeyPatch, Error> {
                         .ok_or_else(|| Error::BadRequest("is_active must be a boolean".into()))?,
                 );
             }
+            "name" => patch.name = Some(name_field(raw)?),
+
             "rpm" => patch.rpm = Some(u32_field(raw, "rpm")?),
             "scope" => {
                 let raw = raw.as_str().unwrap_or_default();
@@ -549,6 +555,25 @@ fn patch_from(value: &Value) -> Result<ApiKeyPatch, Error> {
     Ok(patch)
 }
 
+/// A key name: `null` clears it, a string is trimmed and capped. The store applies the
+/// same rule before writing, so a direct library caller cannot store a name the API
+/// would refuse to update.
+fn name_field(raw: &Value) -> Result<Option<String>, Error> {
+    match raw {
+        Value::Null => Ok(None),
+        Value::String(name) => {
+            let name = name.trim();
+            if name.chars().count() > MAX_API_KEY_NAME {
+                return Err(Error::BadRequest(format!(
+                    "name must be at most {MAX_API_KEY_NAME} characters"
+                )));
+            }
+            Ok(Some(name.to_string()))
+        }
+        _ => Err(Error::BadRequest("name must be a string or null".into())),
+    }
+}
+
 /// Non-negative integer for a numeric cap.
 fn uint(value: &Value, name: &str) -> Result<u64, Error> {
     value
@@ -567,4 +592,86 @@ fn i64_field(value: &Value, name: &str) -> Result<i64, Error> {
     value
         .as_i64()
         .ok_or_else(|| Error::BadRequest(format!("{name} must be an integer or null")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A rename is a trimmed string; `null` and a blank string both mean "no name"
+    /// (the store folds the empty string to `None` when it merges the row).
+    #[test]
+    fn name_patch_trims_and_clears() {
+        let renamed = patch_from(&json!({"name": "  production key  "})).expect("patch");
+        assert_eq!(renamed.name, Some(Some("production key".to_string())));
+
+        let cleared = patch_from(&json!({"name": null})).expect("patch");
+        assert_eq!(cleared.name, Some(None));
+
+        let blank = patch_from(&json!({"name": "   "})).expect("patch");
+        assert_eq!(blank.name, Some(Some(String::new())));
+    }
+
+    /// The cap counts characters, not bytes, and is applied after trimming.
+    #[test]
+    fn name_patch_caps_length_in_chars() {
+        let at_limit = "é".repeat(rrouter_store::MAX_API_KEY_NAME);
+        let patch = patch_from(&json!({ "name": at_limit })).expect("100 characters fit");
+        assert_eq!(patch.name, Some(Some(at_limit)));
+
+        let padded = format!("  {}  ", "x".repeat(rrouter_store::MAX_API_KEY_NAME));
+        assert!(
+            patch_from(&json!({ "name": padded })).is_ok(),
+            "padding is trimmed before the count"
+        );
+
+        let over = "x".repeat(rrouter_store::MAX_API_KEY_NAME + 1);
+        let error = patch_from(&json!({ "name": over })).expect_err("101 characters");
+        assert_eq!(error.status(), 400);
+        assert!(
+            error.to_string().contains("100"),
+            "names the limit: {error}"
+        );
+    }
+
+    /// Anything that is not a string or `null` is a client error, not a silent no-op.
+    #[test]
+    fn name_patch_rejects_a_non_string() {
+        for bad in [json!(7), json!(true), json!(["a"]), json!({"n": "x"})] {
+            let error = patch_from(&json!({ "name": bad })).expect_err("not a string");
+            assert_eq!(error.status(), 400);
+            assert!(
+                error.to_string().contains("string or null"),
+                "explains the type: {error}"
+            );
+        }
+    }
+
+    /// The audit detail names `name` only when the patch carries it.
+    #[test]
+    fn describe_patch_names_a_rename() {
+        let patch = ApiKeyPatch {
+            name: Some(Some("x".to_string())),
+            ..Default::default()
+        };
+        let detail = describe_patch(&patch, KeyScope::Inference, BudgetWindow::Total);
+        assert!(detail.starts_with("name ·"), "{detail}");
+
+        let unrelated = ApiKeyPatch {
+            rpm: Some(1),
+            ..Default::default()
+        };
+        let detail = describe_patch(&unrelated, KeyScope::Inference, BudgetWindow::Total);
+        let fields = detail.split('·').next().unwrap_or_default();
+        assert!(!fields.contains("name"), "{detail}");
+    }
+
+    /// Omitting the field is not a clear: the audit row and the SQL must see no change.
+    #[test]
+    fn an_unrelated_patch_leaves_the_name_absent() {
+        let patch = patch_from(&json!({"rpm": 10})).expect("patch");
+        assert_eq!(patch.name, None);
+        assert_eq!(patch.rpm, Some(10));
+    }
 }
