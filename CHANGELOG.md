@@ -13,6 +13,11 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - `POST /api/route/explain`: the ordered plan a request would execute — providers,
   connections, priorities, dialects and cached subscription headroom — without dispatching.
 
+## 0.4.6 — 2026-11-09
+
+### Fixed
+- Docker publishing lowercases the GHCR repository path. GitHub keeps the repository name as `centopw/RRouter`, but registry references must be `centopw/rrouter`; both the image matrix and the manifest merge now derive `IMAGE_NAME` with `${GITHUB_REPOSITORY,,}`.
+
 ## 0.4.5 — 2026-11-09
 
 ### Added
