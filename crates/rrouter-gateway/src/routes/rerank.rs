@@ -133,6 +133,7 @@ async fn run(
                 // candidates, and this route pins a provider by the endpoint contract.
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await?;

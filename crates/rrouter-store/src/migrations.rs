@@ -12,13 +12,31 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 30;
+pub const SCHEMA_VERSION: i64 = 31;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29, V30,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31,
 ];
+
+/// V31: combo strategies. `combos` gains the strategy that orders its model list at
+/// request time, the decision model a smart combo asks, and the durable round-robin
+/// cursor. Existing rows keep their models and name, read as `fallback` with cursor 0,
+/// so an upgrade cannot change what a combo does. `router_model` is NULL unless the
+/// strategy is `smart`; `fallback` and `round_robin` clear it rather than storing a
+/// value they ignore.
+const V31: &str = r#"
+CREATE TABLE IF NOT EXISTS combos (
+  id         TEXT PRIMARY KEY,
+  name       TEXT UNIQUE NOT NULL,
+  models     TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+ALTER TABLE combos ADD COLUMN strategy TEXT NOT NULL DEFAULT 'fallback';
+ALTER TABLE combos ADD COLUMN router_model TEXT;
+ALTER TABLE combos ADD COLUMN cursor INTEGER NOT NULL DEFAULT 0;
+"#;
 
 /// V30: model presets. A preset is a named layout of the model catalog — one row holds
 /// the live document and its optimistic-concurrency `revision`; a version row holds each
@@ -1333,6 +1351,46 @@ mod tests {
             (None, None, None, None),
             "a queued result has no answer yet"
         );
+    }
+
+    /// v30 → v31: combo strategy columns land with fallback defaults and an existing
+    /// combo keeps its name, models and identity.
+    #[test]
+    fn upgrades_from_v30_landing_v31_combo_strategy() {
+        let mut c = Connection::open_in_memory().expect("open");
+        at_version(&mut c, 30);
+        assert_eq!(user_version(&c), 30);
+        c.execute(
+            "INSERT INTO combos (id, name, models, created_at) \
+             VALUES ('combo-1', 'legacy', '[\"openai/gpt-4.1\",\"claude/claude-sonnet-4-5\"]', 7)",
+            [],
+        )
+        .expect("legacy combo");
+
+        migrate(&mut c).expect("upgrade");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+        for column in ["strategy", "router_model", "cursor"] {
+            assert!(has_column(&c, "combos", column), "combos.{column}");
+        }
+        let (models, strategy, router, cursor, created): (
+            String,
+            String,
+            Option<String>,
+            i64,
+            i64,
+        ) = c
+            .query_row(
+                "SELECT models, strategy, router_model, cursor, created_at FROM combos \
+                 WHERE name = 'legacy'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("legacy combo survives");
+        assert_eq!(models, "[\"openai/gpt-4.1\",\"claude/claude-sonnet-4-5\"]");
+        assert_eq!(strategy, "fallback");
+        assert_eq!(router, None);
+        assert_eq!(cursor, 0);
+        assert_eq!(created, 7, "identity and timestamp survive");
     }
 
     /// v29 → v30: preset tables land, the default preset is seeded with the

@@ -9,8 +9,8 @@ use std::sync::LazyLock;
 
 use rrouter_store::{
     cache_key, window_start, AccountQuota, ApiKey, ApiKeyPatch, AttemptRecord, BudgetWindow,
-    ConnectionScope, Credentials, Guardrails, KeyModel, KeyScope, ModelRow, PruneReport,
-    StatusFilter, Store, UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
+    ComboStrategy, ConnectionScope, Credentials, Guardrails, KeyModel, KeyScope, ModelRow,
+    PruneReport, StatusFilter, Store, UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -72,6 +72,165 @@ fn creds(token: &str) -> Credentials {
     }
 }
 
+#[test]
+fn combo_strategies_validate_and_round_robin_is_durable() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let models = vec![
+            "openai/gpt-4.1".to_string(),
+            "claude/claude-sonnet-4-5".to_string(),
+        ];
+        let smart = s
+            .upsert_combo_with(
+                "smart",
+                &models,
+                ComboStrategy::Smart,
+                Some("openai/gpt-4.1"),
+            )
+            .await
+            .expect("smart");
+        assert_eq!(smart.strategy, ComboStrategy::Smart);
+        assert_eq!(smart.router_model.as_deref(), Some("openai/gpt-4.1"));
+        assert_eq!(smart.cursor, 0);
+        assert_eq!(
+            s.get_combo("smart").await.expect("get").expect("some"),
+            smart
+        );
+
+        // Non-smart strategies clear the decision model.
+        let round = s
+            .upsert_combo_with(
+                "rr",
+                &models,
+                ComboStrategy::RoundRobin,
+                Some("openai/gpt-4.1"),
+            )
+            .await
+            .expect("rr");
+        assert_eq!(round.strategy, ComboStrategy::RoundRobin);
+        assert_eq!(round.router_model, None);
+
+        // Smart needs a decision model; it cannot be this combo, an existing combo, or
+        // an alias that resolves to one.
+        for (name, router) in [
+            ("needs-router", None),
+            ("self", Some("self")),
+            ("smart", Some("rr")),
+        ] {
+            let error = s
+                .upsert_combo_with(name, &models, ComboStrategy::Smart, router)
+                .await
+                .expect_err("invalid smart combo");
+            assert_eq!(error.status(), 400, "{name}: {error}");
+        }
+        s.upsert_alias("alias-to-combo", "rr").await.expect("alias");
+        assert!(s
+            .upsert_combo_with(
+                "smart-alias",
+                &models,
+                ComboStrategy::Smart,
+                Some("alias-to-combo")
+            )
+            .await
+            .is_err());
+        assert!(s
+            .upsert_combo_with(
+                "smart-prefix",
+                &models,
+                ComboStrategy::Smart,
+                Some("combo:anything")
+            )
+            .await
+            .is_err());
+
+        // Durable rotation: each call advances exactly one model and wraps.
+        s.upsert_combo_with("rotate", &models, ComboStrategy::RoundRobin, None)
+            .await
+            .expect("rotate");
+        let starts: Vec<usize> = vec![
+            s.next_combo_start("rotate")
+                .await
+                .expect("a")
+                .expect("some"),
+            s.next_combo_start("rotate")
+                .await
+                .expect("b")
+                .expect("some"),
+            s.next_combo_start("rotate")
+                .await
+                .expect("c")
+                .expect("some"),
+            s.next_combo_start("rotate")
+                .await
+                .expect("d")
+                .expect("some"),
+        ];
+        assert_eq!(starts, vec![0, 1, 0, 1]);
+        assert_eq!(
+            s.get_combo("rotate")
+                .await
+                .expect("get")
+                .expect("some")
+                .cursor,
+            0,
+            "two steps around a two-model list returns the cursor to zero"
+        );
+        assert_eq!(s.next_combo_start("missing").await.expect("none"), None);
+    });
+}
+
+#[test]
+fn combo_cursor_survives_a_restart_and_concurrent_starts_do_not_collide() {
+    let dir = TempDir::new("combo-cursor");
+    {
+        let store = dir.store();
+        let models = vec![
+            "a/one".to_string(),
+            "b/two".to_string(),
+            "c/three".to_string(),
+        ];
+        rt().block_on(async {
+            store
+                .upsert_combo_with("rr", &models, ComboStrategy::RoundRobin, None)
+                .await
+                .expect("combo");
+            assert_eq!(store.next_combo_start("rr").await.expect("first"), Some(0));
+
+            let mut handles = Vec::new();
+            for _ in 0..12 {
+                let store = store.clone();
+                handles.push(tokio::spawn(async move {
+                    store
+                        .next_combo_start("rr")
+                        .await
+                        .expect("start")
+                        .expect("some")
+                }));
+            }
+            let mut starts = Vec::new();
+            for handle in handles {
+                starts.push(handle.await.expect("join"));
+            }
+            starts.sort_unstable();
+            assert_eq!(
+                starts,
+                vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2],
+                "one durable slot per request"
+            );
+        });
+    }
+    let store = dir.store();
+    let next = rt()
+        .block_on(store.next_combo_start("rr"))
+        .expect("persisted cursor");
+    assert_eq!(
+        next,
+        Some(1),
+        "the cursor continues after a reopen: one previous call plus 12 concurrent ones"
+    );
+}
+
 /// Schema artifacts added after v24. A test that rewinds `user_version` to an older number
 /// must remove these too, or the replay runs `ALTER TABLE … ADD COLUMN` on a column the
 /// file still has. Indexes go first: SQLite refuses to drop a column an index covers.
@@ -87,7 +246,10 @@ const UNDO_AFTER_V24: &str = "\
     ALTER TABLE connections DROP COLUMN owner_user_id; \
     ALTER TABLE connections DROP COLUMN team_id; \
     ALTER TABLE user_sessions DROP COLUMN user_agent; \
-    ALTER TABLE user_sessions DROP COLUMN ip; ";
+    ALTER TABLE user_sessions DROP COLUMN ip; \
+    ALTER TABLE combos DROP COLUMN strategy; \
+    ALTER TABLE combos DROP COLUMN router_model; \
+    ALTER TABLE combos DROP COLUMN cursor; ";
 
 fn rewind_past_v24(conn: &rusqlite::Connection) {
     conn.execute_batch(UNDO_AFTER_V24)

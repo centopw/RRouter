@@ -6,6 +6,7 @@ pub mod batches;
 pub mod combos;
 pub mod connections;
 pub mod evals;
+pub mod explain;
 pub mod files;
 pub mod health;
 pub mod keys;

@@ -86,6 +86,7 @@ async fn least_latency_order(planner: &Planner, store: &Store) -> Vec<Uuid> {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -139,6 +140,7 @@ async fn alias_resolves_one_hop_without_looping() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -171,6 +173,7 @@ async fn self_referential_alias_does_not_loop() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -206,6 +209,7 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -230,6 +234,7 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -266,6 +271,7 @@ async fn antigravity_explicit_id_resolves_with_the_cca_dialect() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -294,11 +300,107 @@ async fn antigravity_explicit_id_resolves_with_the_cca_dialect() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
         .expect_err("the allowlist excludes antigravity");
     assert!(matches!(denied, Error::Forbidden { .. }), "{denied}");
+}
+
+/// A request-scoped combo start rotates the stored list after combo expansion. The
+/// allowlist is still judged on the expanded candidates, not on the combo name.
+#[tokio::test]
+async fn combo_start_rotates_the_expanded_candidates() {
+    let store = Store::open_in_memory().unwrap();
+    let xai = conn(&store, "xai", "grok-4", 9).await;
+    let openai = conn(&store, "openai", "gpt-5", 9).await;
+    let claude = conn(&store, "claude", "claude-sonnet-4-5", 9).await;
+    store
+        .upsert_combo(
+            "chain",
+            &[
+                "xai/grok-4".into(),
+                "openai/gpt-5".into(),
+                "claude/claude-sonnet-4-5".into(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let plan = Planner::new()
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            PlanRequest {
+                model: "chain",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+                combo_start: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+    let order: Vec<uuid::Uuid> = plan.candidates.iter().map(|c| c.connection).collect();
+    assert_eq!(order, vec![openai, claude, xai], "start 1 wraps the list");
+
+    // Out-of-range starts wrap as well: 4 % 3 == 1.
+    let wrapped = Planner::new()
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            PlanRequest {
+                model: "chain",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+                combo_start: Some(4),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wrapped
+            .candidates
+            .iter()
+            .map(|c| c.connection)
+            .collect::<Vec<_>>(),
+        vec![openai, claude, xai]
+    );
+
+    let allowed = [String::from("openai/gpt-5")];
+    let filtered = Planner::new()
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            PlanRequest {
+                model: "chain",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: Some(&allowed),
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+                combo_start: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(filtered.candidates.len(), 1);
+    assert_eq!(filtered.candidates[0].connection, openai);
 }
 
 #[tokio::test]
@@ -321,6 +423,7 @@ async fn explicit_provider_wins_over_catalog_guess() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -354,6 +457,7 @@ async fn combo_preserves_declared_order() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -377,6 +481,7 @@ async fn combo_preserves_declared_order() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -406,6 +511,7 @@ async fn round_robin_alternates_equal_priority_connections() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -424,6 +530,7 @@ async fn round_robin_alternates_equal_priority_connections() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -472,6 +579,7 @@ async fn weighted_puts_the_heavy_account_first_eight_times_in_ten() {
                     team_id: None,
                     canary: None,
                     canary_seed: 0,
+                    combo_start: None,
                 },
             )
             .await
@@ -522,6 +630,7 @@ async fn weighted_and_latency_never_override_priority() {
                     team_id: None,
                     canary: None,
                     canary_seed: 0,
+                    combo_start: None,
                 },
             )
             .await
@@ -587,6 +696,7 @@ async fn order(store: &Store, model: &str, strategy: Strategy) -> Vec<Uuid> {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await
@@ -741,6 +851,7 @@ async fn affinity_pins_one_conversation_but_spreads_conversations() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
     };
@@ -785,6 +896,7 @@ async fn disabled_model_is_excluded() {
                 team_id: None,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await

@@ -75,6 +75,7 @@ pub fn auth_header(headers: &HeaderMap) -> Option<String> {
 /// Build the full application router.
 pub fn app(state: Arc<AppState>) -> Router {
     spawn_model_sync(&state);
+    spawn_provider_usage(&state);
     updates::spawn_daily(&state);
     // Eval runs are in-process work; anything still active at boot is orphaned.
     routes::evals::sweep_orphan_runs(&state);
@@ -185,6 +186,7 @@ pub fn app(state: Arc<AppState>) -> Router {
             post(routes::models::custom).delete(routes::models::delete_custom),
         )
         .route("/models/test", post(routes::models::test))
+        .route("/route/explain", post(routes::explain::explain))
         .route(
             "/combos",
             get(routes::combos::list)
@@ -372,6 +374,19 @@ fn spawn_model_sync(state: &Arc<AppState>) {
         return;
     }
     START.call_once(|| models_registry::spawn_daily_sync(Arc::clone(state)));
+}
+
+/// Starts the subscription-usage refresh loop exactly once per process.
+///
+/// Same rule as the models.dev timer: `app()` is the startup hook, the first pass waits a
+/// minute, and outside a runtime there is nothing to schedule. The loop feeds
+/// [`provider_usage::cached_hints`] without ever making a request wait on a provider.
+fn spawn_provider_usage(state: &Arc<AppState>) {
+    static START: std::sync::Once = std::sync::Once::new();
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    START.call_once(|| provider_usage::spawn_refresh(Arc::clone(state)));
 }
 
 /// CORS: echo only the configured origins and loopback tooling.

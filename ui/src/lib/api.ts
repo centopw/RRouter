@@ -541,7 +541,24 @@ export type UpdateConnection = Partial<{
 export type NewKey = { id: string; key: string };
 
 export type Alias = { alias: string; target: string };
-export type Combo = { name: string; models: string[] };
+/**
+ * A named candidate chain.
+ *
+ * `fallback` (the default for every existing combo) tries the chain in order. `round_robin`
+ * rotates which model starts each request; `smart` asks `router_model` to pick the first
+ * candidate. In both non-fallback strategies the remaining models stay the fallback order.
+ * The fields are additive: a build that predates them returns only name/models, which the
+ * dashboard reads as `fallback`.
+ */
+export type ComboStrategy = "fallback" | "round_robin" | "smart";
+
+export type Combo = {
+  name: string;
+  models: string[];
+  strategy?: ComboStrategy;
+  /** Required when `strategy` is `smart`; ignored (and hidden) otherwise. */
+  router_model?: string | null;
+};
 
 /** A reusable system prompt. `version` counts body revisions; a rename does not bump it. */
 export type Template = {

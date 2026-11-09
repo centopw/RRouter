@@ -65,6 +65,10 @@ const MAX_CACHE_ENTRIES: usize = 100_000;
 const DEFAULT_SEMANTIC_TTL_SECS: usize = 3_600;
 /// Default cosine similarity a semantic hit must reach (0.92 = close paraphrase).
 const DEFAULT_SEMANTIC_THRESHOLD: f64 = 0.92;
+/// Subscription reserve when `RROUTER_SUBSCRIPTION_RESERVE_PERCENT` is unset. 90 leaves
+/// one tenth of a plan window for ad-hoc traffic before an account is avoided.
+const DEFAULT_SUBSCRIPTION_RESERVE_PERCENT: u8 = 90;
+
 /// Days of `usage`/`attempts` history kept when `RROUTER_USAGE_RETENTION_DAYS` is
 /// unset. `0` keeps everything, which is the pre-phase-14 behaviour.
 const DEFAULT_USAGE_RETENTION_DAYS: usize = 0;
@@ -184,6 +188,11 @@ pub struct Config {
     pub hedge_ms: u64,
     /// Operator A/B rule (`RROUTER_CANARY`), or `None`. Reloadable: it is read per plan.
     pub canary: Option<CanaryRule>,
+    /// Subscription reserve (`RROUTER_SUBSCRIPTION_RESERVE_PERCENT`), `0..=100`, default 90.
+    /// A provider account at or above this percentage of any plan window is skipped while
+    /// at least one healthier candidate remains; `0` disables subscription-aware filtering
+    /// and ordering. Reloadable: it is read per plan.
+    pub subscription_reserve_percent: u8,
     /// Semantic response cache backend (`RROUTER_SEMANTIC_CACHE`); `Off` by default.
     /// Reloadable: every read consults the snapshot.
     pub semantic_cache: CacheMode,
@@ -517,6 +526,9 @@ impl Config {
                 "allow_remote_admin" => next.allow_remote_admin = candidate.allow_remote_admin,
                 "access_log" => next.access_log = candidate.access_log,
                 "canary" => next.canary.clone_from(&candidate.canary),
+                "subscription_reserve_percent" => {
+                    next.subscription_reserve_percent = candidate.subscription_reserve_percent;
+                }
                 "semantic_cache" => next.semantic_cache = candidate.semantic_cache,
                 "semantic_cache_threshold" => {
                     next.semantic_cache_threshold = candidate.semantic_cache_threshold;
@@ -756,6 +768,14 @@ impl ReloadPlan {
                 "access_log",
                 old.access_log.to_string(),
                 new.access_log.to_string(),
+            );
+        }
+        if old.subscription_reserve_percent != new.subscription_reserve_percent {
+            push_changed(
+                &mut plan,
+                "subscription_reserve_percent",
+                old.subscription_reserve_percent.to_string(),
+                new.subscription_reserve_percent.to_string(),
             );
         }
         if old.semantic_cache != new.semantic_cache {
@@ -1195,6 +1215,22 @@ impl Config {
             MAX_CACHE_ENTRIES,
             &mut problems,
         ));
+        let subscription_reserve_percent = match source.raw(
+            "subscription_reserve_percent",
+            "RROUTER_SUBSCRIPTION_RESERVE_PERCENT",
+        ) {
+            None => DEFAULT_SUBSCRIPTION_RESERVE_PERCENT,
+            Some(raw) => match raw.value.parse::<u8>() {
+                Ok(value) if value <= 100 => value,
+                _ => {
+                    problems.push(format!(
+                        "{} must be a percentage between 0 and 100",
+                        raw.describe()
+                    ));
+                    DEFAULT_SUBSCRIPTION_RESERVE_PERCENT
+                }
+            },
+        };
         // Same rule as the cache bounds: an oversized number is clamped, garbage stops
         // startup. `0` disables history deletion, not the sweep itself.
         let usage_retention_days = clamped_var(
@@ -1244,6 +1280,7 @@ impl Config {
                 access_log,
                 hedge_ms,
                 canary,
+                subscription_reserve_percent,
                 semantic_cache,
                 semantic_cache_threshold,
                 semantic_embedding_model,
@@ -1602,6 +1639,7 @@ mod tests {
             access_log: true,
             hedge_ms: 0,
             canary: None,
+            subscription_reserve_percent: 90,
             semantic_cache: CacheMode::Off,
             semantic_cache_threshold: 0.92,
             semantic_embedding_model: None,
@@ -2227,7 +2265,7 @@ mod tests {
         assert!(loaded.config.admin_token.is_none());
         assert!(loaded.config.cors_origins.is_empty());
         // Every field is accounted for, and all of them are defaults.
-        assert_eq!(loaded.sources.counts(), (0, 0, 32));
+        assert_eq!(loaded.sources.counts(), (0, 0, 33));
         assert!(loaded.config_file.is_none());
     }
 
@@ -2409,7 +2447,7 @@ mod tests {
             rendered.contains("\"port\":\"default\""),
             "default provenance missing: {rendered}"
         );
-        assert_eq!(sources.counts(), (1, 2, 29));
+        assert_eq!(sources.counts(), (1, 2, 30));
     }
 
     #[test]
@@ -2423,8 +2461,8 @@ mod tests {
         let loaded = Config::resolve(&env, Some(layer)).expect("resolve");
         // env + file + default must add up to the settings the resolver tracks.
         let (env, file, defaults) = loaded.sources.counts();
-        assert_eq!((env, file, defaults), (1, 2, 29));
-        assert_eq!(env + file + defaults, 32);
+        assert_eq!((env, file, defaults), (1, 2, 30));
+        assert_eq!(env + file + defaults, 33);
     }
 
     // ----- reload planning --------------------------------------------------------
@@ -2453,6 +2491,48 @@ mod tests {
         assert!(!plan.is_empty());
         // Deterministic: the same inputs produce the same plan and order.
         assert_eq!(plan, ReloadPlan::between(&old.config, &new.config));
+    }
+
+    #[test]
+    fn a_changed_subscription_reserve_is_reloadable() {
+        let old = Config::resolve(&env_map(&[]), None).expect("old");
+        let new = Config::resolve(
+            &env_map(&[("RROUTER_SUBSCRIPTION_RESERVE_PERCENT", "50")]),
+            None,
+        )
+        .expect("new");
+        assert_eq!(new.config.subscription_reserve_percent, 50);
+        let plan = ReloadPlan::between(&old.config, &new.config);
+        assert_eq!(plan.changed.len(), 1, "{plan:?}");
+        assert_eq!(plan.changed[0].field, "subscription_reserve_percent");
+        assert_eq!(plan.changed[0].to, "50");
+        assert_eq!(
+            old.config
+                .reloaded(&new.config, &plan)
+                .subscription_reserve_percent,
+            50
+        );
+    }
+
+    #[test]
+    fn subscription_reserve_rejects_an_out_of_range_percentage() {
+        for value in ["101", "-1", "ninety"] {
+            let env = env_map(&[("RROUTER_SUBSCRIPTION_RESERVE_PERCENT", value)]);
+            let error = Config::resolve(&env, None).expect_err("invalid reserve");
+            assert!(
+                error.contains("SUBSCRIPTION_RESERVE_PERCENT")
+                    || error.contains("subscription_reserve_percent"),
+                "{value}: {error}"
+            );
+        }
+        let env = env_map(&[("RROUTER_SUBSCRIPTION_RESERVE_PERCENT", "0")]);
+        assert_eq!(
+            Config::resolve(&env, None)
+                .expect("0 disables")
+                .config
+                .subscription_reserve_percent,
+            0
+        );
     }
 
     #[test]

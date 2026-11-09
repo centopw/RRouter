@@ -23,6 +23,8 @@ use rrouter_auth::{CredentialStore, Credentials};
 /// Prefix of every gateway API key. The remainder is 32 hex chars of CSPRNG output.
 pub const API_KEY_PREFIX: &str = "sk-rr-";
 const API_KEY_SECRET_HEX_LEN: usize = 32;
+/// Longest smart-router model reference.
+pub const MAX_COMBO_ROUTER_MODEL: usize = 200;
 
 /// A stored provider credential set. `credentials` comes from the encrypted `data` blob.
 #[derive(Debug, Clone)]
@@ -493,7 +495,48 @@ pub struct Combo {
     pub id: Uuid,
     pub name: String,
     pub models: Vec<String>,
+    pub strategy: ComboStrategy,
+    /// Decision model for [`ComboStrategy::Smart`]; always `None` for the other
+    /// strategies. Never a combo itself (that would recurse).
+    pub router_model: Option<String>,
+    /// Durable round-robin cursor. Internal: the API shows it, but create/update reset it.
+    pub cursor: i64,
     pub created_at: i64,
+}
+
+/// How a combo orders its models for one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComboStrategy {
+    /// The stored order is the fallback chain.
+    Fallback,
+    /// Durable rotation: each request starts one model later and wraps.
+    RoundRobin,
+    /// A decision model picks one listed model; failure falls back to the first.
+    Smart,
+}
+
+impl ComboStrategy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fallback => "fallback",
+            Self::RoundRobin => "round_robin",
+            Self::Smart => "smart",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "fallback" => Some(Self::Fallback),
+            "round_robin" => Some(Self::RoundRobin),
+            "smart" => Some(Self::Smart),
+            _ => None,
+        }
+    }
+
+    /// Lenient read for a stored row: an unrecognised value is the pre-v31 behaviour.
+    pub fn from_stored(raw: &str) -> Self {
+        Self::parse(raw).unwrap_or(Self::Fallback)
+    }
 }
 
 /// A reusable named system prompt; `body` is the current revision.
@@ -1941,6 +1984,19 @@ impl Store {
         Ok(())
     }
 
+    /// One alias target, without scanning the table. Routing reads this on the combo
+    /// path, where only the exact name matters.
+    pub async fn alias_target(&self, alias: &str) -> Result<Option<String>> {
+        self.conn()
+            .query_row(
+                "SELECT target FROM model_aliases WHERE alias = ?1",
+                params![alias],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(migrations::db_err)
+    }
+
     pub async fn list_aliases(&self) -> Result<Vec<ModelAlias>> {
         let conn = self.conn();
         let mut stmt = conn
@@ -2089,18 +2145,62 @@ impl Store {
 
     // ----- combos ------------------------------------------------------------------
 
-    /// Insert or replace the chain named `name`. Order is preserved; duplicates are dropped.
+    /// Insert or replace the chain named `name` with the legacy fallback strategy.
     pub async fn upsert_combo(&self, name: &str, models: &[String]) -> Result<Combo> {
+        self.upsert_combo_with(name, models, ComboStrategy::Fallback, None)
+            .await
+    }
+
+    /// Insert or replace a combo and its strategy.
+    ///
+    /// Validation lives here so a direct database writer gets the same rules as the API:
+    /// `smart` names one decision model, that model is not this combo and does not
+    /// resolve to a combo (including through one alias hop), and the other strategies
+    /// store no decision model. An update resets the round-robin cursor.
+    pub async fn upsert_combo_with(
+        &self,
+        name: &str,
+        models: &[String],
+        strategy: ComboStrategy,
+        router_model: Option<&str>,
+    ) -> Result<Combo> {
         let mut unique = Vec::with_capacity(models.len());
-        for m in models {
-            if !unique.contains(m) {
-                unique.push(m.clone());
+        for model in models {
+            if !unique.contains(model) {
+                unique.push(model.clone());
             }
         }
         let json = serde_json::to_string(&unique)?;
-        // Read-then-write under one mutex guard: keep the original id/created_at on update.
-        let conn = self.conn();
-        let existing: Option<(Uuid, i64)> = conn
+        let router_model = match strategy {
+            ComboStrategy::Smart => {
+                let raw = router_model
+                    .ok_or_else(|| Error::BadRequest("smart combos require router_model".into()))?;
+                let router = raw.trim();
+                if router.is_empty() {
+                    return Err(Error::BadRequest(
+                        "smart combos require router_model".into(),
+                    ));
+                }
+                if router.chars().count() > MAX_COMBO_ROUTER_MODEL {
+                    return Err(Error::BadRequest(format!(
+                        "router_model is limited to {MAX_COMBO_ROUTER_MODEL} characters"
+                    )));
+                }
+                if router == name {
+                    return Err(Error::BadRequest(
+                        "router_model must not be the combo name".into(),
+                    ));
+                }
+                Some(router.to_string())
+            }
+            ComboStrategy::Fallback | ComboStrategy::RoundRobin => None,
+        };
+
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        let existing: Option<(Uuid, i64)> = tx
             .query_row(
                 "SELECT id, created_at FROM combos WHERE name = ?1",
                 params![name],
@@ -2108,26 +2208,83 @@ impl Store {
             )
             .optional()
             .map_err(migrations::db_err)?;
+        if let Some(router) = &router_model {
+            if combo_reference(&tx, router, name)? {
+                return Err(Error::BadRequest(
+                    "router_model resolves to a combo; a smart combo cannot recurse".into(),
+                ));
+            }
+        }
         let (id, created_at) = existing.unwrap_or_else(|| (Uuid::new_v4(), now()));
-        conn.execute(
-            "INSERT INTO combos (id, name, models, created_at) VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(name) DO UPDATE SET models = excluded.models",
-            params![id.to_string(), name, json, created_at],
+        tx.execute(
+            "INSERT INTO combos (id, name, models, strategy, router_model, cursor, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6) \
+             ON CONFLICT(name) DO UPDATE SET models = excluded.models, \
+             strategy = excluded.strategy, router_model = excluded.router_model, cursor = 0",
+            params![
+                id.to_string(),
+                name,
+                json,
+                strategy.as_str(),
+                router_model,
+                created_at
+            ],
         )
         .map_err(migrations::db_err)?;
+        tx.commit().map_err(migrations::db_err)?;
         Ok(Combo {
             id,
             name: name.to_string(),
             models: unique,
+            strategy,
+            router_model,
+            cursor: 0,
             created_at,
         })
+    }
+
+    /// Durable round-robin start for one request.
+    ///
+    /// The cursor is read, the start is taken modulo the current model count, and the
+    /// cursor advances in one immediate transaction, so two concurrent requests cannot
+    /// observe the same position. `None` means no combo by that name.
+    pub async fn next_combo_start(&self, name: &str) -> Result<Option<usize>> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        let row: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT cursor, models FROM combos WHERE name = ?1",
+                params![name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(migrations::db_err)?;
+        let Some((cursor, models)) = row else {
+            return Ok(None);
+        };
+        let count = serde_json::from_str::<Vec<String>>(&models)
+            .map_err(|e| Error::Store(format!("combo {name} models: {e}")))?
+            .len();
+        if count == 0 {
+            return Ok(Some(0));
+        }
+        let start = cursor.rem_euclid(count as i64) as usize;
+        tx.execute(
+            "UPDATE combos SET cursor = ?2 WHERE name = ?1",
+            params![name, ((start + 1) % count) as i64],
+        )
+        .map_err(migrations::db_err)?;
+        tx.commit().map_err(migrations::db_err)?;
+        Ok(Some(start))
     }
 
     pub async fn get_combo(&self, name: &str) -> Result<Option<Combo>> {
         let conn = self.conn();
         let row = conn
             .query_row(
-                "SELECT id, name, models, created_at FROM combos WHERE name = ?1",
+                "SELECT id, name, models, strategy, router_model, cursor, created_at FROM combos WHERE name = ?1",
                 params![name],
                 row_to_combo,
             )
@@ -2140,7 +2297,7 @@ impl Store {
         let rows = {
             let conn = self.conn();
             let mut stmt = conn
-                .prepare("SELECT id, name, models, created_at FROM combos ORDER BY name ASC")
+                .prepare("SELECT id, name, models, strategy, router_model, cursor, created_at FROM combos ORDER BY name ASC")
                 .map_err(migrations::db_err)?;
             let rows = stmt
                 .query_map([], row_to_combo)
@@ -3380,6 +3537,9 @@ struct RawCombo {
     id: Uuid,
     name: String,
     models: String,
+    strategy: String,
+    router_model: Option<String>,
+    cursor: i64,
     created_at: i64,
 }
 
@@ -3388,7 +3548,10 @@ fn row_to_combo(r: &Row<'_>) -> rusqlite::Result<RawCombo> {
         id: uuid_col(r.get(0)?)?,
         name: r.get(1)?,
         models: r.get(2)?,
-        created_at: r.get(3)?,
+        strategy: r.get(3)?,
+        router_model: r.get(4)?,
+        cursor: r.get(5)?,
+        created_at: r.get(6)?,
     })
 }
 
@@ -3399,8 +3562,47 @@ fn decode_combo(raw: RawCombo) -> Result<Combo> {
         id: raw.id,
         name: raw.name,
         models,
+        strategy: ComboStrategy::from_stored(&raw.strategy),
+        router_model: raw.router_model,
+        cursor: raw.cursor,
         created_at: raw.created_at,
     })
+}
+
+/// Does `reference` name or resolve (through one alias hop) to a combo other than
+/// `self_name`? Smart combos use this to reject a router model that would re-enter a
+/// combo. Mirrors the planner's one-hop alias rule.
+fn combo_reference(
+    tx: &rusqlite::Transaction<'_>,
+    reference: &str,
+    self_name: &str,
+) -> Result<bool> {
+    let mut current = reference.trim().to_string();
+    if let Some(target) = tx
+        .query_row(
+            "SELECT target FROM model_aliases WHERE alias = ?1",
+            params![current],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(migrations::db_err)?
+    {
+        current = target;
+    }
+    if current.strip_prefix("combo:").is_some() {
+        return Ok(true);
+    }
+    if current == self_name {
+        return Ok(true);
+    }
+    tx.query_row(
+        "SELECT 1 FROM combos WHERE name = ?1",
+        params![current],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .map(|hit| hit.is_some())
+    .map_err(migrations::db_err)
 }
 
 /// Field-wise merge: every `Some` in `patch` overwrites; `None` never erases.

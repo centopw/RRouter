@@ -40,6 +40,7 @@ Every key is optional and matches the environment variable in lowercase:
 | `retry_max_ms` | `RROUTER_RETRY_MAX_MS` | clamped to 0–60000 |
 | `hedge_ms` | `RROUTER_HEDGE_MS` | clamped to 0–60000; `0` disables hedging; restart-only |
 | `canary` | `RROUTER_CANARY` | `model=provider:percent`; empty/`off` disables; reloadable |
+| `subscription_reserve_percent` | `RROUTER_SUBSCRIPTION_RESERVE_PERCENT` | 0–100, default 90; `0` disables subscription-aware routing; reloadable |
 | `semantic_cache` | `RROUTER_SEMANTIC_CACHE` | `off` (default), `sqlite`; reloadable |
 | `semantic_cache_threshold` | `RROUTER_SEMANTIC_CACHE_THRESHOLD` | cosine 0–1, default 0.92 |
 | `semantic_embedding_model` | `RROUTER_SEMANTIC_EMBEDDING_MODEL` | `provider/model`; required when the cache is on |

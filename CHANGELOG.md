@@ -2,6 +2,25 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## Unreleased
+
+### Added
+- Subscription-aware routing: cached provider plan windows (`claude`, `codex`, `github`)
+  now feed the planner. `RROUTER_SUBSCRIPTION_RESERVE_PERCENT` (0–100, default 90) skips
+  an account near a window cap while a healthier candidate remains; all-over plans stay
+  serviceable and order the healthiest first. A background refresher keeps the cache warm
+  at the provider usage module's polite cadence.
+- `POST /api/route/explain`: the ordered plan a request would execute — providers,
+  connections, priorities, dialects and cached subscription headroom — without dispatching.
+
+## 0.4.4 — 2026-11-09
+
+### Added
+- Combo strategies: ordered fallback, durable-cursor round robin, and smart routing through a configured decision model. Smart failures fall back to the first candidate; decision calls are bounded and never recurse into the same combo.
+- Schema v31 adds `combos.strategy`, `combos.router_model` and `combos.cursor`; existing rows remain fallback.
+- Combos UI strategy cards, smart router picker, validation and strategy-aware table.
+- Combo acceptance harness and docs.
+
 ## 0.4.3 — 2026-11-09
 
 ### Added

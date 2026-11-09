@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use rrouter_core::{Error, Result};
+use rrouter_router::{CapacityHint, CapacityHints};
 use rrouter_store::Connection;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -91,6 +92,84 @@ pub async fn account(state: &AppState, conn: &Connection) -> AccountUsage {
     };
     cache_put(conn.id, value.clone());
     value
+}
+
+/// Cached usage for one connection, without a provider call.
+pub fn cached(id: Uuid) -> Option<AccountUsage> {
+    cache_get(id)
+}
+
+/// Subscription hints for every connection with a fresh cached snapshot.
+///
+/// Routing must never wait on a plan-usage endpoint: the background refresh (or a
+/// dashboard read) populates this cache, and an unobserved account simply has no hint.
+pub fn cached_hints() -> CapacityHints {
+    let map = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut hints = CapacityHints::new();
+    for (connection, entry) in map.iter() {
+        let ttl = if entry.value.error.is_none() {
+            SUCCESS_TTL
+        } else {
+            FAILURE_TTL
+        };
+        if entry.at.elapsed() >= ttl || entry.value.error.is_some() {
+            continue;
+        }
+        if let Some(hint) = hint(&entry.value) {
+            hints.insert(*connection, hint);
+        }
+    }
+    hints
+}
+
+/// The binding window: the most-consumed one, with the earliest reset among ties.
+fn hint(usage: &AccountUsage) -> Option<CapacityHint> {
+    let used = usage
+        .windows
+        .iter()
+        .map(|window| window.used_percent)
+        .fold(None::<f64>, |worst, used| {
+            Some(worst.map_or(used, |worst| worst.max(used)))
+        })?;
+    let resets_at = usage
+        .windows
+        .iter()
+        .filter(|window| (window.used_percent - used).abs() < f64::EPSILON)
+        .filter_map(|window| window.resets_at)
+        .min();
+    Some(CapacityHint {
+        used_percent: used,
+        resets_at,
+    })
+}
+
+/// Refresh every OAuth subscription account in the background.
+///
+/// `account` already applies a five-minute success TTL and a fifteen-minute failure TTL,
+/// so a one-minute poll fetches each provider at a polite cadence rather than on every
+/// request. The first pass waits a minute so a restart is never delayed by a provider.
+pub fn spawn_refresh(state: std::sync::Arc<AppState>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            if let Err(e) = refresh_once(&state).await {
+                tracing::debug!(error = %e, "subscription usage refresh failed");
+            }
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+}
+
+async fn refresh_once(state: &AppState) -> Result<()> {
+    let connections = state.store.list_connections(None).await?;
+    for conn in connections {
+        if !conn.is_active || conn.auth_type != "oauth" || !supports(&conn.provider) {
+            continue;
+        }
+        // `account` caches its own answer; a cached entry costs no network I/O.
+        let _ = account(state, &conn).await;
+    }
+    Ok(())
 }
 
 fn cache_get(id: Uuid) -> Option<AccountUsage> {
@@ -668,5 +747,111 @@ mod tests {
             reset_at(&json!({"resetsAt": "2026-04-08T18:59:59Z"})),
             Some(1_775_674_799)
         );
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    fn usage(windows: &[(f64, Option<i64>)]) -> AccountUsage {
+        AccountUsage {
+            connection_id: Uuid::new_v4().to_string(),
+            provider: "claude".into(),
+            name: None,
+            plan: None,
+            windows: windows
+                .iter()
+                .enumerate()
+                .map(|(index, (used, resets_at))| UsageWindow {
+                    id: format!("w{index}"),
+                    label: format!("window {index}"),
+                    used_percent: *used,
+                    window_seconds: None,
+                    resets_at: *resets_at,
+                })
+                .collect(),
+            error: None,
+            fetched_at: 0,
+        }
+    }
+
+    #[test]
+    fn the_most_consumed_window_is_the_binding_one() {
+        let hint = hint(&usage(&[
+            (20.0, Some(900)),
+            (95.0, Some(300)),
+            (10.0, None),
+        ]))
+        .expect("a hint");
+        assert_eq!(hint.used_percent, 95.0);
+        assert_eq!(hint.resets_at, Some(300));
+    }
+
+    #[test]
+    fn equal_windows_report_the_earliest_reset() {
+        let hint = hint(&usage(&[(80.0, Some(900)), (80.0, Some(300))])).expect("a hint");
+        assert_eq!(hint.used_percent, 80.0);
+        assert_eq!(hint.resets_at, Some(300), "the soonest reset wins a tie");
+    }
+
+    #[test]
+    fn no_windows_yields_no_hint() {
+        assert!(hint(&usage(&[])).is_none());
+    }
+
+    #[test]
+    fn cached_hints_ignore_a_stale_snapshot() {
+        let value = usage(&[(95.0, Some(300))]);
+        let id = Uuid::parse_str(&value.connection_id).expect("id");
+        CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            id,
+            Cached {
+                at: Instant::now()
+                    .checked_sub(SUCCESS_TTL + Duration::from_secs(1))
+                    .expect("clock"),
+                value,
+            },
+        );
+        assert!(
+            cached_hints().get(id).is_none(),
+            "an expired snapshot is not headroom data"
+        );
+        CACHE.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    }
+
+    #[test]
+    fn cached_hints_skip_error_entries() {
+        let ok = usage(&[(95.0, Some(300))]);
+        let mut broken = usage(&[(99.0, Some(1))]);
+        broken.error = Some("provider rejected the token".into());
+        let ok_id = Uuid::parse_str(&ok.connection_id).expect("id");
+        let broken_id = Uuid::parse_str(&broken.connection_id).expect("id");
+        {
+            let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            for value in [&ok, &broken] {
+                cache.insert(
+                    Uuid::parse_str(&value.connection_id).expect("id"),
+                    Cached {
+                        at: Instant::now(),
+                        value: value.clone(),
+                    },
+                );
+            }
+        }
+        let hints = cached_hints();
+        assert_eq!(hints.used_percent(ok_id), Some(95.0));
+        assert!(
+            hints.get(broken_id).is_none(),
+            "a failed usage fetch is not headroom data"
+        );
+        CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ok_id);
+        CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&broken_id);
     }
 }

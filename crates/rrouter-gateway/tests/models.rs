@@ -101,6 +101,7 @@ fn config() -> Config {
         access_log: true,
         hedge_ms: 0,
         canary: None,
+        subscription_reserve_percent: 90,
         semantic_cache: rrouter_gateway::config::CacheMode::Off,
         semantic_cache_threshold: 0.92,
         semantic_embedding_model: None,

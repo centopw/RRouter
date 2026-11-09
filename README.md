@@ -52,16 +52,16 @@ curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | s
 ```
 
 ```sh
-# pin the newest published release (v0.4.3) / choose a directory
-RROUTER_VERSION=v0.4.3 RROUTER_INSTALL_DIR="$HOME/bin" \
+# pin the newest published release (v0.4.4) / choose a directory
+RROUTER_VERSION=v0.4.4 RROUTER_INSTALL_DIR="$HOME/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
 
 # see what it would do
 RROUTER_DRY_RUN=1 curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | sh
 ```
 
-`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.3 is
-the newest. The workspace is 0.4.3 — tag artifacts are published by the release workflow.
+`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.4 is
+the newest. The workspace is 0.4.4 — tag artifacts are published by the release workflow.
 
 ## Quick start
 
@@ -145,7 +145,7 @@ Usage reads are windowed and aggregated in SQL, so the dashboard never pages thr
 
 - **`provider/model`** — `openai/gpt-4.1`, `claude/sonnet-4-5`, `codex/gpt-5.6-luna`.
 - **Aliases** — give a model a stable internal name (`prod-default`) so clients never change.
-- **Combos** — an ordered fallback chain; the next candidate is tried when a provider fails.
+- **Combos** — named model lists a client calls as `combo:<name>`. A combo's strategy decides how a request moves through the list: `fallback` (stored order on failure), `round_robin` (durable per-combo cursor), or `smart` (a decision model picks an entry via `{"choice": "provider/model"}`, falling back to the first on any error). See [`docs/COMBOS.md`](docs/COMBOS.md) for the strategy table, API shape and the offline acceptance harness.
 
 Candidates are ordered by account priority, skipping providers with no active connection and
 accounts inside their circuit breaker. A 429 backs the account off exponentially, honouring
@@ -572,9 +572,9 @@ from the matching `## <version>` section of `CHANGELOG.md` by
 `ubuntu-24.04-arm` instead of QEMU. The docker workflow builds `linux/amd64` and
 `linux/arm64` on native runners and merges the digests into
 `ghcr.io/centopw/rrouter:0.2.0`, `:0.2`, `:latest`, and a `:sha-…` manifest, cutting the
-v0.4.3 31-minute QEMU path to an expected ~12–16 minutes cold. The installer verifies the
+v0.4.4 31-minute QEMU path to an expected ~12–16 minutes cold. The installer verifies the
 checksum before installing, so a corrupted download never lands in `$PATH`. Verify notes
-before tagging with `python3 scripts/release-notes.py v0.4.3 --check`; the full flow and
+before tagging with `python3 scripts/release-notes.py v0.4.4 --check`; the full flow and
 timings are in [`docs/RELEASES.md`](docs/RELEASES.md#5-the-pipeline).
 
 ## License

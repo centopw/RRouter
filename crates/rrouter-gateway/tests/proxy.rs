@@ -18,7 +18,9 @@ use http_body_util::BodyExt;
 use rrouter_auth::Credentials;
 use rrouter_gateway::{app, config::Config, AppState};
 use rrouter_router::{Breaker, Catalog, Dispatcher, Planner};
-use rrouter_store::{AccountQuota, BudgetWindow, ModelRow, Store, UsageQuery, UsageRecord};
+use rrouter_store::{
+    AccountQuota, BudgetWindow, ComboStrategy, ModelRow, Store, UsageQuery, UsageRecord,
+};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -284,6 +286,7 @@ fn config(require_api_key: bool) -> Config {
         access_log: true,
         hedge_ms: 0,
         canary: None,
+        subscription_reserve_percent: 90,
         semantic_cache: rrouter_gateway::config::CacheMode::Off,
         semantic_cache_threshold: 0.92,
         semantic_embedding_model: None,
@@ -6355,6 +6358,191 @@ async fn combo_contents_cannot_escape_the_key_allowlist() {
         0,
         "a combo cannot smuggle a disallowed provider"
     );
+}
+
+/// Round-robin rotates the stored list and advances the durable cursor exactly once per
+/// request, including a non-streaming request that plans twice internally.
+#[tokio::test]
+async fn round_robin_combo_advances_once_per_request_and_wraps() {
+    let mock = Mock::start(vec![
+        openai_reply("first"),
+        openai_reply("second"),
+        openai_reply("third"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.state
+        .store
+        .upsert_combo_with(
+            "rr",
+            &["openai/gpt-4.1".into(), "openai/gpt-4.2".into()],
+            ComboStrategy::RoundRobin,
+            None,
+        )
+        .await
+        .expect("combo");
+
+    for content in ["first", "second", "third"] {
+        let (status, _, body) = h.chat(None, "rr").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["choices"][0]["message"]["content"], content);
+    }
+    let seen = mock.seen();
+    let models: Vec<&str> = seen
+        .iter()
+        .map(|body| body["model"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        models,
+        vec!["gpt-4.1", "gpt-4.2", "gpt-4.1"],
+        "one advance per request, wrapping after the last model"
+    );
+}
+
+/// A smart combo asks its decision model with the compact candidate list and honours an
+/// exact choice. The decision is an ordinary counted completion.
+#[tokio::test]
+async fn smart_combo_honours_the_decision_models_choice() {
+    let mock = Mock::start(vec![
+        openai_reply("{\"choice\":\"openai/gpt-4.2\"}"),
+        openai_reply("picked"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.state
+        .store
+        .upsert_combo_with(
+            "smart",
+            &["openai/gpt-4.1".into(), "openai/gpt-4.2".into()],
+            ComboStrategy::Smart,
+            Some("openai/gpt-4.1"),
+        )
+        .await
+        .expect("combo");
+
+    let (status, _, body) = h.chat(None, "smart").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "picked");
+
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 2, "decision then answer");
+    assert_eq!(seen[0]["model"], "gpt-4.1", "decision model");
+    let prompt = seen[0]["messages"][0]["content"]
+        .as_str()
+        .expect("decision prompt");
+    assert!(prompt.contains("openai/gpt-4.1"), "{prompt}");
+    assert!(prompt.contains("openai/gpt-4.2"), "{prompt}");
+    assert!(
+        prompt.contains("hello"),
+        "user request is included: {prompt}"
+    );
+    assert_eq!(seen[1]["model"], "gpt-4.2", "the chosen candidate");
+}
+
+/// An invalid decision is not a client failure: the first listed candidate still answers.
+#[tokio::test]
+async fn smart_combo_invalid_choice_falls_back_to_the_first_candidate() {
+    let mock = Mock::start(vec![
+        openai_reply("not json at all"),
+        openai_reply("fallback answer"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.state
+        .store
+        .upsert_combo_with(
+            "smart",
+            &["openai/gpt-4.1".into(), "openai/gpt-4.2".into()],
+            ComboStrategy::Smart,
+            Some("openai/gpt-4.1"),
+        )
+        .await
+        .expect("combo");
+
+    let (status, _, body) = h.chat(None, "smart").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "fallback answer");
+    assert_eq!(mock.seen()[1]["model"], "gpt-4.1");
+}
+
+/// A decision-model error is a fallback, not a client failure.
+#[tokio::test]
+async fn smart_combo_decision_error_falls_back_to_the_first_candidate() {
+    let mock = Mock::start(vec![
+        MockReply::Json(
+            400,
+            json!({"error": {"message": "decision model rejects this"}}),
+        ),
+        openai_reply("answer after decision error"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.state
+        .store
+        .upsert_combo_with(
+            "smart",
+            &["openai/gpt-4.1".into(), "openai/gpt-4.2".into()],
+            ComboStrategy::Smart,
+            Some("openai/gpt-4.1"),
+        )
+        .await
+        .expect("combo");
+
+    let (status, _, body) = h.chat(None, "smart").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "answer after decision error"
+    );
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 2, "one failed decision, one answer: {seen:?}");
+    assert_eq!(seen[1]["model"], "gpt-4.1");
+}
+
+/// Smart combo creation refuses a router model that is this combo, another combo, an
+/// alias to a combo, or a `combo:` reference; unknown strategies are a 400 too.
+#[tokio::test]
+async fn smart_combo_validation_refuses_recursion_and_unknown_strategies() {
+    let mock = Mock::start(vec![]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.state
+        .store
+        .upsert_combo("base", &["openai/gpt-4.1".to_string()])
+        .await
+        .expect("base combo");
+    h.state
+        .store
+        .upsert_alias("alias-to-base", "base")
+        .await
+        .expect("alias");
+
+    for body in [
+        json!({"name": "smart", "models": ["openai/gpt-4.1"], "strategy": "smart", "router_model": "base"}),
+        json!({"name": "smart", "models": ["openai/gpt-4.1"], "strategy": "smart", "router_model": "smart"}),
+        json!({"name": "smart", "models": ["openai/gpt-4.1"], "strategy": "smart", "router_model": "alias-to-base"}),
+        json!({"name": "smart", "models": ["openai/gpt-4.1"], "strategy": "smart", "router_model": "combo:base"}),
+        json!({"name": "smart", "models": ["openai/gpt-4.1"], "strategy": "smart"}),
+        json!({"name": "smart", "models": ["openai/gpt-4.1"], "strategy": "nope"}),
+    ] {
+        let (status, response) = h.post("/api/combos", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    }
+
+    let (status, body) = h
+        .post(
+            "/api/combos",
+            json!({"name": "plain", "models": ["openai/gpt-4.1"], "router_model": "base"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["strategy"], "fallback");
+    assert_eq!(body["router_model"], Value::Null);
+    assert_eq!(mock.hits(), 0);
 }
 
 // ------------------------------------------------------------- team budgets (v23)

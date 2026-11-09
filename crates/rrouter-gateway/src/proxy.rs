@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -43,6 +43,12 @@ const MAX_ERROR_BODY: usize = 4096;
 /// Rows one semantic lookup compares. The scan is already scope-filtered in SQL; this
 /// bound keeps a pathological table from turning one request into a million cosine calls.
 const SEMANTIC_SCAN_LIMIT: usize = 512;
+/// Smart-combo decision budget. The decision is an optimization, never a dependency.
+const SMART_DECISION_TIMEOUT: Duration = Duration::from_secs(8);
+/// Output cap for the decision call: one short JSON object.
+const SMART_DECISION_MAX_TOKENS: u32 = 128;
+/// User text included in the decision prompt.
+const SMART_PROMPT_CHARS: usize = 4_000;
 /// Exact-match cache control: `hit`/`miss` on the response, and the client's `bypass`
 /// opt-out on the request.
 const CACHE_HEADER: &str = "x-rrouter-cache";
@@ -102,13 +108,149 @@ fn google_cca_headers(
     Ok(headers)
 }
 
+/// The store combo a model reference resolves to, mirroring the planner's one alias
+/// hop and `combo:` prefix rule.
+async fn resolve_combo(
+    state: &AppState,
+    model: &str,
+) -> Result<Option<(String, rrouter_store::Combo)>> {
+    let direct = model.strip_prefix("combo:").unwrap_or(model);
+    if let Some(combo) = state.store.get_combo(direct).await? {
+        return Ok(Some((direct.to_string(), combo)));
+    }
+    if model == direct {
+        if let Some(target) = state.store.alias_target(model).await? {
+            let name = target.strip_prefix("combo:").unwrap_or(&target);
+            if let Some(combo) = state.store.get_combo(name).await? {
+                return Ok(Some((name.to_string(), combo)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Request-scoped combo rotation: `None` keeps stored order (fallback), `Some(i)` starts
+/// the model list at `i`. Round-robin advances the durable cursor exactly once here.
+async fn combo_rotation(
+    state: &Arc<AppState>,
+    model: &str,
+    canonical: &ChatRequest,
+    key: Option<Uuid>,
+    trace: &RequestTrace,
+) -> Result<Option<usize>> {
+    let Some((name, combo)) = resolve_combo(state, model).await? else {
+        return Ok(None);
+    };
+    match combo.strategy {
+        rrouter_store::ComboStrategy::Fallback => Ok(None),
+        rrouter_store::ComboStrategy::RoundRobin => Ok(state.store.next_combo_start(&name).await?),
+        rrouter_store::ComboStrategy::Smart => Ok(Some(
+            smart_start(state, &name, &combo, canonical, key, trace).await?,
+        )),
+    }
+}
+
+async fn smart_start(
+    state: &Arc<AppState>,
+    name: &str,
+    combo: &rrouter_store::Combo,
+    canonical: &ChatRequest,
+    key: Option<Uuid>,
+    trace: &RequestTrace,
+) -> Result<usize> {
+    let Some(router) = combo
+        .router_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    else {
+        tracing::warn!(request_id = %trace.request_id, combo = %name, "smart combo has no router_model; using the first candidate");
+        return Ok(0);
+    };
+    // Runtime recursion guard in addition to create-time validation: a later edit could
+    // make the router model a combo, and a decision must never re-enter one.
+    if router == name || resolve_combo(state, router).await?.is_some() {
+        tracing::warn!(request_id = %trace.request_id, combo = %name, router = %router, "smart combo router_model resolves to a combo; using the first candidate");
+        return Ok(0);
+    }
+    let prompt = smart_prompt(canonical, &combo.models);
+    let body = serde_json::json!({
+        "model": router,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": SMART_DECISION_MAX_TOKENS,
+        "temperature": 0.0,
+        "stream": false,
+    });
+    // Boxed: the decision path re-enters the proxy, and boxing breaks the async
+    // recursion cycle (runtime recursion itself is blocked by validation/guards).
+    let call = Box::pin(complete_for(state, Dialect::OpenAiChat, &body, key));
+    let decision = tokio::time::timeout(SMART_DECISION_TIMEOUT, call).await;
+    let start = match decision {
+        Ok(Ok(response)) => match smart_choice(&response, &combo.models) {
+            Some(index) => index,
+            None => {
+                tracing::warn!(request_id = %trace.request_id, combo = %name, router = %router, "smart combo returned no listed choice; using the first candidate");
+                0
+            }
+        },
+        Ok(Err(error)) => {
+            tracing::warn!(request_id = %trace.request_id, combo = %name, router = %router, error = %error, "smart combo decision failed; using the first candidate");
+            0
+        }
+        Err(_) => {
+            tracing::warn!(request_id = %trace.request_id, combo = %name, router = %router, "smart combo decision timed out; using the first candidate");
+            0
+        }
+    };
+    Ok(start)
+}
+
+fn smart_prompt(canonical: &ChatRequest, models: &[String]) -> String {
+    let request = canonical
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == rrouter_core::Role::User)
+        .map(|message| message.joined_text())
+        .unwrap_or_default();
+    let request: String = request.chars().take(SMART_PROMPT_CHARS).collect();
+    let mut prompt = String::from(
+        "You are a routing policy for a language-model gateway. Choose exactly one \
+         candidate for the user request. Reply with JSON only, in the form \
+         {\"choice\":\"<exact candidate>\"}.\n\nCandidates:\n",
+    );
+    for (index, model) in models.iter().enumerate() {
+        prompt.push_str(&format!("{}. {model}\n", index + 1));
+    }
+    prompt.push_str("\nUser request:\n");
+    prompt.push_str(&request);
+    prompt
+}
+
+fn smart_choice(response: &ChatResponse, models: &[String]) -> Option<usize> {
+    let text: String = response
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let text = text.trim();
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    let value: Value = serde_json::from_str(&text[start..=end]).ok()?;
+    let choice = value.get("choice")?.as_str()?.trim();
+    models.iter().position(|model| model == choice)
+}
+
 /// The request's provider policy: the body's `provider` object with the `x-rrouter-*`
 /// headers laid over it. `None` means the request expressed no preference.
 ///
 /// Parsed once per request so a validation error is a `400` before any planning, and so
 /// the policy cannot disagree with the body field that will be stripped from the
 /// outbound request (the gateway consumes `provider`; a provider must not see it).
-fn provider_policy(body: &Value, headers: &HeaderMap) -> Result<Option<ProviderPolicy>> {
+pub(crate) fn provider_policy(body: &Value, headers: &HeaderMap) -> Result<Option<ProviderPolicy>> {
     ProviderPolicy::from_request(body, |name| {
         headers.get(name).and_then(|value| value.to_str().ok())
     })
@@ -337,6 +479,7 @@ async fn special_inner(
                 team_id: caller.team_id(),
                 canary: config.canary.as_ref(),
                 canary_seed,
+                combo_start: None,
             },
         )
         .await?;
@@ -716,6 +859,7 @@ async fn json_plan(
                 team_id: caller.team_id(),
                 canary: config.canary.as_ref(),
                 canary_seed,
+                combo_start: None,
             },
         )
         .await?;
@@ -937,6 +1081,7 @@ async fn transcriptions_inner(
                         team_id: caller.team_id(),
                         canary: config.canary.as_ref(),
                         canary_seed,
+                        combo_start: None,
                     },
                 )
                 .await?
@@ -1185,9 +1330,15 @@ async fn handle(
     let policy = provider_policy(&body, headers)?;
     let affinity = affinity_of(&canonical);
     let canary_seed = canary_seed_for(trace, Some(affinity));
+    // Combo strategy is request-scoped: round-robin advances its durable cursor and a
+    // smart decision runs exactly once here, before the plan that dispatch consumes.
+    let combo_start = combo_rotation(state, &model, &canonical, key_id, trace).await?;
+    // Subscription headroom is a cached, per-account hint. Reading it never performs a
+    // provider call: the background refresh owns that traffic.
+    let capacity = crate::provider_usage::cached_hints();
     let plan = state
         .planner
-        .plan(
+        .plan_with_capacity(
             state.catalog.as_ref(),
             state.store.as_ref(),
             PlanRequest {
@@ -1200,7 +1351,10 @@ async fn handle(
                 team_id: caller.team_id(),
                 canary: config.canary.as_ref(),
                 canary_seed,
+                combo_start,
             },
+            Some(&capacity),
+            f64::from(config.subscription_reserve_percent),
         )
         .await?;
     let client_stream = plan.stream || canonical.stream;
@@ -1408,6 +1562,7 @@ async fn handle(
                 policy.as_ref(),
                 caller.allowed_models(),
                 caller.team_id(),
+                combo_start,
                 trace,
                 redact_pii,
             )
@@ -1554,6 +1709,11 @@ pub async fn complete_for(
         Some(id) => state.store.key_team(id).await?,
         None => None,
     };
+    // A probe is a real request: its combo strategy resolves once here, and the same
+    // start is handed to the planner below (no second round-robin advance).
+    let canonical = rrouter_translate::parse_request(inbound, body)?;
+    let model = state.mapped_model(key, &canonical.model).await?;
+    let combo_start = combo_rotation(state, &model, &canonical, key, &trace).await?;
     complete_traced(
         state,
         inbound,
@@ -1564,6 +1724,7 @@ pub async fn complete_for(
         policy.as_ref(),
         None,
         team_id,
+        combo_start,
         &trace,
         false,
     )
@@ -1601,6 +1762,7 @@ async fn complete_traced(
     policy: Option<&ProviderPolicy>,
     allowed_models: Option<&[String]>,
     team_id: Option<Uuid>,
+    combo_start: Option<usize>,
     trace: &RequestTrace,
     redact_pii: bool,
 ) -> Result<(Candidate, rrouter_core::ChatResponse)> {
@@ -1612,9 +1774,10 @@ async fn complete_traced(
     let config = state.config.load();
     let affinity = affinity_of(&canonical);
     let canary_seed = canary_seed_for(trace, Some(affinity));
+    let capacity = crate::provider_usage::cached_hints();
     let plan = state
         .planner
-        .plan(
+        .plan_with_capacity(
             state.catalog.as_ref(),
             state.store.as_ref(),
             PlanRequest {
@@ -1627,7 +1790,10 @@ async fn complete_traced(
                 team_id,
                 canary: config.canary.as_ref(),
                 canary_seed,
+                combo_start,
             },
+            Some(&capacity),
+            f64::from(config.subscription_reserve_percent),
         )
         .await?;
     let upstream_stream =
@@ -3680,6 +3846,7 @@ async fn embed_text(
                 team_id,
                 canary: None,
                 canary_seed: 0,
+                combo_start: None,
             },
         )
         .await?;
@@ -3831,6 +3998,7 @@ async fn embeddings_inner(
                 team_id: caller.team_id(),
                 canary: config.canary.as_ref(),
                 canary_seed,
+                combo_start: None,
             },
         )
         .await?;

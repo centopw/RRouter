@@ -645,6 +645,9 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
             "DROP TABLE IF EXISTS user_model_preferences; \
              DROP TABLE IF EXISTS model_preset_versions; \
              DROP TABLE IF EXISTS model_presets; \
+             ALTER TABLE combos DROP COLUMN strategy; \
+             ALTER TABLE combos DROP COLUMN router_model; \
+             ALTER TABLE combos DROP COLUMN cursor; \
              PRAGMA user_version = 29;",
         )
         .expect("rewind to v29");
@@ -677,5 +680,5 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
     assert_eq!(version, SCHEMA_VERSION);
-    assert_eq!(version, 30);
+    assert_eq!(version, 31);
 }

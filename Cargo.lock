@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "rrouter-auth"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "axum",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "rrouter-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1606,7 +1606,7 @@ dependencies = [
 
 [[package]]
 name = "rrouter-gateway"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "rrouter-router"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "rrouter-rtk"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "rrouter-core",
  "serde_json",
@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "rrouter-store"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1692,7 +1692,7 @@ dependencies = [
 
 [[package]]
 name = "rrouter-translate"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "bytes",
  "rrouter-core",
@@ -1703,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "rrouter-ui"
-version = "0.4.3"
+version = "0.4.4"
 
 [[package]]
 name = "rusqlite"

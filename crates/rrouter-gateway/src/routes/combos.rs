@@ -15,6 +15,9 @@ fn combo_view(c: &rrouter_store::Combo) -> serde_json::Value {
         "id": c.id.to_string(),
         "name": c.name,
         "models": c.models,
+        "strategy": c.strategy.as_str(),
+        "router_model": c.router_model,
+        "cursor": c.cursor,
         "created_at": c.created_at,
     })
 }
@@ -26,7 +29,9 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-/// Body: `{name, models: ["m1","m2"]}`; an existing name is replaced.
+/// Body: `{name, models: ["m1","m2"], strategy?, router_model?}`; an existing name is
+/// replaced. `strategy` is `fallback` (default), `round_robin` or `smart`; only `smart`
+/// accepts a `router_model`, and it must not resolve to a combo (validation in the store).
 pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response {
     let value = match body_json(body).await {
         Ok(v) => v,
@@ -50,7 +55,23 @@ pub async fn create(State(state): State<Arc<AppState>>, body: Body) -> Response 
             "models must be a non-empty array of model strings".into(),
         ));
     }
-    match state.store.upsert_combo(&name, &models).await {
+    let strategy = match value.get("strategy").and_then(|v| v.as_str()) {
+        Some(raw) => match rrouter_store::ComboStrategy::parse(raw) {
+            Some(strategy) => strategy,
+            None => {
+                return admin_error(&rrouter_core::Error::BadRequest(format!(
+                    "unknown combo strategy {raw:?}; use fallback, round_robin or smart"
+                )))
+            }
+        },
+        None => rrouter_store::ComboStrategy::Fallback,
+    };
+    let router_model = value.get("router_model").and_then(|v| v.as_str());
+    match state
+        .store
+        .upsert_combo_with(&name, &models, strategy, router_model)
+        .await
+    {
         Ok(combo) => ok_json(combo_view(&combo)),
         Err(e) => admin_error(&e),
     }

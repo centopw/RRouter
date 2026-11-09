@@ -51,11 +51,11 @@ pub use presets::{
 pub use rrouter_auth::{CredentialStore, Credentials};
 pub use store::{
     cache_key, window_reset, window_start, AccountQuota, AccountQuotaState, AccountUsage, ApiKey,
-    ApiKeyPatch, AttemptRecord, BudgetWindow, CacheEntry, Combo, Connection, ConnectionScope,
-    ExhaustedAccounts, Guardrails, KeyModel, KeyScope, ModelAlias, ModelCost, ModelRow,
-    PromptTemplate, PromptTemplateVersion, PruneReport, SemanticCacheCandidate, SemanticCacheEntry,
-    SemanticCacheScope, StatusFilter, Store, UsageBucket, UsageModelBucket, UsageQuery,
-    UsageRecord, UsageSummary, API_KEY_PREFIX,
+    ApiKeyPatch, AttemptRecord, BudgetWindow, CacheEntry, Combo, ComboStrategy, Connection,
+    ConnectionScope, ExhaustedAccounts, Guardrails, KeyModel, KeyScope, ModelAlias, ModelCost,
+    ModelRow, PromptTemplate, PromptTemplateVersion, PruneReport, SemanticCacheCandidate,
+    SemanticCacheEntry, SemanticCacheScope, StatusFilter, Store, UsageBucket, UsageModelBucket,
+    UsageQuery, UsageRecord, UsageSummary, API_KEY_PREFIX, MAX_COMBO_ROUTER_MODEL,
 };
 pub use teams::{normalize_name, Team, TeamMember, TeamPatch, TeamRole, TeamSpend, MAX_TEAM_NAME};
 pub use users::{

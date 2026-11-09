@@ -46,7 +46,7 @@ use rrouter_core::{Dialect, Error, Result};
 use rrouter_store::{AccountQuotaState, Connection, ConnectionScope, Store};
 use uuid::Uuid;
 
-use crate::candidate::{Candidate, Plan};
+use crate::candidate::{Candidate, CapacityHints, Plan};
 use crate::capabilities::capabilities;
 use crate::catalog::Catalog;
 use crate::policy::{candidate_allowed, DataCollection, ProviderPolicy};
@@ -229,6 +229,11 @@ pub struct PlanRequest<'a> {
     /// Stable seed for the canary decision (see [`canary_seed`]). Unused when `canary`
     /// is `None`, and equal seeds always take the same side.
     pub canary_seed: u64,
+    /// Where a combo's model list starts for this request. `None` keeps the stored order;
+    /// round-robin and smart strategies pass the chosen index. Applied only after a combo
+    /// resolves, before its entries are expanded, so allowlist/policy/team filters still
+    /// see every expanded candidate.
+    pub combo_start: Option<usize>,
 }
 
 impl<'a> PlanRequest<'a> {
@@ -244,6 +249,7 @@ impl<'a> PlanRequest<'a> {
             team_id: None,
             canary: None,
             canary_seed: 0,
+            combo_start: None,
         }
     }
 }
@@ -284,6 +290,29 @@ impl Planner {
         store: &Store,
         req: PlanRequest<'_>,
     ) -> Result<Plan> {
+        self.plan_with_capacity(catalog, store, req, None, 0.0)
+            .await
+    }
+
+    /// [`Self::plan`] with subscription headroom applied.
+    ///
+    /// `reserve_percent` is a hard lower bound on health: an account whose most-consumed
+    /// plan window is at or above it is skipped **while at least one healthier candidate
+    /// remains**. If every candidate is over the reserve the plan keeps all of them and
+    /// orders the healthiest first, because refusing a request the provider would still
+    /// serve is worse than spending a nearly-full window. `0` disables the filter.
+    ///
+    /// Hints also feed the existing intra-priority headroom order together with operator
+    /// quota utilization, so priority, strategy, canary, provider policy, team isolation
+    /// and allowlists keep their existing precedence.
+    pub async fn plan_with_capacity(
+        &self,
+        catalog: &Catalog,
+        store: &Store,
+        req: PlanRequest<'_>,
+        capacity: Option<&CapacityHints>,
+        reserve_percent: f64,
+    ) -> Result<Plan> {
         let model = req.model;
         let stream = req.stream;
         let affinity = req.affinity;
@@ -311,7 +340,9 @@ impl Planner {
             }
         }
 
-        let targets = self.targets(catalog, store, model, &aliases).await?;
+        let targets = self
+            .targets(catalog, store, model, &aliases, req.combo_start)
+            .await?;
         if targets.is_empty() {
             return Err(Error::NoRoute {
                 model: model.to_string(),
@@ -500,13 +531,13 @@ impl Planner {
         // With no quota rows the map is empty, neither rule can fire, and the plan is
         // exactly the order the strategy produced — the property the no-quota test pins.
         let quotas = store.account_quota_states().await?;
+        let mut utilization: HashMap<Uuid, f64> = HashMap::new();
         if !quotas.is_empty() {
             let now = now_unix();
             let mut exhausted: Vec<Uuid> = Vec::new();
             let mut wait: Option<u64> = None;
-            let mut headroom: HashMap<Uuid, f64> = HashMap::with_capacity(quotas.len());
             for state in &quotas {
-                headroom.insert(state.quota.connection_id, quota_utilization(state));
+                utilization.insert(state.quota.connection_id, quota_utilization(state));
                 if !state.exhausted {
                     continue;
                 }
@@ -532,7 +563,38 @@ impl Planner {
                     });
                 }
             }
-            headroom_order(&mut candidates, &headroom);
+        }
+        // Subscription windows are a second health input. Filter only when the setting is
+        // on and at least one candidate is below the reserve; an all-over plan stays
+        // serviceable and is ordered by the same intra-priority headroom pass.
+        if let Some(hints) = capacity.filter(|hints| !hints.is_empty()) {
+            let reserve = reserve_percent.clamp(0.0, 100.0);
+            // `0` means off, not "reserve nothing": no filter and no reordering, so an
+            // operator who disables the feature gets exactly the pre-capacity plan.
+            if reserve > 0.0 {
+                let healthy = candidates
+                    .iter()
+                    .filter(|candidate| {
+                        hints
+                            .used_percent(candidate.connection)
+                            .is_none_or(|used| used < reserve)
+                    })
+                    .count();
+                if healthy > 0 && healthy < candidates.len() {
+                    candidates.retain(|candidate| {
+                        hints
+                            .used_percent(candidate.connection)
+                            .is_none_or(|used| used < reserve)
+                    });
+                }
+                for (connection, hint) in hints.iter() {
+                    let slot = utilization.entry(connection).or_insert(0.0);
+                    *slot = slot.max(hint.used_percent / 100.0);
+                }
+            }
+        }
+        if !utilization.is_empty() {
+            headroom_order(&mut candidates, &utilization);
         }
 
         // Operator A/B: promote the canary provider inside each equal-priority run, after
@@ -577,6 +639,7 @@ impl Planner {
         store: &Store,
         model: &str,
         aliases: &[rrouter_store::ModelAlias],
+        combo_start: Option<usize>,
     ) -> Result<Vec<(String, String, bool)>> {
         let mut current = model.to_string();
 
@@ -594,7 +657,12 @@ impl Planner {
             for a in aliases {
                 inner_aliases.insert(a.alias.as_str(), a.target.as_str());
             }
-            for entry in &combo.models {
+            let mut models = combo.models.clone();
+            if !models.is_empty() {
+                let start = combo_start.unwrap_or(0) % models.len();
+                models.rotate_left(start);
+            }
+            for entry in &models {
                 // Resolve one alias hop inside combo entries too; combos are
                 // operator-authored and routinely mix aliases with raw ids.
                 let resolved = inner_aliases
@@ -1107,6 +1175,102 @@ mod tests {
         assert_eq!(plan.candidates.len(), 2);
         assert_eq!(plan.candidates[0].connection, idle, "90% spent yields");
         assert_eq!(plan.candidates[1].connection, busy);
+    }
+
+    fn hint(used: f64) -> crate::candidate::CapacityHint {
+        crate::candidate::CapacityHint {
+            used_percent: used,
+            resets_at: None,
+        }
+    }
+
+    async fn capacity_plan(store: &Store, hints: &CapacityHints, reserve: f64) -> Plan {
+        Planner::new()
+            .plan_with_capacity(
+                &catalog(),
+                store,
+                PlanRequest::new("claude/claude-sonnet-4-5"),
+                Some(hints),
+                reserve,
+            )
+            .await
+            .expect("plan")
+    }
+
+    /// An account at/above the reserve is skipped while a healthier one remains, even
+    /// across priority tiers: preserving a subscription window is the point of the knob.
+    #[tokio::test]
+    async fn subscription_reserve_filters_a_nearly_full_account() {
+        let store = store_with(&[("claude", 0, 100), ("claude", 1, 100)]).await;
+        let conns = store.list_connections(None).await.expect("connections");
+        let busy = conns[0].id;
+        let healthy = conns[1].id;
+        let mut hints = CapacityHints::new();
+        hints.insert(busy, hint(95.0));
+        hints.insert(healthy, hint(20.0));
+
+        let plan = capacity_plan(&store, &hints, 90.0).await;
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.candidates[0].connection, healthy);
+        assert_eq!(
+            plan.candidates[0].priority, 1,
+            "the healthy lower-priority account wins"
+        );
+    }
+
+    /// If every account is over the reserve the request still runs; the healthiest is
+    /// first. A hint is a filter, never a reason to refuse service by itself.
+    #[tokio::test]
+    async fn all_accounts_over_reserve_stay_routable_healthiest_first() {
+        let store = store_with(&[("claude", 0, 100), ("claude", 0, 100)]).await;
+        let conns = store.list_connections(None).await.expect("connections");
+        let mut hints = CapacityHints::new();
+        hints.insert(conns[0].id, hint(99.0));
+        hints.insert(conns[1].id, hint(95.0));
+
+        let plan = capacity_plan(&store, &hints, 90.0).await;
+        assert_eq!(plan.candidates.len(), 2, "all-over is still serviceable");
+        assert_eq!(plan.candidates[0].connection, conns[1].id);
+        assert_eq!(plan.candidates[1].connection, conns[0].id);
+    }
+
+    /// `0` means off: no filter and no reordering, exactly the pre-capacity plan.
+    #[tokio::test]
+    async fn a_zero_reserve_disables_the_filter_and_ordering() {
+        let store = store_with(&[("claude", 0, 100), ("claude", 0, 100)]).await;
+        let conns = store.list_connections(None).await.expect("connections");
+        let mut hints = CapacityHints::new();
+        hints.insert(conns[0].id, hint(99.0));
+        hints.insert(conns[1].id, hint(10.0));
+
+        let plan = capacity_plan(&store, &hints, 0.0).await;
+        assert_eq!(plan.candidates.len(), 2);
+        assert_eq!(plan.candidates[0].connection, conns[0].id);
+        assert_eq!(plan.candidates[1].connection, conns[1].id);
+    }
+
+    /// No hints must be byte-for-byte the old plan: capacity is opt-in data, not a
+    /// silent reordering of every installation.
+    #[tokio::test]
+    async fn no_capacity_hints_keeps_the_original_plan() {
+        let store = store_with(&[("claude", 0, 100), ("claude", 0, 100)]).await;
+        let request = || PlanRequest::new("claude/claude-sonnet-4-5");
+        // A fresh planner on each call so the round-robin cursor cannot differ.
+        let plain = Planner::new()
+            .plan(&catalog(), &store, request())
+            .await
+            .expect("plain");
+        let with_empty = Planner::new()
+            .plan_with_capacity(
+                &catalog(),
+                &store,
+                request(),
+                Some(&CapacityHints::new()),
+                90.0,
+            )
+            .await
+            .expect("empty hints");
+        assert_eq!(plain, with_empty);
     }
 
     /// Without quota rows the headroom pass must be invisible: the plan keeps the exact

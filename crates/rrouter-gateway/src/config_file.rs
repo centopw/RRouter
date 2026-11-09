@@ -121,6 +121,7 @@ struct FileConfig {
     access_log: Option<bool>,
     hedge_ms: Option<u64>,
     canary: Option<String>,
+    subscription_reserve_percent: Option<u8>,
     semantic_cache: Option<String>,
     semantic_cache_threshold: Option<f64>,
     semantic_embedding_model: Option<String>,
@@ -199,6 +200,11 @@ impl FileLayer {
         insert_num(&mut values, "access_log", file.access_log);
         insert_num(&mut values, "hedge_ms", file.hedge_ms);
         insert(&mut values, "canary", file.canary);
+        insert_num(
+            &mut values,
+            "subscription_reserve_percent",
+            file.subscription_reserve_percent,
+        );
         insert(&mut values, "semantic_cache", file.semantic_cache);
         insert_num(
             &mut values,

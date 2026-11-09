@@ -170,6 +170,7 @@ fn config() -> Config {
         access_log: false,
         hedge_ms: 0,
         canary: None,
+        subscription_reserve_percent: 90,
         semantic_cache: rrouter_gateway::config::CacheMode::Off,
         semantic_cache_threshold: 0.92,
         semantic_embedding_model: None,
@@ -496,4 +497,27 @@ async fn a_missing_project_is_a_clear_400_without_an_upstream_call() {
         "the refusal names the missing field: {body}"
     );
     assert_eq!(mock.hits(), 0, "a missing project never reaches upstream");
+}
+
+#[tokio::test]
+async fn route_explain_returns_the_planned_candidate_without_dispatching() {
+    let mock = Mock::start(vec![]).await;
+    let h = harness();
+    h.connect(&mock, PROJECT).await;
+
+    let (status, body) = h
+        .post(
+            "/api/route/explain",
+            json!({"model": format!("{PROVIDER}/gemini-3-pro")}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let data = &body["data"];
+    assert_eq!(data["model"], format!("{PROVIDER}/gemini-3-pro"));
+    assert_eq!(data["subscription_reserve_percent"], 90);
+    assert_eq!(data["capacity_hints"], 0);
+    assert_eq!(data["candidates"].as_array().expect("candidates").len(), 1);
+    assert_eq!(data["candidates"][0]["provider"], PROVIDER);
+    assert_eq!(data["candidates"][0]["dialect"], "google_code_assist");
+    assert_eq!(mock.hits(), 0, "explain is a plan, not a dispatch");
 }
