@@ -52,16 +52,16 @@ curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | s
 ```
 
 ```sh
-# pin the newest published release (v0.4.0) / choose a directory
-RROUTER_VERSION=v0.4.0 RROUTER_INSTALL_DIR="$HOME/bin" \
+# pin the newest published release (v0.4.1) / choose a directory
+RROUTER_VERSION=v0.4.1 RROUTER_INSTALL_DIR="$HOME/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
 
 # see what it would do
 RROUTER_DRY_RUN=1 curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | sh
 ```
 
-`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.0 is
-the newest. The workspace is 0.4.0 — tag artifacts are published by the release workflow.
+`install.sh` downloads a **published** release, so `RROUTER_VERSION` must name one: v0.4.1 is
+the newest. The workspace is 0.4.1 — tag artifacts are published by the release workflow.
 
 ## Quick start
 

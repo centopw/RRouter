@@ -2,6 +2,13 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.4.1 — 2026-11-09
+
+### Documentation and media
+- Added the 10-second product demo (MP4/WebM/GIF), dashboard screenshots for desktop and mobile, and a Mermaid architecture diagram with a numbered runtime flow.
+- README now leads with the demo and screenshots; install and roadmap references point at the new release.
+- This release carries the same gateway features as 0.4.0; no runtime behavior changed.
+
 ## 0.4.0 — 2026-11-09
 
 ### Added

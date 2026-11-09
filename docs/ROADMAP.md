@@ -35,7 +35,7 @@ It is a capability inventory, not a completion score.
 ## Status
 
 Published releases through **0.2.3** were verified live (installer, multi-arch image,
-release binaries). **0.4.0** is the current release: everything listed above is
+release binaries). **0.4.1** is the current release: everything listed above is
 implemented in this tree, and `CHANGELOG.md` → `Unreleased` is the authoritative list of
 what changed since 0.2.3. This page deliberately does not claim a completion percentage;
 release readiness is the coordinator's verification.
