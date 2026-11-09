@@ -5,9 +5,12 @@ import {
   clearAccountQuota,
   getAccountSubscriptions,
   getAccountQuotas,
+  getQuotaPings,
+  isEndpointMissing,
   list,
   listPage,
   updateAccountQuota,
+  updateQuotaPing,
   type Alias,
   type Combo,
   type Connection,
@@ -37,6 +40,7 @@ import {
   type UpdateConnection,
   type UpdateAccountQuota,
   type UpdateKey,
+  type UpdateQuotaPing,
   type UsageBucket,
   type UsageDetail,
   type UsageEvent,
@@ -66,6 +70,7 @@ export const qk = {
   connections: ["connections"] as const,
   accountQuotas: ["accounts", "quotas"] as const,
   accountSubscriptions: ["accounts", "subscriptions"] as const,
+  quotaPings: ["quota-pings"] as const,
   authState: ["auth", "state"] as const,
   me: ["auth", "me"] as const,
   audit: (kind: string) => ["audit", kind] as const,
@@ -156,6 +161,29 @@ export function useClearAccountQuota() {
   return useMutation({
     mutationFn: clearAccountQuota,
     onSuccess: () => void client.invalidateQueries({ queryKey: qk.accountQuotas }),
+  });
+}
+
+/** Auto-ping schedules for Claude/Codex connections; absent on older builds. */
+export function useQuotaPings(enabled = true) {
+  return useQuery({
+    queryKey: qk.quotaPings,
+    queryFn: getQuotaPings,
+    enabled,
+    // Next ping moves with provider resets; a minute keeps the badge honest.
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+    // A 404/405 is a build without the feature, not a transient failure worth retrying.
+    retry: (count, error) => !isEndpointMissing(error) && count < 1,
+  });
+}
+
+export function useUpdateQuotaPing() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: UpdateQuotaPing }) =>
+      updateQuotaPing(id, patch),
+    onSuccess: () => void client.invalidateQueries({ queryKey: qk.quotaPings }),
   });
 }
 

@@ -18,6 +18,8 @@ pub mod metrics;
 pub mod models_registry;
 pub mod provider_usage;
 pub mod proxy;
+pub mod quota_ping;
+pub mod quota_ping_plan;
 pub mod redaction;
 pub mod routes;
 pub mod semantic;
@@ -76,6 +78,7 @@ pub fn auth_header(headers: &HeaderMap) -> Option<String> {
 pub fn app(state: Arc<AppState>) -> Router {
     spawn_model_sync(&state);
     spawn_provider_usage(&state);
+    spawn_quota_ping(&state);
     updates::spawn_daily(&state);
     // Eval runs are in-process work; anything still active at boot is orphaned.
     routes::evals::sweep_orphan_runs(&state);
@@ -219,6 +222,11 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/accounts/quotas", get(routes::quotas::list))
         .route("/accounts/usage", get(routes::quotas::usage))
+        .route("/quota-pings", get(routes::quota_pings::list))
+        .route(
+            "/quota-pings/{connection_id}",
+            put(routes::quota_pings::update),
+        )
         .route(
             "/accounts/quotas/{id}",
             put(routes::quotas::update).delete(routes::quotas::remove),
@@ -389,6 +397,15 @@ fn spawn_provider_usage(state: &Arc<AppState>) {
         return;
     }
     START.call_once(|| provider_usage::spawn_refresh(Arc::clone(state)));
+}
+
+/// Starts the quota-ping scheduler once per process, next to the usage refresh.
+fn spawn_quota_ping(state: &Arc<AppState>) {
+    static START: std::sync::Once = std::sync::Once::new();
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    START.call_once(|| quota_ping::spawn(Arc::clone(state)));
 }
 
 /// CORS: echo only the configured origins and loopback tooling.

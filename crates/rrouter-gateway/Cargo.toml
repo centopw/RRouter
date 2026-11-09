@@ -51,6 +51,7 @@ hmac.workspace = true
 hex.workspace = true
 flate2.workspace = true
 tar.workspace = true
+jiff.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -299,6 +299,58 @@ export type UpdateAccountQuota = Partial<{
   max_cost_micros: number;
 }>;
 
+/** Start a subscription window with a tiny request; Claude/Codex OAuth accounts only. */
+export type QuotaPingMode = "off" | "reset" | "schedule" | "smart";
+
+/** Usage history behind the smart stagger: recent requests and the assigned phase. */
+export type QuotaPingSmart = {
+  recent_requests: number;
+  phase_offset_secs: number;
+};
+
+/** One active Claude/Codex connection's auto-ping schedule and last known state. */
+export type QuotaPingRow = {
+  connection_id: string;
+  provider: string;
+  name: string | null;
+  mode: QuotaPingMode;
+  anchor: string;
+  timezone: string;
+  window_hours: number;
+  slots_per_day: number;
+  ping_model: string | null;
+  last_ping_at: number | null;
+  last_ping_reset_at: number | null;
+  next_ping_at: number | null;
+  last_error: string | null;
+  updated_at: number;
+  smart: QuotaPingSmart;
+};
+
+/** Omitted fields keep their stored value; `mode=off` clears the schedule server-side. */
+export type UpdateQuotaPing = Partial<{
+  mode: QuotaPingMode;
+  anchor: string;
+  timezone: string;
+  window_hours: number;
+  slots_per_day: number;
+  ping_model: string | null;
+}>;
+
+export async function getQuotaPings(): Promise<QuotaPingRow[]> {
+  const body = await api.get<{ data?: QuotaPingRow[] }>("/api/quota-pings");
+  return body.data ?? [];
+}
+
+export function updateQuotaPing(id: string, patch: UpdateQuotaPing): Promise<QuotaPingRow> {
+  return api.put<QuotaPingRow>(`/api/quota-pings/${encodeURIComponent(id)}`, patch);
+}
+
+/** Older builds predate a route; the UI hides the control instead of reporting an error. */
+export function isEndpointMissing(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 404 || error.status === 405);
+}
+
 /**
  * What a key is allowed to reach. `inference` keys call `/v1` and carry limits and
  * guardrails; `admin` keys manage the gateway (`/api/*`, `/metrics`) and never spend tokens.

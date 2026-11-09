@@ -68,15 +68,34 @@ pub async fn account(state: &AppState, conn: &Connection) -> AccountUsage {
         return cached;
     }
     let value = match fetch(state, conn).await {
-        Ok(windows) => AccountUsage {
-            connection_id: conn.id.to_string(),
-            provider: conn.provider.clone(),
-            name: conn.name.clone(),
-            plan: windows.plan,
-            windows: windows.windows,
-            error: None,
-            fetched_at: crate::now_unix(),
-        },
+        Ok(windows) => {
+            let sampled_at = crate::now_unix();
+            for window in &windows.windows {
+                let _ = state
+                    .store
+                    .insert_quota_ping_sample(
+                        conn.id,
+                        &window.id,
+                        window.used_percent,
+                        window.resets_at,
+                        sampled_at,
+                    )
+                    .await;
+            }
+            let _ = state
+                .store
+                .prune_quota_ping_samples(sampled_at - 30 * 24 * 3600)
+                .await;
+            AccountUsage {
+                connection_id: conn.id.to_string(),
+                provider: conn.provider.clone(),
+                name: conn.name.clone(),
+                plan: windows.plan,
+                windows: windows.windows,
+                error: None,
+                fetched_at: sampled_at,
+            }
+        }
         Err(e) => {
             tracing::debug!(provider = %conn.provider, error = %e, "subscription usage fetch failed");
             AccountUsage {
@@ -581,7 +600,7 @@ fn reset_at(window: &Value) -> Option<i64> {
 }
 
 /// The ChatGPT account id lives in the OAuth id token (or an extra credential field).
-fn codex_account_id(
+pub(crate) fn codex_account_id(
     id_token: Option<&str>,
     extra: &serde_json::Map<String, Value>,
 ) -> Option<String> {

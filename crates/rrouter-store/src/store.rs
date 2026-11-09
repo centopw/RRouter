@@ -491,6 +491,78 @@ pub struct ModelPreference {
     pub updated_at: i64,
 }
 
+/// Longest ping model reference.
+pub const MAX_QUOTA_PING_MODEL: usize = 200;
+/// Schema spelling of the auto-ping mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaPingMode {
+    Off,
+    Reset,
+    Schedule,
+    Smart,
+}
+
+impl QuotaPingMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Reset => "reset",
+            Self::Schedule => "schedule",
+            Self::Smart => "smart",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "off" => Some(Self::Off),
+            "reset" => Some(Self::Reset),
+            "schedule" => Some(Self::Schedule),
+            "smart" => Some(Self::Smart),
+            _ => None,
+        }
+    }
+
+    pub fn from_stored(raw: &str) -> Self {
+        Self::parse(raw).unwrap_or(Self::Off)
+    }
+}
+
+/// One connection's auto-ping configuration plus its last outcome.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaPing {
+    pub connection_id: Uuid,
+    pub mode: QuotaPingMode,
+    pub anchor: String,
+    pub timezone: String,
+    pub window_hours: f64,
+    pub slots_per_day: u32,
+    pub ping_model: Option<String>,
+    pub last_ping_at: Option<i64>,
+    pub last_ping_reset_at: Option<i64>,
+    pub last_ping_slot: Option<String>,
+    pub last_error: Option<String>,
+    pub updated_at: i64,
+}
+
+impl QuotaPing {
+    pub fn defaults(connection_id: Uuid) -> Self {
+        Self {
+            connection_id,
+            mode: QuotaPingMode::Off,
+            anchor: "09:30".into(),
+            timezone: "UTC".into(),
+            window_hours: 5.0,
+            slots_per_day: 3,
+            ping_model: None,
+            last_ping_at: None,
+            last_ping_reset_at: None,
+            last_ping_slot: None,
+            last_error: None,
+            updated_at: 0,
+        }
+    }
+}
+
 /// One per-key model mapping: the client's `from` ref is routed as `to`.
 ///
 /// A mapping is one hop and runs before alias/combo resolution, so a client can keep a
@@ -2101,6 +2173,204 @@ impl Store {
         Ok(n > 0)
     }
 
+    // ----- quota auto-ping ---------------------------------------------------------
+
+    /// Every stored ping configuration, ordered by connection id.
+    pub async fn quota_pings(&self) -> Result<Vec<QuotaPing>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT connection_id, mode, anchor, timezone, window_hours, slots_per_day, \
+                 ping_model, last_ping_at, last_ping_reset_at, last_ping_slot, last_error, \
+                 updated_at FROM quota_pings ORDER BY connection_id ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], row_to_quota_ping)
+            .map_err(migrations::db_err)?;
+        rows.map(|row| row.map_err(migrations::db_err)).collect()
+    }
+
+    pub async fn quota_ping(&self, connection_id: Uuid) -> Result<Option<QuotaPing>> {
+        self.conn()
+            .query_row(
+                "SELECT connection_id, mode, anchor, timezone, window_hours, slots_per_day, \
+                 ping_model, last_ping_at, last_ping_reset_at, last_ping_slot, last_error, \
+                 updated_at FROM quota_pings WHERE connection_id = ?1",
+                params![connection_id.to_string()],
+                row_to_quota_ping,
+            )
+            .optional()
+            .map_err(migrations::db_err)
+    }
+
+    /// Insert or update the configuration half of a ping row. Last-ping fields are never
+    /// overwritten by a settings save, so a concurrent scheduler result survives.
+    pub async fn upsert_quota_ping(&self, ping: &QuotaPing) -> Result<QuotaPing> {
+        let anchor = validate_anchor(&ping.anchor)?;
+        let timezone = ping.timezone.trim();
+        if timezone.is_empty() || timezone.chars().count() > 100 {
+            return Err(Error::BadRequest(
+                "a timezone is required (at most 100 characters)".into(),
+            ));
+        }
+        if !(0.5..=24.0).contains(&ping.window_hours) {
+            return Err(Error::BadRequest(
+                "window_hours must be between 0.5 and 24".into(),
+            ));
+        }
+        let max_slots = (24.0 / ping.window_hours).floor() as u32;
+        if ping.slots_per_day == 0 || ping.slots_per_day > max_slots.max(1) {
+            return Err(Error::BadRequest(format!(
+                "slots_per_day must be between 1 and {max_slots}"
+            )));
+        }
+        let ping_model = ping
+            .ping_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+        if ping_model.is_some_and(|model| model.chars().count() > MAX_QUOTA_PING_MODEL) {
+            return Err(Error::BadRequest(format!(
+                "ping_model is limited to {MAX_QUOTA_PING_MODEL} characters"
+            )));
+        }
+        let stamp = now();
+        self.conn()
+            .execute(
+                "INSERT INTO quota_pings \
+                 (connection_id, mode, anchor, timezone, window_hours, slots_per_day, \
+                  ping_model, last_ping_at, last_ping_reset_at, last_ping_slot, last_error, \
+                  updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+                 ON CONFLICT(connection_id) DO UPDATE SET mode = excluded.mode, \
+                 anchor = excluded.anchor, timezone = excluded.timezone, \
+                 window_hours = excluded.window_hours, slots_per_day = excluded.slots_per_day, \
+                 ping_model = excluded.ping_model, updated_at = excluded.updated_at",
+                params![
+                    ping.connection_id.to_string(),
+                    ping.mode.as_str(),
+                    anchor,
+                    timezone,
+                    ping.window_hours,
+                    ping.slots_per_day as i64,
+                    ping_model,
+                    ping.last_ping_at,
+                    ping.last_ping_reset_at,
+                    ping.last_ping_slot,
+                    ping.last_error,
+                    stamp
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        self.quota_ping(ping.connection_id)
+            .await?
+            .ok_or_else(|| Error::Store("quota ping vanished after upsert".into()))
+    }
+
+    /// Record one ping outcome. `last_error = None` clears it; absent timestamps keep the
+    /// stored value so a schedule success does not erase a reset marker and vice versa.
+    pub async fn record_quota_ping(
+        &self,
+        connection_id: Uuid,
+        last_ping_at: Option<i64>,
+        last_ping_reset_at: Option<i64>,
+        last_ping_slot: Option<&str>,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        self.conn()
+            .execute(
+                "UPDATE quota_pings SET last_ping_at = COALESCE(?2, last_ping_at), \
+                 last_ping_reset_at = COALESCE(?3, last_ping_reset_at), \
+                 last_ping_slot = COALESCE(?4, last_ping_slot), last_error = ?5, \
+                 updated_at = ?6 WHERE connection_id = ?1",
+                params![
+                    connection_id.to_string(),
+                    last_ping_at,
+                    last_ping_reset_at,
+                    last_ping_slot,
+                    last_error,
+                    now()
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Forget the last reset/slot markers, used when a mode is switched off.
+    pub async fn clear_quota_ping_schedule(&self, connection_id: Uuid) -> Result<()> {
+        self.conn()
+            .execute(
+                "UPDATE quota_pings SET last_ping_reset_at = NULL, last_ping_slot = NULL, \
+                 last_error = NULL, updated_at = ?2 WHERE connection_id = ?1",
+                params![connection_id.to_string(), now()],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    pub async fn insert_quota_ping_sample(
+        &self,
+        connection_id: Uuid,
+        window_id: &str,
+        used_percent: f64,
+        resets_at: Option<i64>,
+        sampled_at: i64,
+    ) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO quota_ping_samples \
+                 (connection_id, window_id, used_percent, resets_at, sampled_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    connection_id.to_string(),
+                    window_id,
+                    used_percent,
+                    resets_at,
+                    sampled_at
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    pub async fn prune_quota_ping_samples(&self, before: i64) -> Result<usize> {
+        self.conn()
+            .execute(
+                "DELETE FROM quota_ping_samples WHERE sampled_at < ?1",
+                params![before],
+            )
+            .map_err(migrations::db_err)
+    }
+
+    /// Requests per connection since `since` (unix seconds). This is real gateway
+    /// traffic only: pings deliberately write no usage rows.
+    pub async fn recent_request_counts(
+        &self,
+        since: i64,
+    ) -> Result<std::collections::HashMap<Uuid, u64>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT connection_id, count(*) FROM usage \
+                 WHERE connection_id IS NOT NULL AND ts >= ?1 GROUP BY connection_id",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params![since], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (raw, count) = row.map_err(migrations::db_err)?;
+            if let Ok(id) = Uuid::parse_str(&raw) {
+                out.insert(id, count.max(0) as u64);
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn list_aliases(&self) -> Result<Vec<ModelAlias>> {
         let conn = self.conn();
         let mut stmt = conn
@@ -3645,6 +3915,41 @@ struct RawCombo {
     router_model: Option<String>,
     cursor: i64,
     created_at: i64,
+}
+
+fn row_to_quota_ping(r: &Row<'_>) -> rusqlite::Result<QuotaPing> {
+    Ok(QuotaPing {
+        connection_id: uuid_col(r.get(0)?)?,
+        mode: QuotaPingMode::from_stored(&r.get::<_, String>(1)?),
+        anchor: r.get(2)?,
+        timezone: r.get(3)?,
+        window_hours: r.get(4)?,
+        slots_per_day: r.get::<_, i64>(5)?.max(0) as u32,
+        ping_model: r.get(6)?,
+        last_ping_at: r.get(7)?,
+        last_ping_reset_at: r.get(8)?,
+        last_ping_slot: r.get(9)?,
+        last_error: r.get(10)?,
+        updated_at: r.get(11)?,
+    })
+}
+
+/// `HH:MM` in 24-hour form, exactly two digits each.
+fn validate_anchor(raw: &str) -> Result<String> {
+    let anchor = raw.trim();
+    let (hour, minute) = anchor
+        .split_once(':')
+        .ok_or_else(|| Error::BadRequest("anchor must be HH:MM".into()))?;
+    let valid = hour.len() == 2
+        && minute.len() == 2
+        && hour.bytes().all(|b| b.is_ascii_digit())
+        && minute.bytes().all(|b| b.is_ascii_digit())
+        && hour.parse::<u8>().is_ok_and(|h| h < 24)
+        && minute.parse::<u8>().is_ok_and(|m| m < 60);
+    if !valid {
+        return Err(Error::BadRequest("anchor must be HH:MM".into()));
+    }
+    Ok(format!("{hour}:{minute}"))
 }
 
 fn row_to_combo(r: &Row<'_>) -> rusqlite::Result<RawCombo> {

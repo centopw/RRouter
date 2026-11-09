@@ -13,6 +13,18 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - `POST /api/route/explain`: the ordered plan a request would execute — providers,
   connections, priorities, dialects and cached subscription headroom — without dispatching.
 
+## 0.5.0 — 2026-11-09
+
+### Added
+- Smart quota auto-ping for Claude and Codex OAuth accounts. Per-account modes: off, on reset, fixed schedule (anchor/timezone/window/slots), and smart.
+- Smart mode records subscription usage samples and staggers reset pings across accounts by recent traffic, so one fresh window remains available while another account is near its cap; idle accounts are skipped.
+- Admin API `GET/PUT /api/quota-pings` with next-ping previews and validation.
+- Providers UI auto-ping badge, settings drawer, schedule preview and smart fleet explanation.
+- Schema v34 adds `quota_pings` and `quota_ping_samples`.
+
+### Fixed
+- Codex auto-ping sends the account header and Responses-shaped input used by the CLI.
+
 ## 0.4.6 — 2026-11-09
 
 ### Fixed

@@ -12,13 +12,45 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 33;
+pub const SCHEMA_VERSION: i64 = 34;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34,
 ];
+
+/// V34: subscription quota auto-ping. `quota_pings` is one operator configuration per
+/// connection (absent means the API's off defaults); `quota_ping_samples` is the rolling
+/// usage history smart planning reads. Samples are pruned by age, not by count, because
+/// the scheduler only needs "recent traffic" and the history doubles as an audit of what
+/// the usage endpoint reported.
+const V34: &str = r#"
+CREATE TABLE IF NOT EXISTS quota_pings (
+  connection_id       TEXT PRIMARY KEY,
+  mode                TEXT NOT NULL DEFAULT 'off',
+  anchor              TEXT NOT NULL DEFAULT '09:30',
+  timezone            TEXT NOT NULL DEFAULT 'UTC',
+  window_hours        REAL NOT NULL DEFAULT 5,
+  slots_per_day       INTEGER NOT NULL DEFAULT 3,
+  ping_model          TEXT,
+  last_ping_at        INTEGER,
+  last_ping_reset_at  INTEGER,
+  last_ping_slot      TEXT,
+  last_error          TEXT,
+  updated_at          INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS quota_ping_samples (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id TEXT NOT NULL,
+  window_id     TEXT NOT NULL,
+  used_percent  REAL NOT NULL,
+  resets_at     INTEGER,
+  sampled_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_quota_ping_samples_connection
+  ON quota_ping_samples(connection_id, sampled_at);
+"#;
 
 /// V33: per-model preferred provider. A bare model id can be served by several
 /// providers; the operator picks one and routing places that provider's candidates
@@ -1374,6 +1406,39 @@ mod tests {
             (None, None, None, None),
             "a queued result has no answer yet"
         );
+    }
+
+    /// v33 → v34: quota ping tables and the sample index land empty.
+    #[test]
+    fn upgrades_from_v33_landing_v34_quota_pings() {
+        let mut c = Connection::open_in_memory().expect("open");
+        at_version(&mut c, 33);
+        assert_eq!(user_version(&c), 33);
+        assert!(!has_table(&c, "quota_pings"));
+        assert!(!has_table(&c, "quota_ping_samples"));
+        migrate(&mut c).expect("upgrade");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+        assert!(has_table(&c, "quota_pings"));
+        assert!(has_table(&c, "quota_ping_samples"));
+        assert!(has_index(
+            &c,
+            "quota_ping_samples",
+            "idx_quota_ping_samples_connection"
+        ));
+        c.execute(
+            "INSERT INTO quota_pings (connection_id, updated_at) VALUES ('c', 1)",
+            [],
+        )
+        .expect("ping defaults");
+        let (mode, anchor, timezone): (String, String, String) = c
+            .query_row(
+                "SELECT mode, anchor, timezone FROM quota_pings WHERE connection_id = 'c'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("defaults");
+        assert_eq!((mode.as_str(), anchor.as_str()), ("off", "09:30"));
+        assert_eq!(timezone, "UTC");
     }
 
     /// v32 → v33: the preference table lands empty and accepts its first row.

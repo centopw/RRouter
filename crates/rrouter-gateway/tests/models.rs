@@ -642,6 +642,125 @@ async fn v1_models_omits_disabled_models_and_keeps_preferred_ownership() {
     assert_eq!(shared["owned_by"], "openai");
 }
 
+/// Auto-ping API: one row per active Claude/Codex OAuth account, defaults off, and
+/// validated schedule edits.
+#[tokio::test]
+async fn quota_ping_api_lists_supported_accounts_and_validates_edits() {
+    let h = harness();
+    let openai = h.connect("openai", "http://127.0.0.1:9").await;
+    let claude = h
+        .state
+        .store
+        .create_connection(
+            "claude",
+            "oauth",
+            Credentials {
+                access_token: Some("claude-token".into()),
+                ..Credentials::default()
+            },
+            Some("subscription"),
+        )
+        .await
+        .expect("claude")
+        .id;
+    let _codex = h
+        .state
+        .store
+        .create_connection(
+            "codex",
+            "oauth",
+            Credentials {
+                access_token: Some("codex-token".into()),
+                ..Credentials::default()
+            },
+            Some("codex sub"),
+        )
+        .await
+        .expect("codex")
+        .id;
+
+    let (status, body) = h.get("/api/quota-pings").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rows = body["data"].as_array().expect("data");
+    assert_eq!(rows.len(), 2, "only supported OAuth accounts: {body}");
+    for row in rows {
+        assert_eq!(row["mode"], "off");
+        assert_eq!(row["anchor"], "09:30");
+        assert_eq!(row["timezone"], "UTC");
+        assert_eq!(row["window_hours"], 5.0);
+        assert_eq!(row["slots_per_day"], 3);
+        assert_eq!(row["smart"]["recent_requests"], 0);
+    }
+
+    let (status, body) = h
+        .send(
+            "PUT",
+            &format!("/api/quota-pings/{claude}"),
+            json!({
+                "mode": "schedule",
+                "anchor": "07:15",
+                "timezone": "Europe/Berlin",
+                "window_hours": 5,
+                "slots_per_day": 4,
+                "ping_model": "claude-haiku-4-5",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["mode"], "schedule");
+    assert_eq!(body["anchor"], "07:15");
+    assert_eq!(body["timezone"], "Europe/Berlin");
+    assert_eq!(body["slots_per_day"], 4);
+    assert!(body["next_ping_at"].as_i64().is_some());
+
+    for invalid in [
+        json!({"timezone": "Mars/Olympus"}),
+        json!({"anchor": "7:15"}),
+        json!({"window_hours": 0.4}),
+        json!({"slots_per_day": 5}),
+        json!({"mode": "sometimes"}),
+        json!({"ping_model": 7}),
+    ] {
+        let (status, body) = h
+            .send("PUT", &format!("/api/quota-pings/{claude}"), invalid)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    let (status, body) = h
+        .send(
+            "PUT",
+            &format!("/api/quota-pings/{claude}"),
+            json!({"mode": "off"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["mode"], "off");
+    assert_eq!(body["next_ping_at"], Value::Null);
+
+    let (status, _) = h
+        .send(
+            "PUT",
+            &format!("/api/quota-pings/{openai}"),
+            json!({"mode": "off"}),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an API-key provider has no quota ping"
+    );
+
+    let (status, _) = h
+        .send(
+            "PUT",
+            "/api/quota-pings/00000000-0000-0000-0000-000000000000",
+            json!({"mode": "off"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 /// The registry answers one question: what can this gateway call right now.
 #[tokio::test]
 async fn registry_lists_nothing_until_a_provider_is_connected() {

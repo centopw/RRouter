@@ -1,1 +1,0 @@
-import{Ct as e,Dt as t,Tt as n}from"./ui-ovhNdNs8.js";var r=t(n(),1),i=e(),a=r.createContext(void 0),o=e=>{let t=r.useContext(a);if(e)return e;if(!t)throw Error(`No QueryClient set, use QueryClientProvider to set one`);return t},s=({client:e,children:t})=>(r.useEffect(()=>(e.mount(),()=>{e.unmount()}),[e]),(0,i.jsx)(a.Provider,{value:e,children:t}));export{o as n,s as t};

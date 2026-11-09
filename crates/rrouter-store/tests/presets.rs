@@ -642,7 +642,9 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("open raw");
         conn.execute_batch(
-            "DROP TABLE IF EXISTS model_preferences; \
+            "DROP TABLE IF EXISTS quota_ping_samples; \
+             DROP TABLE IF EXISTS quota_pings; \
+             DROP TABLE IF EXISTS model_preferences; \
              DROP TABLE IF EXISTS user_model_preferences; \
              DROP TABLE IF EXISTS model_preset_versions; \
              DROP TABLE IF EXISTS model_presets; \
@@ -683,5 +685,5 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
     assert_eq!(version, SCHEMA_VERSION);
-    assert_eq!(version, 33);
+    assert_eq!(version, 34);
 }

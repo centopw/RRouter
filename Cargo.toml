@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.6"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/centopw/RRouter"
@@ -61,6 +61,7 @@ opentelemetry_sdk = { version = "0.27", default-features = false, features = ["t
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["trace", "http-proto", "reqwest-client", "reqwest-rustls"] }
 tracing-opentelemetry = "0.28"
 argon2 = "0.5"
+jiff = "0.2"
 
 [profile.release]
 lto = "thin"

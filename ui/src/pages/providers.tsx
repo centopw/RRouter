@@ -10,8 +10,8 @@ import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import * as Popover from "@radix-ui/react-popover";
 import { ProviderIcon, providerBrand } from "../components/provider-icon";
-import { DotsThree, MagnifyingGlass, Sliders, X } from "@phosphor-icons/react";
-import { SectionLabel, Stack } from "../components/atoms";
+import { DotsThree, GearSix, MagnifyingGlass, Sliders, X } from "@phosphor-icons/react";
+import { Heading, IconButton, SectionLabel, Stack } from "../components/atoms";
 import {
   Badge,
   Button,
@@ -39,13 +39,16 @@ import {
   useIsAdmin,
   useModelProviders,
   useOAuthProviders,
+  useQuotaPings,
   useTeams,
   useUpdateAccountQuota,
   useUpdateConnection,
+  useUpdateQuotaPing,
 } from "../lib/queries";
 import { apiCode } from "../lib/auth";
 import {
   api,
+  isEndpointMissing,
   type AccountQuotaRow,
   type AccountQuotaWindow,
   type AccountSubscription,
@@ -53,9 +56,11 @@ import {
   type Connection,
   type ModelProvider,
   type OAuthProvider,
+  type QuotaPingMode,
+  type QuotaPingRow,
+  type UpdateQuotaPing,
 } from "../lib/api";
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
-import { Heading } from "../components/atoms";
 
 type AddStep = "kind" | "provider" | "opencode" | "key";
 
@@ -85,9 +90,11 @@ export default function Providers() {
   const [baseUrlFor, setBaseUrlFor] = useState<Connection | null>(null);
   const [teamFor, setTeamFor] = useState<Connection | null>(null);
   const [quotaFor, setQuotaFor] = useState<AccountQuotaRow | null>(null);
+  const [pingFor, setPingFor] = useState<QuotaPingRow | null>(null);
   const [removing, setRemoving] = useState<Connection | null>(null);
   const quotas = useAccountQuotas(isAdmin);
-  const subscriptions = useAccountSubscriptions(isAdmin);
+  const subscriptions = useAccountSubscriptions();
+  const pings = useQuotaPings();
 
   const accounts = connections.data ?? [];
   const connectedIds = useMemo(() => new Set(accounts.map((a) => a.provider)), [accounts]);
@@ -429,6 +436,8 @@ export default function Providers() {
       : []),
   ];
 
+  const pingByConnection = new Map((pings.data ?? []).map((ping) => [ping.connection_id, ping]));
+
   return (
     <>
       <PageHeader
@@ -554,20 +563,30 @@ export default function Providers() {
         </Card>
       )}
 
-      {isAdmin && !connections.isLoading && accounts.length > 0 ? (
+      {!connections.isLoading && accounts.length > 0 ? (
         <div className="mt-4">
           <Card>
             <CardHeader
               title="Subscription limits"
               action={
                 <span className="text-caption text-faint">
-                  {subscriptions.isFetching ? "refreshing…" : "from your provider plan · refreshes every five minutes"}
+                  {subscriptions.isFetching
+                    ? "refreshing…"
+                    : pings.isError && isAdmin
+                      ? "auto-ping unavailable"
+                      : "from your provider plan · refreshes every five minutes"}
                 </span>
               }
             />
             {subscriptions.isError ? (
               <div className="px-5 pb-4">
-                <ErrorNote error={subscriptions.error} onRetry={() => void subscriptions.refetch()} />
+                {isAdmin ? (
+                  <ErrorNote error={subscriptions.error} onRetry={() => void subscriptions.refetch()} />
+                ) : (
+                  <p className="text-small text-muted">
+                    Subscription limits are available to administrators on this gateway.
+                  </p>
+                )}
               </div>
             ) : subscriptions.isLoading ? (
               <p className="px-5 pb-4 text-small text-faint">reading plan limits…</p>
@@ -579,7 +598,12 @@ export default function Providers() {
             ) : (
               <div>
                 {(subscriptions.data ?? []).map((account) => (
-                  <SubscriptionRow key={account.connection_id} account={account} />
+                  <SubscriptionRow
+                    key={account.connection_id}
+                    account={account}
+                    ping={pingByConnection.get(account.connection_id)}
+                    onEdit={isAdmin ? setPingFor : undefined}
+                  />
                 ))}
               </div>
             )}
@@ -664,6 +688,15 @@ export default function Providers() {
 
       {quotaFor ? (
         <QuotaModal key={quotaFor.connection_id} row={quotaFor} onClose={() => setQuotaFor(null)} />
+      ) : null}
+
+      {pingFor ? (
+        <PingModal
+          key={pingFor.connection_id}
+          row={pingFor}
+          rows={pings.data ?? []}
+          onClose={() => setPingFor(null)}
+        />
       ) : null}
 
       {signIn ? (
@@ -1712,40 +1745,107 @@ function WindowBar({ window }: { window: SubscriptionWindow }) {
   );
 }
 
-function SubscriptionRow({ account }: { account: AccountSubscription }) {
+const PING_MODES: ReadonlyArray<{ id: QuotaPingMode; label: string; hint: string }> = [
+  { id: "off", label: "Off", hint: "No automatic pings. The account is never warmed." },
+  {
+    id: "reset",
+    label: "On reset",
+    hint: "Ping just after the provider's current quota window resets.",
+  },
+  {
+    id: "schedule",
+    label: "Schedule",
+    hint: "Ping at fixed wall-clock slots in the chosen timezone.",
+  },
+  {
+    id: "smart",
+    label: "Smart",
+    hint: "Stagger resets across accounts by usage; idle accounts are skipped.",
+  },
+];
+
+function providerLabel(provider: string): string {
+  return provider === "claude"
+    ? "Claude"
+    : provider === "codex"
+      ? "Codex"
+      : provider === "github"
+        ? "GitHub Copilot"
+        : provider;
+}
+
+function pingBadgeText(ping: QuotaPingRow): string {
+  if (ping.mode === "off") return "auto-ping off";
+  if (ping.mode === "reset") return "on reset";
+  return `${ping.mode} ${ping.slots_per_day}/day`;
+}
+
+function PingBadge({ ping }: { ping: QuotaPingRow }) {
+  const detail = [
+    `auto-ping ${ping.mode}`,
+    ping.mode === "schedule"
+      ? `${ping.anchor} ${ping.timezone}, ${ping.slots_per_day} slots/day`
+      : null,
+    ping.next_ping_at ? `next ${when(ping.next_ping_at)}` : "no ping scheduled",
+    ping.last_error ? `last error: ${ping.last_error}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const tone =
+    ping.mode === "off" ? "neutral" : ping.mode === "reset" || ping.mode === "smart" ? "pos" : "accent";
+  return (
+    <Badge tone={tone} title={detail}>
+      {pingBadgeText(ping)}
+    </Badge>
+  );
+}
+
+function SubscriptionRow({
+  account,
+  ping,
+  onEdit,
+}: {
+  account: AccountSubscription;
+  ping?: QuotaPingRow;
+  /** Absent for a reader: the mode badge stays, the settings trigger does not. */
+  onEdit?: (ping: QuotaPingRow) => void;
+}) {
   const exhausted = account.windows.find((window) => window.used_percent >= 100);
+  const supportsPing = account.provider === "claude" || account.provider === "codex";
   return (
     <div className="border-b border-rule px-5 py-3 last:border-0">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className="text-body font-medium text-fg">
-          {account.provider === "claude"
-            ? "Claude"
-            : account.provider === "codex"
-              ? "Codex"
-              : account.provider === "github"
-                ? "GitHub Copilot"
-                : account.provider}
+          {providerLabel(account.provider)}
         </span>
         <span className="min-w-0 truncate text-small text-muted">{account.name ?? ""}</span>
         {account.plan ? <Badge tone="neutral">{account.plan}</Badge> : null}
+        {supportsPing && ping ? <PingBadge ping={ping} /> : null}
         {exhausted ? (
           <Badge tone="neg" title={exhausted.resets_at ? `resets ${when(exhausted.resets_at)}` : undefined}>
             quota exhausted
           </Badge>
         ) : null}
-        {account.error ? (
-          <span
-            className="max-w-full truncate text-caption text-faint"
-            title={account.error}
-          >
-            {account.error.length > 110 ? `${account.error.slice(0, 110)}…` : account.error}
-          </span>
-        ) : (
-          <span className="ml-auto flex items-center gap-1.5 text-caption text-faint">
-            <Dot tone="pos" />
-            live
-          </span>
-        )}
+        <span className="ml-auto flex min-w-0 max-w-full items-center gap-1.5 text-caption text-faint">
+          {account.error ? (
+            <span className="min-w-0 truncate" title={account.error}>
+              {account.error.length > 110 ? `${account.error.slice(0, 110)}…` : account.error}
+            </span>
+          ) : (
+            <>
+              <Dot tone="pos" />
+              <span>live</span>
+            </>
+          )}
+          {supportsPing && ping && onEdit ? (
+            <IconButton
+              label={`Auto-ping settings for ${account.name ?? providerLabel(account.provider)}`}
+              onClick={() => onEdit(ping)}
+            >
+              <GearSix size={15} aria-hidden />
+            </IconButton>
+          ) : null}
+        </span>
       </div>
       {account.windows.length > 0 ? (
         <div className="mt-2 grid gap-1.5 min-[700px]:grid-cols-2 min-[1100px]:grid-cols-3">
@@ -1755,6 +1855,311 @@ function SubscriptionRow({ account }: { account: AccountSubscription }) {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function parseAnchor(value: string): number | null {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value.trim());
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+}
+
+function clockLabel(minutes: number): string {
+  const day = Math.floor(minutes / 1440);
+  const normalized = ((minutes % 1440) + 1440) % 1440;
+  const hh = String(Math.floor(normalized / 60)).padStart(2, "0");
+  const mm = String(normalized % 60).padStart(2, "0");
+  return `${hh}:${mm}${day > 0 ? ` +${day}d` : ""}`;
+}
+
+function validTimezone(zone: string): boolean {
+  const value = zone.trim();
+  if (!value) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function phaseLabel(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0m";
+  const total = Math.round(seconds / 60);
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
+  return hours > 0 ? `${hours}h${minutes > 0 ? ` ${minutes}m` : ""}` : `${Math.max(1, minutes)}m`;
+}
+
+/**
+ * Auto-ping schedule for one Claude/Codex account. Off and reset are a single choice;
+ * schedule exposes the wall-clock fields with a local preview; smart explains the fleet
+ * stagger using the usage history the scheduler already recorded.
+ */
+function PingModal({
+  row,
+  rows,
+  onClose,
+}: {
+  row: QuotaPingRow;
+  rows: QuotaPingRow[];
+  onClose: () => void;
+}) {
+  const update = useUpdateQuotaPing();
+  const [mode, setMode] = useState<QuotaPingMode>(row.mode);
+  const [anchor, setAnchor] = useState(row.anchor);
+  const [timezone, setTimezone] = useState(row.timezone);
+  const [windowHours, setWindowHours] = useState(String(row.window_hours));
+  const [slots, setSlots] = useState(String(row.slots_per_day));
+  const [failure, setFailure] = useState<unknown>(null);
+  const busy = update.isPending;
+
+  const anchorMinutes = parseAnchor(anchor);
+  const hoursValue = Number(windowHours);
+  const slotsValue = Number(slots);
+  const windowValid = Number.isFinite(hoursValue) && hoursValue >= 0.5 && hoursValue <= 24;
+  const maxSlots = windowValid ? Math.max(1, Math.floor(24 / hoursValue)) : 0;
+  const slotsValid =
+    Number.isInteger(slotsValue) && slotsValue >= 1 && (maxSlots === 0 || slotsValue <= maxSlots);
+  const timezoneValid = validTimezone(timezone);
+  const scheduleInvalid = anchorMinutes === null || !timezoneValid || !windowValid || !slotsValid;
+
+  const scheduleIssues: string[] = [];
+  if (anchorMinutes === null) scheduleIssues.push("anchor must be 24-hour HH:MM, e.g. 09:30");
+  if (!timezoneValid) scheduleIssues.push("timezone must be an IANA name, e.g. Europe/Paris or UTC");
+  if (!windowValid) scheduleIssues.push("window must be between 0.5 and 24 hours");
+  if (!slotsValid) {
+    scheduleIssues.push(
+      maxSlots > 0 ? `slots per day must be a whole number from 1 to ${maxSlots}` : "slots per day must be a whole number",
+    );
+  }
+
+  const preview =
+    mode === "schedule" && !scheduleInvalid
+      ? (() => {
+          const interval = Math.round(hoursValue * 60);
+          const start = anchorMinutes ?? 0;
+          return {
+            slots: Array.from({ length: slotsValue }, (_, index) => clockLabel(start + index * interval)),
+            coverage: clockLabel(start + slotsValue * interval),
+          };
+        })()
+      : null;
+
+  const peers = useMemo(() => {
+    // The scheduler staggers only enabled smart accounts; include the account being edited
+    // so the preview describes the fleet as it will look after saving.
+    const same = rows.filter(
+      (ping) =>
+        ping.provider === row.provider &&
+        (ping.mode === "smart" || ping.connection_id === row.connection_id),
+    );
+    if (!same.some((ping) => ping.connection_id === row.connection_id)) same.push(row);
+    return same.sort((a, b) => b.smart.recent_requests - a.smart.recent_requests);
+  }, [rows, row]);
+  const smartCount = peers.length;
+
+  const save = () => {
+    if (mode === "schedule" && scheduleInvalid) return;
+    if (busy) return;
+    setFailure(null);
+    const patch: UpdateQuotaPing = { mode };
+    if (mode === "schedule") {
+      patch.anchor = anchor.trim();
+      patch.timezone = timezone.trim();
+      patch.window_hours = hoursValue;
+      patch.slots_per_day = slotsValue;
+    }
+    update.mutate(
+      { id: row.connection_id, patch },
+      { onSuccess: onClose, onError: setFailure },
+    );
+  };
+
+  const activeHint =
+    PING_MODES.find((option) => option.id === mode)?.hint ?? "No automatic pings.";
+
+  return (
+    <Modal
+      title="Auto-ping settings"
+      open
+      width="lg"
+      onClose={onClose}
+      description={`${providerLabel(row.provider)}${row.name ? ` · ${row.name}` : ""} · a tiny request starts the plan window`}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            cancel
+          </Button>
+          <Button
+            variant="primary"
+            disabled={busy || (mode === "schedule" && scheduleInvalid)}
+            onClick={save}
+          >
+            {busy ? "saving…" : "save"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-line bg-surface-2 px-3 py-2 text-caption text-muted">
+          <span>
+            next ping <span className="font-medium text-fg">{row.next_ping_at ? when(row.next_ping_at) : "not scheduled"}</span>
+          </span>
+          <span>
+            last ping <span className="font-medium text-fg">{row.last_ping_at ? when(row.last_ping_at) : "never"}</span>
+          </span>
+          {row.last_ping_reset_at ? (
+            <span>
+              reset seen <span className="font-medium text-fg">{when(row.last_ping_reset_at)}</span>
+            </span>
+          ) : null}
+        </div>
+
+        <Field label="mode">
+          <Segmented
+            options={PING_MODES.map((option) => ({ id: option.id, label: option.label }))}
+            value={mode}
+            onChange={(next) => {
+              if (busy) return;
+              setMode(next);
+              setFailure(null);
+            }}
+            ariaLabel="auto-ping mode"
+          />
+        </Field>
+        <p className="-mt-2 text-small leading-relaxed text-muted">{activeHint}</p>
+
+        {mode === "schedule" ? (
+          <div className="flex flex-col gap-3 rounded-lg border border-line p-3">
+            <div className="grid gap-3 min-[520px]:grid-cols-2">
+              <Field label="anchor" hint="local wall clock, HH:MM">
+                <Input
+                  value={anchor}
+                  onChange={(value) => {
+                    setAnchor(value);
+                    setFailure(null);
+                  }}
+                  placeholder="09:30"
+                  ariaLabel="auto-ping anchor"
+                  disabled={busy}
+                />
+              </Field>
+              <Field label="timezone" hint="IANA name, e.g. Europe/Paris">
+                <Input
+                  value={timezone}
+                  onChange={(value) => {
+                    setTimezone(value);
+                    setFailure(null);
+                  }}
+                  placeholder="UTC"
+                  ariaLabel="auto-ping timezone"
+                  disabled={busy}
+                />
+              </Field>
+              <Field label="window hours" hint="0.5 to 24">
+                <Input
+                  type="number"
+                  value={windowHours}
+                  onChange={(value) => {
+                    setWindowHours(value);
+                    setFailure(null);
+                  }}
+                  ariaLabel="auto-ping window hours"
+                  disabled={busy}
+                />
+              </Field>
+              <Field label="slots per day" hint={maxSlots > 0 ? `1 to ${maxSlots}` : "whole number"}>
+                <Input
+                  type="number"
+                  value={slots}
+                  onChange={(value) => {
+                    setSlots(value);
+                    setFailure(null);
+                  }}
+                  ariaLabel="auto-ping slots per day"
+                  disabled={busy}
+                />
+              </Field>
+            </div>
+
+            {scheduleIssues.length > 0 ? (
+              <ul role="alert" className="flex flex-col gap-0.5 text-caption text-neg">
+                {scheduleIssues.map((issue) => (
+                  <li key={issue}>{issue}</li>
+                ))}
+              </ul>
+            ) : preview ? (
+              <div className="rounded-md bg-surface-2 px-3 py-2">
+                <p className="text-caption font-medium text-muted">
+                  Local slot preview · {timezone.trim()}
+                </p>
+                <p className="mt-1 break-words font-mono text-small text-fg">
+                  {preview.slots.join(" · ")}
+                </p>
+                <p className="mt-1 text-caption text-muted">
+                  Each slot starts a {hoursValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}-hour
+                  window; coverage ends <span className="font-mono text-fg">{preview.coverage}</span>.
+                </p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {mode === "smart" ? (
+          <div className="flex flex-col gap-2 rounded-lg border border-line p-3">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+              <p className="text-small font-semibold text-fg">Accounts by recent usage</p>
+              <p className="text-caption text-faint">highest first</p>
+            </div>
+            <ul className="flex flex-col gap-1">
+              {peers.map((peer) => (
+                <li
+                  key={peer.connection_id}
+                  className={cx(
+                    "flex flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-md px-2 py-1.5 text-caption",
+                    peer.connection_id === row.connection_id && "bg-surface-3",
+                  )}
+                >
+                  <span className="min-w-0 flex-1 basis-36 truncate font-medium text-fg">
+                    {peer.name ?? providerLabel(peer.provider)}
+                    {peer.connection_id === row.connection_id ? " · this account" : ""}
+                  </span>
+                  <span className="tnum text-muted">{peer.smart.recent_requests.toLocaleString()} req/24h</span>
+                  <span className="tnum text-muted">offset +{phaseLabel(peer.smart.phase_offset_secs)}</span>
+                  <span className="tnum text-faint">
+                    {peer.next_ping_at ? `next ${when(peer.next_ping_at)}` : "next —"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-small leading-relaxed text-muted">
+              Smart orders accounts by usage and gives each a phase offset across one{" "}
+              {row.window_hours}-hour window. The busiest account pings at its reset, then the
+              others follow their assigned offsets ({smartCount} smart account
+              {smartCount === 1 ? "" : "s"}), so resets stay staggered and one fresh window is
+              available. Accounts with no requests in the last 24 hours and zero current usage
+              are skipped.
+            </p>
+          </div>
+        ) : null}
+
+        {row.last_error ? (
+          <p role="status" className="break-words rounded-lg border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-caption text-[var(--color-warn-ink)]">
+            Last auto-ping error: {row.last_error}
+          </p>
+        ) : null}
+
+        {failure ? (
+          isEndpointMissing(failure) ? (
+            <p role="alert" className="text-small text-warn-ink">
+              Auto-ping is not available on this build. Update the gateway and try again.
+            </p>
+          ) : (
+            <ErrorNote error={failure} />
+          )
+        ) : null}
+      </div>
+    </Modal>
   );
 }
 

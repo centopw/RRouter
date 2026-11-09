@@ -88,6 +88,29 @@ port 51121 is occupied.
 6. Inspect the connection view: no access token, refresh token or client secret is shown.
    Do not paste tokens into issues; the repo has no fixture containing real credentials.
 
+## Quota auto-ping (Claude / Codex)
+
+Subscription plans expose rolling windows (Claude's 5-hour session, Codex's primary
+window). A tiny request starts a new window, so an account can be warmed just after its
+current window resets. The Providers page exposes four modes per Claude/Codex OAuth account:
+
+| Mode | Behaviour |
+| --- | --- |
+| `off` | Never ping. |
+| `reset` | Ping five seconds after the current window's `resets_at`. |
+| `schedule` | Ping at fixed local wall-clock slots: anchor, IANA timezone, window hours, slots/day. |
+| `smart` | Record usage samples and stagger accounts by recent traffic. The busiest account pings at its reset; the others follow phase offsets across one window. Idle accounts (no requests in 24h and no current usage) are skipped. |
+
+The scheduler runs every 60 seconds. It refreshes credentials and subscription usage,
+sends at most one tiny request per due reset/slot, and records `last_ping_at`,
+`last_ping_reset_at`, `last_ping_slot` and `last_error`. A failed ping backs off for 15
+minutes and never fails a client request. Pings are operational: they create no usage row
+and no API-key traffic.
+
+Claude uses a 1-token Haiku Messages request; Codex uses a streamed Responses request with
+the CLI account header and `store:false`. API-key accounts have no subscription window and
+are not listed. Usage samples are kept for 30 days.
+
 ## Dialect matrix
 
 | Client → provider | Chat | Responses | Messages | Embeddings |

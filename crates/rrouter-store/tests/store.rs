@@ -235,6 +235,8 @@ fn combo_cursor_survives_a_restart_and_concurrent_starts_do_not_collide() {
 /// must remove these too, or the replay runs `ALTER TABLE … ADD COLUMN` on a column the
 /// file still has. Indexes go first: SQLite refuses to drop a column an index covers.
 const UNDO_AFTER_V24: &str = "\
+    DROP TABLE IF EXISTS quota_ping_samples; \
+    DROP TABLE IF EXISTS quota_pings; \
     DROP TABLE IF EXISTS model_preferences; \
     DROP TABLE IF EXISTS user_model_preferences; \
     DROP TABLE IF EXISTS model_preset_versions; DROP TABLE IF EXISTS model_presets; \
@@ -1584,6 +1586,85 @@ fn aliases_and_disabled_models_upsert_list_delete() {
         );
         s.set_disabled("gpt-4o", false).await.expect("enable");
         assert_eq!(s.disabled_models().await.expect("dis"), vec!["o3"]);
+    });
+}
+
+#[test]
+fn quota_ping_config_round_trips_validates_and_samples_prune() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let id = Uuid::new_v4();
+        assert!(s.quota_ping(id).await.expect("none").is_none());
+        let mut ping = rrouter_store::QuotaPing::defaults(id);
+        ping.mode = rrouter_store::QuotaPingMode::Smart;
+        ping.anchor = "07:15".into();
+        ping.timezone = "Europe/Berlin".into();
+        ping.window_hours = 5.0;
+        ping.slots_per_day = 4;
+        ping.ping_model = Some("claude-haiku-4-5".into());
+        let saved = s.upsert_quota_ping(&ping).await.expect("upsert");
+        assert_eq!(saved.mode, rrouter_store::QuotaPingMode::Smart);
+        assert_eq!(saved.anchor, "07:15");
+        assert_eq!(saved.timezone, "Europe/Berlin");
+        assert_eq!(saved.slots_per_day, 4);
+        assert!(saved.updated_at > 0);
+        assert_eq!(s.quota_pings().await.expect("list"), vec![saved.clone()]);
+
+        // Configuration saves never clobber the last outcome.
+        s.record_quota_ping(id, Some(10), None, Some("slot:1"), None)
+            .await
+            .expect("record");
+        let mut changed = saved.clone();
+        changed.mode = rrouter_store::QuotaPingMode::Off;
+        let changed = s.upsert_quota_ping(&changed).await.expect("update");
+        assert_eq!(changed.mode, rrouter_store::QuotaPingMode::Off);
+        assert_eq!(changed.last_ping_at, Some(10));
+        assert_eq!(changed.last_ping_slot.as_deref(), Some("slot:1"));
+
+        for invalid in [
+            {
+                let mut p = ping.clone();
+                p.anchor = "9:30".into();
+                p
+            },
+            {
+                let mut p = ping.clone();
+                p.window_hours = 0.4;
+                p
+            },
+            {
+                let mut p = ping.clone();
+                p.slots_per_day = 5; // 24 / 5 == 4
+                p
+            },
+        ] {
+            assert!(s.upsert_quota_ping(&invalid).await.is_err());
+        }
+
+        let now = 1_800_000_000;
+        for at in [now - 31 * 86_400, now - 10] {
+            s.insert_quota_ping_sample(id, "five_hour", 42.0, Some(now + 60), at)
+                .await
+                .expect("sample");
+        }
+        assert_eq!(
+            s.prune_quota_ping_samples(now - 30 * 86_400)
+                .await
+                .expect("prune"),
+            1
+        );
+        assert!(
+            s.prune_quota_ping_samples(now - 30 * 86_400)
+                .await
+                .expect("again")
+                == 0
+        );
+
+        s.clear_quota_ping_schedule(id).await.expect("clear");
+        let cleared = s.quota_ping(id).await.expect("get").expect("row");
+        assert_eq!(cleared.last_ping_slot, None);
+        assert_eq!(cleared.last_ping_reset_at, None);
     });
 }
 

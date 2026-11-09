@@ -14,6 +14,7 @@ pub mod model_presets;
 pub mod models;
 pub(crate) mod native;
 pub mod oauth;
+pub mod quota_pings;
 pub mod quotas;
 pub mod rerank;
 pub mod settings;
