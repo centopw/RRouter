@@ -1911,6 +1911,42 @@ async fn budget_exhausted_blocks_the_next_request() {
     assert_eq!(mock.hits(), 1);
 }
 
+/// Two concurrent requests against one budgeted key must not both pass the preflight
+/// check. The first spends 10 tokens; the second waits for that usage row and is refused.
+#[tokio::test]
+async fn concurrent_budgeted_requests_do_not_overspend() {
+    let mock = Mock::start(vec![openai_reply("first"), openai_reply("second")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"budget_tokens": 5})).await;
+
+    let (first, second) =
+        tokio::join!(h.chat(Some(&key), "gpt-4.1"), h.chat(Some(&key), "gpt-4.1"));
+    let statuses = [first.0, second.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1,
+        "exactly one request fits the budget: {statuses:?}"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::TOO_MANY_REQUESTS)
+            .count(),
+        1,
+        "the second request is refused: {statuses:?}"
+    );
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the refused request never reached the provider"
+    );
+}
+
 /// Every usage row the proxy writes names the key that paid for it, and `/api/usage`
 /// exposes that attribution.
 #[tokio::test]
@@ -2351,6 +2387,92 @@ async fn guardrails_refuse_a_response_served_from_the_cache() {
         1,
         "the refusal came from the cache, not a retry"
     );
+}
+
+/// A blocked term split across two SSE deltas must not bypass output scanning. The
+/// first fragment may already be on the wire; the delta that completes the term is not.
+#[tokio::test]
+async fn guardrails_match_a_term_split_across_deltas() {
+    let delta = |content: &str, finish: Value| {
+        rrouter_core::sse::render_openai(
+            &json!({"id":"g2","model":"mock-model","choices":[{"index":0,"delta":{"content":content},"finish_reason":finish}]}).to_string(),
+            None,
+        )
+    };
+    let mock = Mock::start(vec![MockReply::Sse(vec![
+        SseStep {
+            wire: delta("leaked SEC", json!(null)),
+            await_gate: None,
+        },
+        SseStep {
+            wire: delta("RET here", json!(null)),
+            await_gate: None,
+        },
+        SseStep {
+            wire: delta("AFTER THE HIT", json!("stop")),
+            await_gate: None,
+        },
+        SseStep {
+            wire: "data: [DONE]\n\n".to_string(),
+            await_gate: None,
+        },
+    ])])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(
+        &id,
+        json!({"guardrails": {"blocked": ["secret"], "scan_output": true}}),
+    )
+    .await;
+
+    let mut body = openai_chat_body("gpt-4.1");
+    body["stream"] = json!(true);
+    let res = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {key}"))
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    let mut stream = res.into_body().into_data_stream();
+
+    let first = next_frame(&mut stream).await;
+    assert!(
+        first.contains("SEC"),
+        "the incomplete prefix was forwarded: {first}"
+    );
+    let second = next_frame(&mut stream).await;
+    assert!(
+        second.contains("output_blocked"),
+        "the completing delta triggers a terminal error: {second}"
+    );
+    assert!(
+        !second.contains("RET here"),
+        "the completing delta is not forwarded: {second}"
+    );
+    while let Some(Ok(chunk)) = tokio::time::timeout(
+        Duration::from_secs(5),
+        futures_util::StreamExt::next(&mut stream),
+    )
+    .await
+    .expect("the stream ends promptly")
+    {
+        let text = String::from_utf8_lossy(&chunk).into_owned();
+        assert!(
+            !text.contains("AFTER THE HIT"),
+            "nothing after the refusal: {text}"
+        );
+    }
 }
 
 /// A streaming response is stopped at the delta that carries the term: the client keeps
@@ -4821,7 +4943,9 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
     // The list reports only the in-window spend.
     let (_, listed) = h.get("/api/keys").await;
     assert_eq!(listed["data"][0]["budget_window"], "monthly");
-    assert_eq!(listed["data"][0]["spent_tokens"], 120);
+    // 120 seeded this month plus the first chat's 10; the budget lock makes that first
+    // usage durable before the refused request is admitted, so the list is deterministic.
+    assert_eq!(listed["data"][0]["spent_tokens"], 130);
 }
 
 /// A monthly key with a USD budget spent before the window is admitted.

@@ -498,6 +498,46 @@ async fn manual_pkce_start_completes_from_the_pasted_callback() {
     assert!(!connections.to_string().contains(PKCE_ACCESS_TOKEN));
 }
 
+/// A pending id is bound to the provider that started it. Redeeming it through another
+/// provider route must fail before any exchange or connection write.
+#[tokio::test]
+async fn completion_rejects_a_pending_id_from_another_provider() {
+    let _mock = &*MOCK;
+    let harness = harness();
+    let (status, start) = harness
+        .post("/api/oauth/codex/start", json!({"manual": true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    let (id, _, _) = pkce_details(&start);
+
+    let (status, body) = harness
+        .post("/api/oauth/claude/complete", json!({"id": id}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("belongs to provider codex"),
+        "{body}"
+    );
+
+    let (status, body) = harness.get(&format!("/api/oauth/claude/status/{id}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, body) = harness.delete(&format!("/api/oauth/claude/{id}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, body) = harness.get(&format!("/api/oauth/codex/status/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["pending"], true);
+
+    let (status, body) = harness.delete(&format!("/api/oauth/codex/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cancelled"], true);
+
+    let (status, connections) = harness.get("/api/connections").await;
+    assert_eq!(status, StatusCode::OK, "{connections}");
+    assert_eq!(connections["data"].as_array().expect("rows").len(), 0);
+}
+
 #[tokio::test]
 async fn manual_pkce_start_requires_a_fixed_redirect_port() {
     let _mock = &*MOCK;

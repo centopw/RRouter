@@ -13,6 +13,27 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - `POST /api/route/explain`: the ordered plan a request would execute — providers,
   connections, priorities, dialects and cached subscription headroom — without dispatching.
 
+### Fixed
+- Budgeted keys and teams now serialize admission through usage commit, so concurrent
+  requests cannot all pass the preflight check and overspend. Unbudgeted traffic stays
+  concurrent.
+- OAuth completion is bound to the provider that started the pending login; an id from
+  one provider cannot be redeemed through another provider's route.
+- Existing `master.key`, `jwt.key` and `setup-code.txt` files are tightened to `0600` on
+  load instead of trusting the mode they were created with.
+- Connection deletion removes quota, quota-ping and latency rows in one transaction, and
+  historical usage/attempt rows remain for audit.
+- Streamed output guardrails match blocked terms split across SSE deltas; terminal
+  stream failures are recorded as failures instead of `200`; invalid streamed tool JSON
+  fails translation instead of becoming `null`.
+- Model-scoped 429s no longer clear an unrelated connection-wide failure streak.
+- `/api/system` reports storage failures instead of returning zeroed counters.
+- Dashboard: horizontal table overflow, destructive-dialog errors, retry buttons inside
+  forms, preset-default errors, duplicate export errors, provider toggle method, and
+  activity error-lane accessibility.
+- Helm and raw Kubernetes defaults keep remote admin disabled; enabling it requires an
+  admin token or authenticating Ingress.
+
 ## 0.5.1 — 2026-11-09
 
 ### Changed

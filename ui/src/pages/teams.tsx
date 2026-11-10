@@ -109,7 +109,13 @@ export default function Teams() {
                 <Button variant="quiet" onClick={() => setRenaming(team)}>
                   rename
                 </Button>
-                <Button variant="danger" onClick={() => setDeleting(team)}>
+                <Button
+                  variant="danger"
+                  onClick={() => {
+                    remove.reset();
+                    setDeleting(team);
+                  }}
+                >
                   delete
                 </Button>
               </span>
@@ -133,11 +139,18 @@ export default function Teams() {
         }
         confirmLabel="Delete team"
         busy={remove.isPending}
+        error={remove.error}
         onConfirm={() => {
-          if (deleting) remove.mutate(deleting.id);
-          setDeleting(null);
+          if (deleting) {
+            remove.mutate(deleting.id, { onSuccess: () => setDeleting(null) });
+          }
         }}
-        onClose={() => setDeleting(null)}
+        onClose={() => {
+          if (!remove.isPending) {
+            remove.reset();
+            setDeleting(null);
+          }
+        }}
       />
 
       {creating ? <CreateTeamModal onClose={() => setCreating(false)} /> : null}

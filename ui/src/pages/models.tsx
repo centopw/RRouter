@@ -684,11 +684,18 @@ export default function Models() {
         message={<>Remove <span className="font-mono">{deleting?.ref}</span> from this gateway's registry? Requests naming it fail until it is listed again.</>}
         confirmLabel="Delete model"
         busy={remove.isPending}
+        error={remove.error}
         onConfirm={() => {
-          if (deleting) remove.mutate(deleting);
-          setDeleting(null);
+          if (deleting) {
+            remove.mutate(deleting, { onSuccess: () => setDeleting(null) });
+          }
         }}
-        onClose={() => setDeleting(null)}
+        onClose={() => {
+          if (!remove.isPending) {
+            remove.reset();
+            setDeleting(null);
+          }
+        }}
       />
 
       <PageHeader
@@ -741,6 +748,12 @@ export default function Models() {
       {sync.isError || toggle.isError || remove.isError ? (
         <div className="mb-3">
           <ErrorNote error={sync.error ?? toggle.error ?? remove.error} />
+        </div>
+      ) : null}
+
+      {makeDefaultPreset.isError && !defaultBlocked ? (
+        <div className="mb-3">
+          <ErrorNote error={makeDefaultPreset.error} />
         </div>
       ) : null}
 
@@ -805,7 +818,7 @@ export default function Models() {
                 },
               })
             }
-            defaultBlocked={defaultBlocked || makeDefaultPreset.isError}
+            defaultBlocked={defaultBlocked}
             onLoadLatest={layoutDraft.loadLatest}
             manage={{
               create: (name) =>

@@ -383,11 +383,18 @@ export default function Combos() {
         }
         confirmLabel="Delete combo"
         busy={remove.isPending}
+        error={remove.error}
         onConfirm={() => {
-          if (pending) remove.mutate(pending.name);
-          setPending(null);
+          if (pending) {
+            remove.mutate(pending.name, { onSuccess: () => setPending(null) });
+          }
         }}
-        onClose={() => setPending(null)}
+        onClose={() => {
+          if (!remove.isPending) {
+            remove.reset();
+            setPending(null);
+          }
+        }}
       />
 
       <Card>

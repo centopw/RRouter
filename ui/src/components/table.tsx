@@ -154,8 +154,8 @@ export function DataTable<T>({
   return (
     <div>
       <div
-        className={cx("table-scroll", bounded && "overflow-auto")}
-        tabIndex={bounded ? 0 : undefined}
+        className={cx("table-scroll overflow-x-auto", bounded && "overflow-y-auto")}
+        tabIndex={0}
         role="region"
         aria-label={label}
         style={bounded ? { maxHeight: maxBodyHeight } : undefined}

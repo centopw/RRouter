@@ -139,11 +139,18 @@ export default function Evals() {
         }
         confirmLabel="Delete suite"
         busy={remove.isPending}
+        error={remove.error}
         onConfirm={() => {
-          if (deleting) remove.mutate(deleting.id);
-          setDeleting(null);
+          if (deleting) {
+            remove.mutate(deleting.id, { onSuccess: () => setDeleting(null) });
+          }
         }}
-        onClose={() => setDeleting(null)}
+        onClose={() => {
+          if (!remove.isPending) {
+            remove.reset();
+            setDeleting(null);
+          }
+        }}
       />
 
       {creating ? <SuiteModal onClose={() => setCreating(false)} /> : null}

@@ -23,12 +23,14 @@ Expose the Service through an Ingress. Do not publish the pod port directly.
 
 ## Admin authentication
 
-The manifest sets `RROUTER_ALLOW_REMOTE_ADMIN=true` because Ingress traffic does not arrive
-over pod loopback. That makes the admin API reachable to anything that can reach the pod
-network. Close it with one of:
+The manifest leaves `RROUTER_ALLOW_REMOTE_ADMIN=false`, so the admin API is loopback-only and
+an Ingress cannot reach it. To administer the gateway through an Ingress, enable remote admin
+and close it with one of:
 
-- an Ingress that authenticates `/api/*` and `/metrics` (basic auth, OIDC, IP allowlist); or
-- `RROUTER_ADMIN_TOKEN` from a Secret, sent as `Authorization: Bearer` or `x-admin-token`.
+- `RROUTER_ADMIN_TOKEN` from a Secret, sent as `Authorization: Bearer` or `x-admin-token`; or
+- an Ingress that authenticates `/api/*` and `/metrics` (basic auth, OIDC, IP allowlist).
+
+Set `RROUTER_ALLOW_REMOTE_ADMIN=true` only after one of those controls is in place.
 
 The dashboard prompts for the admin token and keeps it in the tab's sessionStorage. Never
 expose `/api` publicly without one of these controls.

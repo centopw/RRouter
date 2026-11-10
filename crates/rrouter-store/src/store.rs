@@ -1477,21 +1477,35 @@ impl Store {
     }
 
     pub async fn delete_connection(&self, id: Uuid) -> Result<bool> {
-        let conn = self.conn();
-        let n = conn
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        let n = tx
             .execute(
                 "DELETE FROM connections WHERE id = ?1",
                 params![id.to_string()],
             )
             .map_err(migrations::db_err)?;
-        // A deleted connection's latency sample must not outlive it: the id is never
-        // reused, so the row would only ever be dead weight.
-        conn.execute(
-            "DELETE FROM connection_stats WHERE connection_id = ?1",
-            params![id.to_string()],
-        )
-        .map_err(migrations::db_err)?;
-        Ok(n > 0)
+        if n == 0 {
+            return Ok(false);
+        }
+        // Configuration and derived rows follow the connection. Historical `usage` and
+        // `attempts` rows stay: the audit trail must outlive the account it describes.
+        for table in [
+            "quota_ping_samples",
+            "quota_pings",
+            "account_quotas",
+            "connection_stats",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE connection_id = ?1"),
+                params![id.to_string()],
+            )
+            .map_err(migrations::db_err)?;
+        }
+        tx.commit().map_err(migrations::db_err)?;
+        Ok(true)
     }
 
     fn seal(&self, id: &Uuid, creds: &Credentials) -> Result<Vec<u8>> {

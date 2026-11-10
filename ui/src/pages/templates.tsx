@@ -167,11 +167,18 @@ export default function Templates() {
         message={<>Delete <span className="font-medium">{deleting?.name}</span> and its whole version history? Playground prompts that used it are unaffected, but the template cannot be restored.</>}
         confirmLabel="Delete template"
         busy={remove.isPending}
+        error={remove.error}
         onConfirm={() => {
-          if (deleting) remove.mutate(deleting.id);
-          setDeleting(null);
+          if (deleting) {
+            remove.mutate(deleting.id, { onSuccess: () => setDeleting(null) });
+          }
         }}
-        onClose={() => setDeleting(null)}
+        onClose={() => {
+          if (!remove.isPending) {
+            remove.reset();
+            setDeleting(null);
+          }
+        }}
       />
 
       <PageHeader

@@ -9,13 +9,16 @@ use axum::extract::State;
 use axum::response::Response;
 use serde_json::json;
 
-use super::ok_json;
+use super::{admin_error, ok_json};
 use crate::state::AppState;
 
 pub async fn system(State(state): State<Arc<AppState>>) -> Response {
     // Restart-only fields dominate this view, but read one snapshot for consistency.
     let config = state.config.load();
-    let connections = state.store.list_connections(None).await.unwrap_or_default();
+    let connections = match state.store.list_connections(None).await {
+        Ok(rows) => rows,
+        Err(e) => return admin_error(&e),
+    };
     let active = connections.iter().filter(|c| c.is_active).count();
     let providers: Vec<String> = {
         let mut names: Vec<String> = connections.iter().map(|c| c.provider.clone()).collect();
@@ -23,25 +26,22 @@ pub async fn system(State(state): State<Arc<AppState>>) -> Response {
         names.dedup();
         names
     };
-    let api_keys = state.store.count_api_keys().await.unwrap_or(0);
-    let combos = state
-        .store
-        .list_combos()
-        .await
-        .map(|c| c.len())
-        .unwrap_or(0);
-    let aliases = state
-        .store
-        .list_aliases()
-        .await
-        .map(|a| a.len())
-        .unwrap_or(0);
-    let disabled = state
-        .store
-        .disabled_models()
-        .await
-        .map(|d| d.len())
-        .unwrap_or(0);
+    let api_keys = match state.store.count_api_keys().await {
+        Ok(n) => n,
+        Err(e) => return admin_error(&e),
+    };
+    let combos = match state.store.list_combos().await {
+        Ok(rows) => rows.len(),
+        Err(e) => return admin_error(&e),
+    };
+    let aliases = match state.store.list_aliases().await {
+        Ok(rows) => rows.len(),
+        Err(e) => return admin_error(&e),
+    };
+    let disabled = match state.store.disabled_models().await {
+        Ok(rows) => rows.len(),
+        Err(e) => return admin_error(&e),
+    };
 
     ok_json(json!({
         "version": env!("CARGO_PKG_VERSION"),

@@ -42,7 +42,8 @@ spec:
             - { name: RROUTER_HOST, value: "0.0.0.0" }
             - { name: RROUTER_PORT, value: "20128" }
             - { name: RROUTER_DATA_DIR, value: "/data" }
-            - { name: RROUTER_ALLOW_REMOTE_ADMIN, value: "true" }
+            # Keep false unless an admin token or authenticating Ingress is configured.
+            - { name: RROUTER_ALLOW_REMOTE_ADMIN, value: "false" }
             - { name: RUST_LOG, value: "rrouter=info" }
             # Prefer a secret for the master key in real clusters:
             # - name: RROUTER_MASTER_KEY

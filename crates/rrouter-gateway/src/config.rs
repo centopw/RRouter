@@ -2863,11 +2863,16 @@ mod tests {
 
         let snapshot = std::sync::Arc::new(ConfigSnapshot::new(priority.clone()));
         let stop = std::sync::Arc::new(AtomicBool::new(false));
+        // Readers and the writer start together; otherwise a loaded machine can finish
+        // all 500 writes before any reader thread is scheduled, making the total zero.
+        let start = std::sync::Arc::new(std::sync::Barrier::new(5));
         let readers: Vec<_> = (0..4)
             .map(|_| {
                 let snapshot = std::sync::Arc::clone(&snapshot);
                 let stop = std::sync::Arc::clone(&stop);
+                let start = std::sync::Arc::clone(&start);
                 std::thread::spawn(move || {
+                    start.wait();
                     let mut observed = 0u64;
                     while !stop.load(Ordering::Relaxed) {
                         let config = snapshot.load();
@@ -2883,6 +2888,7 @@ mod tests {
             })
             .collect();
 
+        start.wait();
         for _ in 0..500 {
             snapshot.apply(&weighted);
             snapshot.apply(&priority);

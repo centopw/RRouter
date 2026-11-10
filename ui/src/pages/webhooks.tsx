@@ -199,11 +199,22 @@ export default function Webhooks() {
         }
         confirmLabel="Delete endpoint"
         busy={remove.isPending}
+        error={remove.error ?? failure}
         onConfirm={() => {
-          if (deleting) remove.mutate(deleting.id, { onError: setFailure });
-          setDeleting(null);
+          if (deleting) {
+            remove.mutate(deleting.id, {
+              onError: setFailure,
+              onSuccess: () => setDeleting(null),
+            });
+          }
         }}
-        onClose={() => setDeleting(null)}
+        onClose={() => {
+          if (!remove.isPending) {
+            remove.reset();
+            setFailure(null);
+            setDeleting(null);
+          }
+        }}
       />
 
       <PageHeader

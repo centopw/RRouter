@@ -177,8 +177,39 @@ pub struct SessionClaims {
     pub exp: usize,
 }
 
+/// Existing secret files created outside the process (restored backups, copied volumes)
+/// must not stay group/world-readable. Best effort: a failure is logged, and the caller
+/// still uses the secret rather than rotating it behind the operator's back.
+#[cfg(unix)]
+fn restrict_secret_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            Ok(()) => tracing::warn!(
+                path = %path.display(),
+                mode = format!("{mode:o}"),
+                "tightened secret file permissions to 0600"
+            ),
+            Err(error) => tracing::error!(
+                path = %path.display(),
+                mode = format!("{mode:o}"),
+                %error,
+                "secret file is group/world-readable and could not be repaired"
+            ),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_secret_file(_path: &Path) {}
+
 fn read_or_create_jwt_key(path: &Path) -> Vec<u8> {
     if let Ok(raw) = std::fs::read_to_string(path) {
+        restrict_secret_file(path);
         let raw = raw.trim();
         if raw.len() >= 32 {
             return raw.as_bytes().to_vec();
@@ -206,10 +237,9 @@ fn read_or_create_jwt_key(path: &Path) -> Vec<u8> {
 }
 
 fn read_code(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|raw| raw.trim().to_string())
-        .filter(|raw| !raw.is_empty())
+    let raw = std::fs::read_to_string(path).ok()?;
+    restrict_secret_file(path);
+    Some(raw.trim().to_string()).filter(|raw| !raw.is_empty())
 }
 
 fn write_code(path: &Path, code: &str) {
@@ -229,6 +259,7 @@ fn write_code(path: &Path, code: &str) {
             use std::io::Write;
             let _ = file.write_all(format!("{code}\n").as_bytes());
         }
+        restrict_secret_file(path);
     }
     #[cfg(not(unix))]
     {
@@ -364,6 +395,32 @@ mod tests {
         assert!(!again.verify(&code));
         assert!(!dir.join(SETUP_FILE).exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_secret_files_are_tightened_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("rrouter-secret-mode-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let auth = Auth::load(&dir, false);
+        let _ = auth.code().expect("setup code");
+        let jwt = dir.join(JWT_KEY_FILE);
+        let setup = dir.join(SETUP_FILE);
+        assert!(jwt.exists(), "jwt key created on load");
+        assert!(setup.exists(), "setup code created");
+
+        for path in [&jwt, &setup] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
+                .expect("make permissive");
+        }
+        let _ = Auth::load(&dir, false);
+        for path in [&jwt, &setup] {
+            let mode = std::fs::metadata(path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{} must be repaired to 0600", path.display());
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

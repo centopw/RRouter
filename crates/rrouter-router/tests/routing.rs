@@ -1174,6 +1174,58 @@ fn rate_limit_backoff_is_exponential_and_honors_retry_after() {
     assert_eq!(breaker.check_at(id, now).unwrap().as_secs(), 300);
 }
 
+#[test]
+fn model_rate_limit_does_not_clear_connection_failure_streak() {
+    let breaker = Breaker::new();
+    let conn = Uuid::new_v4();
+    for _ in 0..2 {
+        breaker.record_failure_for(conn, "a", 500, None);
+    }
+    assert!(breaker.check(conn).is_none(), "two failures stay closed");
+
+    // A model-scoped 429 must not reset the two server failures above.
+    breaker.record_failure_for(conn, "b", 429, None);
+    assert!(breaker.check(conn).is_none(), "429 stays connection-closed");
+    breaker.record_failure_for(conn, "a", 500, None);
+    assert!(
+        breaker.check(conn).is_some(),
+        "the third server failure must still trip the breaker"
+    );
+}
+
+#[test]
+fn rate_limit_answered_closes_half_open_without_resetting_failures() {
+    let breaker = Breaker::new();
+    let conn = Uuid::new_v4();
+    let now = Instant::now();
+    for _ in 0..3 {
+        breaker.record_failure_for_at(conn, "a", 500, None, now);
+    }
+    assert!(matches!(
+        breaker.state_at(conn, now),
+        BreakerState::Open { .. }
+    ));
+    let probe = breaker
+        .claim_candidate_at(conn, "a", now + Duration::from_secs(31))
+        .expect("half-open probe");
+    assert!(matches!(probe, ProbeTicket::Probe { .. }));
+    breaker.record_failure_for_at(conn, "a", 429, None, now + Duration::from_secs(31));
+    assert!(
+        matches!(
+            breaker.state_at(conn, now + Duration::from_secs(31)),
+            BreakerState::Closed
+        ),
+        "a 429 answer closes the half-open probe"
+    );
+    breaker.record_failure_for_at(conn, "a", 500, None, now + Duration::from_secs(31));
+    assert!(
+        breaker
+            .check_at(conn, now + Duration::from_secs(31))
+            .is_some(),
+        "the preserved failure count still trips on the next server error"
+    );
+}
+
 #[tokio::test]
 async fn fallback_uses_second_candidate_and_opens_first_breaker() {
     let dispatcher = Dispatcher::new(Breaker::new());

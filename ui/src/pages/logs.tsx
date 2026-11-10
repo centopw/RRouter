@@ -201,12 +201,6 @@ export default function Logs() {
           </span>
         </div>
 
-        {exportError ? (
-          <div className="border-t border-line px-5 py-2">
-            <ErrorNote error={exportError} />
-          </div>
-        ) : null}
-
         <div className="border-t border-line">
           {usage.isPending ? (
             <div aria-hidden className="space-y-2 px-6 py-4">

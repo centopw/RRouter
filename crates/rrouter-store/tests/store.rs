@@ -10,7 +10,8 @@ use std::sync::LazyLock;
 use rrouter_store::{
     cache_key, window_start, AccountQuota, ApiKey, ApiKeyPatch, AttemptRecord, BudgetWindow,
     ComboStrategy, ConnectionScope, Credentials, Guardrails, KeyModel, KeyScope, ModelRow,
-    PruneReport, StatusFilter, Store, UsageQuery, UsageRecord, API_KEY_PREFIX, KEY_FILE_NAME,
+    PruneReport, QuotaPing, QuotaPingMode, StatusFilter, Store, UsageQuery, UsageRecord,
+    API_KEY_PREFIX, KEY_FILE_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -1497,6 +1498,44 @@ fn latency_ewma_is_old_times_zero_point_eight_plus_sample_times_zero_point_two()
             .await
             .expect("latencies")
             .is_empty());
+    });
+}
+
+#[test]
+fn delete_connection_removes_configuration_rows_atomically() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        let c = store
+            .create_connection("claude", "oauth", Credentials::default(), Some("gone"))
+            .await
+            .expect("connection");
+        store
+            .set_account_quota(&AccountQuota {
+                connection_id: c.id,
+                window: BudgetWindow::Daily,
+                max_requests: 10,
+                max_tokens: 1_000,
+                max_cost_micros: 5_000,
+            })
+            .await
+            .expect("quota");
+        let mut ping = QuotaPing::defaults(c.id);
+        ping.mode = QuotaPingMode::Schedule;
+        store.upsert_quota_ping(&ping).await.expect("ping");
+        store
+            .insert_quota_ping_sample(c.id, "window-1", 42.0, None, 1)
+            .await
+            .expect("sample");
+
+        assert!(store.delete_connection(c.id).await.expect("delete"));
+        assert!(store.account_quotas().await.expect("quotas").is_empty());
+        assert!(store.quota_pings().await.expect("pings").is_empty());
+        assert!(store
+            .connection_latencies()
+            .await
+            .expect("latencies")
+            .is_empty());
+        assert!(!store.delete_connection(c.id).await.expect("delete again"));
     });
 }
 

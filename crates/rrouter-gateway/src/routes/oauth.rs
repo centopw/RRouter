@@ -108,6 +108,9 @@ pub async fn status(
     if rrouter_auth::get(&provider).is_none() {
         return admin_error(&Error::NotFound(format!("unknown provider {provider}")));
     }
+    if let Err(e) = ensure_pending_provider(&state, &provider, &id) {
+        return admin_error(&e);
+    }
     ok_json(json!({
         "id": id,
         "provider": provider,
@@ -135,6 +138,9 @@ pub async fn complete(
     let Some(id) = value.get("id").and_then(|v| v.as_str()) else {
         return admin_error(&Error::BadRequest("id is required".into()));
     };
+    if let Err(e) = ensure_pending_provider(&state, &provider, id) {
+        return admin_error(&e);
+    }
     let callback_url = value
         .get("callback_url")
         .and_then(|v| v.as_str())
@@ -148,6 +154,12 @@ pub async fn complete(
         Ok(done) => done,
         Err(e) => return admin_error(&e),
     };
+    if signed_in.provider != spec.id {
+        return admin_error(&Error::BadRequest(format!(
+            "pending sign-in belongs to provider {}, not {}",
+            signed_in.provider, spec.id
+        )));
+    }
     // A GitHub sign-in yields a long-lived token that still needs the short-lived
     // Copilot session token before it can serve requests; derive it now so the
     // connection is usable the moment the dashboard shows it.
@@ -192,7 +204,27 @@ pub async fn cancel(
     if rrouter_auth::get(&provider).is_none() {
         return admin_error(&Error::NotFound(format!("unknown provider {provider}")));
     }
+    if let Err(e) = ensure_pending_provider(&state, &provider, &id) {
+        return admin_error(&e);
+    }
     ok_json(json!({ "id": id, "cancelled": state.oauth.cancel(&id) }))
+}
+
+/// The pending id must belong to the provider named in the route. Without this check a
+/// caller can start provider A, then post the id to provider B and persist A's
+/// credentials as a B connection.
+fn ensure_pending_provider(
+    state: &AppState,
+    provider: &str,
+    id: &str,
+) -> std::result::Result<(), Error> {
+    match state.oauth.pending_provider(id) {
+        Some(actual) if actual != provider => Err(Error::BadRequest(format!(
+            "pending sign-in belongs to provider {actual}, not {provider}"
+        ))),
+        // Unknown ids stay idempotent for status/cancel; complete reports NotFound itself.
+        _ => Ok(()),
+    }
 }
 
 fn challenge_kind(c: &rrouter_auth::Challenge) -> &'static str {

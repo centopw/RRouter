@@ -327,6 +327,15 @@ impl OAuthFlows {
         ))
     }
 
+    /// The provider a pending login was started for. `None` when the id is unknown.
+    ///
+    /// The id is a bearer capability handed to the dashboard, but the route also names a
+    /// provider. Callers must compare this value before completing or cancelling so an id
+    /// started for one provider cannot be redeemed as another.
+    pub fn pending_provider(&self, id: &str) -> Option<&'static str> {
+        self.lock().get(id).map(|p| p.provider)
+    }
+
     /// Whether this login is still waiting.
     pub fn is_pending(&self, id: &str) -> bool {
         let map = self.lock();

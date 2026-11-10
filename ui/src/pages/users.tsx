@@ -109,7 +109,10 @@ export default function Users() {
             variant="danger"
             disabled={u.is_owner}
             title={u.is_owner ? "the owner cannot be removed" : undefined}
-            onClick={() => setRemoving(u)}
+            onClick={() => {
+              remove.reset();
+              setRemoving(u);
+            }}
           >
             remove
           </Button>
@@ -131,7 +134,14 @@ export default function Users() {
       title: "",
       align: "right",
       render: (i) => (
-        <Button variant="danger" disabled={revoke.isPending} onClick={() => setRevoking(i)}>
+        <Button
+          variant="danger"
+          disabled={revoke.isPending}
+          onClick={() => {
+            revoke.reset();
+            setRevoking(i);
+          }}
+        >
           revoke
         </Button>
       ),
@@ -156,11 +166,18 @@ export default function Users() {
         message={<>Remove <span className="font-medium">{removing?.email}</span>? Their sessions end immediately and the account cannot sign in again.</>}
         confirmLabel="Remove user"
         busy={remove.isPending}
+        error={remove.error}
         onConfirm={() => {
-          if (removing) remove.mutate(removing.id);
-          setRemoving(null);
+          if (removing) {
+            remove.mutate(removing.id, { onSuccess: () => setRemoving(null) });
+          }
         }}
-        onClose={() => setRemoving(null)}
+        onClose={() => {
+          if (!remove.isPending) {
+            remove.reset();
+            setRemoving(null);
+          }
+        }}
       />
 
       <ConfirmDialog
@@ -169,11 +186,18 @@ export default function Users() {
         message={<>The link sent to <span className="font-medium">{revoking?.email}</span> stops working. They can be invited again.</>}
         confirmLabel="Revoke invitation"
         busy={revoke.isPending}
+        error={revoke.error}
         onConfirm={() => {
-          if (revoking) revoke.mutate(revoking.id);
-          setRevoking(null);
+          if (revoking) {
+            revoke.mutate(revoking.id, { onSuccess: () => setRevoking(null) });
+          }
         }}
-        onClose={() => setRevoking(null)}
+        onClose={() => {
+          if (!revoke.isPending) {
+            revoke.reset();
+            setRevoking(null);
+          }
+        }}
       />
 
       {notice ? (

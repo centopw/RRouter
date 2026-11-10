@@ -2,6 +2,7 @@ import { type ReactNode } from "react";
 import { WarningOctagon } from "@phosphor-icons/react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { Button } from "../atoms/Button";
+import { ErrorNote } from "./ErrorNote";
 
 /**
  * Destructive confirmation on Radix AlertDialog: focus starts on the safe action, Escape
@@ -13,6 +14,7 @@ export function ConfirmDialog({
   message,
   confirmLabel = "Delete",
   busy = false,
+  error,
   onConfirm,
   onClose,
 }: {
@@ -21,6 +23,8 @@ export function ConfirmDialog({
   message: ReactNode;
   confirmLabel?: string;
   busy?: boolean;
+  /** A failed confirmation stays visible instead of closing on the first click. */
+  error?: unknown;
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -40,6 +44,11 @@ export function ConfirmDialog({
               <div className="min-w-0 text-body leading-relaxed text-ink-soft">{message}</div>
             </AlertDialog.Description>
           </div>
+          {error ? (
+            <div className="mt-3">
+              <ErrorNote error={error} />
+            </div>
+          ) : null}
           <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
             <AlertDialog.Cancel asChild>
               <Button disabled={busy}>cancel</Button>

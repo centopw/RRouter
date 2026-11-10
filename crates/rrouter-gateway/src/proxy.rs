@@ -267,8 +267,12 @@ async fn admit_or_explain(
     model: &str,
     trace: &RequestTrace,
 ) -> Result<()> {
+    // Budgeted keys/teams take their lock before the spend check; the guard moves into
+    // the response and is released only after the usage row is durable.
+    let hold = state.budget_hold(caller).await?;
     match state.admit(caller, model).await {
         Ok(limits) => {
+            trace.set_budget_hold(hold);
             if let Some(limits) = limits {
                 trace.set_rate_limits(limits);
             }
@@ -525,6 +529,7 @@ async fn special_inner(
                 streamed: false,
                 status: 200,
                 error: None,
+                budget_hold: trace.take_budget_hold(),
             },
         );
     }
@@ -1267,6 +1272,7 @@ fn record_passthrough(
             streamed: false,
             status: 200,
             error: None,
+            budget_hold: trace.take_budget_hold(),
         },
     );
 }
@@ -1531,11 +1537,12 @@ async fn handle(
                 streamed: false,
                 status: 200,
                 error: None,
+                budget_hold: trace.take_budget_hold(),
             };
             // Scan before the row is written, so a refusal is logged as one 403 row
             // instead of a 200 that the client never received.
             if let Some(policy) = caller.output_guardrails() {
-                guard_output(state, policy, &response_text(&assembled), recorded)?;
+                guard_output(state, policy, &response_text(&assembled), &recorded)?;
             }
             // Redaction happens after the guardrail decision (which must see the original
             // text) and before the response is built, cached or returned.
@@ -1665,6 +1672,7 @@ async fn handle(
             // The slot belongs to the stream, not to this handler: it is released when
             // the body ends or the client disconnects, whichever comes first.
             _permit: permit,
+            budget_hold: trace.take_budget_hold(),
         },
         open,
         bytes,
@@ -1831,9 +1839,10 @@ async fn complete_traced(
             streamed: false,
             status: 200,
             error: None,
+            budget_hold: trace.take_budget_hold(),
         };
         if let Some(policy) = guardrails {
-            guard_output(state, policy, &response_text(&resp), recorded)?;
+            guard_output(state, policy, &response_text(&resp), &recorded)?;
         }
         record_once(state, recorded);
         return Ok((candidate, resp));
@@ -1862,9 +1871,10 @@ async fn complete_traced(
         streamed: false,
         status: 200,
         error: None,
+        budget_hold: trace.take_budget_hold(),
     };
     if let Some(policy) = guardrails {
-        guard_output(state, policy, &response_text(&assembled), recorded)?;
+        guard_output(state, policy, &response_text(&assembled), &recorded)?;
     }
     record_once(state, recorded);
     Ok((candidate, assembled))
@@ -1968,10 +1978,15 @@ async fn reassemble(open: &StreamRoute, bytes: ByteStream) -> Result<rrouter_cor
         parts.push(rrouter_core::Part::Text(text));
     }
     for (_, tid, name, args) in tools {
+        let input = serde_json::from_str(&args).map_err(|e| {
+            rrouter_core::Error::Translation(format!(
+                "tool call {name:?} ({tid}) returned invalid JSON arguments: {e}"
+            ))
+        })?;
         parts.push(rrouter_core::Part::ToolUse {
             id: tid,
             name,
-            input: serde_json::from_str(&args).unwrap_or(serde_json::Value::Null),
+            input,
         });
     }
     Ok(rrouter_core::ChatResponse {
@@ -2318,31 +2333,40 @@ async fn serve_cache_hit(
     label: &'static str,
     redact_pii: bool,
 ) -> Result<Response> {
+    // Take the hold once: a guardrail refusal and the cache-hit row share it, and the
+    // local handle keeps it alive until `record_cache_hit` moves it into the writer.
+    let budget_hold = trace.take_budget_hold();
     if let Some(policy) = caller.output_guardrails() {
-        guard_output(
-            state,
-            policy,
-            &body,
-            Recorded {
-                candidate,
-                model,
-                endpoint: endpoint_of(inbound),
-                usage: Usage::default(),
-                key: key_id,
-                request_id: trace.request_id,
-                trace_id: trace.trace_id(),
-                started,
-                upstream_ms: 0,
-                ttft: None,
-                streamed: false,
-                status: 200,
-                error: None,
-            },
-        )?;
+        let recorded = Recorded {
+            candidate,
+            model,
+            endpoint: endpoint_of(inbound),
+            usage: Usage::default(),
+            key: key_id,
+            request_id: trace.request_id,
+            trace_id: trace.trace_id(),
+            started,
+            upstream_ms: 0,
+            ttft: None,
+            streamed: false,
+            status: 200,
+            error: None,
+            budget_hold: budget_hold.clone(),
+        };
+        guard_output(state, policy, &body, &recorded)?;
     }
     crate::metrics::cache_hit();
     trace.set_provider(&candidate.provider);
-    record_cache_hit(state, candidate, model, inbound, key_id, trace, started);
+    record_cache_hit(
+        state,
+        candidate,
+        model,
+        inbound,
+        key_id,
+        trace,
+        started,
+        budget_hold,
+    );
     // A cached body may have been written by a key without redaction (or before this
     // policy existed): re-redact on the way out. Idempotent.
     let body = if redact_pii {
@@ -2371,6 +2395,7 @@ fn record_cache_hit(
     key: Option<Uuid>,
     trace: &RequestTrace,
     started: Instant,
+    budget_hold: Option<Arc<crate::state::BudgetHold>>,
 ) {
     spawn_record(
         state,
@@ -2396,6 +2421,7 @@ fn record_cache_hit(
             streamed: false,
             error: None,
         },
+        budget_hold,
     );
 }
 
@@ -2856,6 +2882,9 @@ struct RequestTrace {
     /// Milliseconds from sending the upstream request to its response headers. Set by
     /// every dispatch attempt and read once the winner is known.
     upstream_ms: AtomicU32,
+    /// Budget locks for this request. Taken by admission, moved into the response/record
+    /// path so the lock outlives the handler; a request that fails early drops it here.
+    budget_hold: Mutex<Option<Arc<crate::state::BudgetHold>>>,
     inner: Mutex<TraceLabels>,
 }
 
@@ -2894,11 +2923,23 @@ impl RequestTrace {
             tracestate: started.tracestate,
             attempts: AtomicU32::new(0),
             upstream_ms: AtomicU32::new(0),
+            budget_hold: Mutex::new(None),
             inner: Mutex::new(TraceLabels::default()),
         }
     }
 
     /// The 32-hex trace id the client sees as `x-trace-id`.
+    fn set_budget_hold(&self, hold: Option<Arc<crate::state::BudgetHold>>) {
+        *self.budget_hold.lock().unwrap_or_else(|e| e.into_inner()) = hold;
+    }
+
+    fn take_budget_hold(&self) -> Option<Arc<crate::state::BudgetHold>> {
+        self.budget_hold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
     fn trace_id(&self) -> &str {
         &self.trace.trace_id
     }
@@ -3214,7 +3255,9 @@ impl RequestTrace {
         };
         let store = Arc::clone(&state.store);
         let access_log = state.config.load().access_log;
+        let budget_hold = self.take_budget_hold();
         tokio::spawn(async move {
+            let _budget_hold = budget_hold;
             match store.record_usage(&rec).await {
                 Err(e) => tracing::warn!(error = %e, "failure record failed"),
                 Ok(()) if access_log => access_line(&rec),
@@ -3288,6 +3331,15 @@ struct Wire {
     /// The message the client was sent when a guardrail ended the stream. `Some` means
     /// nothing else was forwarded and the usage row says `403`.
     blocked: Option<String>,
+    /// The terminal error sent after a decode/transport failure. Without this the usage
+    /// row would say `200` even though the client received an error frame.
+    terminal_error: Option<(u16, String)>,
+    /// Longest blocked term, in characters; zero when output scanning is off.
+    guard_max: usize,
+    /// Trailing response text from the previous delta, per channel, so a term split
+    /// across two SSE frames is still matched.
+    guard_text_tail: String,
+    guard_reasoning_tail: String,
 }
 
 impl Wire {
@@ -3299,6 +3351,17 @@ impl Wire {
         guardrails: Option<Guardrails>,
         redact_pii: bool,
     ) -> Self {
+        let guard_max = guardrails
+            .as_ref()
+            .map(|policy| {
+                policy
+                    .blocked
+                    .iter()
+                    .map(|term| term.chars().count())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
         Self {
             incoming,
             decoder: rrouter_translate::StreamDecoder::new(upstream, client_model),
@@ -3312,24 +3375,36 @@ impl Wire {
             guardrails,
             stream_redactor: redact_pii.then(crate::redaction::StreamRedactor::new),
             blocked: None,
+            terminal_error: None,
+            guard_max,
+            guard_text_tail: String::new(),
+            guard_reasoning_tail: String::new(),
         }
     }
 
     /// Judge one text delta against the output policy.
     ///
-    /// Matching is per delta, because a delta is all that exists at that instant: bytes
-    /// already written cannot be recalled, and buffering the whole response to catch a
-    /// term split across two frames would defeat streaming. On a hit the offending delta
-    /// is dropped whole — the conservative direction — and the caller emits one terminal
-    /// error frame and stops.
-    fn blocked_by(&self, event: &StreamEvent) -> Option<String> {
+    /// The previous delta's tail is prepended to the current one, so a term split across
+    /// two SSE frames is still matched. Bytes already written cannot be recalled, but the
+    /// delta that completes the term is dropped and the stream stops before it is sent.
+    /// The tail is per channel: mixing reasoning into answer text would invent matches.
+    fn blocked_by(&mut self, event: &StreamEvent) -> Option<String> {
         let policy = self.guardrails.as_ref()?;
-        let text = match event {
-            StreamEvent::TextDelta(text) | StreamEvent::ReasoningDelta(text) => text,
+        let (text, tail) = match event {
+            StreamEvent::TextDelta(text) => (text, &mut self.guard_text_tail),
+            StreamEvent::ReasoningDelta(text) => (text, &mut self.guard_reasoning_tail),
             _ => return None,
         };
+        let combined = if tail.is_empty() {
+            text.clone()
+        } else {
+            format!("{tail}{text}")
+        };
+        // Keep only the longest term minus one character: that is the largest prefix
+        // that could still become a match when the next delta arrives.
+        *tail = suffix_chars(&combined, self.guard_max.saturating_sub(1));
         policy
-            .hit(text)
+            .hit(&combined)
             .map(|term| format!("the response contains the blocked term {term:?}"))
     }
 
@@ -3379,6 +3454,8 @@ impl Wire {
                 // beginning of the blocked term, and a policy refusal never emits it.
                 crate::metrics::guardrail_blocked(Stage::Output);
                 self.blocked = Some(message.clone());
+                self.guard_text_tail.clear();
+                self.guard_reasoning_tail.clear();
                 self.stream_redactor = None;
                 self.pending.clear();
                 self.failed = true;
@@ -3444,6 +3521,7 @@ impl Wire {
 
     /// Flush the redaction tail, then build one terminal error frame.
     fn close_with_error(&mut self, err: Error) -> Bytes {
+        self.terminal_error = Some((err.status(), err.to_string()));
         let tail = match self.flush_stream_tail_mode(true) {
             Ok(tail) => tail,
             Err(e) => return Bytes::from(error_frame(self.inbound, &e)),
@@ -3459,6 +3537,16 @@ fn record_stream_redaction(report: &crate::redaction::RedactionReport) {
         crate::metrics::pii_redacted(crate::metrics::RedactStage::Stream, report);
         tracing::debug!(stage = "stream", %report, "pii redacted from stream delta");
     }
+}
+
+/// Last `n` characters of `text`, preserving UTF-8 boundaries.
+fn suffix_chars(text: &str, n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    let mut chars: Vec<char> = text.chars().rev().take(n).collect();
+    chars.reverse();
+    chars.into_iter().collect()
 }
 
 fn join(acc: Option<Bytes>, next: Bytes) -> Bytes {
@@ -3535,6 +3623,8 @@ struct PendingRecord {
     /// This request's concurrency slot. `ResponseStream` owns it until the body ends or
     /// is dropped, which is the whole release protocol.
     _permit: Option<OwnedSemaphorePermit>,
+    /// Budget locks held until this stream's usage row is written.
+    budget_hold: Option<Arc<crate::state::BudgetHold>>,
 }
 
 /// The `Wire` plus the bookkeeping needed to record one usage row when it ends,
@@ -3564,7 +3654,10 @@ impl ResponseStream {
         // says 403 with the reason the client read in the terminal error frame.
         let (status, error) = match self.inner.blocked.as_deref() {
             Some(message) => (403, Some(message)),
-            None => (200, None),
+            None => match self.inner.terminal_error.as_ref() {
+                Some((status, message)) => (*status, Some(message.as_str())),
+                None => (200, None),
+            },
         };
         record_once(
             &pending.state,
@@ -3582,6 +3675,7 @@ impl ResponseStream {
                 streamed: true,
                 status,
                 error,
+                budget_hold: pending.budget_hold,
             },
         );
         if !completed {
@@ -3662,10 +3756,7 @@ fn endpoint_of(dialect: Dialect) -> &'static str {
 }
 
 /// One finished request, ready to turn into a usage row.
-///
-/// `Copy` so a refusal can record the row it just described (`..recorded`) rather than
-/// rebuilding it field by field.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Recorded<'a> {
     candidate: &'a Candidate,
     model: &'a str,
@@ -3687,6 +3778,8 @@ struct Recorded<'a> {
     status: u16,
     /// What the client was told, when the request failed. Prompt text never goes here.
     error: Option<&'a str>,
+    /// Budget locks released after this row is durable.
+    budget_hold: Option<Arc<crate::state::BudgetHold>>,
 }
 
 fn record_once(state: &AppState, r: Recorded<'_>) {
@@ -3725,7 +3818,7 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
         streamed: r.streamed,
         error: r.error.map(str::to_owned),
     };
-    spawn_record(state, rec);
+    spawn_record(state, rec, r.budget_hold);
 }
 
 /// Output side of a key's guardrails, for the non-streaming paths.
@@ -3737,7 +3830,7 @@ fn guard_output(
     state: &AppState,
     policy: &Guardrails,
     text: &str,
-    recorded: Recorded<'_>,
+    recorded: &Recorded<'_>,
 ) -> Result<()> {
     let Some(term) = policy.hit(text) else {
         return Ok(());
@@ -3749,7 +3842,7 @@ fn guard_output(
         Recorded {
             status: 403,
             error: Some(&message),
-            ..recorded
+            ..recorded.clone()
         },
     );
     Err(Error::Forbidden {
@@ -3776,7 +3869,11 @@ fn response_text(response: &ChatResponse) -> String {
 ///
 /// The row carries its own `trace_id`, so the access line and the stored row cannot
 /// disagree about which trace the request belonged to.
-fn spawn_record(state: &AppState, mut rec: UsageRecord) {
+fn spawn_record(
+    state: &AppState,
+    mut rec: UsageRecord,
+    budget_hold: Option<Arc<crate::state::BudgetHold>>,
+) {
     let store = Arc::clone(&state.store);
     let access_log = state.config.load().access_log;
     // Usage accounting must never fail a request or delay the response — and the same
@@ -3784,6 +3881,9 @@ fn spawn_record(state: &AppState, mut rec: UsageRecord) {
     // which is why no memo cache (and no invalidation hook in `routes/models.rs`) is
     // needed: one indexed registry read per completed request, always current.
     tokio::spawn(async move {
+        // Keep the budget lock until the usage row is durable; the next request for this
+        // key/team then sees the spend it just made.
+        let _budget_hold = budget_hold;
         let usage = rrouter_core::Usage {
             input_tokens: rec.input_tokens,
             output_tokens: rec.output_tokens,
@@ -4101,6 +4201,7 @@ async fn embeddings_inner(
                     streamed: false,
                     status: 200,
                     error: None,
+                    budget_hold: trace.take_budget_hold(),
                 },
             );
         }
@@ -4173,6 +4274,26 @@ mod tests {
             login: None,
             stream_only: false,
         }
+    }
+
+    /// A terminal stream failure must be visible to the usage row, not recorded as a
+    /// successful `200` response.
+    #[test]
+    fn terminal_stream_error_is_recorded_for_usage() {
+        let incoming: ByteStream = Box::pin(futures_util::stream::empty());
+        let mut wire = Wire::new(
+            Dialect::OpenAiChat,
+            Dialect::OpenAiChat,
+            "mock-model",
+            incoming,
+            None,
+            false,
+        );
+        let frame = wire.close_with_error(Error::Translation("bad stream".into()));
+        assert!(String::from_utf8_lossy(&frame).contains("bad stream"));
+        let (status, message) = wire.terminal_error.as_ref().expect("terminal error");
+        assert_eq!(*status, 400);
+        assert!(message.contains("bad stream"));
     }
 
     /// Manifest-declared query parameters are part of the transport contract.

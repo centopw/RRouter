@@ -124,11 +124,18 @@ export default function Keys() {
         message={<>Every client using <span className="font-mono">{revoking?.name ?? revoking?.id}</span> stops working immediately. This cannot be undone.</>}
         confirmLabel="Revoke key"
         busy={remove.isPending}
+        error={remove.error}
         onConfirm={() => {
-          if (revoking) remove.mutate(revoking.id);
-          setRevoking(null);
+          if (revoking) {
+            remove.mutate(revoking.id, { onSuccess: () => setRevoking(null) });
+          }
         }}
-        onClose={() => setRevoking(null)}
+        onClose={() => {
+          if (!remove.isPending) {
+            remove.reset();
+            setRevoking(null);
+          }
+        }}
       />
 
       <PageHeader

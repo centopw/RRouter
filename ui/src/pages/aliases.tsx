@@ -125,11 +125,18 @@ export default function Aliases() {
         message={<>Clients calling <span className="font-mono">{pending?.alias}</span> will get a model-not-found error until they use another name.</>}
         confirmLabel="Delete alias"
         busy={remove.isPending}
+        error={remove.error}
         onConfirm={() => {
-          if (pending) remove.mutate(pending.alias);
-          setPending(null);
+          if (pending) {
+            remove.mutate(pending.alias, { onSuccess: () => setPending(null) });
+          }
         }}
-        onClose={() => setPending(null)}
+        onClose={() => {
+          if (!remove.isPending) {
+            remove.reset();
+            setPending(null);
+          }
+        }}
       />
 
       <DataTable

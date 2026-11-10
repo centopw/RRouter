@@ -46,12 +46,12 @@ resources:
   limits:
     memory: 1Gi
 
-# The admin API is gated by loopback; inside a pod an Ingress arrives from the pod
-# network, so remote admin is enabled and must be authenticated at the Ingress or with
-# an admin token. Never expose the Service publicly without one of those.
+# The admin API is gated by loopback. In a pod, an Ingress arrives from the pod network,
+# so remote admin stays off unless explicitly enabled. If you enable it, also configure
+# `admin.existingSecret` or `admin.value`; never expose the Service unauthenticated.
 admin:
   # Set existingSecret to a Secret containing the admin token; or set value to have the
-  # chart create one. Empty means no token: authenticate /api and /metrics at the Ingress.
+  # chart create one. Empty means no token.
   existingSecret: ""
   existingSecretKey: admin-token
   value: ""
@@ -63,7 +63,8 @@ masterKey:
   value: ""
 
 requireApiKey: true
-allowRemoteAdmin: true
+# Keep false unless an admin token or authenticating Ingress is configured.
+allowRemoteAdmin: false
 rustLog: "rrouter=info"
 
 podAnnotations: {}

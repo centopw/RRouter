@@ -251,6 +251,17 @@ impl Breaker {
         self.record_success(conn);
     }
 
+    /// A 429 proves the account is reachable but says nothing about the 5xx/auth failure
+    /// that opened the connection breaker. Close a half-open probe without resetting the
+    /// failure count, so repeated server errors still trip the breaker.
+    fn record_rate_limit_answered(&self, conn: Uuid) {
+        let mut map = self.lock();
+        let entry = map.entry(conn).or_insert_with(Entry::new);
+        if matches!(entry.state, BreakerState::HalfOpen { .. }) {
+            entry.state = BreakerState::Closed;
+        }
+    }
+
     /// Record a failure with the candidate's model.
     ///
     /// 429 is model-scoped: it starts an exponential cooldown for `(conn, model)` and
@@ -288,9 +299,10 @@ impl Breaker {
             let wait = retry_after.unwrap_or(exponential).min(BACKOFF_CAP);
             entry.until = now + wait;
             drop(map);
-            // The account itself answered: a half-open probe is not re-opened by a
-            // model-specific limit. Other models on this connection stay eligible.
-            self.record_success(conn);
+            // The account answered, but a model-specific limit is not proof that an
+            // unrelated 5xx streak healed. Close a half-open episode so its probe slot
+            // is not stranded, and preserve the failure count for the next real verdict.
+            self.record_rate_limit_answered(conn);
             return;
         }
         self.record_failure_at(conn, status, retry_after, now);

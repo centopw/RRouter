@@ -148,7 +148,7 @@ export default function Providers() {
 
   const toggle = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
-      api.put<Connection>(`/api/connections/${id}`, { is_active: active }),
+      api.patch<Connection>(`/api/connections/${id}`, { is_active: active }),
     onSuccess: invalidate,
     onError: (e) => setNotice({ tone: "neg", text: e instanceof Error ? e.message : String(e) }),
   });
@@ -428,7 +428,10 @@ export default function Providers() {
               onRouting={() => setRouting(r)}
               onTest={() => test.mutate(r.id)}
               onToggle={() => toggle.mutate({ id: r.id, active: !r.is_active })}
-              onRemove={() => setRemoving(r)}
+              onRemove={() => {
+                remove.reset();
+                setRemoving(r);
+              }}
             />
           ),
         } as Column<Connection>,
@@ -488,11 +491,18 @@ export default function Providers() {
         message={<>Remove <span className="font-medium">{removing?.name ?? removing?.provider}</span>? Requests routed only here fall back or fail, and its stored credential is deleted.</>}
         confirmLabel="Remove account"
         busy={remove.isPending}
+        error={remove.error}
         onConfirm={() => {
-          if (removing) remove.mutate(removing.id);
-          setRemoving(null);
+          if (removing) {
+            remove.mutate(removing.id, { onSuccess: () => setRemoving(null) });
+          }
         }}
-        onClose={() => setRemoving(null)}
+        onClose={() => {
+          if (!remove.isPending) {
+            remove.reset();
+            setRemoving(null);
+          }
+        }}
       />
 
       {notice ? (

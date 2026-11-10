@@ -8,8 +8,12 @@ replica, a `Recreate` strategy, a PVC, probes, a Service and an optional Ingress
 ```sh
 helm install rrouter deploy/helm/rrouter \
   --namespace rrouter --create-namespace \
-  --set admin.value='choose-a-long-admin-token'
+  --set admin.value='choose-a-long-admin-token' \
+  --set allowRemoteAdmin=true
 ```
+
+`allowRemoteAdmin` defaults to `false`, so the admin API stays loopback-only. Enabling it
+without a token makes the admin API reachable to anything on the pod network.
 
 Get the first-run setup code:
 
@@ -38,7 +42,7 @@ The chart name plus release name produces `rrouter-rrouter` unless you override
 | `admin.value` / `admin.existingSecret` | empty | `RROUTER_ADMIN_TOKEN`; without it authenticate at the Ingress |
 | `masterKey.value` / `masterKey.existingSecret` | empty | Prefer a Secret in production |
 | `requireApiKey` | `true` | Require `sk-rr-…` on `/v1` |
-| `allowRemoteAdmin` | `true` | Needed for Ingress traffic; pair with auth |
+| `allowRemoteAdmin` | `false` | Enable only with `admin.value`/`admin.existingSecret` or authenticating Ingress |
 | `ingress.enabled` | `false` | Enable the Ingress template |
 
 Create secrets instead of putting values in the release:
@@ -73,7 +77,7 @@ ingress:
       hosts: [rrouter.example.com]
 ```
 
-Do not enable an Ingress without admin authentication or `admin.value`/`admin.existingSecret`.
+Do not enable an Ingress without admin authentication or `admin.value`/`admin.existingSecret`. Enabling an Ingress also requires `allowRemoteAdmin=true`.
 
 ## Upgrade and uninstall
 

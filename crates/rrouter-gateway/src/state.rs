@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use tokio::sync::OwnedMutexGuard;
 
 use axum::http::HeaderMap;
 use rrouter_core::{Dialect, Error, Result};
@@ -54,6 +55,16 @@ pub struct RateLimits {
     pub budget_tokens_remaining: Option<u64>,
     /// Micro-USD left in the key's durable budget window; `None` when unlimited.
     pub budget_micros_remaining: Option<u64>,
+}
+
+/// Guards held for one request against every budget it can spend (its key and its team).
+///
+/// Budget checks are read-then-spend, so two concurrent requests could both pass a
+/// preflight check and overspend. A budgeted request takes these locks before admission
+/// and holds them until its usage row is durable; unbudgeted traffic never touches them.
+/// The tradeoff is deliberate: a key with an explicit budget serializes its own requests.
+pub(crate) struct BudgetHold {
+    _guards: Vec<OwnedMutexGuard<()>>,
 }
 
 pub struct AppState {
@@ -371,6 +382,34 @@ impl AppState {
             .key_model_target(id, model)
             .await?
             .unwrap_or_else(|| model.to_string()))
+    }
+
+    /// Take the budget locks a request needs before checking its spend. Returns `None`
+    /// for anonymous or unbudgeted traffic; a budgeted key/team serializes requests until
+    /// the previous request's usage row is committed.
+    pub(crate) async fn budget_hold(&self, caller: &Caller) -> Result<Option<Arc<BudgetHold>>> {
+        let Caller::Key(key) = caller else {
+            return Ok(None);
+        };
+        let mut ids = Vec::new();
+        if key.budget_tokens > 0 || key.budget_micros > 0 {
+            ids.push(key.id);
+        }
+        if let Some(team) = self.store.key_team_row(key.id).await? {
+            if team.budget_tokens > 0 || team.budget_micros > 0 {
+                ids.push(team.id);
+            }
+        }
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let mut guards = Vec::with_capacity(ids.len());
+        for id in ids {
+            guards.push(self.counters.budget_lock(id).lock_owned().await);
+        }
+        Ok(Some(Arc::new(BudgetHold { _guards: guards })))
     }
 
     /// Allowlist and per-key caps for an authenticated caller. Must run after the
@@ -716,6 +755,9 @@ fn dollars(micros: u64) -> String {
 #[derive(Default)]
 pub struct KeyCounters {
     inner: Mutex<HashMap<Uuid, Window>>,
+    /// One async mutex per budgeted key/team. Entries are small and never removed while
+    /// an in-flight request may still hold the old lock.
+    budget_locks: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Default)]
@@ -845,6 +887,15 @@ impl KeyCounters {
             .unwrap_or_else(|p| p.into_inner())
             .remove(&id);
     }
+
+    fn budget_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        self.budget_locks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
 }
 
 /// Dialect implied by an inbound URI path; unknown paths fall back to [OI] chat.
@@ -917,6 +968,29 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(counters.snapshot(id).tokens_used, 10);
         }
+    }
+
+    /// Budget locks are per id: two requests for one budgeted key/team cannot both hold
+    /// the gate, while a different id is independent.
+    #[tokio::test]
+    async fn budget_lock_serializes_the_same_key_or_team() {
+        let counters = KeyCounters::default();
+        let id = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let first = counters.budget_lock(id).lock_owned().await;
+        assert!(
+            counters.budget_lock(id).try_lock_owned().is_err(),
+            "the same budget id must wait for the in-flight request"
+        );
+        assert!(
+            counters.budget_lock(other).try_lock_owned().is_ok(),
+            "an unrelated budget id is independent"
+        );
+        drop(first);
+        assert!(
+            counters.budget_lock(id).try_lock_owned().is_ok(),
+            "the lock is released with the request guard"
+        );
     }
 
     #[test]

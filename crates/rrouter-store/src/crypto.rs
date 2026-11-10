@@ -12,7 +12,8 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -27,6 +28,32 @@ const TAG_LEN: usize = 16;
 
 /// Name of the key file created inside the data dir when no master key is supplied.
 pub const KEY_FILE_NAME: &str = "master.key";
+
+/// Existing key material must not stay group/world-readable. Creation already uses
+/// `0600`; this also repairs a file copied into the data directory with a permissive mode.
+#[cfg(unix)]
+fn restrict_key_file(path: &Path) -> Result<()> {
+    let metadata =
+        fs::metadata(path).map_err(|e| Error::Store(format!("stat {}: {e}", path.display())))?;
+    if !metadata.is_file() {
+        return Err(Error::Store(format!(
+            "{} must be a regular file",
+            path.display()
+        )));
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| Error::Store(format!("chmod {} 0600: {e}", path.display())))?;
+        tracing::warn!(path = %path.display(), mode = format!("{mode:o}"), "tightened master key permissions to 0600");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_key_file(_path: &Path) -> Result<()> {
+    Ok(())
+}
 
 /// AES-256-GCM key used for every credential blob in one `Store`.
 ///
@@ -64,7 +91,10 @@ impl Cipher {
     pub(crate) fn load_or_create_file(data_dir: &Path) -> Result<Self> {
         let path = data_dir.join(KEY_FILE_NAME);
         match fs::read(&path) {
-            Ok(bytes) => Self::from_bytes(&bytes),
+            Ok(bytes) => {
+                restrict_key_file(&path)?;
+                Self::from_bytes(&bytes)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let mut key = [0u8; KEY_LEN];
                 rand::rngs::OsRng.fill_bytes(&mut key);
@@ -207,6 +237,15 @@ mod tests {
         }
         let first = fs::read(&path).expect("read key");
         assert_eq!(first.len(), KEY_LEN);
+        // A copied or restored key file with a permissive mode is repaired on load.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod 0644");
+            Cipher::load_or_create_file(&dir).expect("repair mode");
+            let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "existing key file must be repaired to 0600");
+        }
         // Second call reuses, does not rotate, the key.
         Cipher::load_or_create_file(&dir).expect("reuse");
         assert_eq!(fs::read(&path).expect("read key"), first);

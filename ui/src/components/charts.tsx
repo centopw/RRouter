@@ -346,6 +346,9 @@ export function TrafficChart({
             <div
               key={`err-${i}`}
               title={`${b.full}: ${b.errors} failed`}
+              role={b.errors > 0 ? "img" : undefined}
+              aria-label={b.errors > 0 ? `${b.full}: ${b.errors} failed` : undefined}
+              aria-hidden={b.errors === 0 ? true : undefined}
               className={cx(
                 "h-1.5 min-w-0 flex-1 rounded-[1px]",
                 b.errors > 0 ? "bg-[var(--color-neg)]" : "bg-[var(--color-rule)]",
