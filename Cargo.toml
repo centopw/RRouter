@@ -51,15 +51,15 @@ flate2 = "1"
 tar = "0.4"
 hex = "0.4"
 hmac = "0.12"
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10.3", features = ["rust_crypto"] }
 digest = "0.10"
 # Optional OpenTelemetry export (feature `otel`, default off). Kept in the workspace
 # table so the gateway can opt in without duplicating version pins; nothing here is
 # compiled unless `rrouter-gateway` enables the feature.
-opentelemetry = { version = "0.27", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.27", default-features = false, features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.27", default-features = false, features = ["trace", "http-proto", "reqwest-client", "reqwest-rustls"] }
-tracing-opentelemetry = "0.28"
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = "0.34"
 argon2 = "0.5"
 jiff = "0.2"
 

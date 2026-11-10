@@ -377,7 +377,7 @@ pub fn request_span(
     {
         use tracing_opentelemetry::OpenTelemetrySpanExt;
         if let Some(parent) = otel::remote_parent(trace) {
-            span.set_parent(parent);
+            let _ = span.set_parent(parent);
         }
     }
     span
@@ -414,7 +414,7 @@ pub mod otel {
     use opentelemetry::Context;
     use opentelemetry::KeyValue;
     use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::trace::{Sampler, Tracer, TracerProvider};
+    use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider, Tracer};
     use tracing_opentelemetry::OpenTelemetryLayer;
     use tracing_subscriber::Registry;
 
@@ -423,7 +423,7 @@ pub mod otel {
     /// The exporter and its provider. Cheap to keep for the process lifetime; dropping it
     /// without [`Exporter::shutdown`] can lose buffered spans.
     pub struct Exporter {
-        provider: TracerProvider,
+        provider: SdkTracerProvider,
         tracer: Tracer,
     }
 
@@ -437,15 +437,19 @@ pub mod otel {
                 .with_endpoint(&config.endpoint)
                 .build()
                 .map_err(|e| format!("otel exporter: {e}"))?;
-            let provider = TracerProvider::builder()
-                .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+            let provider = SdkTracerProvider::builder()
+                .with_batch_exporter(exporter)
                 .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
                     config.sample_ratio,
                 ))))
-                .with_resource(opentelemetry_sdk::Resource::new([KeyValue::new(
-                    "service.name",
-                    config.service_name.clone(),
-                )]))
+                .with_resource(
+                    opentelemetry_sdk::Resource::builder_empty()
+                        .with_attributes([KeyValue::new(
+                            "service.name",
+                            config.service_name.clone(),
+                        )])
+                        .build(),
+                )
                 .build();
             let tracer = provider.tracer("rrouter");
             Ok(Self { provider, tracer })
@@ -458,10 +462,9 @@ pub mod otel {
 
         /// Block until the batch processor has exported everything buffered so far.
         pub fn force_flush(&self) -> Result<(), String> {
-            for result in self.provider.force_flush() {
-                result.map_err(|e| format!("otel flush: {e}"))?;
-            }
-            Ok(())
+            self.provider
+                .force_flush()
+                .map_err(|e| format!("otel flush: {e}"))
         }
 
         /// Flush and stop; after this no span is exported.
