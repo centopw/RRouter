@@ -556,6 +556,37 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         stream_only: false,
     },
     ProviderSpec {
+        id: "opencode-go",
+        display: "OpenCode Go",
+        kind: ProviderKind::ApiKey,
+        // Go is a separate plan served from its own base URL. The paid OpenCode base
+        // cannot serve Go models, so this is a distinct provider rather than a model
+        // special case in the chat transport.
+        base_url: "https://opencode.ai/inference/go/openai/v1/chat/completions",
+        base_url_requires_override: false,
+        responses_url: Some("https://opencode.ai/inference/go/openai/v1/responses"),
+        models_url: Some("https://opencode.ai/inference/go/v1/models"),
+        // The Go Anthropic lane authenticates with x-api-key, not the Bearer style this
+        // spec uses; leave it out and let a Messages client translate through Chat.
+        messages_url: None,
+        images_url: None,
+        audio_speech_url: None,
+        audio_transcriptions_url: None,
+        audio_voices_url: None,
+        default_dialect: Dialect::OpenAiChat,
+        auth: AuthStyle::Bearer,
+        extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &["openai-beta"],
+        default_max_tokens: None,
+        refresh: None,
+        login: None,
+        profile_url: None,
+        stream_only: false,
+    },
+    ProviderSpec {
         id: "deepseek",
         display: "DeepSeek",
         kind: ProviderKind::ApiKey,
@@ -1022,6 +1053,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn opencode_go_is_a_separate_transport_from_paid_opencode() {
+        let go = get("opencode-go").expect("opencode-go");
+        assert_eq!(go.display, "OpenCode Go");
+        assert_eq!(
+            go.base_url,
+            "https://opencode.ai/inference/go/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            go.responses_url,
+            Some("https://opencode.ai/inference/go/openai/v1/responses")
+        );
+        assert_eq!(
+            go.models_url,
+            Some("https://opencode.ai/inference/go/v1/models")
+        );
+        assert_eq!(go.messages_url, None);
+        assert_eq!(go.auth, AuthStyle::Bearer);
+        assert_eq!(go.default_dialect, Dialect::OpenAiChat);
+
+        let paid = get("opencode").expect("opencode");
+        assert_eq!(
+            paid.base_url,
+            "https://opencode.ai/inference/openai/v1/chat/completions"
+        );
+        assert_ne!(paid.base_url, go.base_url);
     }
 
     #[test]

@@ -24,6 +24,7 @@ export const PROVIDER_BRANDS: Record<string, Brand> = {
   openai: { path: siOpenai.path, color: "#10A37F", domain: "openai.com" },
   codex: { path: siOpenai.path, color: "#10A37F", domain: "openai.com" },
   opencode: { color: "#111111", domain: "opencode.ai" },
+  "opencode-go": { color: "#E87040", domain: "opencode.ai" },
   github: { path: siGithub.path, color: "#181717", domain: "github.com" },
   gemini: { path: siGooglegemini.path, color: "#4285F4", domain: "gemini.google.com" },
   // Antigravity is Google's agent surface on Cloud Code Assist. The Google mark (rather

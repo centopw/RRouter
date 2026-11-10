@@ -12,6 +12,8 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 | `google-antigravity` | Google Antigravity | subscription (PKCE, fixed port 51121) | Google Code Assist (`/v1internal:*`) | yes (project-scoped `POST`) | Sign-in returns a Google token; the account's Cloud project is discovered via `loadCodeAssist` (onboarding when absent) and stored as `credentials.extra.project_id`, which every CCA envelope carries. `POST /api/models/fetch` posts `v1internal:fetchAvailableModels` with that project and stores the catalogue's ids/`displayName` as upstream rows. |
 | `openai` | OpenAI | API key | Chat | yes | Responses and compaction available; `store:false` is enforced for Codex traffic. Native web search through Responses. |
 | `anthropic` | Anthropic | API key | Messages | yes | Exact token counting via `/v1/messages/count_tokens`. Native web search through the Messages `web_search` tool. |
+| `opencode` | OpenCode | API key | Chat | yes | Paid Console base `https://opencode.ai/inference/openai/v1`; Go plans use the separate `opencode-go` provider. |
+| `opencode-go` | OpenCode Go | API key | Chat; Responses | yes | Go subscription base `https://opencode.ai/inference/go/openai/v1`; use `opencode-go/<model-id>`. Separate base URL from paid OpenCode; the Anthropic lane is intentionally not declared because it authenticates with `x-api-key`, so Messages clients translate through Chat. |
 | `deepseek` | DeepSeek | API key | Chat | yes | |
 | `gemini` | Google Gemini | API key | Chat (OpenAI compatibility layer) | yes | Native search uses `generateContent` + `google_search`; auth is `x-goog-api-key` there. |
 | `groq` | Groq | API key | Chat | yes | Very fast small models; no Responses endpoint. |

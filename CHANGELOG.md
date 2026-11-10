@@ -2,6 +2,14 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.6.1 — 2026-11-10
+
+### Fixed
+- OpenCode Go is now a distinct provider, `opencode-go`, whose chat and Responses
+  calls use `https://opencode.ai/inference/go/...`. Paid OpenCode keeps
+  `https://opencode.ai/inference/...`; Go models no longer route through the paid base.
+  The Go models endpoint is `https://opencode.ai/inference/go/v1/models`.
+
 ## 0.6.0 — 2026-11-10
 
 ### Added

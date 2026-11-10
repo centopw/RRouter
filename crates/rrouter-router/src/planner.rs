@@ -1724,8 +1724,8 @@ mod tests {
             .all(|c| c.model == "notaprovider/some-model"));
     }
 
-    /// The fifteen core ids keep resolving exactly as they did before the split moved to
-    /// the registry: prefix stripped, model id untouched, one provider, no fan-out.
+    /// The core ids keep resolving exactly as they did before the split moved to the
+    /// registry: prefix stripped, model id untouched, one provider, no fan-out.
     #[tokio::test]
     async fn core_provider_refs_are_unchanged() {
         const CORE: &[&str] = &[
@@ -1735,6 +1735,7 @@ mod tests {
             "openai",
             "anthropic",
             "opencode",
+            "opencode-go",
             "deepseek",
             "gemini",
             "groq",

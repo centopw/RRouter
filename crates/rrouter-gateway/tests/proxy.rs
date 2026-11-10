@@ -86,6 +86,10 @@ impl Mock {
         };
         let router = Router::new()
             .route("/v1/chat/completions", post(handle))
+            // Paid and Go OpenCode live on different base paths; both are mocked so a
+            // routing regression shows up as the wrong path, not a 404.
+            .route("/inference/openai/v1/chat/completions", post(handle))
+            .route("/inference/go/openai/v1/chat/completions", post(handle))
             .route("/v1/messages", post(handle))
             .route("/v1/responses", post(handle))
             .route("/v1/embeddings", post(handle))
@@ -661,6 +665,47 @@ async fn health_and_models() {
     // A connected provider contributes its catalog models.
     assert!(ids.contains(&"gpt-4.1"), "models: {ids:?}");
     assert!(ids.len() > 5);
+}
+
+#[tokio::test]
+async fn opencode_go_uses_its_own_base_path_and_paid_opencode_does_not() {
+    let mock = Mock::start(vec![openai_reply("paid"), openai_reply("go")]).await;
+    let h = harness(false);
+    h.connect("opencode", &mock).await;
+    h.connect("opencode-go", &mock).await;
+
+    let (paid_status, paid) = h
+        .post("/v1/chat/completions", openai_chat_body("opencode/kimi-k3"))
+        .await;
+    assert_eq!(paid_status, StatusCode::OK, "{paid}");
+    assert_eq!(paid["choices"][0]["message"]["content"], "paid");
+
+    let (go_status, go) = h
+        .post(
+            "/v1/chat/completions",
+            openai_chat_body("opencode-go/kimi-k3"),
+        )
+        .await;
+    assert_eq!(go_status, StatusCode::OK, "{go}");
+    assert_eq!(go["choices"][0]["message"]["content"], "go");
+
+    assert_eq!(
+        mock.paths(),
+        vec![
+            "/inference/openai/v1/chat/completions".to_string(),
+            "/inference/go/openai/v1/chat/completions".to_string(),
+        ],
+        "Go must not reuse the paid OpenCode base path"
+    );
+    // Both requests carry the same bearer credential; the plan, not the key, decides
+    // which base URL is called.
+    let second = mock.headers(1).expect("second headers");
+    assert!(
+        second
+            .iter()
+            .any(|(name, value)| { name == "authorization" && value == "Bearer test-key" }),
+        "{second:?}"
+    );
 }
 
 #[tokio::test]
