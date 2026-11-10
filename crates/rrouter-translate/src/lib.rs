@@ -11,6 +11,7 @@ pub mod google_cca;
 mod openai_chat;
 pub mod rerank;
 mod responses;
+pub mod search;
 mod wire;
 
 pub use anthropic::{AnthropicDecoder, AnthropicEncoder};

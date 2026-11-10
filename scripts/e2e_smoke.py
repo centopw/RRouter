@@ -6,7 +6,8 @@ Proves, against the real binary (not test harness):
      first content frame before the upstream has sent its last chunk;
   2. a dead account falls through to the next one within the fallback budget;
   3. credentials are encrypted at rest and never echoed by /api/connections;
-  4. an Anthropic-dialect client gets Anthropic-shaped SSE from an [OI]-speaking provider.
+  4. an Anthropic-dialect client gets Anthropic-shaped SSE from an [OI]-speaking provider;
+  5. `/v1/search` reaches a provider's native Responses search tool and returns citations.
 """
 import json
 import os
@@ -48,6 +49,31 @@ class Upstream(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") == "Bearer dead-key":
             self.send_response(401)
             payload = b'{"error":{"message":"invalid api key"}}'
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if self.path == "/v1/responses" and any(
+            tool.get("type") == "web_search" for tool in body.get("tools", [])
+        ):
+            payload = json.dumps({
+                "id": "resp-1", "object": "response",
+                "output": [{
+                    "type": "message", "role": "assistant",
+                    "content": [{
+                        "type": "output_text", "text": "pong",
+                        "annotations": [{
+                            "type": "url_citation",
+                            "url": "https://example.com/pong",
+                            "title": "Pong",
+                        }],
+                    }],
+                }],
+                "usage": {"input_tokens": 7, "output_tokens": 2},
+            }).encode()
+            self.send_response(200)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(payload)))
             self.end_headers()
@@ -184,6 +210,17 @@ def main():
             anth = json.loads(r.read())
         check("anthropic dialect response shape", anth.get("type") == "message"
               and isinstance(anth.get("content"), list), str(anth)[:90])
+
+        # --- provider-native web search -------------------------------------------
+        st, search = http("POST", "/v1/search", {
+            "model": "openai", "query": "ping", "max_results": 2,
+        })
+        found = json.loads(search)
+        check("search returns a cited answer", st == 200 and found.get("answer", {}).get("text") == "pong",
+              str(found)[:100])
+        check("search expands the provider default", found.get("model") == "gpt-5-mini", found.get("model", ""))
+        check("search keeps the citation", found.get("results", [{}])[0].get("url") == "https://example.com/pong",
+              str(found.get("results", []))[:100])
 
         # --- credentials encrypted at rest ----------------------------------------
         db = open(f"{DATA}/rrouter.db", "rb").read()

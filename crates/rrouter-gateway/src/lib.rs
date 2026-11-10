@@ -332,6 +332,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/health", get(routes::health::health))
         .route("/ready", get(routes::health::ready))
         .route("/v1/models", get(v1_models))
+        .route("/v1/models/search", get(routes::search::models))
         .route("/v1/models/{*id}", get(v1_model))
         .route("/v1/chat/completions", post(proxy::proxy))
         .route("/v1/messages", post(proxy::proxy))
@@ -340,6 +341,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/v1/messages/count_tokens", post(proxy::count_tokens))
         .route("/v1/embeddings", post(proxy::embeddings))
         .route("/v1/rerank", post(routes::rerank::rerank))
+        .route("/v1/search", post(routes::search::search))
         // Provider-native storage and jobs: forwarded verbatim, `501` where the provider
         // declares no endpoint (see `routes::native` for the shared plumbing).
         .route(

@@ -20,6 +20,8 @@ the model decides where it routes.
 | `POST /v1/audio/transcriptions` | multipart forwarded verbatim |
 | `GET /v1/audio/voices` | forwarded when declared |
 | `POST /v1/rerank` | canonical rerank, forwarded when declared |
+| `POST /v1/search` | provider-native web search, routed through the same planner |
+| `GET /v1/models/search` | connected providers with a native search surface |
 | `/v1/files*` | provider file API forwarded; 501 when unsupported |
 | `/v1/batches*` | provider batch API forwarded; 501 when unsupported |
 
@@ -31,6 +33,72 @@ an OpenAI API-key connection does.
 `GET /v1/models` lists only enabled models from connected providers. A disabled model is
 absent; re-enabling restores it. `/v1/models/{id}` returns 404 for a disabled or unroutable
 model.
+
+## Web search
+
+`POST /v1/search` runs a provider's own hosted search tool and returns one answer with
+ordered citations. It uses the same model string, planner, credentials, account failover,
+key limits and usage accounting as chat: a provider id expands to its default search model,
+`provider/model` pins one, and a combo or alias chains providers.
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `model` or `provider` | yes | Provider id (`claude`), `provider/model`, alias or combo. Both names are accepted; they must agree when both are sent. |
+| `query` | yes | Search prompt, at most 8 KiB. Trimmed. |
+| `max_results` | no | 1–20, default 5. Caps returned citations; the model may have read more pages. |
+| `search_type` | no | Only `web`, the default. Provider-native search is not a news/X-firehose API. |
+| `domain_filter` | no | At most 10 domains. Anthropic and Responses providers get their native domain filter; Gemini receives the same restriction in the prompt. |
+
+```sh
+curl -s localhost:20128/v1/search \
+  -H "Authorization: Bearer sk-rr-..." \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude","query":"What changed in Rust 1.90?","max_results":3}'
+```
+
+```json
+{
+  "provider": "claude",
+  "model": "claude-sonnet-4-5",
+  "query": "What changed in Rust 1.90?",
+  "results": [
+    {
+      "title": "Announcing Rust 1.90.0",
+      "url": "https://blog.rust-lang.org/...",
+      "snippet": "Rust 1.90 was released.",
+      "position": 1,
+      "score": null,
+      "published_at": "2026-01-01T00:00:00Z",
+      "favicon_url": null,
+      "content": null,
+      "metadata": {},
+      "citation": {"provider": "claude", "retrieved_at": 1794312000, "rank": 1}
+    }
+  ],
+  "answer": {"source": "claude", "model": "claude-sonnet-4-5", "text": "Rust 1.90 was released."},
+  "usage": {"queries_used": 1, "search_cost_usd": 0, "input_tokens": 120, "output_tokens": 40, "llm_tokens": 160},
+  "metrics": {"total_results_available": null, "returned_results": 1},
+  "errors": []
+}
+```
+
+Native search surfaces:
+
+| Provider ids | Wire surface | Default model |
+| --- | --- | --- |
+| `claude`, `anthropic` | Messages API with `web_search_20250305` | `claude-sonnet-4-5` |
+| `openai`, `codex`, `xai` | Responses API with the `web_search` tool | `gpt-5-mini`, `gpt-5.6-luna`, `grok-4` |
+| `gemini` | `generateContent` with `google_search` grounding | `gemini-2.5-flash` |
+
+A provider with no native search is removed from the plan. If no candidate remains, the
+route answers `501` without calling upstream. Search tokens are written to the normal usage
+row and priced from the model registry; the search tool's own per-call fee is not priced by
+the gateway.
+
+`GET /v1/models/search` lists connected search providers for clients that discover
+capabilities at runtime (`kind` is `webSearch`, and `default_model` is the provider-only
+default).
+
 
 ## Admin
 

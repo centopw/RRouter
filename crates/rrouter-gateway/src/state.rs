@@ -600,7 +600,7 @@ impl AppState {
     }
 
     /// One alias hop, exactly as the planner resolves it before routing.
-    async fn resolve_alias(&self, model: &str) -> Result<String> {
+    pub(crate) async fn resolve_alias(&self, model: &str) -> Result<String> {
         let aliases = self.store.list_aliases().await?;
         Ok(aliases
             .iter()

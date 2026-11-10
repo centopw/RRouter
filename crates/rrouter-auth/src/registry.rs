@@ -11,6 +11,7 @@ use std::sync::LazyLock;
 use rrouter_core::Dialect;
 
 use crate::overrides::{override_for, OverrideKind};
+use rrouter_translate::search::SearchMode;
 use rrouter_translate::{MaxTokensKey, WireProfile};
 
 /// How an account for this provider is obtained and refreshed.
@@ -664,7 +665,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         kind: ProviderKind::ApiKey,
         base_url: "https://api.x.ai/v1/chat/completions",
         base_url_requires_override: false,
-        responses_url: None,
+        responses_url: Some("https://api.x.ai/v1/responses"),
         models_url: None,
         messages_url: None,
         images_url: Some("https://api.x.ai/v1/images/generations"),
@@ -837,6 +838,50 @@ pub fn login_flow_for(provider: &str) -> Option<LoginFlow> {
     })
 }
 
+/// One provider's native web-search surface.
+///
+/// Search is a separate capability, not part of the chat transport: the provider runs it
+/// inside an existing model endpoint, and the gateway only needs to know which wire body
+/// that endpoint expects and which model to use when the client names the provider alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchSpec {
+    pub mode: SearchMode,
+    /// Model used when the client sends a provider id (`claude`) instead of
+    /// `provider/model`. Chosen from the provider's catalog and overridable per request.
+    pub default_model: &'static str,
+}
+
+/// Native web search for `provider`, when its model API can search the web.
+///
+/// The list is deliberately explicit. A provider is added here only after its API
+/// documents a hosted search tool; an unknown provider answers `501` on `/v1/search`
+/// instead of receiving a guessed tool or a different endpoint.
+pub fn search_spec(provider: &str) -> Option<SearchSpec> {
+    match provider {
+        "claude" | "anthropic" => Some(SearchSpec {
+            mode: SearchMode::Anthropic,
+            default_model: "claude-sonnet-4-5",
+        }),
+        "openai" => Some(SearchSpec {
+            mode: SearchMode::OpenAiResponses,
+            default_model: "gpt-5-mini",
+        }),
+        "codex" => Some(SearchSpec {
+            mode: SearchMode::OpenAiResponses,
+            default_model: "gpt-5.6-luna",
+        }),
+        "xai" => Some(SearchSpec {
+            mode: SearchMode::OpenAiResponses,
+            default_model: "grok-4",
+        }),
+        "gemini" => Some(SearchSpec {
+            mode: SearchMode::Gemini,
+            default_model: "gemini-2.5-flash",
+        }),
+        _ => None,
+    }
+}
+
 /// Core providers that serve `/v1/rerank`. Empty today: the capability ships through
 /// community manifests, and this table is where a built-in provider would join.
 const CORE_RERANK: &[(&str, &str)] = &[];
@@ -977,6 +1022,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn native_search_specs_name_an_endpoint_and_a_default_model() {
+        for provider in ["claude", "anthropic", "openai", "codex", "xai", "gemini"] {
+            let spec = get(provider).unwrap_or_else(|| panic!("{provider}"));
+            let search = search_spec(provider).unwrap_or_else(|| panic!("{provider} search"));
+            assert!(!search.default_model.is_empty(), "{provider}");
+            match search.mode {
+                SearchMode::Anthropic => assert!(
+                    spec.messages_url.is_some(),
+                    "{provider} searches through Messages"
+                ),
+                SearchMode::OpenAiResponses => assert!(
+                    spec.responses_url.is_some(),
+                    "{provider} searches through Responses"
+                ),
+                SearchMode::Gemini => {}
+            }
+        }
+        assert!(search_spec("groq").is_none());
+        assert_eq!(
+            get("xai").expect("xai").responses_url,
+            Some("https://api.x.ai/v1/responses")
+        );
     }
 
     #[test]

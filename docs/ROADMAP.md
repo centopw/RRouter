@@ -15,7 +15,7 @@ It is a capability inventory, not a completion score.
 
 | Area | What ships |
 | --- | --- |
-| Protocol surface | `/v1/chat/completions`, `/v1/messages`, `/v1/responses` (+ `compact`), `/v1/messages/count_tokens`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/rerank`, `/v1/models`, `/v1/models/{id}`; streaming translation across the three dialects, including same-dialect passthrough. Control-plane `/v1/files` and `/v1/batches` are forwarded verbatim to providers that declare the capability (OpenAI-compatible manifests only); execution stays with the provider |
+| Protocol surface | `/v1/chat/completions`, `/v1/messages`, `/v1/responses` (+ `compact`), `/v1/messages/count_tokens`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/rerank`, `/v1/search`, `/v1/models`, `/v1/models/search`, `/v1/models/{id}`; streaming translation across the three dialects, including same-dialect passthrough. Control-plane `/v1/files` and `/v1/batches` are forwarded verbatim to providers that declare the capability (OpenAI-compatible manifests only); execution stays with the provider |
 | Routing | `RROUTER_STRATEGY` = `priority`, `weighted`, `least_latency`, `cheapest`; priority is authoritative and the strategy orders within a priority group; combos (`combo:`), model aliases and disabled models; operator canary (`RROUTER_CANARY=model=provider:percent`) and non-streaming hedging (`RROUTER_HEDGE_MS`); subscription-aware reserve (`RROUTER_SUBSCRIPTION_RESERVE_PERCENT`, default 90) skips accounts near a provider plan window while a healthier candidate remains; `POST /api/route/explain` returns the ordered plan, priorities, dialects and cached window headroom without dispatching |
 | Reliability | per-attempt retries with jitter capped by `Retry-After`, the request deadline and the send budget (streaming retries only before the first byte); circuit breaker with half-open probe; per-provider timeouts; global concurrency cap; graceful shutdown; `/health` and `/ready` |
 | Identity & sessions | first-run owner setup code, argon2id passwords, HttpOnly JWT sessions validated against the database with refresh/rotation, single-use recovery codes, invite-only signup, `admin`/`member`/`viewer` roles, CSRF on mutations, audit trail and Audit page; each session records the client IP, raw User-Agent and a derived device label (schema v28); admin token and admin-scoped keys remain the automation path |
@@ -35,8 +35,8 @@ It is a capability inventory, not a completion score.
 ## Status
 
 Published releases through **0.2.3** were verified live (installer, multi-arch image,
-release binaries). **0.5.5** is the current release: everything listed above is
-implemented in this tree, and `CHANGELOG.md` → `0.5.5` is the authoritative list of
+release binaries). **0.6.0** is the current release: everything listed above is
+implemented in this tree, and `CHANGELOG.md` → `0.6.0` is the authoritative list of
 what changed since 0.2.3. This page deliberately does not claim a completion percentage;
 release readiness is the coordinator's verification.
 

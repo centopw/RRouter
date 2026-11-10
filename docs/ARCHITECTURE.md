@@ -46,13 +46,16 @@ Request flow:
 4. **Dispatcher** retries, fails over, probes breakers and optionally hedges.
 5. **Response** is translated back to the caller's dialect; usage, trace, audit and webhooks
    are recorded.
+6. **Search** (`/v1/search`) skips dialect translation: it plans the same provider accounts,
+   sends that provider's native search tool, and returns its cited answer in one canonical
+   body. Retries, breakers, key limits and usage accounting are shared with chat.
 
 | Crate | Responsibility |
 | --- | --- |
 | `rrouter-core` | shared request/response/stream types and errors |
 | `rrouter-auth` | provider registry, credentials, OAuth refresh |
 | `rrouter-store` | SQLite, encryption, connections/keys/teams/usage/evals/outbox |
-| `rrouter-translate` | Chat ⇄ Responses ⇄ Anthropic, request and stream |
+| `rrouter-translate` | Chat ⇄ Responses ⇄ Anthropic, request and stream; native web-search adapters |
 | `rrouter-router` | aliases, combos, planning, breaker, dispatch |
 | `rrouter-rtk` | Token Saver: inbound tool-result compression |
 | `rrouter-gateway` | HTTP surface, proxy, admin API, dashboard |

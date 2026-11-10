@@ -17,6 +17,7 @@ pub mod oauth;
 pub mod quota_pings;
 pub mod quotas;
 pub mod rerank;
+pub mod search;
 pub mod settings;
 pub mod system;
 pub mod system_logs;

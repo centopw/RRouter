@@ -6,17 +6,17 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 
 | Id | Display | Auth | Native | Model list | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `claude` | Claude (Anthropic OAuth) | subscription (PKCE) | Messages | yes | Request must claim a current Claude Code version; a stale one is refused with "version 2.1.280 or newer is required". Callback host is `localhost`. |
-| `codex` | Codex (ChatGPT OAuth) | subscription (PKCE, fixed port 1455) | Responses | **no** | Stream-only: non-streaming clients are served by reassembling the stream. Its five verified ids come from the built-in catalog. The subscription backend does not serve `/responses/compact`. |
+| `claude` | Claude (Anthropic OAuth) | subscription (PKCE) | Messages | yes | Request must claim a current Claude Code version; a stale one is refused with "version 2.1.280 or newer is required". Callback host is `localhost`. Native web search through the Messages `web_search` tool. |
+| `codex` | Codex (ChatGPT OAuth) | subscription (PKCE, fixed port 1455) | Responses | **no** | Stream-only: non-streaming clients are served by reassembling the stream. Its five verified ids come from the built-in catalog. The subscription backend does not serve `/responses/compact`. Responses also exposes native web search. |
 | `github` | GitHub Copilot | subscription (device code) | Chat | yes | Also exposes Responses and Messages URLs; a Copilot-specific token refresh is handled per request. |
 | `google-antigravity` | Google Antigravity | subscription (PKCE, fixed port 51121) | Google Code Assist (`/v1internal:*`) | yes (project-scoped `POST`) | Sign-in returns a Google token; the account's Cloud project is discovered via `loadCodeAssist` (onboarding when absent) and stored as `credentials.extra.project_id`, which every CCA envelope carries. `POST /api/models/fetch` posts `v1internal:fetchAvailableModels` with that project and stores the catalogue's ids/`displayName` as upstream rows. |
-| `openai` | OpenAI | API key | Chat | yes | Responses and compaction available; `store:false` is enforced for Codex traffic. |
-| `anthropic` | Anthropic | API key | Messages | yes | Exact token counting via `/v1/messages/count_tokens`. |
+| `openai` | OpenAI | API key | Chat | yes | Responses and compaction available; `store:false` is enforced for Codex traffic. Native web search through Responses. |
+| `anthropic` | Anthropic | API key | Messages | yes | Exact token counting via `/v1/messages/count_tokens`. Native web search through the Messages `web_search` tool. |
 | `deepseek` | DeepSeek | API key | Chat | yes | |
-| `gemini` | Google Gemini | API key | Chat (OpenAI compatibility layer) | yes | |
+| `gemini` | Google Gemini | API key | Chat (OpenAI compatibility layer) | yes | Native search uses `generateContent` + `google_search`; auth is `x-goog-api-key` there. |
 | `groq` | Groq | API key | Chat | yes | Very fast small models; no Responses endpoint. |
 | `openrouter` | OpenRouter | API key | Chat | yes | Aggregator: the widest model catalog, priced per model. |
-| `xai` | xAI | API key | Chat | yes | |
+| `xai` | xAI | API key | Chat; Responses for search | yes | Native search uses `/v1/responses` + `web_search`. |
 | `mistral` | Mistral | API key | Chat | yes | |
 | `together` | Together AI | API key | Chat | yes | |
 | `cerebras` | Cerebras | API key | Chat | yes | |
@@ -43,6 +43,25 @@ Non-chat endpoints follow the same rule: a provider that declares one gets the c
 forwarded (`/v1/rerank`, `/v1/files`, `/v1/batches`, `/v1/images/generations`,
 `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/voices`); every other provider
 answers `501` for that path without calling upstream.
+
+### Native web search
+
+`POST /v1/search` uses the provider's own search tool; the gateway does not fetch or rank
+pages itself. Search is routed like chat (priority, strategy, key allowlist, team scope,
+breaker, retries), and a provider that cannot search is removed from the plan rather than
+being sent a guessed tool.
+
+| Provider | Request shape | Default when the client sends the provider id |
+| --- | --- | --- |
+| `claude`, `anthropic` | Messages `tools: [{"type":"web_search_20250305","name":"web_search"}]`; `allowed_domains` supported | `claude-sonnet-4-5` |
+| `openai`, `codex` | Responses `tools: [{"type":"web_search"}]`; `filters.allowed_domains` supported | `gpt-5-mini`, `gpt-5.6-luna` |
+| `xai` | Responses `tools: [{"type":"web_search"}]`; domain filters supported | `grok-4` |
+| `gemini` | `generateContent` with `tools: [{"google_search":{}}]`; domain filters are stated in the prompt | `gemini-2.5-flash` |
+
+The client's `max_results` caps the citations returned, not the number of searches the
+model may run. Tokens land in the normal usage row; the search tool's own per-call fee is
+not priced by the gateway. `GET /v1/models/search` lists providers that are connected and
+search-capable.
 
 ## Google Antigravity (Cloud Code Assist)
 
@@ -140,8 +159,12 @@ patched, so provider-native cache markers and tool definitions survive.
 2. Model listing derives from the chat base URL unless the spec declares `models_url`, so a
    standard OpenAI-compatible server works with no extra code; the derivation itself is
    `models_url` in `crates/rrouter-gateway/src/models_registry.rs`.
-3. Run `cargo test -p rrouter-auth -p rrouter-gateway`; the registry tests assert that every
-   provider has a valid spec.
+3. If the provider documents a hosted web-search tool, add it to `search_spec` in
+   `crates/rrouter-auth/src/registry.rs` and a request/response adapter in
+   `crates/rrouter-translate/src/search.rs`; until then `/v1/search` answers `501` for it.
+4. Run `cargo test -p rrouter-auth -p rrouter-translate -p rrouter-gateway`; the registry
+   tests assert that every provider has a valid spec and every search provider has an
+   endpoint for its mode.
 
 OAuth providers additionally need a `LoginFlow` (PKCE with a fixed or dynamic loopback port, or
 a device-code flow) and, if the provider reports an account label, a `profile_url`.

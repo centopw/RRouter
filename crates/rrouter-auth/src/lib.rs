@@ -41,8 +41,8 @@ pub use loopback::LoopbackServer;
 pub use overrides::{invalid_overrides, override_for, OverrideKind};
 pub use query::with_query;
 pub use registry::{
-    all, get, is_oauth, login_flow_for, AuthStyle, DeviceFlow, LoginFlow, PkceFlow, ProviderKind,
-    ProviderSpec, RefreshBody, RefreshSpec, PROVIDERS,
+    all, get, is_oauth, login_flow_for, search_spec, AuthStyle, DeviceFlow, LoginFlow, PkceFlow,
+    ProviderKind, ProviderSpec, RefreshBody, RefreshSpec, SearchSpec, PROVIDERS,
 };
 
 /// Serializes tests that mutate process environment. Rust tests share one process, and

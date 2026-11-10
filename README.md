@@ -21,6 +21,8 @@ encryption key material and the dashboard all live inside the binary and one dat
   SHA-256 hashes and printed once.
 - **A real model registry.** Catalog, provider `/models`, models.dev metadata, custom rows,
   provider coverage, disabled models and preferred providers.
+- **Native web search.** Route Anthropic, OpenAI/Codex, xAI or Gemini through their own
+  hosted search tools and return one cited answer from `/v1/search`.
 - **Smart quota auto-ping.** Warm Claude/Codex subscription windows on reset, on a schedule,
   or with usage-aware staggered resets across accounts.
 
@@ -47,11 +49,11 @@ curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | s
 Pin a release or choose a directory:
 
 ```sh
-RROUTER_VERSION=v0.5.5 RROUTER_INSTALL_DIR="$HOME/bin" \
+RROUTER_VERSION=v0.6.0 RROUTER_INSTALL_DIR="$HOME/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
 ```
 
-`install.sh` downloads a published release; `v0.5.5` is the newest. From source:
+`install.sh` downloads a published release; `v0.6.0` is the newest. From source:
 
 ```sh
 git clone https://github.com/centopw/RRouter && cd RRouter
@@ -117,7 +119,8 @@ where it goes, not the protocol.
 ## At a glance
 
 - **Inference:** `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/embeddings`,
-  token counting, images, audio, rerank, files and batches when the provider declares them.
+  `/v1/search`, token counting, images, audio, rerank, files and batches when the provider
+  declares them.
 - **Model strings:** `provider/model`, aliases, `combo:<name>`; bare ids expand across
   connected providers.
 - **Strategies:** priority, weighted, least-latency and cheapest; canary and provider policy

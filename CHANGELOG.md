@@ -2,6 +2,28 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.6.0 — 2026-11-10
+
+### Added
+- `POST /v1/search`: provider-native web search through existing connections. Claude and
+  Anthropic use the Messages `web_search` server tool; OpenAI, Codex and xAI use the
+  Responses `web_search` tool; Gemini uses `generateContent` with Google Search grounding.
+  The request routes through the normal planner, account failover, key limits, input/output
+  guardrails and usage accounting, and returns one cited answer in a 9Router-compatible
+  shape.
+- `GET /v1/models/search`: connected providers with a native search surface and their
+  provider-only default model.
+- Request fields: `model` (or `provider`), `query`, `max_results` (1–20, citation cap),
+  `search_type` (`web` only), and `domain_filter` (native filters where supported, prompt
+  hint for Gemini).
+- xAI now declares its Responses endpoint for native `web_search`.
+
+### Notes
+- Search tokens are recorded and priced from the model registry; the provider's per-search
+  tool fee is not priced by the gateway.
+- A provider without native search is filtered from the plan; if none remains the route
+  answers `501` without calling upstream.
+
 ## 0.5.5 — 2026-11-10
 
 ### Changed
