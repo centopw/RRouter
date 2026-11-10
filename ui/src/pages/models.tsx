@@ -29,7 +29,13 @@ import {
 import { DataTable, PaginationBar, type Column } from "../components/table";
 import { PresetBar } from "../components/model-presets";
 import { InactiveList, SortableCards, SortableTable, type LayoutRow } from "../components/sortable-list";
-import { layoutFor, useLayoutDraft } from "../lib/layout-draft";
+import {
+  effectiveGroups,
+  groupForEntry,
+  layoutFor,
+  useLayoutDraft,
+  type DraftGroup,
+} from "../lib/layout-draft";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS, CapabilityChips } from "../components/capability-chips";
 import { ProviderIcon } from "../components/provider-icon";
 import { Checkbox, Heading, IconButton, Toggle } from "../components/atoms";
@@ -292,6 +298,36 @@ export default function Models() {
   // A preset row is a registry model plus its place in the layout; a ref the registry no
   // longer lists is still shown, as unavailable, so ordering never silently drops.
   const byRef = useMemo(() => new Map(all.map((model) => [model.ref, model] as const)), [all]);
+  const entryByRef = useMemo(
+    () => new Map(layoutDraft.entries.map((entry) => [entry.ref, entry] as const)),
+    [layoutDraft.entries],
+  );
+  const groupChoices = useMemo(
+    () =>
+      effectiveGroups(
+        layoutDraft.entries,
+        layoutDraft.groups,
+        (provider) => providerDisplay.get(provider) ?? provider,
+      ),
+    [layoutDraft.entries, layoutDraft.groups, providerDisplay],
+  );
+  const groupIndex = useMemo(
+    () => new Map(groupChoices.map((group, index) => [group.id, index] as const)),
+    [groupChoices],
+  );
+  const groupOf = useCallback(
+    (ref: string) => groupForEntry(entryByRef.get(ref), groupChoices),
+    [entryByRef, groupChoices],
+  );
+  const [groupsOpen, setGroupsOpen] = useState(false);
+  const openGroups = () => {
+    layoutDraft.ensureProviderGroups(
+      groupChoices
+        .filter((group) => group.provider)
+        .map((group) => ({ provider: group.provider as string, name: group.name })),
+    );
+    setGroupsOpen(true);
+  };
   const entryRefs = useMemo(
     () => new Set(layoutDraft.entries.map((entry) => entry.ref)),
     [layoutDraft.entries],
@@ -319,7 +355,14 @@ export default function Models() {
       isNew: false,
     }))
     .filter(matchesRow);
-  const activeRows = visibleRows.filter((row) => row.model?.enabled !== false);
+  const rowOrder = new Map(visibleRows.map((row, index) => [row.ref, index] as const));
+  const activeRows = visibleRows
+    .filter((row) => row.model?.enabled !== false)
+    .sort((a, b) => {
+      const ai = groupIndex.get(groupOf(a.ref)) ?? Number.MAX_SAFE_INTEGER;
+      const bi = groupIndex.get(groupOf(b.ref)) ?? Number.MAX_SAFE_INTEGER;
+      return ai - bi || (rowOrder.get(a.ref) ?? 0) - (rowOrder.get(b.ref) ?? 0);
+    });
   const disabledRows = visibleRows.filter((row) => row.model?.enabled === false);
   const newRows = all
     .filter((model) => !entryRefs.has(model.ref))
@@ -353,6 +396,26 @@ export default function Models() {
     Math.max(1, Math.ceil(disabledModels.length / size)),
   );
   const activeSlice = activeRows.slice((activePage - 1) * size, activePage * size);
+  const sliceGroups = useMemo(() => {
+    const byGroup = new Map<string, LayoutRow[]>();
+    for (const row of activeSlice) {
+      const id = groupOf(row.ref);
+      const list = byGroup.get(id);
+      if (list) list.push(row);
+      else byGroup.set(id, [row]);
+    }
+    return groupChoices
+      .filter((group) => byGroup.has(group.id))
+      .map((group) => ({ ...group, rows: byGroup.get(group.id) ?? [] }));
+  }, [activeSlice, groupChoices, groupOf]);
+  const activeCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of activeRows) {
+      const id = groupOf(row.ref);
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    return counts;
+  }, [activeRows, groupOf]);
   const disabledSlice = disabledModels.slice((disabledPage - 1) * size, disabledPage * size);
   const inactiveSlice = [...hiddenRows, ...newRows].slice(
     (inactivePage - 1) * size,
@@ -546,6 +609,9 @@ export default function Models() {
               onEdit={() => setEditing(m)}
               onDelete={() => setDeleting(m)}
               onHide={presetId ? () => hideRow.current(m.ref) : undefined}
+              groups={isAdmin && presetId ? groupChoices : undefined}
+              currentGroup={groupOf(m.ref)}
+              onMoveGroup={(next) => layoutDraft.assignGroup(m.ref, next)}
             />
           </div>
         ),
@@ -553,7 +619,18 @@ export default function Models() {
     ];
     // A reader sees the registry, not the controls that change it.
     return isAdmin ? list : list.filter((column) => column.key !== "actions");
-  }, [isAdmin, testTarget, toggleTarget, removeTarget, presetId, coverage, providerDisplay]);
+  }, [
+    isAdmin,
+    testTarget,
+    toggleTarget,
+    removeTarget,
+    presetId,
+    coverage,
+    providerDisplay,
+    groupChoices,
+    groupOf,
+    layoutDraft,
+  ]);
 
   const filteredOut = appliedQuery.trim() !== "" || effectiveProvider !== ALL;
   const providerName =
@@ -801,7 +878,7 @@ export default function Models() {
             }}
             onSaveCopy={(name) =>
               createPreset.mutate(
-                { name, layout: layoutFor(layoutDraft.entries, layoutDraft.autoInclude) },
+                { name, layout: layoutFor(layoutDraft.entries, layoutDraft.groups, layoutDraft.autoInclude) },
                 { onSuccess: (created) => selectPreset(created.id) },
               )
             }
@@ -823,7 +900,7 @@ export default function Models() {
             manage={{
               create: (name) =>
                 createPreset.mutate(
-                  { name, layout: layoutFor(layoutDraft.entries, layoutDraft.autoInclude) },
+                  { name, layout: layoutFor(layoutDraft.entries, layoutDraft.groups, layoutDraft.autoInclude) },
                   { onSuccess: (created) => selectPreset(created.id) },
                 ),
               rename: (id, name) => patchPreset.mutate({ id, patch: { name } }),
@@ -869,50 +946,72 @@ export default function Models() {
             <CardHeader
               title="Active models"
               action={
-                <span className="text-caption text-faint">
-                  drag a row, or focus its handle and press space
+                <span className="flex flex-wrap items-center justify-end gap-2">
+                  <span className="text-caption text-faint">
+                    drag a row, or focus its handle and press space
+                  </span>
+                  {isAdmin && presetsReady ? (
+                    <Button variant="ghost" onClick={openGroups}>
+                      manage groups
+                    </Button>
+                  ) : null}
                 </span>
               }
             />
             {coverageBar}
-            {phone ? (
-              <SortableCards
-                rows={activeSlice}
-                onReorder={layoutDraft.reorder}
-                reducedMotion={reduceMotion}
-                canHide={!layoutDraft.conflict}
-                onHide={(ref) => hideRow.current(ref)}
-                empty={activeEmpty}
-                render={(model) => (
-                  <ModelCardBody
-                    model={model}
-                    isAdmin={isAdmin}
-                    testTarget={testTarget}
-                    toggleTarget={toggleTarget}
-                    removeTarget={removeTarget}
-                    onTest={(m) => test.mutate(m)}
-                    onToggle={(m) => toggle.mutate(m)}
-                    onEdit={setEditing}
-                    onDelete={setDeleting}
-                    onHide={(ref) => hideRow.current(ref)}
-                    coverageFor={(id) => coverage.get(id) ?? []}
-                    displayOfProvider={(id) => providerDisplay.get(id) ?? id}
-                    onPickProvider={(id) => setFilters({ provider: id, page: "1" })}
-                    onPreferPreference={(model, provider) => prefer.mutate({ model: model.id, provider })}
-                  />
-                )}
-              />
+            {sliceGroups.length === 0 ? (
+              <EmptyState>{activeEmpty}</EmptyState>
             ) : (
-              <SortableTable
-                rows={activeSlice}
-                columns={columns}
-                onReorder={layoutDraft.reorder}
-                onHide={(ref) => hideRow.current(ref)}
-                reducedMotion={reduceMotion}
-                canHide={!layoutDraft.conflict}
-                scrollLabel="Active models"
-                empty={activeEmpty}
-              />
+              sliceGroups.map((group) => (
+                <section key={group.id} aria-label={group.name}>
+                  <GroupHeading
+                    group={group}
+                    count={activeCounts.get(group.id) ?? group.rows.length}
+                  />
+                  {phone ? (
+                    <SortableCards
+                      rows={group.rows}
+                      onReorder={layoutDraft.reorder}
+                      reducedMotion={reduceMotion}
+                      canHide={!layoutDraft.conflict}
+                      onHide={(ref) => hideRow.current(ref)}
+                      empty={activeEmpty}
+                      render={(model) => (
+                        <ModelCardBody
+                          model={model}
+                          isAdmin={isAdmin}
+                          testTarget={testTarget}
+                          toggleTarget={toggleTarget}
+                          removeTarget={removeTarget}
+                          onTest={(m) => test.mutate(m)}
+                          onToggle={(m) => toggle.mutate(m)}
+                          onEdit={setEditing}
+                          onDelete={setDeleting}
+                          onHide={(ref) => hideRow.current(ref)}
+                          groups={isAdmin && presetId ? groupChoices : undefined}
+                          currentGroup={groupOf(model.ref)}
+                          onMoveGroup={(next) => layoutDraft.assignGroup(model.ref, next)}
+                          coverageFor={(id) => coverage.get(id) ?? []}
+                          displayOfProvider={(id) => providerDisplay.get(id) ?? id}
+                          onPickProvider={(id) => setFilters({ provider: id, page: "1" })}
+                          onPreferPreference={(model, provider) => prefer.mutate({ model: model.id, provider })}
+                        />
+                      )}
+                    />
+                  ) : (
+                    <SortableTable
+                      rows={group.rows}
+                      columns={columns}
+                      onReorder={layoutDraft.reorder}
+                      onHide={(ref) => hideRow.current(ref)}
+                      reducedMotion={reduceMotion}
+                      canHide={!layoutDraft.conflict}
+                      scrollLabel={`${group.name} models`}
+                      empty={activeEmpty}
+                    />
+                  )}
+                </section>
+              ))
             )}
             <PaginationBar
               pagination={{
@@ -1032,6 +1131,18 @@ export default function Models() {
         />
       ) : null}
 
+      <GroupManager
+        open={groupsOpen}
+        groups={groupChoices}
+        onClose={() => setGroupsOpen(false)}
+        onCreate={(name) => {
+          layoutDraft.createGroup(name);
+        }}
+        onRename={(id, name) => layoutDraft.renameGroup(id, name)}
+        onReorder={(from, to) => layoutDraft.reorderGroup(from, to)}
+        onDelete={(id) => layoutDraft.deleteGroup(id)}
+      />
+
       {customOpen ? (
         <CustomModelModal
           providers={connected}
@@ -1088,6 +1199,9 @@ function RowMenu({
   onEdit,
   onDelete,
   onHide,
+  groups,
+  currentGroup,
+  onMoveGroup,
 }: {
   model: Model;
   pendingDelete: boolean;
@@ -1095,6 +1209,10 @@ function RowMenu({
   onDelete: () => void;
   /** Only while a preset is active: hides the row here, not from routing. */
   onHide?: () => void;
+  /** Groups on this preset; omitted for callers without a layout. */
+  groups?: Array<DraftGroup & { implicit?: boolean }>;
+  currentGroup?: string;
+  onMoveGroup?: (group: string | null) => void;
 }) {
   const surface = useRef<HTMLDivElement>(null);
   const items = () =>
@@ -1129,6 +1247,9 @@ function RowMenu({
   };
   const item =
     "flex h-8 items-center rounded-[var(--radius-input)] px-2 text-left text-small text-fg hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent-text";
+  const movableGroups = groups?.filter(
+    (group) => !group.provider || group.provider === model.provider,
+  );
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
@@ -1161,6 +1282,34 @@ function RowMenu({
               Edit limits and price
             </button>
           </Popover.Close>
+          {groups && onMoveGroup ? (
+            <div className="mt-1 border-t border-line pt-1">
+              <p className="px-2 py-1 text-caption text-faint">Move to group</p>
+              <div className="max-h-48 overflow-y-auto">
+                {movableGroups?.map((group) => {
+                  const checked = currentGroup === group.id;
+                  return (
+                    <Popover.Close asChild key={group.id}>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        tabIndex={-1}
+                        aria-current={checked ? "true" : undefined}
+                        onClick={() => onMoveGroup(group.provider ? null : group.id)}
+                        className={cx(item, checked && "bg-surface-2 text-accent-text")}
+                      >
+                        <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                        {group.provider ? (
+                          <span className="ml-2 shrink-0 text-caption text-faint">provider</span>
+                        ) : null}
+                        {checked ? <span className="ml-2 shrink-0 text-caption">current</span> : null}
+                      </button>
+                    </Popover.Close>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
           {onHide ? (
             <Popover.Close asChild>
               <button type="button" role="menuitem" tabIndex={-1} onClick={onHide} className={item}>
@@ -1262,6 +1411,9 @@ function ModelCardBody({
   displayOfProvider,
   onPickProvider,
   onPreferPreference,
+  groups,
+  currentGroup,
+  onMoveGroup,
 }: {
   model: Model;
   isAdmin: boolean;
@@ -1273,6 +1425,9 @@ function ModelCardBody({
   onEdit: (model: Model) => void;
   onDelete: (model: Model) => void;
   onHide?: (ref: string) => void;
+  groups?: Array<DraftGroup & { implicit?: boolean }>;
+  currentGroup?: string;
+  onMoveGroup?: (group: string | null) => void;
   coverageFor: (id: string) => Model[];
   displayOfProvider: (id: string) => string;
   onPickProvider: (id: string) => void;
@@ -1357,11 +1512,156 @@ function ModelCardBody({
                     onEdit={() => onEdit(m)}
                     onDelete={() => onDelete(m)}
                     onHide={onHide ? () => onHide(m.ref) : undefined}
+                    groups={groups}
+                    currentGroup={currentGroup}
+                    onMoveGroup={onMoveGroup}
                   />
                 </div>
               ) : null}
             </div>
           </div>
+  );
+}
+
+/** A section title above one group's table; the controls live in the group manager. */
+function GroupHeading({
+  group,
+  count,
+}: {
+  group: DraftGroup & { implicit?: boolean };
+  count: number;
+}) {
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-line bg-surface-2 px-5 py-2.5">
+      <div className="flex min-w-0 items-baseline gap-2">
+        <h3 className="truncate text-small font-semibold text-fg">{group.name}</h3>
+        <span className="shrink-0 text-caption text-faint">
+          {group.provider ? `provider · ${group.provider}` : "custom group"}
+        </span>
+      </div>
+      <span className="text-caption text-faint tnum">{count.toLocaleString()} models</span>
+    </div>
+  );
+}
+
+/** One group row in the manager; local text state keeps every keystroke cheap. */
+function GroupNameField({ name, onCommit }: { name: string; onCommit: (name: string) => void }) {
+  const [value, setValue] = useState(name);
+  useEffect(() => setValue(name), [name]);
+  return (
+    <Input
+      value={value}
+      ariaLabel={`Rename group ${name}`}
+      onChange={setValue}
+      onBlur={() => {
+        if (value.trim() && value.trim() !== name) onCommit(value.trim());
+        else setValue(name);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+        if (event.key === "Escape") {
+          setValue(name);
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
+/** Create, rename, reorder and remove the groups of the active preset. */
+function GroupManager({
+  open,
+  groups,
+  onClose,
+  onCreate,
+  onRename,
+  onReorder,
+  onDelete,
+}: {
+  open: boolean;
+  groups: Array<DraftGroup & { implicit?: boolean }>;
+  onClose: () => void;
+  onCreate: (name: string) => void;
+  onRename: (id: string, name: string) => void;
+  onReorder: (from: string, to: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  const [name, setName] = useState("");
+  useEffect(() => {
+    if (open) setName("");
+  }, [open]);
+  return (
+    <Modal
+      title="model groups"
+      description="Groups change this preset's board only; routing is unchanged. Provider buckets start with every model of that provider."
+      open={open}
+      onClose={onClose}
+      width="lg"
+      footer={<Button onClick={onClose}>done</Button>}
+    >
+      <ul className="flex flex-col gap-2">
+        {groups.map((group, index) => (
+          <li
+            key={group.id}
+            className="flex flex-wrap items-center gap-2 rounded-[var(--radius-card)] border border-line bg-surface-2 p-2"
+          >
+            <span className="min-w-0 flex-1">
+              <GroupNameField name={group.name} onCommit={(next) => onRename(group.id, next)} />
+            </span>
+            <Badge tone={group.provider ? "neutral" : "accent"}>
+              {group.provider ? "provider" : "custom"}
+            </Badge>
+            <Button
+              variant="quiet"
+              aria-label={`Move ${group.name} up`}
+              disabled={index === 0}
+              onClick={() => onReorder(group.id, groups[index - 1]?.id ?? group.id)}
+            >
+              ↑
+            </Button>
+            <Button
+              variant="quiet"
+              aria-label={`Move ${group.name} down`}
+              disabled={index === groups.length - 1}
+              onClick={() => onReorder(group.id, groups[index + 1]?.id ?? group.id)}
+            >
+              ↓
+            </Button>
+            {group.provider ? null : (
+              <Button
+                variant="quiet"
+                aria-label={`Delete group ${group.name}`}
+                onClick={() => onDelete(group.id)}
+              >
+                delete
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+      <form
+        className="mt-4 flex items-end gap-2 border-t border-line pt-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!name.trim()) return;
+          onCreate(name.trim());
+          setName("");
+        }}
+      >
+        <div className="min-w-0 flex-1">
+          <Field label="new group">
+            <Input
+              value={name}
+              placeholder="Fast models"
+              onChange={setName}
+            />
+          </Field>
+        </div>
+        <Button variant="primary" type="submit" disabled={!name.trim()}>
+          add group
+        </Button>
+      </form>
+    </Modal>
   );
 }
 

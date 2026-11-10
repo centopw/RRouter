@@ -2,6 +2,16 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.7.0 — 2026-11-10
+
+### Added
+- Model groups on the **Models** page and in model presets. The board is grouped by
+  provider by default; operators can create free-form groups, rename provider or free-form
+  groups, reorder groups, and move a model to another group. Grouping is presentation only.
+- `/v1/models` now carries additive group metadata: each entry has `group`, and the top level
+  has an ordered `groups` array from the instance default preset. The flat `data` list still
+  contains every enabled model, so OpenAI clients are unaffected.
+
 ## 0.6.1 — 2026-11-10
 
 ### Fixed

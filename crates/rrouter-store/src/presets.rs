@@ -60,6 +60,12 @@ pub const MAX_LAYOUT_ITEMS: usize = 20_000;
 pub const MAX_LAYOUT_PROVIDER: usize = 64;
 /// Longest model id in a layout item.
 pub const MAX_LAYOUT_MODEL_ID: usize = 200;
+/// Groups one layout may define, including explicit provider buckets.
+pub const MAX_LAYOUT_GROUPS: usize = 500;
+/// Longest group id.
+pub const MAX_LAYOUT_GROUP_ID: usize = 64;
+/// Longest group display name.
+pub const MAX_LAYOUT_GROUP_NAME: usize = 80;
 /// Longest preset name.
 pub const MAX_PRESET_NAME: usize = 80;
 /// Longest preset description, in characters.
@@ -86,6 +92,10 @@ pub struct LayoutItem {
     pub provider: String,
     /// Model id within that provider.
     pub id: String,
+    /// Explicit group this item belongs to. Omitted means the implicit provider bucket
+    /// (or an explicit group whose `provider` matches this item's provider).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Zero-based order inside this item's visibility group.
     pub position: u32,
     /// `false` means the model is present in the preset but inactive. Omitted means
@@ -103,6 +113,23 @@ pub struct LayoutItem {
     pub hidden_at: Option<i64>,
 }
 
+/// One named group on a preset board.
+///
+/// Groups are presentation, not routing. A group with `provider` set is the bucket for
+/// that provider's unassigned models and must use the stable id `provider:<provider>`;
+/// a group without one is a free-form group that can mix providers. Array order is the
+/// display order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayoutGroup {
+    /// Stable id; `provider:<provider>` for a provider bucket, a client-chosen id for a
+    /// free-form group.
+    pub id: String,
+    pub name: String,
+    /// Provider whose unassigned models belong here. Omitted for a free-form group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
 /// A model preset layout document, exactly as stored in `layout_json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutDocument {
@@ -112,6 +139,10 @@ pub struct LayoutDocument {
     /// stay valid as the catalog grows.
     #[serde(default = "default_true")]
     pub auto_include_new: bool,
+    /// Explicit groups, in display order. Provider buckets not named here are implicit
+    /// and render after the explicit list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<LayoutGroup>,
     #[serde(default)]
     pub items: Vec<LayoutItem>,
 }
@@ -122,6 +153,7 @@ impl Default for LayoutDocument {
         Self {
             schema_version: LAYOUT_SCHEMA_VERSION,
             auto_include_new: true,
+            groups: Vec::new(),
             items: Vec::new(),
         }
     }
@@ -151,6 +183,70 @@ impl LayoutDocument {
             return Err(Error::BadRequest(format!(
                 "a layout holds at most {MAX_LAYOUT_ITEMS} items"
             )));
+        }
+        if self.groups.len() > MAX_LAYOUT_GROUPS {
+            return Err(Error::BadRequest(format!(
+                "a layout holds at most {MAX_LAYOUT_GROUPS} groups"
+            )));
+        }
+
+        let mut group_by_id: std::collections::HashMap<&str, &LayoutGroup> =
+            std::collections::HashMap::with_capacity(self.groups.len());
+        let mut providers = HashSet::with_capacity(self.groups.len());
+        for group in &self.groups {
+            let id = group.id.trim();
+            let name = group.name.trim();
+            if id.is_empty() {
+                return Err(Error::BadRequest("a layout group needs an id".to_string()));
+            }
+            if id.chars().count() > MAX_LAYOUT_GROUP_ID {
+                return Err(Error::BadRequest(format!(
+                    "a layout group id is limited to {MAX_LAYOUT_GROUP_ID} characters"
+                )));
+            }
+            if name.is_empty() {
+                return Err(Error::BadRequest("a layout group needs a name".to_string()));
+            }
+            if name.chars().count() > MAX_LAYOUT_GROUP_NAME {
+                return Err(Error::BadRequest(format!(
+                    "a layout group name is limited to {MAX_LAYOUT_GROUP_NAME} characters"
+                )));
+            }
+            if group_by_id.insert(id, group).is_some() {
+                return Err(Error::BadRequest(format!(
+                    "duplicate layout group id: {id}"
+                )));
+            }
+            match group.provider.as_deref().map(str::trim) {
+                Some("") => {
+                    return Err(Error::BadRequest(
+                        "a provider group needs a provider".to_string(),
+                    ));
+                }
+                Some(provider) => {
+                    if provider.chars().count() > MAX_LAYOUT_PROVIDER {
+                        return Err(Error::BadRequest(format!(
+                            "a layout group provider is limited to {MAX_LAYOUT_PROVIDER} characters"
+                        )));
+                    }
+                    if id != format!("provider:{provider}") {
+                        return Err(Error::BadRequest(format!(
+                            "provider group {id} must use the id provider:{provider}"
+                        )));
+                    }
+                    if !providers.insert(provider) {
+                        return Err(Error::BadRequest(format!(
+                            "duplicate provider group for {provider}"
+                        )));
+                    }
+                }
+                None if id.starts_with("provider:") => {
+                    return Err(Error::BadRequest(format!(
+                        "group id {id} uses the reserved provider: prefix"
+                    )));
+                }
+                None => {}
+            }
         }
 
         let mut seen: HashSet<(&str, &str)> = HashSet::with_capacity(self.items.len());
@@ -183,6 +279,21 @@ impl LayoutDocument {
                 return Err(Error::BadRequest(format!(
                     "duplicate layout item: {provider}/{id}"
                 )));
+            }
+            if let Some(group) = item.group.as_deref() {
+                let group = group.trim();
+                let Some(target) = group_by_id.get(group) else {
+                    return Err(Error::BadRequest(format!(
+                        "layout item {provider}/{id} references unknown group {group}"
+                    )));
+                };
+                if let Some(group_provider) = target.provider.as_deref() {
+                    if group_provider.trim() != provider {
+                        return Err(Error::BadRequest(format!(
+                            "layout item {provider}/{id} cannot join provider group {group}"
+                        )));
+                    }
+                }
             }
             if item
                 .last_visible_position
@@ -246,6 +357,10 @@ pub struct ModelPresetVersion {
 }
 
 /// Result of an optimistic layout write.
+///
+/// The updated variant carries the full preset because every caller needs it; boxing that
+/// would add an allocation to the common success path for a short-lived local value.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PresetUpdateOutcome {

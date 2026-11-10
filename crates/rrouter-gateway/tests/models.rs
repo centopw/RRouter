@@ -17,7 +17,7 @@ use rrouter_auth::Credentials;
 use rrouter_gateway::models_registry::{parse_models_dev, MAX_FETCHED_IDS};
 use rrouter_gateway::{app, config::Config, AppState};
 use rrouter_router::{Breaker, Catalog, Dispatcher, Planner};
-use rrouter_store::{ModelRow, Store};
+use rrouter_store::{LayoutDocument, LayoutGroup, LayoutItem, ModelRow, Store};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -406,6 +406,119 @@ async fn model_preferences_drive_api_rows_and_v1_owned_by() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+/// `/v1/models` stays an OpenAI list but carries additive group metadata. With no
+/// customized preset every provider is an implicit bucket; a default preset can rename
+/// the buckets, add a mixed group and reorder them without changing the model set.
+#[tokio::test]
+async fn v1_models_groups_follow_the_default_preset() {
+    let h = harness();
+    h.connect("openai", "http://127.0.0.1:9").await;
+    h.connect("anthropic", "http://127.0.0.1:9").await;
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let groups = body["groups"].as_array().expect("groups");
+    assert!(
+        groups
+            .iter()
+            .any(|group| group["id"] == "provider:openai" && group["name"] == "OpenAI"),
+        "implicit provider buckets are the default: {groups:?}"
+    );
+    let gpt = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|model| model["id"] == "gpt-4.1" && model["owned_by"] == "openai")
+        .expect("gpt-4.1");
+    assert_eq!(gpt["group"], "provider:openai");
+
+    let preset = h
+        .state
+        .store
+        .default_model_preset()
+        .await
+        .expect("preset lookup")
+        .expect("seeded default");
+    let layout = LayoutDocument {
+        schema_version: rrouter_store::LAYOUT_SCHEMA_VERSION,
+        auto_include_new: true,
+        groups: vec![
+            LayoutGroup {
+                id: "g-fast".into(),
+                name: "Fast".into(),
+                provider: None,
+            },
+            LayoutGroup {
+                id: "provider:openai".into(),
+                name: "OpenAI custom".into(),
+                provider: Some("openai".into()),
+            },
+            LayoutGroup {
+                id: "provider:anthropic".into(),
+                name: "Anthropic custom".into(),
+                provider: Some("anthropic".into()),
+            },
+        ],
+        items: vec![
+            LayoutItem {
+                provider: "openai".into(),
+                id: "gpt-4.1".into(),
+                group: Some("g-fast".into()),
+                position: 0,
+                visible: true,
+                last_visible_position: None,
+                hidden_at: None,
+            },
+            LayoutItem {
+                provider: "anthropic".into(),
+                id: "claude-sonnet-4-5".into(),
+                group: None,
+                position: 1,
+                visible: true,
+                last_visible_position: None,
+                hidden_at: None,
+            },
+        ],
+    };
+    h.state
+        .store
+        .update_model_preset_layout(preset.id, preset.revision, &layout, "test")
+        .await
+        .expect("layout write");
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let groups = body["groups"].as_array().expect("groups");
+    assert_eq!(groups[0]["id"], "g-fast");
+    assert_eq!(groups[0]["name"], "Fast");
+    assert_eq!(groups[0]["provider"], Value::Null);
+    assert_eq!(groups[1]["id"], "provider:openai");
+    assert_eq!(groups[1]["name"], "OpenAI custom");
+    assert_eq!(groups[2]["id"], "provider:anthropic");
+
+    let data = body["data"].as_array().expect("data");
+    let gpt = data
+        .iter()
+        .find(|model| model["id"] == "gpt-4.1" && model["owned_by"] == "openai")
+        .expect("gpt-4.1 after grouping");
+    assert_eq!(gpt["group"], "g-fast");
+    let claude = data
+        .iter()
+        .find(|model| model["id"] == "claude-sonnet-4-5" && model["owned_by"] == "anthropic")
+        .expect("claude after grouping");
+    assert_eq!(claude["group"], "provider:anthropic");
+    assert_eq!(
+        data.first().map(|model| model["id"].clone()),
+        Some(Value::String("gpt-4.1".into())),
+        "the custom group is first: {body}"
+    );
+    // Grouping does not hide models: every entry still reports a group.
+    assert!(
+        data.iter().all(|model| model["group"].is_string()),
+        "{body}"
+    );
 }
 
 #[tokio::test]

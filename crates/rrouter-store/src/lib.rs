@@ -44,10 +44,10 @@ pub use evals::{
 };
 pub use migrations::SCHEMA_VERSION;
 pub use presets::{
-    LayoutDocument, LayoutItem, ModelPreset, ModelPresetVersion, PresetUpdateOutcome,
-    DEFAULT_MODEL_PRESET_ID, LAYOUT_SCHEMA_VERSION, MAX_LAYOUT_ITEMS, MAX_LAYOUT_MODEL_ID,
-    MAX_LAYOUT_PROVIDER, MAX_PRESET_ACTOR, MAX_PRESET_DESCRIPTION, MAX_PRESET_NAME,
-    MAX_PRESET_VERSIONS,
+    LayoutDocument, LayoutGroup, LayoutItem, ModelPreset, ModelPresetVersion, PresetUpdateOutcome,
+    DEFAULT_MODEL_PRESET_ID, LAYOUT_SCHEMA_VERSION, MAX_LAYOUT_GROUPS, MAX_LAYOUT_GROUP_ID,
+    MAX_LAYOUT_GROUP_NAME, MAX_LAYOUT_ITEMS, MAX_LAYOUT_MODEL_ID, MAX_LAYOUT_PROVIDER,
+    MAX_PRESET_ACTOR, MAX_PRESET_DESCRIPTION, MAX_PRESET_NAME, MAX_PRESET_VERSIONS,
 };
 pub use rrouter_auth::{CredentialStore, Credentials};
 pub use store::{

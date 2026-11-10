@@ -1,6 +1,6 @@
 //! `/v1/models`, the model registry admin routes, and the alias / disabled-model routes.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -63,7 +63,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
     }
 
     let created = crate::now_unix();
-    let data: Vec<Value> = entries
+    let models: Vec<(String, String)> = entries
         .into_iter()
         .map(|(id, (fallback, preferred, preferred_serves))| {
             let owned_by = if preferred_serves {
@@ -71,10 +71,152 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
             } else {
                 fallback
             };
-            json!({ "id": id, "object": "model", "owned_by": owned_by, "created": created })
+            (id, owned_by)
         })
         .collect();
-    ok_json(json!({ "object": "list", "data": data }))
+    let (data, groups) = grouped_models(&state, created, models).await;
+    ok_json(json!({ "object": "list", "data": data, "groups": groups }))
+}
+
+/// Apply the default preset's groups to the flat `/v1/models` list.
+///
+/// The OpenAI shape stays a flat `data` array. Grouping is additive metadata: every entry
+/// gains `group` (a group id) and the response gains an ordered `groups` array. A client
+/// that ignores both still gets exactly the model set it asked for; a grouped picker can
+/// render the operator's board without a second request.
+///
+/// Groups are presentation only. A model hidden by the default preset remains listed and
+/// routable; it is placed in its group using the item's remembered visible position.
+async fn grouped_models(
+    state: &AppState,
+    created: i64,
+    models: Vec<(String, String)>,
+) -> (Vec<Value>, Vec<Value>) {
+    let layout = state
+        .store
+        .default_model_preset()
+        .await
+        .ok()
+        .flatten()
+        .map(|preset| preset.layout);
+
+    let mut explicit_groups: Vec<&rrouter_store::LayoutGroup> = layout
+        .as_ref()
+        .map(|layout| layout.groups.iter().collect())
+        .unwrap_or_default();
+    let group_ids: HashSet<&str> = explicit_groups.iter().map(|g| g.id.as_str()).collect();
+    let provider_groups: HashMap<&str, &str> = explicit_groups
+        .iter()
+        .filter_map(|group| group.provider.as_deref().map(|p| (p, group.id.as_str())))
+        .collect();
+    let item_by_ref: HashMap<String, &rrouter_store::LayoutItem> = layout
+        .as_ref()
+        .map(|layout| {
+            layout
+                .items
+                .iter()
+                .map(|item| (format!("{}\0{}", item.provider, item.id), item))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // A model joins its explicit group, else the explicit provider bucket, else an
+    // implicit provider bucket appended after every explicit group.
+    let mut resolved: Vec<(String, String, Option<String>, u32)> = Vec::with_capacity(models.len());
+    let mut implicit: Vec<&str> = Vec::new();
+    for (id, provider) in &models {
+        let item = item_by_ref.get(&format!("{provider}\0{id}"));
+        let explicit = item
+            .and_then(|item| item.group.as_deref())
+            .filter(|group| group_ids.contains(group));
+        let group = explicit
+            .map(str::to_string)
+            .or_else(|| {
+                provider_groups
+                    .get(provider.as_str())
+                    .map(|id| (*id).to_string())
+            })
+            .unwrap_or_else(|| {
+                let id = format!("provider:{provider}");
+                if !implicit.contains(&provider.as_str()) {
+                    implicit.push(provider.as_str());
+                }
+                id
+            });
+        let position = item
+            .map(|item| {
+                if item.visible {
+                    item.position
+                } else {
+                    item.last_visible_position.unwrap_or(u32::MAX)
+                }
+            })
+            .unwrap_or(u32::MAX);
+        resolved.push((id.clone(), provider.clone(), Some(group), position));
+    }
+
+    // Explicit groups keep their stored order; implicit buckets follow in first-seen
+    // provider order. A group with no models still appears, so an operator can create an
+    // empty bucket before assigning anything.
+    let mut group_order: Vec<(String, String, Option<String>)> = Vec::new();
+    for group in explicit_groups.drain(..) {
+        group_order.push((group.id.clone(), group.name.clone(), group.provider.clone()));
+    }
+    for provider in implicit {
+        let id = format!("provider:{provider}");
+        if !group_order.iter().any(|(existing, _, _)| *existing == id) {
+            let name = rrouter_auth::registry::get(provider)
+                .map(|spec| spec.display.to_string())
+                .unwrap_or_else(|| provider.to_string());
+            group_order.push((id, name, Some(provider.to_string())));
+        }
+    }
+    let index: HashMap<&str, usize> = group_order
+        .iter()
+        .enumerate()
+        .map(|(index, (id, _, _))| (id.as_str(), index))
+        .collect();
+
+    resolved.sort_by(|a, b| {
+        let a_index = index
+            .get(a.2.as_deref().unwrap_or(""))
+            .copied()
+            .unwrap_or(usize::MAX);
+        let b_index = index
+            .get(b.2.as_deref().unwrap_or(""))
+            .copied()
+            .unwrap_or(usize::MAX);
+        a_index
+            .cmp(&b_index)
+            .then(a.3.cmp(&b.3))
+            .then(a.0.cmp(&b.0))
+    });
+
+    let groups: Vec<Value> = group_order
+        .iter()
+        .enumerate()
+        .map(|(position, (id, name, provider))| {
+            json!({
+                "id": id,
+                "name": name,
+                "provider": provider,
+                "position": position,
+            })
+        })
+        .collect();
+    let data = resolved
+        .into_iter()
+        .map(|(id, provider, group, _)| {
+            json!({
+                "id": id,
+                "object": "model",
+                "owned_by": provider,
+                "created": created,
+                "group": group,
+            })
+        })
+        .collect();
+    (data, groups)
 }
 
 /// `GET /v1/models/{id}`: the OpenAI model object for a routable `id` or `provider/id`.

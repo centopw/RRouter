@@ -7,7 +7,8 @@ Proves, against the real binary (not test harness):
   2. a dead account falls through to the next one within the fallback budget;
   3. credentials are encrypted at rest and never echoed by /api/connections;
   4. an Anthropic-dialect client gets Anthropic-shaped SSE from an [OI]-speaking provider;
-  5. `/v1/search` reaches a provider's native Responses search tool and returns citations.
+  5. `/v1/search` reaches a provider's native Responses search tool and returns citations;
+  6. `/v1/models` carries the default preset's custom group names and assignments.
 """
 import json
 import os
@@ -221,6 +222,39 @@ def main():
         check("search expands the provider default", found.get("model") == "gpt-5-mini", found.get("model", ""))
         check("search keeps the citation", found.get("results", [{}])[0].get("url") == "https://example.com/pong",
               str(found.get("results", []))[:100])
+
+        # --- model groups in /v1/models -------------------------------------------
+        st, preset = http("POST", "/api/model-presets", {
+            "name": "group-smoke",
+            "layout": {
+                "schema_version": 1,
+                "auto_include_new": True,
+                "groups": [
+                    {"id": "g-fast", "name": "Fast"},
+                    {"id": "provider:openai", "name": "OpenAI Bucket",
+                     "provider": "openai"},
+                ],
+                "items": [{
+                    "provider": "openai", "id": "gpt-4.1", "group": "g-fast",
+                    "position": 0, "visible": True,
+                }],
+            },
+        })
+        preset_id = json.loads(preset).get("id") if st == 201 else None
+        check("custom preset with groups created", isinstance(preset_id, str), str(preset)[:100])
+        if preset_id:
+            st, promoted = http("POST", f"/api/model-presets/{preset_id}/default", {})
+            check("group preset is the default", st == 200 and json.loads(promoted).get("is_default") is True,
+                  str(promoted)[:100])
+            st, listed = http("GET", "/v1/models")
+            models = json.loads(listed)
+            groups = models.get("groups") or []
+            gpt = next((m for m in models.get("data", []) if m.get("id") == "gpt-4.1"), {})
+            check("v1/models groups use the preset name and order",
+                  st == 200 and groups and groups[0].get("name") == "Fast",
+                  str(groups)[:100])
+            check("v1/models assigns a model to its custom group",
+                  gpt.get("group") == "g-fast", str(gpt)[:100])
 
         # --- credentials encrypted at rest ----------------------------------------
         db = open(f"{DATA}/rrouter.db", "rb").read()

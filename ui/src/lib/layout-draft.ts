@@ -30,14 +30,24 @@ import {
 export type DraftEntry = {
   ref: string;
   visible: boolean;
+  /** Explicit group id; absent means the provider bucket. */
+  group?: string;
   last_visible_position?: number;
   hidden_at?: number;
+};
+
+/** A named group on the board. Provider groups keep the reserved `provider:` id. */
+export type DraftGroup = {
+  id: string;
+  name: string;
+  provider?: string;
 };
 
 export type DraftState = "clean" | "dirty" | "saving" | "conflict";
 
 export type LayoutDraft = {
   entries: DraftEntry[];
+  groups: DraftGroup[];
   autoInclude: boolean;
   state: DraftState;
   savedAt: number | null;
@@ -47,6 +57,16 @@ export type LayoutDraft = {
   /** Registry refs the preset has never seen; auto-include appends them to the draft. */
   adopt: (refs: string[]) => void;
   reorder: (from: string, to: string) => void;
+  /** Create a free-form group and return its id. */
+  createGroup: (name: string) => string;
+  renameGroup: (id: string, name: string) => void;
+  reorderGroup: (from: string, to: string) => void;
+  /** Remove a free-form group; its models fall back to their provider buckets. */
+  deleteGroup: (id: string) => void;
+  /** Materialize provider buckets so they can be renamed and reordered. */
+  ensureProviderGroups: (providers: Array<{ provider: string; name: string }>) => void;
+  /** Move a model into a group; `null` returns it to its provider bucket. */
+  assignGroup: (ref: string, group: string | null) => void;
   hide: (ref: string) => void;
   restore: (ref: string) => void;
   /** Bring every hidden row back, and adopt registry refs the preset never stored. */
@@ -70,6 +90,7 @@ export function entriesOf(layout: LayoutDocument | undefined): DraftEntry[] {
     .map((item) => ({
       ref: `${item.provider}/${item.id}`,
       visible: item.visible,
+      ...(item.group === undefined ? {} : { group: item.group }),
       ...(item.last_visible_position === undefined
         ? {}
         : { last_visible_position: item.last_visible_position }),
@@ -77,14 +98,25 @@ export function entriesOf(layout: LayoutDocument | undefined): DraftEntry[] {
     }));
 }
 
+/** The explicit groups stored in a layout, in display order. */
+export function groupsOf(layout: LayoutDocument | undefined): DraftGroup[] {
+  return (layout?.groups ?? []).map((group) => ({ ...group }));
+}
+
 /** The document the gateway validates: dense, zero-based positions per visibility group. */
-export function layoutFor(entries: DraftEntry[], autoInclude: boolean): LayoutDocument {
+export function layoutFor(
+  entries: DraftEntry[],
+  groups: DraftGroup[],
+  autoInclude: boolean,
+): LayoutDocument {
+  const known = new Set(groups.map((group) => group.id));
   const items = (group: DraftEntry[]) =>
     group.map((entry, position) => {
       const cut = entry.ref.indexOf("/");
       return {
         provider: cut < 0 ? entry.ref : entry.ref.slice(0, cut),
         id: cut < 0 ? "" : entry.ref.slice(cut + 1),
+        ...(entry.group && known.has(entry.group) ? { group: entry.group } : {}),
         position,
         visible: entry.visible,
         // Restore memory belongs to hidden rows only; a visible row carries none.
@@ -97,6 +129,11 @@ export function layoutFor(entries: DraftEntry[], autoInclude: boolean): LayoutDo
   return {
     schema_version: LAYOUT_SCHEMA_VERSION,
     auto_include_new: autoInclude,
+    groups: groups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      ...(group.provider === undefined ? {} : { provider: group.provider }),
+    })),
     items: [
       ...items(entries.filter((entry) => entry.visible)),
       ...items(entries.filter((entry) => !entry.visible)),
@@ -104,17 +141,72 @@ export function layoutFor(entries: DraftEntry[], autoInclude: boolean): LayoutDo
   };
 }
 
-/** Where a hidden row goes when it comes back: its old slot among the visible rows. */
-function insertAtVisible(entries: DraftEntry[], ref: string, position: number): DraftEntry[] {
-  const next = entries.filter((entry) => entry.ref !== ref);
+/**
+ * The groups to render: explicit groups first, then implicit provider buckets for
+ * visible models that are not assigned to an explicit group. An implicit bucket is not in
+ * the saved document until the operator customizes groups.
+ */
+export function effectiveGroups(
+  entries: DraftEntry[],
+  groups: DraftGroup[],
+  nameOfProvider: (provider: string) => string,
+): Array<DraftGroup & { implicit: boolean }> {
+  const known = new Set(groups.map((group) => group.id));
+  const byProvider = new Map(
+    groups
+      .filter((group) => group.provider)
+      .map((group) => [group.provider as string, group.id]),
+  );
+  const out: Array<DraftGroup & { implicit: boolean }> = groups.map((group) => ({
+    ...group,
+    implicit: false,
+  }));
+  const seen = new Set(out.map((group) => group.id));
+  for (const entry of entries) {
+    if (!entry.visible) continue;
+    if (entry.group && known.has(entry.group)) continue;
+    const provider = entry.ref.slice(0, entry.ref.indexOf("/"));
+    if (byProvider.has(provider)) continue;
+    const id = `provider:${provider}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      name: nameOfProvider(provider),
+      provider,
+      implicit: true,
+    });
+  }
+  return out;
+}
+
+/** The group a visible row resolves to, including the implicit provider bucket. */
+export function groupForEntry(
+  entry: DraftEntry | undefined,
+  groups: Array<DraftGroup & { implicit?: boolean }>,
+): string {
+  if (!entry) return "";
+  if (entry.group && groups.some((group) => group.id === entry.group)) return entry.group;
+  const provider = entry.ref.slice(0, entry.ref.indexOf("/"));
+  return (
+    groups.find((group) => group.provider === provider)?.id ?? `provider:${provider}`
+  );
+}
+
+function insertAtVisible(
+  entries: DraftEntry[],
+  restored: DraftEntry,
+  position: number,
+): DraftEntry[] {
+  const next = entries.filter((entry) => entry.ref !== restored.ref);
   const visible = next.filter((entry) => entry.visible);
   const anchor = visible[position];
   if (!anchor) {
-    next.push({ ref, visible: true });
+    next.push({ ...restored, visible: true });
     return next;
   }
   const at = next.indexOf(anchor);
-  next.splice(at, 0, { ref, visible: true });
+  next.splice(at, 0, { ...restored, visible: true });
   return next;
 }
 
@@ -124,6 +216,7 @@ export function useLayoutDraft(
   onSaved?: () => void,
 ): LayoutDraft {
   const [entries, setEntries] = useState<DraftEntry[]>([]);
+  const [groups, setGroups] = useState<DraftGroup[]>([]);
   const [autoInclude, setAutoIncludeState] = useState(false);
   const [state, setState] = useState<DraftState>("clean");
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -132,6 +225,7 @@ export function useLayoutDraft(
   const [epoch, setEpoch] = useState(0);
 
   const saved = useRef<DraftEntry[]>([]);
+  const savedGroups = useRef<DraftGroup[]>([]);
   const revision = useRef(0);
   const saves = useRef(0);
   const seeded = useRef<string | null>(null);
@@ -149,7 +243,9 @@ export function useLayoutDraft(
     seeded.current = key;
     revision.current = preset.revision;
     saved.current = entriesOf(preset.layout);
+    savedGroups.current = groupsOf(preset.layout);
     setEntries(saved.current);
+    setGroups(savedGroups.current);
     setAutoIncludeState(preset.layout.auto_include_new);
     setConflict(null);
     setError(null);
@@ -158,7 +254,7 @@ export function useLayoutDraft(
   }, [preset, epoch, dirty]);
 
   const persist = useCallback(
-    async (next: DraftEntry[], auto: boolean): Promise<boolean> => {
+    async (next: DraftEntry[], nextGroups: DraftGroup[], auto: boolean): Promise<boolean> => {
       const id = preset?.id;
       if (!id) return false;
       const attempt = ++saves.current;
@@ -166,12 +262,13 @@ export function useLayoutDraft(
       return api
         .put<ModelPreset>(`/api/model-presets/${encodeURIComponent(id)}/layout`, {
           revision: revision.current,
-          layout: layoutFor(next, auto),
+          layout: layoutFor(next, nextGroups, auto),
         })
         .then((accepted) => {
           if (attempt !== saves.current) return false; // a newer save has already started
           revision.current = accepted.revision;
           saved.current = next;
+          savedGroups.current = nextGroups;
           setConflict(null);
           setError(null);
           setState("clean");
@@ -191,6 +288,7 @@ export function useLayoutDraft(
           // Roll back to what the gateway last accepted, and say so: the table must not
           // keep an order the server rejected.
           setEntries(saved.current);
+          setGroups(savedGroups.current);
           setState("clean");
           setError(failure instanceof Error ? failure.message : "the save failed");
           return false;
@@ -203,21 +301,26 @@ export function useLayoutDraft(
   useEffect(() => {
     if (state !== "dirty" || conflict) return;
     if (timer.current !== null) window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => persist(entries, autoInclude), 250);
+    timer.current = window.setTimeout(() => persist(entries, groups, autoInclude), 250);
     return () => {
       if (timer.current !== null) window.clearTimeout(timer.current);
       timer.current = null;
     };
-  }, [entries, autoInclude, state, conflict, persist]);
+  }, [entries, groups, autoInclude, state, conflict, persist]);
 
-  const change = useCallback((next: DraftEntry[]) => {
-    setEntries(next);
-    setError(null);
-    setState((current) => (current === "conflict" ? current : "dirty"));
-  }, []);
+  const change = useCallback(
+    (next: DraftEntry[], nextGroups: DraftGroup[] = groups) => {
+      setEntries(next);
+      setGroups(nextGroups);
+      setError(null);
+      setState((current) => (current === "conflict" ? current : "dirty"));
+    },
+    [groups],
+  );
 
   return {
     entries,
+    groups,
     autoInclude,
     state,
     savedAt,
@@ -240,6 +343,60 @@ export function useLayoutDraft(
       next.splice(end, 0, moved);
       change(next);
     },
+    createGroup: (name) => {
+      const id = `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      change(entries, [...groups, { id, name: name.trim() || "New group" }]);
+      return id;
+    },
+    renameGroup: (id, name) => {
+      const clean = name.trim();
+      if (!clean) return;
+      change(
+        entries,
+        groups.map((group) => (group.id === id ? { ...group, name: clean } : group)),
+      );
+    },
+    reorderGroup: (from, to) => {
+      const start = groups.findIndex((group) => group.id === from);
+      const end = groups.findIndex((group) => group.id === to);
+      if (start < 0 || end < 0 || start === end) return;
+      const next = [...groups];
+      const [moved] = next.splice(start, 1);
+      if (!moved) return;
+      next.splice(end, 0, moved);
+      change(entries, next);
+    },
+    deleteGroup: (id) => {
+      if (groups.find((group) => group.id === id)?.provider) return;
+      change(
+        entries.map((entry) =>
+          entry.group === id ? { ...entry, group: undefined } : entry,
+        ),
+        groups.filter((group) => group.id !== id),
+      );
+    },
+    ensureProviderGroups: (providers) => {
+      const known = new Set(
+        groups.filter((group) => group.provider).map((group) => group.provider as string),
+      );
+      const added = providers
+        .filter((provider) => !known.has(provider.provider))
+        .map((provider) => ({
+          id: `provider:${provider.provider}`,
+          name: provider.name,
+          provider: provider.provider,
+        }));
+      if (added.length > 0) change(entries, [...groups, ...added]);
+    },
+    assignGroup: (ref, group) => {
+      change(
+        entries.map((entry) =>
+          entry.ref === ref
+            ? { ...entry, ...(group === null ? { group: undefined } : { group }) }
+            : entry,
+        ),
+      );
+    },
     hide: (ref) => {
       const visible = entries.filter((entry) => entry.visible);
       const at = visible.findIndex((entry) => entry.ref === ref);
@@ -260,17 +417,15 @@ export function useLayoutDraft(
     restore: (ref) => {
       const entry = entries.find((candidate) => candidate.ref === ref);
       const position = entry?.last_visible_position;
+      if (!entry) return;
       if (position === undefined) {
-        change([...entries, { ref, visible: true }]);
+        change(entries.map((candidate) =>
+          candidate.ref === ref ? { ...candidate, visible: true } : candidate,
+        ));
         return;
       }
       // The remembered slot is the document's, so a reload restores to the same place.
-      const restored = insertAtVisible(entries, ref, position).map((candidate) =>
-        candidate.ref === ref
-          ? { ref: candidate.ref, visible: true }
-          : candidate,
-      );
-      change(restored);
+      change(insertAtVisible(entries, entry, position));
     },
     restoreAll: (extraRefs = []) => {
       const known = new Set(entries.map((entry) => entry.ref));
@@ -278,7 +433,7 @@ export function useLayoutDraft(
         .filter((ref) => !known.has(ref))
         .map((ref) => ({ ref, visible: true }));
       change([
-        ...entries.map((entry) => (entry.visible ? entry : { ref: entry.ref, visible: true })),
+        ...entries.map((entry) => (entry.visible ? entry : { ...entry, visible: true })),
         ...added,
       ]);
     },
@@ -289,11 +444,12 @@ export function useLayoutDraft(
     },
     saveNow: () => {
       if (timer.current !== null) window.clearTimeout(timer.current);
-      return persist(entries, autoInclude);
+      return persist(entries, groups, autoInclude);
     },
     discard: () => {
       if (timer.current !== null) window.clearTimeout(timer.current);
       setEntries(saved.current);
+      setGroups(savedGroups.current);
       setAutoIncludeState(preset?.layout.auto_include_new ?? false);
       setConflict(null);
       setError(null);

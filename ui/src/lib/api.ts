@@ -810,10 +810,19 @@ export type ModelProvider = {
 /** The only layout format this build reads and writes. */
 export const LAYOUT_SCHEMA_VERSION = 1;
 
+/** One named group on a preset board. Provider groups use `provider:<provider>`. */
+export type LayoutGroup = {
+  id: string;
+  name: string;
+  provider?: string;
+};
+
 /** One model on a preset's board. `position` is dense and zero-based inside its group. */
 export type LayoutItem = {
   provider: string;
   id: string;
+  /** Explicit group id; omitted means the provider bucket. */
+  group?: string;
   position: number;
   /** `false` keeps the model on the board but out of the active list; it still routes. */
   visible: boolean;
@@ -830,6 +839,8 @@ export type LayoutDocument = {
   schema_version: number;
   /** Merge registry models the document does not name, instead of leaving them unlisted. */
   auto_include_new: boolean;
+  /** Explicit groups in display order; provider buckets not named here are implicit. */
+  groups?: LayoutGroup[];
   items: LayoutItem[];
 };
 

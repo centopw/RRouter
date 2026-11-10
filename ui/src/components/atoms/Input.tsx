@@ -1,3 +1,4 @@
+import type { KeyboardEvent } from "react";
 import { cx } from "../../lib/cx";
 
 export const control =
@@ -11,6 +12,9 @@ export function Input({
   disabled,
   ariaLabel,
   className,
+  onBlur,
+  onKeyDown,
+  autoFocus,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -19,6 +23,9 @@ export function Input({
   disabled?: boolean;
   ariaLabel?: string;
   className?: string;
+  onBlur?: () => void;
+  onKeyDown?: (event: KeyboardEvent<HTMLInputElement>) => void;
+  autoFocus?: boolean;
 }) {
   return (
     <input
@@ -27,6 +34,9 @@ export function Input({
       disabled={disabled}
       aria-label={ariaLabel ?? placeholder}
       placeholder={placeholder}
+      onBlur={onBlur}
+      onKeyDown={onKeyDown}
+      autoFocus={autoFocus}
       onChange={(e) => onChange(e.target.value)}
       className={cx(control, className)}
     />

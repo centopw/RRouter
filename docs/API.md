@@ -34,6 +34,12 @@ an OpenAI API-key connection does.
 absent; re-enabling restores it. `/v1/models/{id}` returns 404 for a disabled or unroutable
 model.
 
+The response remains an OpenAI list. It adds grouping metadata from the instance's default
+model preset: every entry carries `group` (a group id) and the top level carries an ordered
+`groups` array (`id`, `name`, `provider`, `position`). Models without an explicit group are
+in an implicit provider bucket (`provider:<provider>`). Grouping is presentation only and
+never removes a model; a client that ignores the extra fields sees exactly the same `data`.
+
 ## Web search
 
 `POST /v1/search` runs a provider's own hosted search tool and returns one answer with

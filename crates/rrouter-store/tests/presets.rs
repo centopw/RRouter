@@ -6,9 +6,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
 use rrouter_store::{
-    LayoutDocument, LayoutItem, PresetUpdateOutcome, Store, DEFAULT_MODEL_PRESET_ID,
-    LAYOUT_SCHEMA_VERSION, MAX_LAYOUT_ITEMS, MAX_LAYOUT_MODEL_ID, MAX_LAYOUT_PROVIDER,
-    MAX_PRESET_NAME, MAX_PRESET_VERSIONS, SCHEMA_VERSION,
+    LayoutDocument, LayoutGroup, LayoutItem, PresetUpdateOutcome, Store, DEFAULT_MODEL_PRESET_ID,
+    LAYOUT_SCHEMA_VERSION, MAX_LAYOUT_GROUPS, MAX_LAYOUT_GROUP_ID, MAX_LAYOUT_GROUP_NAME,
+    MAX_LAYOUT_ITEMS, MAX_LAYOUT_MODEL_ID, MAX_LAYOUT_PROVIDER, MAX_PRESET_NAME,
+    MAX_PRESET_VERSIONS, SCHEMA_VERSION,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -56,6 +57,7 @@ fn item(provider: &str, id: &str, position: u32, visible: bool) -> LayoutItem {
     LayoutItem {
         provider: provider.to_string(),
         id: id.to_string(),
+        group: None,
         position,
         visible,
         last_visible_position: None,
@@ -67,6 +69,7 @@ fn layout(items: Vec<LayoutItem>) -> LayoutDocument {
     LayoutDocument {
         schema_version: LAYOUT_SCHEMA_VERSION,
         auto_include_new: true,
+        groups: Vec::new(),
         items,
     }
 }
@@ -158,6 +161,7 @@ fn layout_validation_accepts_dense_groups_and_rejects_broken_documents() {
             LayoutItem {
                 provider: "openai".into(),
                 id: "hidden".into(),
+                group: None,
                 position: 0,
                 visible: false,
                 last_visible_position: Some(MAX_LAYOUT_ITEMS as u32 - 1),
@@ -166,6 +170,7 @@ fn layout_validation_accepts_dense_groups_and_rejects_broken_documents() {
             LayoutItem {
                 provider: "openai".into(),
                 id: "visible".into(),
+                group: None,
                 position: 0,
                 visible: true,
                 last_visible_position: Some(0),
@@ -183,6 +188,7 @@ fn layout_validation_accepts_dense_groups_and_rejects_broken_documents() {
             items: vec![LayoutItem {
                 provider: "openai".into(),
                 id: "hidden".into(),
+                group: None,
                 position: 0,
                 visible: false,
                 last_visible_position: Some(out_of_range),
@@ -195,6 +201,100 @@ fn layout_validation_accepts_dense_groups_and_rejects_broken_documents() {
             "last_visible_position {out_of_range} is outside a layout"
         );
     }
+}
+
+#[test]
+fn layout_groups_are_unique_ordered_and_bound_to_providers() {
+    let group = |id: &str, name: &str, provider: Option<&str>| LayoutGroup {
+        id: id.to_string(),
+        name: name.to_string(),
+        provider: provider.map(str::to_string),
+    };
+    let valid = LayoutDocument {
+        schema_version: LAYOUT_SCHEMA_VERSION,
+        auto_include_new: true,
+        groups: vec![
+            group("g-fast", "Fast", None),
+            group("provider:openai", "OpenAI", Some("openai")),
+        ],
+        items: vec![
+            LayoutItem {
+                provider: "openai".into(),
+                id: "gpt-4.1".into(),
+                group: Some("g-fast".into()),
+                position: 0,
+                visible: true,
+                last_visible_position: None,
+                hidden_at: None,
+            },
+            LayoutItem {
+                provider: "openai".into(),
+                id: "gpt-5".into(),
+                group: None,
+                position: 1,
+                visible: true,
+                last_visible_position: None,
+                hidden_at: None,
+            },
+        ],
+    };
+    valid
+        .validate()
+        .expect("explicit custom and provider groups");
+
+    let mut duplicate = valid.clone();
+    duplicate.groups.push(group("g-fast", "Again", None));
+    assert!(duplicate.validate().is_err(), "group ids are unique");
+
+    let mut duplicate_provider = valid.clone();
+    duplicate_provider
+        .groups
+        .push(group("provider:openai-2", "Again", Some("openai")));
+    assert!(
+        duplicate_provider.validate().is_err(),
+        "one bucket per provider, and the id is fixed"
+    );
+
+    let mut reserved = valid.clone();
+    reserved
+        .groups
+        .push(group("provider:manual", "Manual", None));
+    assert!(reserved.validate().is_err(), "provider: is reserved");
+
+    let mut unknown = valid.clone();
+    unknown.items[0].group = Some("missing".into());
+    assert!(unknown.validate().is_err(), "a group reference must exist");
+
+    let mut foreign = valid.clone();
+    foreign.items[0].provider = "anthropic".into();
+    foreign.items[0].group = Some("provider:openai".into());
+    assert!(
+        foreign.validate().is_err(),
+        "a model cannot join another provider's bucket"
+    );
+
+    let mut blank = valid.clone();
+    blank.groups[0].name = "  ".into();
+    assert!(blank.validate().is_err(), "a group needs a name");
+
+    let mut long = valid.clone();
+    long.groups[0].name = "g".repeat(MAX_LAYOUT_GROUP_NAME + 1);
+    assert!(long.validate().is_err(), "a group name is bounded");
+
+    let mut long_id = valid.clone();
+    long_id.groups[0].id = "g".repeat(MAX_LAYOUT_GROUP_ID + 1);
+    assert!(long_id.validate().is_err(), "a group id is bounded");
+
+    let mut too_many = valid.clone();
+    too_many.groups = (0..=MAX_LAYOUT_GROUPS)
+        .map(|i| group(&format!("g-{i}"), "g", None))
+        .collect();
+    assert!(too_many.validate().is_err(), "the group count is bounded");
+
+    // Array order is the display order and is not rewritten by validation.
+    let ordered = valid.clone();
+    assert_eq!(ordered.groups[0].id, "g-fast");
+    assert_eq!(ordered.groups[1].id, "provider:openai");
 }
 
 #[test]

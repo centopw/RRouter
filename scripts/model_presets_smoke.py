@@ -15,8 +15,10 @@ Run against a live gateway (admin authority required — loopback or
   POST   /api/model-presets/{id}/activate      -> { active_id, persisted } (per-account)
   GET    /api/model-presets/active             -> preset this caller resolves to
 
-A layout is `{ schema_version: 1, auto_include_new, items: [{ provider, id, position,
-visible }] }`; positions are dense from 0 inside each visibility group. The default preset
+A layout is `{ schema_version: 1, auto_include_new, groups?, items: [{ provider, id,
+group?, position, visible }] }`; positions are dense from 0 inside each visibility group.
+Groups are optional presentation metadata: array order is display order, provider buckets use
+`provider:<provider>`, and a free-form group may mix providers. The default preset
 cannot be deleted; an admin moves the flag with `POST /{id}/default`, which demotes the
 previous default in the same transaction. Activation is a per-account preference, so an
 admin-token caller has none and resolves to the default.
