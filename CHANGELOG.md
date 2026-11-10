@@ -2,10 +2,13 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
-## Unreleased
+## 0.5.4 — 2026-11-10
 
 ### Changed
 - OAuth sign-in no longer opens a browser automatically. PKCE dialogs always use the paste-back flow, with explicit **open** and **copy** actions for the authorize URL. This makes remote/cluster sign-in deterministic instead of depending on a loopback listener inside the pod.
+
+### CI
+- GitHub Actions now target Node 24 action majors and `ubuntu-24.04`, clearing the Node.js 20 and Ubuntu 26 migration annotations.
 
 ## 0.5.3 — 2026-11-10
 
