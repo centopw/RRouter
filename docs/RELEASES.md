@@ -128,7 +128,7 @@ line count/byte summary instead of the body, so it is safe in CI and locally.
 ### 5.2 Docker images (native, no QEMU)
 
 `docker.yml` builds each architecture on its own runner: `linux/amd64` on
-`ubuntu-latest`, `linux/arm64` on `ubuntu-24.04-arm`. Each leg pushes an image **by
+`ubuntu-24.04`, `linux/arm64` on `ubuntu-24.04-arm`. Each leg pushes an image **by
 digest** (`provenance: false`, GHA cache scoped per architecture); a single `merge` job
 downloads the two digest files and runs `docker buildx imagetools create` for the version,
 major-minor, branch/PR, short-sha and `latest` tags. Pull requests build both platforms

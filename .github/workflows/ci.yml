@@ -7,9 +7,9 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           # rustfmt is its own gate now: the tree is clean today, and a formatting drift
@@ -26,9 +26,9 @@ jobs:
   # fixed version exists — by an `audit.toml` `[advisories] ignore` entry with a review
   # date in the comment. Do not add an ignore list pre-emptively.
   audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
@@ -36,10 +36,10 @@ jobs:
       - run: cargo audit
 
   dashboard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -55,9 +55,9 @@ jobs:
   # (pinned) so a bad expression, unknown runner/context or shell mistake fails PRs
   # before a tag is cut.
   workflows:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Lint GitHub Actions workflows
         uses: docker://rhysd/actionlint:1.7.12
         with:
