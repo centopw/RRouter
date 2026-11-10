@@ -299,7 +299,7 @@ impl Refresher {
             ..Credentials::default()
         };
         // Copilot tokens carry per-token upstream selection in the `proxy-ep`/`tid` query
-        // of the token string; 9router keeps the raw token, so `extra` stays untouched.
+        // of the token string; keep the raw token and leave `extra` untouched.
         patch.extra = serde_json::Map::new();
         tracing::debug!("derived new GitHub Copilot session token");
         Ok(patch)

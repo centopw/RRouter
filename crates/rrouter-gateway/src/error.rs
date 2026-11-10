@@ -1,11 +1,11 @@
-//! Error bodies in the shape 9router's clients already parse, per inbound dialect.
+//! Error bodies in the shape each inbound dialect's clients expect.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use rrouter_core::{Dialect, Error};
 use serde_json::{json, Value};
 
-/// `(type, code)` pair 9router emits for a given HTTP status.
+/// `(type, code)` pair emitted for a given HTTP status.
 pub fn error_kind(status: u16) -> (&'static str, &'static str) {
     match status {
         400 => ("invalid_request_error", ""),
@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn status_maps_9router_kind_and_code() {
+    fn status_maps_kind_and_code() {
         assert_eq!(error_kind(401), ("authentication_error", "invalid_api_key"));
         assert_eq!(error_kind(404), ("not_found_error", "model_not_found"));
         assert_eq!(error_kind(429), ("rate_limit_error", "rate_limit_exceeded"));

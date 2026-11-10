@@ -1,8 +1,8 @@
 //! Per-connection circuit breaker.
 //!
-//! 9router kept a single binary lock per account; that either hammers a dead
-//! account or locks a healthy one out for a fixed period. This is a real
-//! closed → open → half-open breaker: consecutive failures trip it, the open
+//! A binary per-account lock either hammers a dead account or locks a healthy one
+//! out for a fixed period. This is a real closed → open → half-open breaker: consecutive
+//! failures trip it, the open
 //! window is time-based, and reopening admits exactly one probe at a time so a
 //! recovered account is picked up without a thundering herd.
 //!

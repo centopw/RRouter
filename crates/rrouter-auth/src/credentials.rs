@@ -2,8 +2,8 @@
 //!
 //! Every field except `extra` is optional and defaults to `None`, so a stored row that only
 //! knows an API key deserializes cleanly into this struct. `extra` is the
-//! `providerSpecificData` passthrough 9router stores per provider (project ids, region,
-//! enterprise URLs, ...) and is never interpreted by this crate.
+//! provider-specific passthrough metadata (project ids, region, enterprise URLs, ...)
+//! and is never interpreted by this crate.
 
 use serde::{Deserialize, Serialize};
 

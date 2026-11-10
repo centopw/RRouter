@@ -18,7 +18,7 @@ pub mod config_file;
 
 use config_file::{EnvLookup, FileLayer};
 
-/// Default listen port: 9router's, so existing client configs keep working.
+/// Default listen port used by existing client configurations.
 pub const DEFAULT_PORT: u16 = 20128;
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_DATA_DIR: &str = "./data";

@@ -67,8 +67,8 @@ fn scalar_as_string(value: &Value) -> Option<String> {
 
 /// `(type, code)` a status maps to when the provider said nothing more specific.
 ///
-/// These are the pairs 9router's clients already parse, so a translated failure is
-/// indistinguishable from a native one.
+/// These are the standard pairs clients of the inbound dialect already parse, so a
+/// translated failure is indistinguishable from a native one.
 fn status_kind(status: u16) -> (&'static str, &'static str) {
     match status {
         400 => ("invalid_request_error", ""),

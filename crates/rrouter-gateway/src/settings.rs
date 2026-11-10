@@ -17,8 +17,7 @@ use crate::state::AppState;
 pub const BRAND_KEYS: &[&str] = &["brand_name", "brand_color", "logo_url", "footer_text"];
 
 /// Token Saver (RTK) switch, readable on the proxy path without touching the settings
-/// database. Default on: 9Router ships the same feature on, and a request can opt out with
-/// `x-rrouter-rtk: off`.
+/// database. Default on; a request can opt out with `x-rrouter-rtk: off`.
 static RTK: AtomicBool = AtomicBool::new(true);
 
 pub fn rtk() -> bool {

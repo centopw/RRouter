@@ -2,7 +2,7 @@
 //! refresh recipe for every provider RRouter can route to.
 //!
 //! The table is `const` data; the id → spec index is a `LazyLock<HashMap>` built once.
-//! These transports are live 9router transports and are copied verbatim; changing one is a
+//! These transports are verified against the providers' public APIs; changing one is a
 //! routing change, not a refactor.
 
 use std::collections::HashMap;

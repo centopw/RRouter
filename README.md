@@ -148,5 +148,4 @@ acceptance harnesses.
 
 ## License
 
-MIT. Behavioural inspiration from 9router (also MIT); no code is copied. Wire formats were
-re-derived from the providers' published APIs and observed behaviour.
+MIT. Wire formats were re-derived from the providers' published APIs and observed behaviour.
