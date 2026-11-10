@@ -51,7 +51,7 @@ flate2 = "1"
 tar = "0.4"
 hex = "0.4"
 hmac = "0.12"
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 digest = "0.10"
 # Optional OpenTelemetry export (feature `otel`, default off). Kept in the workspace
 # table so the gateway can opt in without duplicating version pins; nothing here is
