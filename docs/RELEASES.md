@@ -150,7 +150,7 @@ Notes:
 - **No compiled-artifact cache.** `Swatinem/rust-cache` runs with `cache-targets: "false"`,
   so it caches downloaded crates but never restores `target/` output into a job that
   produces a signed artifact. A poisoned cache cannot reach a release.
-- **Actions are pinned to major tags** (`@v4`, `@v2`, …) like the rest of this repository;
+- **Actions are pinned to major tags** (`@v7`, `@v2`, …) like the rest of this repository;
   Dependabot updates `github-actions` monthly. If you tighten that policy further, use
   commit SHAs and update Dependabot accordingly.
 - **Re-runs.** `workflow_dispatch` with a tag builds and publishes that tag. Note that
