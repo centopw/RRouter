@@ -84,7 +84,6 @@ export default function Providers() {
   const [signIn, setSignIn] = useState<OAuthProvider | null>(null);
   const [keyProvider, setKeyProvider] = useState<string | null>(null);
   const [customProtocol, setCustomProtocol] = useState<"openai" | "anthropic" | null>(null);
-  const [authWindow, setAuthWindow] = useState<Window | null>(null);
   const [notice, setNotice] = useState<{ tone: "pos" | "neg"; text: string } | null>(null);
   const [routing, setRouting] = useState<Connection | null>(null);
   const [baseUrlFor, setBaseUrlFor] = useState<Connection | null>(null);
@@ -216,9 +215,8 @@ export default function Providers() {
   }, [params, setParams, isAdmin]);
 
   const startSignIn = (provider: OAuthProvider) => {
-    // The popup must be opened during the click to survive popup blockers.
-    const win = window.open("", "_blank", "width=560,height=720");
-    setAuthWindow(win);
+    // Do not open a browser here: the dialog shows the authorize URL and the operator
+    // chooses when to open it or copy it.
     setSignIn(provider);
     setAdding(false);
   };
@@ -712,14 +710,11 @@ export default function Providers() {
       {signIn ? (
         <OAuthDialog
           provider={signIn}
-          authWindow={authWindow}
           onClose={() => {
             setSignIn(null);
-            setAuthWindow(null);
           }}
           onConnected={(label, warning) => {
             setSignIn(null);
-            setAuthWindow(null);
             invalidate();
             refreshRegistrySoon();
             setNotice({
@@ -729,7 +724,6 @@ export default function Providers() {
           }}
           onViewProviders={() => {
             setSignIn(null);
-            setAuthWindow(null);
             window.requestAnimationFrame(() =>
               document.getElementById("providers-connected")?.scrollIntoView({ block: "start" }),
             );

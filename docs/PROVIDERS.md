@@ -27,8 +27,8 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 | `jina` | Jina AI | API key | — (rerank only) | **no** | No chat API: the entry exists for `https://api.jina.ai/v1/rerank`, and a chat request aimed at it is rejected by Jina. |
 
 **Remote OAuth.** A gateway in a cluster or on a remote VPS cannot receive a browser
-callback on its own loopback. In the sign-in dialog, tick **Deploying on a remote VPS?**;
-the gateway returns an authorize URL and a registered redirect URI, and the operator
+callback on its own loopback. The sign-in dialog never opens a browser automatically:
+it shows the authorize URL, an **open** button and a **copy** button, and the operator
 pastes the final browser URL back. Every PKCE provider advertises this mode: Codex uses
 its fixed port 1455, Google Antigravity uses 51121, and Claude uses the stable manual
 callback `http://localhost:54545/callback`. Device-code sign-in (GitHub Copilot) needs no
@@ -163,11 +163,11 @@ POST /api/oauth/{provider}/complete    {"id":"…","callback_url":"http://localh
   -> {"id":"<connection>","provider":"…","name":"…","warning":null}
 ```
 
-Manual mode requires a provider with a fixed redirect port (Codex, Google Antigravity);
-Claude registers an ephemeral port and answers `400 manual callback requires a fixed
-redirect port`. The pasted URL's `state` is checked against the pending login, and the code
-is exchanged at most once even if both a loopback waiter and a pasted callback race. An
-empty start body keeps the loopback behavior.
+Every PKCE provider supports manual mode. A provider with a fixed registered port uses it;
+Claude accepts a stable manual callback at `http://localhost:54545/callback`. The pasted
+URL's `state` is checked against the pending login, and the code is exchanged at most once
+even if both a loopback waiter and a pasted callback race. The dashboard always starts
+PKCE sign-ins in manual mode and requires an explicit **open** or **copy** action.
 
 Callback pages use a built-in light/dark card with the RRouter wordmark. When
 `RROUTER_PUBLIC_URL` is a safe absolute URL (`https://…`, or loopback `http://`), the success

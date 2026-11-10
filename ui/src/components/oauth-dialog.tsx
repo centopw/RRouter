@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle } from "@phosphor-icons/react";
 import { Badge, Button, Dot, ErrorNote, Field, Modal, cx } from "./ui";
-import { Checkbox } from "./atoms";
 import { ProviderIcon } from "./provider-icon";
 import { ApiError, api, type OAuthProvider, type OAuthStart } from "../lib/api";
 import { qk, useOAuthStatus } from "../lib/queries";
@@ -90,25 +89,20 @@ function callbackErrorText(error: unknown): string {
  */
 export function OAuthDialog({
   provider,
-  authWindow,
   onClose,
   onConnected,
   onViewProviders,
 }: {
   provider: OAuthProvider;
-  /** A blank popup opened during the click, so the browser treats it as user-initiated. */
-  authWindow: Window | null;
   onClose: () => void;
   onConnected: (label: string, warning: string | null) => void;
   /** The success panel's "view providers"; defaults to closing the dialog. */
   onViewProviders?: () => void;
 }) {
   const client = useQueryClient();
-  // Only a provider that advertises the capability gets the switch at all: a device-code
-  // flow has no callback to paste, and an older gateway would ignore the flag.
-  const supportsManual = provider.manual === true;
-  const [manualRequested, setManualRequested] = useState(false);
-  const manual = manualRequested && supportsManual;
+  // PKCE always uses the paste-back flow. A device-code provider has no callback to
+  // paste, and a build that predates manual completion falls back to the loopback UI.
+  const manual = provider.flow === "pkce" && provider.manual !== false;
   const [start, setStart] = useState<OAuthStart | null>(null);
   const [startError, setStartError] = useState<unknown>(null);
   const [callback, setCallback] = useState("");
@@ -140,15 +134,6 @@ export function OAuthDialog({
         }
         mine = s.id;
         setStart(s);
-        if (!manual && s.challenge.kind === "pkce") {
-          // The popup was opened synchronously by the click; navigate it only once the
-          // server has produced the authorize URL.
-          if (authWindow && !authWindow.closed) {
-            authWindow.location.replace(s.challenge.authorize_url);
-          } else {
-            window.open(s.challenge.authorize_url, "_blank", "noopener,width=520,height=720");
-          }
-        }
       })
       .catch((error) => {
         if (live) setStartError(error);
@@ -159,7 +144,7 @@ export function OAuthDialog({
         void api.del<{ cancelled: boolean }>(`/api/oauth/${provider.id}/${mine}`).catch(() => {});
       }
     };
-  }, [provider.id, manual, authWindow]);
+  }, [provider.id, manual]);
 
   const challenge = start?.challenge ?? null;
   // The server echoes the mode it actually started. A build that ignored `manual` falls
@@ -336,25 +321,6 @@ export function OAuthDialog({
               </p>
             ) : null}
 
-            {supportsManual && provider.flow !== "device_code" ? (
-              <label className="flex items-start gap-2 rounded-[8px] border border-line bg-[var(--color-surface-2)] px-3 py-2.5">
-                <Checkbox
-                  checked={manualRequested}
-                  onChange={setManualRequested}
-                  ariaLabel="deploying on a remote VPS"
-                  className="mt-0.5"
-                  disabled={complete.isPending || completeManual.isPending}
-                />
-                <span className="min-w-0 text-body text-fg">
-                  Deploying on a remote VPS?
-                  <span className="mt-0.5 block text-caption leading-relaxed text-faint">
-                    Sign in elsewhere and paste the callback URL here. The loopback listener
-                    is not used in this mode.
-                  </span>
-                </span>
-              </label>
-            ) : null}
-
             {startError ? <ErrorNote error={startError} /> : null}
             {!paste && complete.isError ? <ErrorNote error={complete.error} /> : null}
 
@@ -375,14 +341,15 @@ export function OAuthDialog({
               <>
                 {paste ? (
                   <p className="text-body leading-relaxed text-muted">
-                    Open the authorize URL in the browser that holds your provider session.
-                    After you approve, that browser lands on the redirect URI (it may fail to
-                    load — that is expected). Copy its whole address bar and paste it below.
+                    Open the authorize URL yourself in the browser that holds your provider
+                    session. After you approve, that browser lands on the redirect URI (it may
+                    fail to load — that is expected). Copy its whole address bar and paste it
+                    below.
                   </p>
                 ) : (
                   <p className="text-body text-muted">
-                    A browser tab opened at the provider. Approve access there; this dialog
-                    finishes automatically once the loopback listener receives the callback.
+                    This gateway build uses the loopback flow. Open the authorize URL yourself,
+                    approve access, and wait for the callback.
                   </p>
                 )}
                 <Field
@@ -405,7 +372,7 @@ export function OAuthDialog({
                 </Field>
                 <Field
                   label="authorize url"
-                  hint={paste ? "open this where you can approve the sign-in" : "if the tab did not open, use this"}
+                  hint={paste ? "click open, or copy it into the browser that holds your session" : "open this yourself to approve the sign-in"}
                 >
                   <div className="flex min-w-0 items-start gap-2">
                     <a
@@ -416,6 +383,17 @@ export function OAuthDialog({
                     >
                       {challenge.authorize_url}
                     </a>
+                    <Button
+                      onClick={() =>
+                        window.open(
+                          challenge.authorize_url,
+                          "_blank",
+                          "noopener,width=520,height=720",
+                        )
+                      }
+                    >
+                      open
+                    </Button>
                     <Button onClick={() => copy(challenge.authorize_url)} ariaLabel="copy authorize url">
                       copy
                     </Button>
