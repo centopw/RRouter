@@ -57,7 +57,7 @@ digest = "0.10"
 # table so the gateway can opt in without duplicating version pins; nothing here is
 # compiled unless `rrouter-gateway` enables the feature.
 opentelemetry = { version = "0.27", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.27", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["trace", "http-proto", "reqwest-client", "reqwest-rustls"] }
 tracing-opentelemetry = "0.28"
 argon2 = "0.5"
