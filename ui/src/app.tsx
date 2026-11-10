@@ -3,28 +3,15 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   Pulse,
   ArrowsLeftRight,
-  Buildings,
   ChatCircleText,
-  Cube,
-  FileText,
-  Flask,
-  WebhooksLogo,
   GearSix,
-  Heartbeat,
-  ListMagnifyingGlass,
-  UserCircle,
   Key,
-  ListBullets,
   MagnifyingGlass,
-  PlugsConnected,
   SidebarSimple,
   SignOut,
-  Shuffle,
-  TerminalWindow,
-  UsersThree,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
 import { useAuthState, useHealth, useIsAdmin, useModels, useSignOut, useSystem } from "./lib/queries";
 import { Button, CopyChip, Dot, cx } from "./components/ui";
@@ -39,6 +26,24 @@ type NavItem = {
   adminOnly?: boolean;
 };
 
+type NavTab = {
+  to: string;
+  label: string;
+  /** Exact matching is needed when this tab is also the section root. */
+  end?: boolean;
+  adminOnly?: boolean;
+};
+
+type SectionId = "activity" | "playground" | "routing" | "access" | "system";
+
+type NavSection = {
+  id: SectionId;
+  to: string;
+  label: string;
+  icon: React.ReactNode;
+  tabs: NavTab[];
+};
+
 const glyph = (Icon: typeof Pulse) => <Icon size={17} weight="regular" aria-hidden />;
 
 /** White-label settings written through `/api/settings`; every field is optional. */
@@ -51,26 +56,77 @@ type Brand = {
 
 const DEFAULT_NAME = "RRouter";
 
-const NAV: NavItem[] = [
-  { to: "/activity", label: "Activity", icon: glyph(Pulse), group: "Gateway" },
-  { to: "/logs", label: "Logs", icon: glyph(ListBullets), group: "Gateway", adminOnly: true },
-  { to: "/playground", label: "Playground", icon: glyph(ChatCircleText), group: "Gateway", adminOnly: true },
-  { to: "/templates", label: "Templates", icon: glyph(FileText), group: "Gateway" },
-  { to: "/evals", label: "Evals", icon: glyph(Flask), group: "Gateway" },
-  { to: "/providers", label: "Providers", icon: glyph(PlugsConnected), group: "Gateway" },
-  { to: "/models", label: "Models", icon: glyph(Cube), group: "Gateway" },
-  { to: "/keys", label: "API Keys", icon: glyph(Key), group: "Access", adminOnly: true },
-  { to: "/teams", label: "Teams", icon: glyph(Buildings), group: "Access" },
-  { to: "/users", label: "Users", icon: glyph(UsersThree), group: "Access", adminOnly: true },
-  { to: "/aliases", label: "Aliases", icon: glyph(ArrowsLeftRight), group: "Routing", adminOnly: true },
-  { to: "/combos", label: "Combos", icon: glyph(Shuffle), group: "Routing", adminOnly: true },
-  { to: "/account", label: "My account", icon: glyph(UserCircle), group: "System" },
-  { to: "/audit", label: "Audit", icon: glyph(ListMagnifyingGlass), group: "System", adminOnly: true },
-  { to: "/health", label: "Health", icon: glyph(Heartbeat), group: "System", adminOnly: true },
-  { to: "/webhooks", label: "Webhooks", icon: glyph(WebhooksLogo), group: "System", adminOnly: true },
-  { to: "/system-logs", label: "System logs", icon: glyph(TerminalWindow), group: "System", adminOnly: true },
-  { to: "/settings", label: "Settings", icon: glyph(GearSix), group: "System", adminOnly: true },
+/**
+ * Five surfaces, each with tabs. The sidebar shows the surface; the tab strip shows the
+ * pages. Daily pages are the first tab, rare configuration stays under System.
+ */
+const SECTIONS: NavSection[] = [
+  {
+    id: "activity",
+    to: "/activity",
+    label: "Activity",
+    icon: glyph(Pulse),
+    tabs: [
+      { to: "/activity", label: "Activity", end: true },
+      { to: "/activity/logs", label: "Logs", adminOnly: true },
+      { to: "/activity/audit", label: "Audit", adminOnly: true },
+    ],
+  },
+  {
+    id: "playground",
+    to: "/playground",
+    label: "Playground",
+    icon: glyph(ChatCircleText),
+    tabs: [
+      { to: "/playground/chat", label: "Playground", adminOnly: true },
+      { to: "/playground/templates", label: "Templates" },
+      { to: "/playground/evals", label: "Evals" },
+    ],
+  },
+  {
+    id: "routing",
+    to: "/routing",
+    label: "Routing",
+    icon: glyph(ArrowsLeftRight),
+    tabs: [
+      { to: "/routing/models", label: "Models" },
+      { to: "/routing/providers", label: "Providers" },
+      { to: "/routing/aliases", label: "Aliases", adminOnly: true },
+      { to: "/routing/combos", label: "Combos", adminOnly: true },
+    ],
+  },
+  {
+    id: "access",
+    to: "/access",
+    label: "Access",
+    icon: glyph(Key),
+    tabs: [
+      { to: "/access/keys", label: "API Keys", adminOnly: true },
+      { to: "/access/teams", label: "Teams" },
+      { to: "/access/users", label: "Users", adminOnly: true },
+    ],
+  },
+  {
+    id: "system",
+    to: "/system",
+    label: "System",
+    icon: glyph(GearSix),
+    tabs: [
+      { to: "/system/health", label: "Health", adminOnly: true },
+      { to: "/system/webhooks", label: "Webhooks", adminOnly: true },
+      { to: "/system/logs", label: "System logs", adminOnly: true },
+      { to: "/system/settings", label: "Settings", adminOnly: true },
+    ],
+  },
 ];
+
+function visibleTabs(section: NavSection, isAdmin: boolean) {
+  return section.tabs.filter((tab) => isAdmin || !tab.adminOnly);
+}
+
+function sectionDefault(section: NavSection, isAdmin: boolean) {
+  return visibleTabs(section, isAdmin)[0]?.to ?? section.to;
+}
 
 /** A first run (no accounts, no keys) lands on the wizard once; the flag is set by the
  *  wizard itself when the operator skips or finishes, so this never fights a choice. */
@@ -165,18 +221,27 @@ export function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  /** One list drives the rail, the mobile tabs and ⌘K, so no two can disagree. */
-  const nav = useMemo(() => NAV.filter((item) => isAdmin || !item.adminOnly), [isAdmin]);
-
-  const groups = useMemo(() => {
-    const out = new Map<string, NavItem[]>();
-    for (const item of nav) {
-      const bucket = out.get(item.group);
-      if (bucket) bucket.push(item);
-      else out.set(item.group, [item]);
-    }
-    return [...out.entries()];
-  }, [nav]);
+  /** The rail shows surfaces; ⌘K and the tab strips show the pages inside them. */
+  const sections = useMemo(
+    () =>
+      SECTIONS.map((section) => ({
+        ...section,
+        tabs: visibleTabs(section, isAdmin),
+      })).filter((section) => section.tabs.length > 0),
+    [isAdmin],
+  );
+  const nav = useMemo(
+    () =>
+      sections.flatMap((section) =>
+        section.tabs.map((tab) => ({
+          to: tab.to,
+          label: tab.label,
+          icon: section.icon,
+          group: section.label,
+        })),
+      ),
+    [sections],
+  );
 
   useEffect(() => {
     const element = navRef.current;
@@ -284,24 +349,13 @@ export function Shell() {
           style={{ maskImage: navFade, WebkitMaskImage: navFade }}
           aria-label="Dashboard"
         >
-          {groups.map(([group, items]) => (
-            <div key={group} className="mb-3">
-              {collapsed ? (
-                <div aria-hidden className="mx-2 mb-2 border-t border-line" />
-              ) : (
-                <div className="px-2 pb-1.5 text-caption font-semibold uppercase tracking-[0.12em] text-faint">
-                  {group}
-                </div>
-              )}
-              <ul className="space-y-0.5">
-                {items.map((item) => (
-                  <li key={item.to}>
-                    <NavItemLink item={item} variant="sidebar" collapsed={collapsed} />
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
+          <ul className="space-y-0.5">
+            {sections.map((section) => (
+              <li key={section.id}>
+                <NavSectionLink section={section} variant="sidebar" collapsed={collapsed} />
+              </li>
+            ))}
+          </ul>
         </nav>
 
         <SessionFooter collapsed={collapsed} />
@@ -350,8 +404,8 @@ export function Shell() {
           className="tab-strip flex gap-1 overflow-x-auto px-2 pb-2"
           aria-label="Dashboard"
         >
-          {nav.map((item) => (
-            <NavItemLink key={item.to} item={item} variant="tab" />
+          {sections.map((section) => (
+            <NavSectionLink key={section.id} section={section} variant="tab" />
           ))}
         </nav>
       </header>
@@ -436,12 +490,14 @@ function SessionFooter({ collapsed }: { collapsed?: boolean }) {
   if (collapsed) {
     return (
       <div className="flex flex-col items-center gap-1 border-t border-line py-2">
-        <span
+        <Link
+          to="/account"
+          aria-label="My account"
           title={`${user.name} · ${user.email}`}
-          className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-3 text-small font-semibold text-fg"
+          className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-3 text-small font-semibold text-fg hover:bg-surface-2"
         >
           {user.name.slice(0, 1).toUpperCase()}
-        </span>
+        </Link>
         <button
           type="button"
           onClick={signOutAndLeave}
@@ -457,10 +513,13 @@ function SessionFooter({ collapsed }: { collapsed?: boolean }) {
   }
   return (
     <div className="flex items-center gap-2 border-t border-line px-3 py-2.5">
-      <div className="min-w-0 flex-1">
+      <Link
+        to="/account"
+        className="min-w-0 flex-1 rounded-md px-1 py-0.5 hover:bg-surface-3"
+      >
         <div className="truncate text-small font-medium text-fg">{user.name}</div>
         <div className="truncate text-caption text-faint">{user.email}</div>
-      </div>
+      </Link>
       <Button variant="quiet" disabled={signOut.isPending} onClick={signOutAndLeave}>
         sign out
       </Button>
@@ -502,60 +561,115 @@ function SidebarFooter({
   );
 }
 
-/** One nav item, two orientations: the rail stacks a left accent bar, the mobile tab row
- *  a bottom one. `NavLink` owns `aria-current`, so active state is announced, not just seen. */
-function NavItemLink({
-  item,
+/** One sidebar/tab entry for a whole surface. The active state covers every tab. */
+function NavSectionLink({
+  section,
   variant,
   collapsed = false,
 }: {
-  item: NavItem;
+  section: NavSection;
   variant: "sidebar" | "tab";
   collapsed?: boolean;
 }) {
+  const location = useLocation();
+  const isAdmin = useIsAdmin();
+  const active =
+    location.pathname === section.to || location.pathname.startsWith(`${section.to}/`);
   return (
-    <NavLink
-      to={item.to}
-      title={variant === "sidebar" && collapsed ? item.label : undefined}
-      aria-label={variant === "sidebar" && collapsed ? item.label : undefined}
-      className={({ isActive }) =>
-        cx(
-          "relative flex items-center text-body transition-colors",
-          variant === "tab"
-            ? "h-11 shrink-0 gap-2 whitespace-nowrap rounded-lg px-3"
-            : collapsed
-              ? "justify-center rounded-[8px] px-0 py-2"
-              : "gap-2.5 rounded-[8px] px-2.5 py-2",
-          variant === "sidebar"
-            ? isActive
-              ? "bg-[var(--color-selected)] font-medium text-accent-text"
-              : "text-ink-soft hover:bg-surface-3 hover:text-fg"
-            : isActive
-              ? "bg-accent font-medium text-[var(--color-accent-ink)]"
-              : "text-muted hover:bg-surface-3 hover:text-fg",
-        )
-      }
-    >
-      {({ isActive }) => (
-        <>
-          {isActive ? (
-            <span
-              aria-hidden
-              className={cx(
-                "absolute rounded-full bg-[var(--color-nav-accent)]",
-                variant === "tab"
-                  ? "inset-x-2 bottom-0 h-[2px]"
-                  : collapsed
-                    ? "inset-y-1.5 left-0 w-[2px]"
-                    : "left-0 top-1.5 h-[calc(100%-12px)] w-[2px]",
-              )}
-            />
-          ) : null}
-          <span className="shrink-0">{item.icon}</span>
-          {collapsed ? null : item.label}
-        </>
+    <Link
+      to={sectionDefault(section, isAdmin)}
+      aria-current={active ? "page" : undefined}
+      title={variant === "sidebar" && collapsed ? section.label : undefined}
+      aria-label={variant === "sidebar" && collapsed ? section.label : undefined}
+      className={cx(
+        "relative flex items-center text-body transition-colors",
+        variant === "tab"
+          ? "h-14 min-w-0 flex-1 flex-col justify-center gap-0.5 rounded-lg px-1 text-caption"
+          : collapsed
+            ? "justify-center rounded-[8px] px-0 py-2"
+            : "gap-2.5 rounded-[8px] px-2.5 py-2",
+        variant === "sidebar"
+          ? active
+            ? "bg-[var(--color-selected)] font-medium text-accent-text"
+            : "text-ink-soft hover:bg-surface-3 hover:text-fg"
+          : active
+            ? "bg-accent font-medium text-[var(--color-accent-ink)]"
+            : "text-muted hover:bg-surface-3 hover:text-fg",
       )}
-    </NavLink>
+    >
+      {active ? (
+        <span
+          aria-hidden
+          className={cx(
+            "absolute rounded-full bg-[var(--color-nav-accent)]",
+            variant === "tab"
+              ? "inset-x-2 bottom-0 h-[2px]"
+              : collapsed
+                ? "inset-y-1.5 left-0 w-[2px]"
+                : "left-0 top-1.5 h-[calc(100%-12px)] w-[2px]",
+          )}
+        />
+      ) : null}
+      <span className="shrink-0">{section.icon}</span>
+      {collapsed ? null : (
+        <span className={variant === "tab" ? "max-w-full truncate" : undefined}>
+          {section.label}
+        </span>
+      )}
+    </Link>
+  );
+}
+
+/** Tab strip for one surface. The page content is the nested route's `<Outlet/>`. */
+/** Section root opens the first tab the current role can use. */
+export function SectionIndex({ section: id }: { section: SectionId }) {
+  const isAdmin = useIsAdmin();
+  const section = SECTIONS.find((candidate) => candidate.id === id);
+  if (!section) return <Navigate to="/activity" replace />;
+  return <Navigate to={sectionDefault(section, isAdmin)} replace />;
+}
+
+export function SectionLayout({ section: id }: { section: SectionId }) {
+  const isAdmin = useIsAdmin();
+  const section = SECTIONS.find((candidate) => candidate.id === id);
+  if (!section) return <Outlet />;
+  const tabs = visibleTabs(section, isAdmin);
+  return (
+    <>
+      <nav
+        aria-label={`${section.label} sections`}
+        className="tab-strip mb-4 flex gap-1 overflow-x-auto border-b border-line"
+      >
+        {tabs.map((tab) => (
+          <NavLink
+            key={tab.to}
+            to={tab.to}
+            end={tab.end}
+            className={({ isActive }) =>
+              cx(
+                "relative shrink-0 px-3 py-2 text-body transition-colors",
+                isActive
+                  ? "font-medium text-accent-text"
+                  : "text-muted hover:text-fg",
+              )
+            }
+          >
+            {({ isActive }) => (
+              <>
+                {tab.label}
+                {isActive ? (
+                  <span
+                    aria-hidden
+                    className="absolute inset-x-2 bottom-0 h-[2px] rounded-full bg-[var(--color-nav-accent)]"
+                  />
+                ) : null}
+              </>
+            )}
+          </NavLink>
+        ))}
+      </nav>
+      <Outlet />
+    </>
   );
 }
 

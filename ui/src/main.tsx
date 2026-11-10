@@ -9,7 +9,7 @@ import {
   useRouteError,
 } from "react-router-dom";
 import "./index.css";
-import { Shell } from "./app";
+import { SectionIndex, SectionLayout, Shell } from "./app";
 import { ToastProvider } from "./components/toast";
 import { AuthGuard, RequireAdmin } from "./pages/auth/guard";
 
@@ -153,27 +153,75 @@ const router = createBrowserRouter(
           errorElement: <RouteError />,
           children: [
             { index: true, element: <Navigate to="/activity" replace /> },
-            { path: "activity", element: <Activity /> },
-            // Reader surface: any signed-in role may open these.
-            { path: "models", element: <Models /> },
-            { path: "templates", element: <Templates /> },
-            { path: "evals", element: <Evals /> },
-            { path: "teams", element: <Teams /> },
+            {
+              path: "activity",
+              element: <SectionLayout section="activity" />,
+              children: [
+                { index: true, element: <Activity /> },
+                { path: "logs", element: <AdminPage><Logs /></AdminPage> },
+                { path: "audit", element: <AdminPage><Audit /></AdminPage> },
+              ],
+            },
+            {
+              path: "playground",
+              element: <SectionLayout section="playground" />,
+              children: [
+                { index: true, element: <SectionIndex section="playground" /> },
+                { path: "chat", element: <AdminPage><Playground /></AdminPage> },
+                { path: "templates", element: <Templates /> },
+                { path: "evals", element: <Evals /> },
+              ],
+            },
+            {
+              path: "routing",
+              element: <SectionLayout section="routing" />,
+              children: [
+                { index: true, element: <SectionIndex section="routing" /> },
+                { path: "models", element: <Models /> },
+                { path: "providers", element: <Providers /> },
+                { path: "aliases", element: <AdminPage><Aliases /></AdminPage> },
+                { path: "combos", element: <AdminPage><Combos /></AdminPage> },
+              ],
+            },
+            {
+              path: "access",
+              element: <SectionLayout section="access" />,
+              children: [
+                { index: true, element: <SectionIndex section="access" /> },
+                { path: "keys", element: <AdminPage><Keys /></AdminPage> },
+                { path: "teams", element: <Teams /> },
+                { path: "users", element: <AdminPage><Users /></AdminPage> },
+              ],
+            },
+            {
+              path: "system",
+              element: <SectionLayout section="system" />,
+              children: [
+                { index: true, element: <SectionIndex section="system" /> },
+                { path: "health", element: <AdminPage><Health /></AdminPage> },
+                { path: "webhooks", element: <AdminPage><Webhooks /></AdminPage> },
+                { path: "logs", element: <AdminPage><SystemLogs /></AdminPage> },
+                { path: "settings", element: <AdminPage><Settings /></AdminPage> },
+              ],
+            },
             { path: "account", element: <Account /> },
-            // Admin surface: hidden from the nav and refused here on a typed URL.
-            { path: "logs", element: <AdminPage><Logs /></AdminPage> },
-            { path: "providers", element: <Providers /> },
-            { path: "connections", element: <Navigate to="/providers" replace /> },
-            { path: "playground", element: <AdminPage><Playground /></AdminPage> },
-            { path: "settings", element: <AdminPage><Settings /></AdminPage> },
-            { path: "keys", element: <AdminPage><Keys /></AdminPage> },
-            { path: "users", element: <AdminPage><Users /></AdminPage> },
-            { path: "audit", element: <AdminPage><Audit /></AdminPage> },
-            { path: "aliases", element: <AdminPage><Aliases /></AdminPage> },
-            { path: "combos", element: <AdminPage><Combos /></AdminPage> },
-            { path: "health", element: <AdminPage><Health /></AdminPage> },
-            { path: "webhooks", element: <AdminPage><Webhooks /></AdminPage> },
-            { path: "system-logs", element: <AdminPage><SystemLogs /></AdminPage> },
+            // Legacy URLs keep working; the section tabs are the canonical paths.
+            { path: "logs", element: <Navigate to="/activity/logs" replace /> },
+            { path: "audit", element: <Navigate to="/activity/audit" replace /> },
+            { path: "templates", element: <Navigate to="/playground/templates" replace /> },
+            { path: "evals", element: <Navigate to="/playground/evals" replace /> },
+            { path: "models", element: <Navigate to="/routing/models" replace /> },
+            { path: "providers", element: <Navigate to="/routing/providers" replace /> },
+            { path: "connections", element: <Navigate to="/routing/providers" replace /> },
+            { path: "aliases", element: <Navigate to="/routing/aliases" replace /> },
+            { path: "combos", element: <Navigate to="/routing/combos" replace /> },
+            { path: "keys", element: <Navigate to="/access/keys" replace /> },
+            { path: "teams", element: <Navigate to="/access/teams" replace /> },
+            { path: "users", element: <Navigate to="/access/users" replace /> },
+            { path: "health", element: <Navigate to="/system/health" replace /> },
+            { path: "webhooks", element: <Navigate to="/system/webhooks" replace /> },
+            { path: "system-logs", element: <Navigate to="/system/logs" replace /> },
+            { path: "settings", element: <Navigate to="/system/settings" replace /> },
             { path: "*", element: <NotFound /> },
           ],
         },

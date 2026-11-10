@@ -2,6 +2,11 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## Unreleased
+
+### Changed
+- Dashboard navigation now has five surfaces — Activity, Playground, Routing, Access, System — with tabs for their pages. Account moved to the sidebar footer; Settings, Health, Webhooks, System logs and Audit are no longer permanent sidebar entries. Legacy URLs redirect to the new tab paths.
+
 ## 0.5.4 — 2026-11-10
 
 ### Changed
