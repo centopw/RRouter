@@ -51,10 +51,9 @@ pub async fn providers() -> Response {
             spec.login_flow().map(|flow| {
                 // Manual (paste-the-callback) mode needs a registered fixed port; a
                 // dynamic loopback port cannot be reached from the browser host.
-                let manual = matches!(
-                    flow,
-                    rrouter_auth::LoginFlow::Pkce(pkce) if pkce.fixed_port.is_some()
-                );
+                // Every PKCE flow has a manual mode: a fixed registered port is used
+                // when present, otherwise the stable manual loopback port is used.
+                let manual = matches!(flow, rrouter_auth::LoginFlow::Pkce(_));
                 json!({
                     "id": spec.id,
                     "display": spec.display,

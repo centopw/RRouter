@@ -7,7 +7,7 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 | Id | Display | Auth | Native | Model list | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `claude` | Claude (Anthropic OAuth) | subscription (PKCE) | Messages | yes | Request must claim a current Claude Code version; a stale one is refused with "version 2.1.280 or newer is required". Callback host is `localhost`. |
-| `codex` | Codex (ChatGPT OAuth) | subscription (device code) | Responses | **no** | Stream-only: non-streaming clients are served by reassembling the stream. Its five verified ids come from the built-in catalog. The subscription backend does not serve `/responses/compact`. |
+| `codex` | Codex (ChatGPT OAuth) | subscription (PKCE, fixed port 1455) | Responses | **no** | Stream-only: non-streaming clients are served by reassembling the stream. Its five verified ids come from the built-in catalog. The subscription backend does not serve `/responses/compact`. |
 | `github` | GitHub Copilot | subscription (device code) | Chat | yes | Also exposes Responses and Messages URLs; a Copilot-specific token refresh is handled per request. |
 | `google-antigravity` | Google Antigravity | subscription (PKCE, fixed port 51121) | Google Code Assist (`/v1internal:*`) | yes (project-scoped `POST`) | Sign-in returns a Google token; the account's Cloud project is discovered via `loadCodeAssist` (onboarding when absent) and stored as `credentials.extra.project_id`, which every CCA envelope carries. `POST /api/models/fetch` posts `v1internal:fetchAvailableModels` with that project and stores the catalogue's ids/`displayName` as upstream rows. |
 | `openai` | OpenAI | API key | Chat | yes | Responses and compaction available; `store:false` is enforced for Codex traffic. |
@@ -25,6 +25,14 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 | `cohere` | Cohere | API key | Chat (OpenAI-compatibility surface) | derived | Chat goes through Cohere's compatibility API; rerank is `https://api.cohere.com/v1/rerank`. Chat and rerank model ids differ, so each surface needs its own custom rows. |
 | `fireworks` | Fireworks AI | API key | Chat | derived | Ids look like `accounts/fireworks/models/<name>` and are stored verbatim; the API documents `max_tokens`. |
 | `jina` | Jina AI | API key | — (rerank only) | **no** | No chat API: the entry exists for `https://api.jina.ai/v1/rerank`, and a chat request aimed at it is rejected by Jina. |
+
+**Remote OAuth.** A gateway in a cluster or on a remote VPS cannot receive a browser
+callback on its own loopback. In the sign-in dialog, tick **Deploying on a remote VPS?**;
+the gateway returns an authorize URL and a registered redirect URI, and the operator
+pastes the final browser URL back. Every PKCE provider advertises this mode: Codex uses
+its fixed port 1455, Google Antigravity uses 51121, and Claude uses the stable manual
+callback `http://localhost:54545/callback`. Device-code sign-in (GitHub Copilot) needs no
+callback and works unchanged.
 
 The last four are reviewed community manifests (`providers/community/*.json`) compiled into
 the binary at build time, so they appear here exactly as the built-in rows do. `derived` means

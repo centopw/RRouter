@@ -113,7 +113,7 @@ async fn providers_lists_only_registered_login_flows() {
             .as_bool()
             .expect("manual")
     };
-    assert!(!manual("claude"), "dynamic loopback cannot be pasted");
+    assert!(manual("claude"), "manual uses the stable fallback port");
     assert!(manual("codex"));
     assert!(manual("google-antigravity"));
     assert!(!manual("github"), "device flow has no redirect");

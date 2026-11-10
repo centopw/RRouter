@@ -35,6 +35,9 @@ pub const PENDING_TTL: Duration = Duration::from_secs(15 * 60);
 const COMPLETE_WAIT: Duration = Duration::from_secs(20);
 /// Ceiling on a single device-code poll cycle.
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Loopback port used by manual PKCE when the provider accepts a dynamic port. The
+/// gateway never binds it; the operator pastes the callback URL from their own browser.
+const MANUAL_REDIRECT_PORT: u16 = 54_545;
 
 /// What the caller must do next.
 #[derive(Debug, Clone, Serialize)]
@@ -791,13 +794,11 @@ struct ExchangeCode<'a> {
 /// Without a registered fixed port the provider accepts a per-process ephemeral port,
 /// which no other machine can reach; manual mode has no way to receive that redirect, so
 /// it fails before creating a pending login.
-fn fixed_redirect_uri(provider: &str, p: &PkceFlow) -> Result<String> {
-    let port = p.fixed_port.ok_or_else(|| {
-        Error::BadRequest(format!(
-            "manual callback requires a fixed redirect port; {provider} registers an \
-             ephemeral loopback port"
-        ))
-    })?;
+fn fixed_redirect_uri(_provider: &str, p: &PkceFlow) -> Result<String> {
+    // A provider with a registered fixed port must use it. Providers such as Claude
+    // accept any localhost port; manual mode uses a stable one so the browser can land
+    // on a predictable URL that the operator pastes back.
+    let port = p.fixed_port.unwrap_or(MANUAL_REDIRECT_PORT);
     let path = if p.callback_path.starts_with('/') {
         p.callback_path.to_string()
     } else {
@@ -1606,20 +1607,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_start_requires_a_fixed_redirect_port() {
+    async fn manual_start_uses_a_stable_redirect_for_a_dynamic_port_provider() {
         let flows = OAuthFlows::new();
         let http = reqwest::Client::new();
         let spec = crate::registry::get("claude").expect("claude");
-        let err = flows
+        let (id, challenge) = flows
             .start_manual(&http, spec)
             .await
-            .expect_err("claude uses an ephemeral port");
-        assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
-        assert!(
-            err.to_string()
-                .contains("manual callback requires a fixed redirect port"),
-            "{err}"
-        );
+            .expect("manual fallback");
+        match challenge {
+            Challenge::Pkce {
+                redirect_uri,
+                manual,
+                ..
+            } => {
+                assert!(manual);
+                assert_eq!(redirect_uri, "http://localhost:54545/callback");
+            }
+            other => panic!("expected PKCE, got {other:?}"),
+        }
+        assert!(flows.cancel(&id));
     }
 
     #[tokio::test]

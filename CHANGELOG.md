@@ -2,6 +2,11 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.5.3 — 2026-11-10
+
+### Fixed
+- Remote OAuth for PKCE providers without a registered fixed port (Claude) now has a manual mode using a stable `localhost:54545` redirect. The dashboard advertises manual completion for every PKCE provider, so a gateway in a cluster or on a remote VPS can be signed in by pasting the callback URL.
+
 ## 0.5.2 — 2026-11-10
 
 ### Added

@@ -539,18 +539,21 @@ async fn completion_rejects_a_pending_id_from_another_provider() {
 }
 
 #[tokio::test]
-async fn manual_pkce_start_requires_a_fixed_redirect_port() {
+async fn manual_pkce_start_uses_a_stable_redirect_for_a_dynamic_port_provider() {
     let _mock = &*MOCK;
     let harness = harness();
-    let (status, body) = harness
+    let (status, start) = harness
         .post("/api/oauth/claude/start", json!({"manual": true}))
         .await;
-    assert!(status.is_client_error(), "{status} {body}");
-    assert!(
-        body.to_string()
-            .contains("manual callback requires a fixed redirect port"),
-        "{body}"
+    assert_eq!(status, StatusCode::OK, "{start}");
+    assert_eq!(start["challenge"]["manual"], true);
+    assert_eq!(
+        start["challenge"]["redirect_uri"],
+        "http://localhost:54545/callback"
     );
+    let (id, _, _) = pkce_details(&start);
+    let (status, _) = harness.delete(&format!("/api/oauth/claude/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
