@@ -2,7 +2,7 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
-## Unreleased
+## 0.5.2 — 2026-11-10
 
 ### Added
 - Subscription-aware routing: cached provider plan windows (`claude`, `codex`, `github`)

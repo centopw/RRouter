@@ -2,8 +2,8 @@ apiVersion: v2
 name: rrouter
 description: Self-hosted AI gateway with a single Rust binary and SQLite storage.
 type: application
-version: 0.1.0
-appVersion: "0.5.1"
+version: 0.1.1
+appVersion: "0.5.2"
 home: https://github.com/centopw/RRouter
 sources:
   - https://github.com/centopw/RRouter

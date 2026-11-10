@@ -1,4 +1,4 @@
-![RRouter — one endpoint, smarter routing](docs/brand/banner.png)
+<p align="center"><img src="docs/assets/readme/hero.png" alt="RRouter — one endpoint for every model"></p>
 
 # RRouter
 
@@ -26,20 +26,14 @@ encryption key material and the dashboard all live inside the binary and one dat
 
 ## See it
 
-[Watch the 10-second demo](docs/assets/rrouter-demo.mp4) · [Activity](docs/screenshots/activity.png) · [Models](docs/screenshots/models.png) · [Evals](docs/screenshots/evals.png) · [Webhooks](docs/screenshots/webhooks.png)
+<p align="center"><img src="docs/assets/readme/flow.png" alt="Clients to RRouter to providers"></p>
 
-[![RRouter demo](docs/assets/rrouter-demo.gif)](docs/assets/rrouter-demo.mp4)
+<p align="center"><img src="docs/assets/readme/features.png" alt="Protocol translation, failover, encrypted secrets, quota auto-ping"></p>
 
-<p align="center">
-  <img src="docs/screenshots/activity.png" width="49%" alt="Activity dashboard">
-  <img src="docs/screenshots/models.png" width="49%" alt="Models registry with provider coverage">
-</p>
-<p align="center">
-  <img src="docs/screenshots/evals.png" width="49%" alt="Evals suites and runs">
-  <img src="docs/screenshots/webhooks.png" width="49%" alt="Webhook delivery queue">
-</p>
-
-Mobile: [Models at 390px](docs/screenshots/models-mobile.png) · [Webhooks at 390px](docs/screenshots/webhooks-mobile.png)
+<p align="center"><img src="docs/assets/readme/panel-observe.png" alt="Activity dashboard and Models registry"></p>
+<p align="center"><img src="docs/assets/readme/panel-access.png" alt="Providers and API Keys"></p>
+<p align="center"><img src="docs/assets/readme/panel-ops.png" alt="Evals and Webhooks"></p>
+<p align="center"><img src="docs/assets/readme/panel-mobile.png" alt="Responsive dashboard on mobile"></p>
 
 ## Install
 
@@ -53,11 +47,11 @@ curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | s
 Pin a release or choose a directory:
 
 ```sh
-RROUTER_VERSION=v0.5.1 RROUTER_INSTALL_DIR="$HOME/bin" \
+RROUTER_VERSION=v0.5.2 RROUTER_INSTALL_DIR="$HOME/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
 ```
 
-`install.sh` downloads a published release; `v0.5.1` is the newest. From source:
+`install.sh` downloads a published release; `v0.5.2` is the newest. From source:
 
 ```sh
 git clone https://github.com/centopw/RRouter && cd RRouter
@@ -86,6 +80,8 @@ Choose a method and read [Deployment overview](docs/deploy/README.md), then
 [Operations](docs/DEPLOY.md) for exposure, TLS, backups, restore drills and upgrades.
 
 ## Quick start
+
+<p align="center"><img src="docs/assets/readme/quickstart.png" alt="Install, then point any client at RRouter"></p>
 
 ```sh
 export ANTHROPIC_BASE_URL=http://127.0.0.1:20128
