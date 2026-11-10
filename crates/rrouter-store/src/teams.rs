@@ -21,7 +21,7 @@ use uuid::Uuid;
 use rrouter_core::{Error, Result};
 
 use crate::migrations;
-use crate::store::{BudgetWindow, Store};
+use crate::store::{sql_u64, BudgetWindow, RowExt, Store};
 
 /// Longest team name a dashboard can render in a badge without truncating to noise.
 pub const MAX_TEAM_NAME: usize = 80;
@@ -155,8 +155,8 @@ fn row_to_team(r: &Row<'_>) -> rusqlite::Result<Team> {
         id: uuid_col(r.get(0)?)?,
         name: r.get(1)?,
         created_at: r.get(2)?,
-        budget_tokens: r.get(3)?,
-        budget_micros: r.get(4)?,
+        budget_tokens: r.get_u64(3)?,
+        budget_micros: r.get_u64(4)?,
         budget_window: BudgetWindow::from_stored(&r.get::<_, String>(5)?),
     })
 }
@@ -215,8 +215,8 @@ impl Store {
                     team.id.to_string(),
                     team.name,
                     team.created_at,
-                    team.budget_tokens,
-                    team.budget_micros,
+                    sql_u64(team.budget_tokens),
+                    sql_u64(team.budget_micros),
                     team.budget_window.as_str(),
                 ],
             )
@@ -281,8 +281,8 @@ impl Store {
                 params![
                     id.to_string(),
                     team.name,
-                    team.budget_tokens,
-                    team.budget_micros,
+                    sql_u64(team.budget_tokens),
+                    sql_u64(team.budget_micros),
                     team.budget_window.as_str(),
                 ],
             )
@@ -443,9 +443,9 @@ impl Store {
                 params![team_id.to_string(), since],
                 |r| {
                     Ok(TeamSpend {
-                        requests: r.get(0)?,
-                        tokens: r.get(1)?,
-                        cost_micros: r.get(2)?,
+                        requests: r.get_u64(0)?,
+                        tokens: r.get_u64(1)?,
+                        cost_micros: r.get_u64(2)?,
                     })
                 },
             )

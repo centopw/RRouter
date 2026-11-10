@@ -14,6 +14,7 @@ All notable changes. Dates are local; versions follow semver once tagged.
   connections, priorities, dialects and cached subscription headroom — without dispatching.
 
 ### Fixed
+- Updated `rusqlite`/`libsqlite3-sys` to 0.41.1/0.39.1, clearing RUSTSEC-2026-0459 in the bundled SQLite library.
 - Budgeted keys and teams now serialize admission through usage commit, so concurrent
   requests cannot all pass the preflight check and overspend. Unbudgeted traffic stays
   concurrent.

@@ -1721,8 +1721,8 @@ impl Store {
                         id: uuid_col(r.get(0)?)?,
                         name: r.get(1)?,
                         created_at: r.get(2)?,
-                        budget_tokens: r.get(3)?,
-                        budget_micros: r.get(4)?,
+                        budget_tokens: r.get_u64(3)?,
+                        budget_micros: r.get_u64(4)?,
                         budget_window: BudgetWindow::from_stored(&r.get::<_, String>(5)?),
                     })
                 },
@@ -1814,10 +1814,10 @@ impl Store {
                 key.is_active as i64,
                 key.rpm,
                 key.tpm,
-                key.budget_tokens,
+                sql_u64(key.budget_tokens),
                 allowed,
                 key.expires_at,
-                key.budget_micros,
+                sql_u64(key.budget_micros),
                 key.budget_window.as_str(),
                 guardrails,
                 key.scope.as_str(),
@@ -3176,7 +3176,7 @@ impl Store {
                 r.status,
                 r.streamed as i64,
                 r.error,
-                r.cost_micros,
+                sql_u64(r.cost_micros),
                 r.upstream_ms,
                 r.trace_id,
             ],
@@ -3329,13 +3329,13 @@ impl Store {
                 Ok(UsageSummary {
                     provider: r.get(0)?,
                     model: r.get(1)?,
-                    requests: r.get(2)?,
-                    errors: r.get(3)?,
-                    input_tokens: r.get(4)?,
-                    output_tokens: r.get(5)?,
-                    cache_read_tokens: r.get(6)?,
-                    cache_write_tokens: r.get(7)?,
-                    cost_micros: r.get(8)?,
+                    requests: r.get_u64(2)?,
+                    errors: r.get_u64(3)?,
+                    input_tokens: r.get_u64(4)?,
+                    output_tokens: r.get_u64(5)?,
+                    cache_read_tokens: r.get_u64(6)?,
+                    cache_write_tokens: r.get_u64(7)?,
+                    cost_micros: r.get_u64(8)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })
@@ -3371,13 +3371,13 @@ impl Store {
                 let avg: f64 = r.get(8)?;
                 Ok(UsageBucket {
                     start: r.get(0)?,
-                    requests: r.get(1)?,
-                    errors: r.get(2)?,
-                    input_tokens: r.get(3)?,
-                    output_tokens: r.get(4)?,
-                    cache_read_tokens: r.get(5)?,
-                    cache_write_tokens: r.get(6)?,
-                    cost_micros: r.get(7)?,
+                    requests: r.get_u64(1)?,
+                    errors: r.get_u64(2)?,
+                    input_tokens: r.get_u64(3)?,
+                    output_tokens: r.get_u64(4)?,
+                    cache_read_tokens: r.get_u64(5)?,
+                    cache_write_tokens: r.get_u64(6)?,
+                    cost_micros: r.get_u64(7)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })
@@ -3418,13 +3418,13 @@ impl Store {
                     start: r.get(0)?,
                     provider: r.get(1)?,
                     model: r.get(2)?,
-                    requests: r.get(3)?,
-                    errors: r.get(4)?,
-                    input_tokens: r.get(5)?,
-                    output_tokens: r.get(6)?,
-                    cache_read_tokens: r.get(7)?,
-                    cache_write_tokens: r.get(8)?,
-                    cost_micros: r.get(9)?,
+                    requests: r.get_u64(3)?,
+                    errors: r.get_u64(4)?,
+                    input_tokens: r.get_u64(5)?,
+                    output_tokens: r.get_u64(6)?,
+                    cache_read_tokens: r.get_u64(7)?,
+                    cache_write_tokens: r.get_u64(8)?,
+                    cost_micros: r.get_u64(9)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })
@@ -3516,13 +3516,13 @@ impl Store {
                 Ok(UsageSummary {
                     provider: r.get(0)?,
                     model: r.get(1)?,
-                    requests: r.get(2)?,
-                    errors: r.get(3)?,
-                    input_tokens: r.get(4)?,
-                    output_tokens: r.get(5)?,
-                    cache_read_tokens: r.get(6)?,
-                    cache_write_tokens: r.get(7)?,
-                    cost_micros: r.get(8)?,
+                    requests: r.get_u64(2)?,
+                    errors: r.get_u64(3)?,
+                    input_tokens: r.get_u64(4)?,
+                    output_tokens: r.get_u64(5)?,
+                    cache_read_tokens: r.get_u64(6)?,
+                    cache_write_tokens: r.get_u64(7)?,
+                    cost_micros: r.get_u64(8)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })
@@ -3558,13 +3558,13 @@ impl Store {
                 let avg: f64 = r.get(8)?;
                 Ok(UsageBucket {
                     start: r.get(0)?,
-                    requests: r.get(1)?,
-                    errors: r.get(2)?,
-                    input_tokens: r.get(3)?,
-                    output_tokens: r.get(4)?,
-                    cache_read_tokens: r.get(5)?,
-                    cache_write_tokens: r.get(6)?,
-                    cost_micros: r.get(7)?,
+                    requests: r.get_u64(1)?,
+                    errors: r.get_u64(2)?,
+                    input_tokens: r.get_u64(3)?,
+                    output_tokens: r.get_u64(4)?,
+                    cache_read_tokens: r.get_u64(5)?,
+                    cache_write_tokens: r.get_u64(6)?,
+                    cost_micros: r.get_u64(7)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })
@@ -3602,13 +3602,13 @@ impl Store {
                     start: r.get(0)?,
                     provider: r.get(1)?,
                     model: r.get(2)?,
-                    requests: r.get(3)?,
-                    errors: r.get(4)?,
-                    input_tokens: r.get(5)?,
-                    output_tokens: r.get(6)?,
-                    cache_read_tokens: r.get(7)?,
-                    cache_write_tokens: r.get(8)?,
-                    cost_micros: r.get(9)?,
+                    requests: r.get_u64(3)?,
+                    errors: r.get_u64(4)?,
+                    input_tokens: r.get_u64(5)?,
+                    output_tokens: r.get_u64(6)?,
+                    cache_read_tokens: r.get_u64(7)?,
+                    cache_write_tokens: r.get_u64(8)?,
+                    cost_micros: r.get_u64(9)?,
                     avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
                 })
             })
@@ -3832,6 +3832,25 @@ fn team_filter(teams: Option<&[Uuid]>, first: usize) -> (String, Vec<SqlValue>) 
     }
 }
 
+/// Store a `u64` counter in SQLite's signed integer column, saturating at `i64::MAX`.
+/// rusqlite 0.41 no longer implements `ToSql`/`FromSql` for `u64`; every counter in this
+/// schema is non-negative, so the conversion is total in the supported range.
+pub(crate) fn sql_u64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// Read a non-negative counter stored as SQLite `INTEGER`.
+pub(crate) trait RowExt {
+    fn get_u64(&self, idx: usize) -> rusqlite::Result<u64>;
+}
+
+impl RowExt for Row<'_> {
+    fn get_u64(&self, idx: usize) -> rusqlite::Result<u64> {
+        let value: i64 = self.get(idx)?;
+        Ok(value.max(0) as u64)
+    }
+}
+
 fn uuid_col(s: String) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(&s).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -3875,7 +3894,7 @@ fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         streamed: r.get::<_, i64>(14)? != 0,
         error: r.get(15)?,
         key_id: kid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
-        cost_micros: r.get(17)?,
+        cost_micros: r.get_u64(17)?,
         upstream_ms: r.get(18)?,
     })
 }
@@ -3929,10 +3948,10 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         created_at: r.get(4)?,
         rpm: r.get(5)?,
         tpm: r.get(6)?,
-        budget_tokens: r.get(7)?,
+        budget_tokens: r.get_u64(7)?,
         allowed_models,
         expires_at: r.get(9)?,
-        budget_micros: r.get(10)?,
+        budget_micros: r.get_u64(10)?,
         budget_window: BudgetWindow::from_stored(&r.get::<_, String>(11)?),
         guardrails,
         scope: KeyScope::from_stored(&r.get::<_, String>(13)?),
