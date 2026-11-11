@@ -2,6 +2,21 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.10.0 — 2026-11-11
+
+### Features
+
+- feat(ui): make copy fields selectable and add model reference copy ([`f8b409c`](https://github.com/centopw/RRouter/commit/f8b409c1c50e1130801ac1515179c295d497d56a))
+- feat(release): derive version and notes from conventional commits ([`46fa832`](https://github.com/centopw/RRouter/commit/46fa8323d3d476c7f21cac0997db953530a4c23b))
+
+### Bug Fixes
+
+- fix(release): stage tracked carriers with git add -u ([`4c45954`](https://github.com/centopw/RRouter/commit/4c45954ac58199476cc7c6a1bcfff56135b7b943))
+
+### Other Changes
+
+- test(release): cover patch numbers above 100 ([`cee874f`](https://github.com/centopw/RRouter/commit/cee874f94e92662d8a602681a41928c941051606))
+
 ## 0.9.0 — 2026-11-11
 
 ### Changed
