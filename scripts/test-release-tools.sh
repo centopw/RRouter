@@ -22,9 +22,12 @@ fail() {
 
 step "syntax"
 bash -n scripts/verify-release.sh || fail "verify-release.sh has a syntax error"
-python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' \
-  scripts/sbom.py || fail "sbom.py has a syntax error"
-pass "verify-release.sh parses (bash -n); sbom.py parses (ast)"
+python3 -c 'import ast, sys
+for path in sys.argv[1:]:
+    ast.parse(open(path, encoding="utf-8").read())' \
+  scripts/sbom.py scripts/release.py scripts/release-notes.py \
+  || fail "a release script has a syntax error"
+pass "bash and Python release tools parse"
 
 step "SBOM determinism and shape"
 python3 scripts/sbom.py --artifact rrouter-linux-amd64 --version 0.0.0-test \
@@ -97,5 +100,105 @@ pass "SBOM not reproducible from the claimed commit refused"
 rm -f "$REL/rrouter-linux-amd64.tar.gz.sbom.cdx.json"
 if verify >/dev/null 2>&1; then fail "a release without an SBOM passed"; fi
 pass "missing SBOM refused"
+
+step "release metadata: one version source"
+RELROOT="$TMP/relroot"
+mkdir -p "$RELROOT/scripts" "$RELROOT/deploy/helm/rrouter" "$RELROOT/docs/deploy"
+cp scripts/release.py scripts/release-notes.py "$RELROOT/scripts/"
+cat >"$RELROOT/Cargo.toml" <<'EOF'
+[workspace]
+members = ["a"]
+
+[workspace.package]
+version = "0.9.0"
+edition = "2021"
+EOF
+cat >"$RELROOT/Cargo.lock" <<'EOF'
+[[package]]
+name = "external"
+version = "0.9.0"
+
+[[package]]
+name = "rrouter-auth"
+version = "0.9.0"
+EOF
+cat >"$RELROOT/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## 0.9.0 — 2026-01-01
+
+### Changed
+- Old.
+EOF
+cat >"$RELROOT/README.md" <<'EOF'
+RROUTER_VERSION=v0.9.0
+`install.sh` downloads a published release; `v0.9.0` is the newest.
+EOF
+cat >"$RELROOT/deploy/helm/rrouter/Chart.yaml" <<'EOF'
+apiVersion: v2
+name: rrouter
+version: 0.1.4
+appVersion: "0.9.0"
+EOF
+cat >"$RELROOT/docs/ROADMAP.md" <<'EOF'
+**0.9.0** is the current release, and `CHANGELOG.md` → `0.9.0` lists changes.
+EOF
+cat >"$RELROOT/docs/deploy/helm.md" <<'EOF'
+helm upgrade rrouter --set image.tag=0.9.0
+EOF
+git -C "$RELROOT" init -q
+git -C "$RELROOT" config user.email test@example.test
+git -C "$RELROOT" config user.name Test
+git -C "$RELROOT" add -A
+git -C "$RELROOT" commit -qm "chore: initial"
+git -C "$RELROOT" tag -a v0.9.0 -m v0.9.0
+printf 'a\n' >"$RELROOT/a"
+git -C "$RELROOT" add a
+git -C "$RELROOT" commit -qm "fix(ui): make a key field selectable"
+printf 'b\n' >>"$RELROOT/a"
+git -C "$RELROOT" add a
+git -C "$RELROOT" commit -qm "feat(api): add provider-qualified ids"
+
+python3 scripts/release.py --root "$RELROOT" >/dev/null \
+  || fail "auto release from a feat commit failed"
+grep -q 'version = "0.10.0"' "$RELROOT/Cargo.toml" || fail "Cargo.toml not bumped"
+grep -A1 'name = "rrouter-auth"' "$RELROOT/Cargo.lock" | grep -q '0.10.0' \
+  || fail "Cargo.lock workspace member not bumped"
+grep -q 'version = "0.9.0"' "$RELROOT/Cargo.lock" || fail "external lock row was rewritten"
+grep -q 'appVersion: "0.10.0"' "$RELROOT/deploy/helm/rrouter/Chart.yaml" \
+  || fail "Helm appVersion not bumped"
+grep -q 'v0.10.0' "$RELROOT/README.md" || fail "README pin not bumped"
+grep -q '### Features' "$RELROOT/CHANGELOG.md" || fail "feat group missing from notes"
+grep -q '### Bug Fixes' "$RELROOT/CHANGELOG.md" || fail "fix group missing from notes"
+python3 scripts/release.py --root "$RELROOT" --check >/dev/null \
+  || fail "consistent release metadata was rejected"
+if python3 scripts/release.py 0.10.1 --root "$RELROOT" >/dev/null 2>&1; then
+  fail "a patch version was accepted for feat commits"
+fi
+if python3 scripts/release.py --bump patch --root "$RELROOT" >/dev/null 2>&1; then
+  fail "an explicit patch bump was accepted for feat commits"
+fi
+
+git -C "$RELROOT" add -A
+git -C "$RELROOT" commit -qm "chore(release): v0.10.0"
+git -C "$RELROOT" tag -a v0.10.0 -m v0.10.0
+printf 'c\n' >>"$RELROOT/a"
+git -C "$RELROOT" add a
+git -C "$RELROOT" commit -qm "refactor(core)!: remove the legacy path"
+python3 scripts/release.py --root "$RELROOT" >/dev/null \
+  || fail "auto release from a breaking commit failed"
+grep -q 'version = "1.0.0"' "$RELROOT/Cargo.toml" || fail "breaking commit did not bump major"
+grep -q '### Breaking Changes' "$RELROOT/CHANGELOG.md" || fail "breaking group missing"
+
+python3 - "$RELROOT/deploy/helm/rrouter/Chart.yaml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text(encoding="utf-8").replace('1.0.0', '0.9.9'), encoding="utf-8")
+PY
+if python3 scripts/release.py 1.0.0 --root "$RELROOT" --check >/dev/null 2>&1; then
+  fail "drifted Helm appVersion passed the check"
+fi
+pass "semver derived from commits, lockfile scoping, notes generation, drift detection"
 
 printf '\nrelease tooling: all checks passed\n'

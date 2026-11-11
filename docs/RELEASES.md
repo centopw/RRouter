@@ -5,6 +5,23 @@ inventory, and a GitHub build-provenance attestation. The release **body is rend
 from `CHANGELOG.md`; build legs only attach assets. This page says exactly what each piece
 proves, what the installer checks, and what a human still has to do.
 
+## 0. Versioning and commit messages
+
+RRouter follows SemVer strictly; the release tool derives the bump from Conventional
+Commits since the last `v*` tag and refuses a mismatched version:
+
+| Commit since the last tag | Bump | Example |
+| --- | --- | --- |
+| `fix:`, `perf:`, `docs:`, `refactor:`, `ci:`, `chore:` | **patch** `X.Y.Z` | `fix(ui): keep the key field selectable` |
+| `feat:` | **minor** `X.Y.0` | `feat(api): add provider-qualified model ids` |
+| `type!:`, `type(scope)!:` or a `BREAKING CHANGE:` footer | **major** `X.0.0` | `refactor(core)!: remove the legacy path` |
+
+Release commits themselves use `chore(release): vX.Y.Z` and are ignored by the bump
+calculation. The CHANGELOG section is generated in the same conventional style
+(`### Features`, `### Bug Fixes`, `### Breaking Changes`, …) with commit links; it is not
+hand-invented. `scripts/release.py --check` runs in CI and fails when a carrier or the
+bump is wrong.
+
 ## 1. What a release contains
 
 For each of `linux-amd64`, `linux-arm64`, `darwin-arm64`, `darwin-amd64`:
@@ -166,8 +183,13 @@ Notes:
 
 ## 6. What remains manual
 
-1. **Cut the tag** after `CHANGELOG.md` is final and `./scripts/verify.sh` is green:
-   `git tag vX.Y.Z && git push origin vX.Y.Z`.
+1. **Write Conventional Commits, then cut the release.** `Cargo.toml` is the only version
+   source. Commit your work with `feat:`/`fix:`/`type!:` messages, then run
+   `./scripts/release.py` (or `--bump patch|minor|major` to insist). It derives the SemVer
+   bump, updates `Cargo.lock`, the Helm `appVersion`, README, roadmap and Helm guide, and
+   generates the conventional CHANGELOG section. `--check` (also a CI gate) fails if any
+   carrier drifts or the bump is wrong. `./scripts/release.py --publish` runs
+   `./scripts/verify.sh`, commits, tags and pushes `main` and `vX.Y.Z`.
 2. **Read the release notes** the workflow generated and confirm all four tarballs, four
    checksums and four SBOMs are attached.
 3. **Container image.** `docker.yml` builds and pushes the multi-arch image on the same tag,

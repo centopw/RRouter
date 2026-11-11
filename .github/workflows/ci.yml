@@ -51,6 +51,16 @@ jobs:
       - run: npm run build
         working-directory: ui
 
+  # One version source: Cargo.toml. The release tool writes every derived carrier
+  # (Cargo.lock, README, Helm appVersion, roadmap, Helm guide) and this gate fails a PR
+  # that lets them drift or cuts a version without a CHANGELOG section.
+  release-metadata:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check version carriers and CHANGELOG notes
+        run: python3 scripts/release.py --check
+
   # Static validation of the workflows themselves. Runs the upstream actionlint image
   # (pinned) so a bad expression, unknown runner/context or shell mistake fails PRs
   # before a tag is cut.
