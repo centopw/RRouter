@@ -815,6 +815,8 @@ export type LayoutGroup = {
   id: string;
   name: string;
   provider?: string;
+  /** Whether the group and its models are advertised by `/v1/models`. Default true. */
+  visible?: boolean;
 };
 
 /** One model on a preset's board. `position` is dense and zero-based inside its group. */

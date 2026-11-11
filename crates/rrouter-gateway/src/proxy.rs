@@ -23,6 +23,7 @@ use rrouter_core::{ChatRequest, ChatResponse, Dialect, Error, Part, Result, Stre
 use rrouter_router::{Candidate, Plan, PlanRequest, ProviderPolicy};
 use rrouter_store::{AttemptRecord, ConnectionScope, Guardrails, UsageRecord};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -2192,6 +2193,35 @@ fn outbound_headers(
     Ok(headers)
 }
 
+/// Stable `x-opencode-session` for one conversation.
+///
+/// OpenCode asks clients for a stable conversation id and rejects a missing header. A
+/// native client header wins when it is a sane value; otherwise the gateway hashes its
+/// conversation affinity into the `ses_<32 hex>` shape OpenCode uses.
+fn opencode_session(client: Option<&HeaderMap>, affinity: u64) -> String {
+    if let Some(value) = client
+        .and_then(|headers| headers.get("x-opencode-session"))
+        .and_then(|value| value.to_str().ok())
+    {
+        let value = value.trim();
+        if !value.is_empty() && value.len() <= 256 {
+            return value.to_string();
+        }
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"opencode-go\0rrouter\0");
+    digest.update(affinity.to_le_bytes());
+    let digest = digest.finalize();
+    let mut out = String::with_capacity(36);
+    out.push_str("ses_");
+    use std::fmt::Write;
+    for byte in &digest[..16] {
+        // Writing a two-digit hex byte into a String cannot fail.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 /// Provider headers with nothing of the client's added, for calls that have no inbound
 /// request (the admin probe).
 fn request_headers(spec: &ProviderSpec, creds: &Credentials) -> Result<axum::http::HeaderMap> {
@@ -2618,6 +2648,15 @@ impl Attempt<'_> {
         }
         let (url, dialect) = endpoint(spec, creds.base_url_override.as_deref(), self.inbound);
         let mut headers = outbound_headers(spec, &creds, self.client_headers)?;
+        // OpenCode Go rejects requests without a session id (`MissingSessionID`). The
+        // affinity hash is stable for one conversation and unique across conversations,
+        // which is exactly the routing/prompt-cache key OpenCode asks for.
+        if matches!(candidate.provider.as_str(), "opencode" | "opencode-go") {
+            let session = opencode_session(self.client_headers, affinity_of(&self.canonical));
+            if let Ok(value) = HeaderValue::from_str(&session) {
+                headers.insert("x-opencode-session", value);
+            }
+        }
         inject_trace_headers(&mut headers, trace);
         Ok(Prepared {
             urls: vec![url],

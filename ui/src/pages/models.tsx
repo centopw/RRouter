@@ -34,6 +34,7 @@ import {
   groupForEntry,
   layoutFor,
   useLayoutDraft,
+  type DraftEntry,
   type DraftGroup,
 } from "../lib/layout-draft";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS, CapabilityChips } from "../components/capability-chips";
@@ -49,6 +50,8 @@ import {
   useCreatePreset,
   useDeletePreset,
   useDuplicatePreset,
+  useAliases,
+  useCombos,
   useIsAdmin,
   useModelProviders,
   useModels,
@@ -61,7 +64,9 @@ import {
 import {
   ApiError,
   api,
+  type Alias,
   type Capabilities,
+  type Combo,
   type Model,
   type ModelProvider,
   type ModelTest,
@@ -76,6 +81,8 @@ const DEFAULT_SIZE = 50;
 export default function Models() {
   const models = useModels();
   const providers = useModelProviders();
+  const aliases = useAliases();
+  const combos = useCombos();
   const isAdmin = useIsAdmin();
   const phone = usePhone();
   const reduceMotion = useReducedMotion();
@@ -246,6 +253,30 @@ export default function Models() {
 
   // Coverage is computed from the whole registry, not the filtered page: the same model
   // served by two providers must say so even when a filter hides one of them.
+  const groupCandidates = useMemo(
+    () => [
+      ...all.map((model) => ({
+        ref: model.ref,
+        label: model.id,
+        provider: model.provider,
+        kind: "model" as const,
+      })),
+      ...(aliases.data ?? []).map((alias) => ({
+        ref: `rrouter/${alias.alias}`,
+        label: `${alias.alias} → ${alias.target}`,
+        provider: "rrouter",
+        kind: "alias" as const,
+      })),
+      ...(combos.data ?? []).map((combo) => ({
+        ref: `rrouter/${combo.name}`,
+        label: `${combo.name} · ${combo.models.length} models`,
+        provider: "rrouter",
+        kind: "combo" as const,
+      })),
+    ],
+    [all, aliases.data, combos.data],
+  );
+
   const coverage = useMemo(() => {
     const map = new Map<string, Model[]>();
     for (const model of all) {
@@ -305,6 +336,9 @@ export default function Models() {
   const groupChoices = useMemo(() => {
     const knownEntries = layoutDraft.entries.filter((entry) => byRef.has(entry.ref));
     const knownProviders = new Set(Array.from(byRef.values(), (model) => model.provider));
+    if ((aliases.data?.length ?? 0) > 0 || (combos.data?.length ?? 0) > 0) {
+      knownProviders.add("rrouter");
+    }
     return effectiveGroups(
       knownEntries,
       layoutDraft.groups.filter(
@@ -312,7 +346,14 @@ export default function Models() {
       ),
       (provider) => providerDisplay.get(provider) ?? provider,
     );
-  }, [layoutDraft.entries, layoutDraft.groups, providerDisplay, byRef]);
+  }, [
+    layoutDraft.entries,
+    layoutDraft.groups,
+    providerDisplay,
+    byRef,
+    aliases.data,
+    combos.data,
+  ]);
   const groupIndex = useMemo(
     () => new Map(groupChoices.map((group, index) => [group.id, index] as const)),
     [groupChoices],
@@ -928,8 +969,8 @@ export default function Models() {
               className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-[8px] border border-line bg-surface px-4 py-2 text-small text-fg"
             >
               <span>
-                <span className="font-mono">{undo.ref}</span> hidden from this preset. It still
-                routes; only this list changed.
+                <span className="font-mono">{undo.ref}</span> hidden from this preset and
+                /v1/models. It still routes when named explicitly.
               </span>
               <span className="flex gap-1.5">
                 <Button
@@ -1030,6 +1071,16 @@ export default function Models() {
               }}
             />
           </Card>
+
+          <AliasesCombosCard
+            aliases={aliases.data ?? []}
+            combos={combos.data ?? []}
+            groups={groupChoices}
+            entries={layoutDraft.entries}
+            editable={isAdmin}
+            onAssign={(ref, group) => layoutDraft.assignGroup(ref, group)}
+            onVisible={(ref, visible) => layoutDraft.setVisible(ref, visible)}
+          />
 
           {disabledCard}
 
@@ -1147,6 +1198,10 @@ export default function Models() {
         onRename={(id, name) => layoutDraft.renameGroup(id, name)}
         onReorder={(from, to) => layoutDraft.reorderGroup(from, to)}
         onDelete={(id) => layoutDraft.deleteGroup(id)}
+        entries={layoutDraft.entries}
+        candidates={groupCandidates}
+        onAssign={(ref, group) => layoutDraft.assignGroup(ref, group)}
+        onSetVisible={(id, visible) => layoutDraft.setGroupVisible(id, visible)}
       />
 
       {customOpen ? (
@@ -1319,7 +1374,7 @@ function RowMenu({
           {onHide ? (
             <Popover.Close asChild>
               <button type="button" role="menuitem" tabIndex={-1} onClick={onHide} className={item}>
-                Hide from this list
+                Hide from the board and /v1/models
               </button>
             </Popover.Close>
           ) : null}
@@ -1529,6 +1584,101 @@ function ModelCardBody({
   );
 }
 
+/** Aliases and combos are routable names, not provider models: configure their group and
+ *  `/v1/models` visibility separately from the registry table. */
+function AliasesCombosCard({
+  aliases,
+  combos,
+  groups,
+  entries,
+  editable,
+  onAssign,
+  onVisible,
+}: {
+  aliases: Alias[];
+  combos: Combo[];
+  groups: Array<DraftGroup & { implicit?: boolean }>;
+  entries: DraftEntry[];
+  editable: boolean;
+  onAssign: (ref: string, group: string | null) => void;
+  onVisible: (ref: string, visible: boolean) => void;
+}) {
+  if (aliases.length === 0 && combos.length === 0) return null;
+  const custom = groups.filter((group) => !group.provider);
+  const rows = [
+    ...aliases.map((alias) => ({
+      ref: `rrouter/${alias.alias}`,
+      name: alias.alias,
+      detail: `alias → ${alias.target}`,
+      kind: "alias" as const,
+    })),
+    ...combos.map((combo) => ({
+      ref: `rrouter/${combo.name}`,
+      name: combo.name,
+      detail: `combo · ${combo.models.length} models`,
+      kind: "combo" as const,
+    })),
+  ];
+  return (
+    <Card className="mt-4">
+      <CardHeader
+        title="Aliases & combos"
+        action={
+          <span className="text-caption text-faint">
+            {rows.length.toLocaleString()} routable names · group and /v1/models visibility
+          </span>
+        }
+      />
+      <ul className="flex flex-col">
+        {rows.map((row) => {
+          const entry = entries.find((candidate) => candidate.ref === row.ref);
+          const visible = entry?.visible !== false;
+          const group = entry?.group ?? "";
+          return (
+            <li
+              key={row.ref}
+              className="flex flex-wrap items-center gap-2 border-b border-[var(--color-rule)] px-4 py-2 last:border-b-0"
+            >
+              <Badge tone="neutral">{row.kind}</Badge>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-mono text-small text-fg">{row.name}</span>
+                <span className="block truncate text-caption text-faint">{row.detail}</span>
+              </span>
+              {editable ? (
+                <>
+                  <Select
+                    value={group}
+                    ariaLabel={`Group for ${row.ref}`}
+                    onChange={(next) => onAssign(row.ref, next || null)}
+                    className="w-40"
+                  >
+                    <option value="">Ungrouped</option>
+                    {custom.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.name}
+                      </option>
+                    ))}
+                  </Select>
+                  <Toggle
+                    size="sm"
+                    checked={visible}
+                    label={`List ${row.ref} on /v1/models`}
+                    onChange={(next) => onVisible(row.ref, next)}
+                  />
+                </>
+              ) : (
+                <Badge tone={visible ? "neutral" : "warn"}>
+                  {visible ? "listed" : "hidden"}
+                </Badge>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </Card>
+  );
+}
+
 /** A section title above one group's table; the controls live in the group manager. */
 function GroupHeading({
   group,
@@ -1538,12 +1688,17 @@ function GroupHeading({
   count: number;
 }) {
   return (
-    <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-line bg-surface-2 px-5 py-2.5">
+    <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-line bg-surface-2 px-4 py-2.5">
       <div className="flex min-w-0 items-baseline gap-2">
         <h3 className="truncate text-small font-semibold text-fg">{group.name}</h3>
         <span className="shrink-0 text-caption text-faint">
           {group.provider ? `provider · ${group.provider}` : "custom group"}
         </span>
+        {group.visible === false ? (
+          <Badge tone="warn" title="This group and its models are not listed by /v1/models">
+            hidden from /v1/models
+          </Badge>
+        ) : null}
       </div>
       <span className="text-caption text-faint tnum">{count.toLocaleString()} models</span>
     </div>
@@ -1574,6 +1729,13 @@ function GroupNameField({ name, onCommit }: { name: string; onCommit: (name: str
   );
 }
 
+export type GroupCandidate = {
+  ref: string;
+  label: string;
+  provider: string;
+  kind: "model" | "alias" | "combo";
+};
+
 /** Create, rename, reorder and remove the groups of the active preset. */
 function GroupManager({
   open,
@@ -1583,6 +1745,10 @@ function GroupManager({
   onRename,
   onReorder,
   onDelete,
+  entries,
+  candidates,
+  onAssign,
+  onSetVisible,
 }: {
   open: boolean;
   groups: Array<DraftGroup & { implicit?: boolean }>;
@@ -1591,15 +1757,25 @@ function GroupManager({
   onRename: (id: string, name: string) => void;
   onReorder: (from: string, to: string) => void;
   onDelete: (id: string) => void;
+  entries: DraftEntry[];
+  candidates: GroupCandidate[];
+  onAssign: (ref: string, group: string | null) => void;
+  onSetVisible: (id: string, visible: boolean) => void;
 }) {
   const [name, setName] = useState("");
+  const [openModels, setOpenModels] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
   useEffect(() => {
-    if (open) setName("");
+    if (open) {
+      setName("");
+      setOpenModels(null);
+      setFilter("");
+    }
   }, [open]);
   return (
     <Modal
       title="model groups"
-      description="Groups change this preset's board only; routing is unchanged. Provider buckets start with every model of that provider."
+      description="Groups change this preset's board and the default preset's /v1/models discovery. Routing is unchanged. Provider buckets start with every unassigned model of that provider."
       open={open}
       onClose={onClose}
       width="lg"
@@ -1617,6 +1793,24 @@ function GroupManager({
             <Badge tone={group.provider ? "neutral" : "accent"}>
               {group.provider ? "provider" : "custom"}
             </Badge>
+            <span className="flex items-center gap-1.5 text-caption text-faint">
+              <Toggle
+                size="sm"
+                checked={group.visible}
+                label={`Show ${group.name} in /v1/models`}
+                onChange={(next) => onSetVisible(group.id, next)}
+              />
+              /v1/models
+            </span>
+            {group.provider ? null : (
+              <Button
+                variant="quiet"
+                aria-label={`${openModels === group.id ? "Close" : "Edit"} models in ${group.name}`}
+                onClick={() => setOpenModels(openModels === group.id ? null : group.id)}
+              >
+                models ({entries.filter((entry) => entry.group === group.id).length})
+              </Button>
+            )}
             <Button
               variant="quiet"
               aria-label={`Move ${group.name} up`}
@@ -1642,6 +1836,54 @@ function GroupManager({
                 delete
               </Button>
             )}
+            {!group.provider && openModels === group.id ? (
+              <div className="basis-full border-t border-line pt-2">
+                <Input
+                  value={filter}
+                  placeholder="filter models, aliases and combos"
+                  onChange={setFilter}
+                />
+                <div className="mt-2 max-h-64 overflow-y-auto rounded-[var(--radius-input)] border border-line bg-surface">
+                  {candidates
+                    .filter((candidate) => {
+                      const needle = filter.trim().toLowerCase();
+                      return (
+                        !needle ||
+                        candidate.ref.toLowerCase().includes(needle) ||
+                        candidate.label.toLowerCase().includes(needle)
+                      );
+                    })
+                    .map((candidate) => {
+                      const checked =
+                        entries.find((entry) => entry.ref === candidate.ref)?.group ===
+                        group.id;
+                      return (
+                        <div
+                          key={candidate.ref}
+                          className="flex items-center gap-2 border-b border-[var(--color-rule)] px-2 py-1.5 last:border-b-0"
+                        >
+                          <Checkbox
+                            checked={checked}
+                            ariaLabel={`${checked ? "Remove" : "Add"} ${candidate.ref} ${checked ? "from" : "to"} ${group.name}`}
+                            onChange={(next) =>
+                              onAssign(candidate.ref, next ? group.id : null)
+                            }
+                          />
+                          <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.06em] text-muted">
+                            {candidate.provider}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate font-mono text-caption">
+                            {candidate.label}
+                          </span>
+                          {candidate.kind !== "model" ? (
+                            <Badge tone="neutral">{candidate.kind}</Badge>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            ) : null}
           </li>
         ))}
       </ul>

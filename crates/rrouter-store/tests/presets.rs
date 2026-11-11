@@ -209,6 +209,7 @@ fn layout_groups_are_unique_ordered_and_bound_to_providers() {
         id: id.to_string(),
         name: name.to_string(),
         provider: provider.map(str::to_string),
+        visible: true,
     };
     let valid = LayoutDocument {
         schema_version: LAYOUT_SCHEMA_VERSION,

@@ -2,8 +2,8 @@
 
 Layout presets for the **Models** page: a named, ordered board of registry models with
 groups and a per-row visibility flag. A preset changes what an operator sees and how it is
-ordered; it does **not** change routing. Hiding a row leaves the model routable, and nothing
-here writes `disabled_models`.
+ordered; it does **not** change routing. Hiding a row or group removes it from `/v1/models`
+discovery but leaves the model routable, and nothing here writes `disabled_models`.
 
 Status: shipped. The routes below are served by this build, the dashboard is the reference
 client (`ui/src/lib/api.ts`, `ui/src/lib/layout-draft.ts`, `ui/src/components/model-presets.tsx`),
@@ -14,9 +14,9 @@ and `scripts/model_presets_smoke.py` is the API half of acceptance.
 | State | Where it lives | Effect |
 | --- | --- | --- |
 | **Preset** | server-side library, `scope: "global"` | Named layout document, instance-wide, admin-managed |
-| **Group** | preset `layout.groups[]` | `{ id, name, provider? }`; array order is display order. Provider buckets use `provider:<provider>` |
+| **Group** | preset `layout.groups[]` | `{ id, name, provider?, visible }`; array order is display order. Provider buckets use `provider:<provider>` |
 | **Item** | preset `layout.items[]` | `{ provider, id, group?, position, visible }`; `group` is an explicit group id, omitted means the provider bucket |
-| **visible: false** | item flag | The row is hidden from this preset's active list; it **stays routable** |
+| **visible: false** | item flag | The row is hidden from this preset's active list and from `/v1/models` when this is the default preset; it **stays routable** |
 | **`disabled_models`** | routing registry | Separate `PUT /api/disabled/{model}` state. Hiding a preset row never touches it |
 | **active** | per account | The preset a signed-in person is looking at; `active_id` in the list is resolved for the caller |
 | **default** | one row, `is_default: true` | What a caller with no preference resolves to (admin token, gateway key, loopback). Exactly one; cannot be deleted |
@@ -53,7 +53,8 @@ the Disabled table until enabled.
       },
       {
         "id": "g-fast",
-        "name": "Fast models"
+        "name": "Fast models",
+        "visible": true
       }
     ],
     "items": [
@@ -101,7 +102,7 @@ stores nothing of its own.
 | --- | --- |
 | `schema_version` | exactly `1`; anything else is `400 layout_invalid` |
 | `auto_include_new` | default `true`; when true the registry merges models the document does not name |
-| `groups` | at most 500; `id` ≤ 64 chars and unique, `name` ≤ 80 chars and non-empty, `provider` ≤ 64 chars |
+| `groups` | at most 500; `id` ≤ 64 chars and unique, `name` ≤ 80 chars and non-empty, `provider` ≤ 64 chars, `visible` defaults true |
 | provider group | `provider` set; the id must be exactly `provider:<provider>` and each provider appears once |
 | free-form group | no `provider`; its id must not start with `provider:` |
 | `items` | at most 20,000; `provider` ≤ 64 chars, `id` ≤ 200, both non-empty after trim |
@@ -167,10 +168,13 @@ Details that matter:
    restore it from the hidden section, restore all, or toggle *include new models
    automatically*.
 3. **Groups** — **manage groups** opens the group board: create a free-form group, rename
-   provider or free-form groups, move a group up/down, or delete a free-form group. The row
-   menu's **Move to group** assignment moves one model; a deleted group's models fall back to
-   their provider bucket. Opening the board materializes the implicit provider buckets so
-   they can be renamed and ordered.
+   provider or free-form groups, move a group up/down, toggle `/v1/models` visibility, or
+   delete a free-form group. A custom group's **models** button opens a filtered checklist:
+   checking adds a model, alias or combo, unchecking removes it to its provider bucket. The
+   row menu's **Move to group** does the same for one registry model. The **Aliases & combos**
+   card exposes a group picker and visibility toggle for routable names that are not registry
+   models. Opening the board materializes the implicit provider buckets so they can be
+   renamed and ordered.
 4. **Save** — every change lands in a local draft and persists as a full-layout `PUT` 250 ms
    after the last edit, carrying the revision the screen read. The header shows *saving…*,
    *saved · <time>* or *unsaved changes*.
@@ -211,6 +215,8 @@ Dragging is an enhancement, never the only way to act:
 | 4 | Switch presets | Active list, groups, hidden section and counts follow the selection; the choice survives reload (`?preset=` + per-account preference) |
 | 4b | Create a group, move two models in, reorder it above a provider group, reload | The group name/order and assignments persist; `/v1/models` reports the same group id, name and order |
 | 4c | Rename a provider group and move it below a custom group | The provider bucket keeps its models; `/v1/models` shows the new name and position |
+| 4d | Toggle a group off in **manage groups** | The group and its models leave `/v1/models`; the dashboard still shows the group with a hidden badge; named requests still route |
+| 4e | Add an alias or combo to a custom group from the group checklist, then hide it in **Aliases & combos** | `/v1/models` reflects the group and omission; the alias/combo pages and routing are untouched |
 | 5 | Edit, then switch preset | Unsaved-changes prompt; Cancel keeps the draft, Discard drops it deliberately |
 | 6 | Two tabs: save in A, then edit in B | B shows the conflict banner, keeps its draft, offers *Load latest* / *Save as copy*; the stored layout is A's |
 | 7 | Make default | The chosen preset becomes the instance default, the previous one can then be deleted, and the control disables on the current default |

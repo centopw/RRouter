@@ -13,7 +13,7 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 | `openai` | OpenAI | API key | Chat | yes | Responses and compaction available; `store:false` is enforced for Codex traffic. Native web search through Responses. |
 | `anthropic` | Anthropic | API key | Messages | yes | Exact token counting via `/v1/messages/count_tokens`. Native web search through the Messages `web_search` tool. |
 | `opencode` | OpenCode | API key | Chat | yes | Paid Console base `https://opencode.ai/inference/openai/v1`; Go plans use the separate `opencode-go` provider. |
-| `opencode-go` | OpenCode Go | API key | Chat; Responses | yes | Go subscription base `https://opencode.ai/inference/go/openai/v1`; use `opencode-go/<model-id>`. Separate base URL from paid OpenCode; the Anthropic lane is intentionally not declared because it authenticates with `x-api-key`, so Messages clients translate through Chat. |
+| `opencode-go` | OpenCode Go | API key | Chat; Responses | yes | Go subscription base `https://opencode.ai/inference/go/openai/v1`; use `opencode-go/<model-id>`. Separate base URL from paid OpenCode; every request carries a stable `x-opencode-session` derived from the conversation. The Anthropic lane is intentionally not declared because it authenticates with `x-api-key`, so Messages clients translate through Chat. |
 | `deepseek` | DeepSeek | API key | Chat | yes | |
 | `gemini` | Google Gemini | API key | Chat (OpenAI compatibility layer) | yes | Native search uses `generateContent` + `google_search`; auth is `x-goog-api-key` there. |
 | `groq` | Groq | API key | Chat | yes | Very fast small models; no Responses endpoint. |

@@ -78,15 +78,13 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
     ok_json(json!({ "object": "list", "data": data, "groups": groups }))
 }
 
-/// Apply the default preset's groups to the flat `/v1/models` list.
+/// Apply the default preset's groups and visibility to the flat `/v1/models` list.
 ///
 /// The OpenAI shape stays a flat `data` array. Grouping is additive metadata: every entry
-/// gains `group` (a group id) and the response gains an ordered `groups` array. A client
-/// that ignores both still gets exactly the model set it asked for; a grouped picker can
-/// render the operator's board without a second request.
-///
-/// Groups are presentation only. A model hidden by the default preset remains listed and
-/// routable; it is placed in its group using the item's remembered visible position.
+/// gains `group` (a group id) and the response gains an ordered `groups` array. The
+/// default preset is the discovery policy: an item explicitly hidden is omitted, a group
+/// toggled off is omitted with its models, and `auto_include_new: false` drops models the
+/// preset never named. Routing is unaffected; hidden models still serve requests by name.
 async fn grouped_models(
     state: &AppState,
     created: i64,
@@ -99,15 +97,18 @@ async fn grouped_models(
         .ok()
         .flatten()
         .map(|preset| preset.layout);
-
-    let mut explicit_groups: Vec<&rrouter_store::LayoutGroup> = layout
+    let auto_include = layout
         .as_ref()
-        .map(|layout| layout.groups.iter().collect())
-        .unwrap_or_default();
-    let group_ids: HashSet<&str> = explicit_groups.iter().map(|g| g.id.as_str()).collect();
-    let model_providers: HashSet<&str> = models
+        .map(|layout| layout.auto_include_new)
+        .unwrap_or(true);
+    let empty = Vec::new();
+    let explicit_groups: &[rrouter_store::LayoutGroup] = layout
+        .as_ref()
+        .map(|layout| layout.groups.as_slice())
+        .unwrap_or(&empty);
+    let group_by_id: HashMap<&str, &rrouter_store::LayoutGroup> = explicit_groups
         .iter()
-        .map(|(_, provider)| provider.as_str())
+        .map(|group| (group.id.as_str(), group))
         .collect();
     let provider_groups: HashMap<&str, &str> = explicit_groups
         .iter()
@@ -125,15 +126,19 @@ async fn grouped_models(
         .unwrap_or_default();
 
     // A model joins its explicit group, else the explicit provider bucket, else an
-    // implicit provider bucket appended after every explicit group.
-    let mut resolved: Vec<(String, String, Option<String>, u32)> = Vec::with_capacity(models.len());
+    // implicit provider bucket. Items and groups hidden from discovery are dropped here,
+    // before ordering, so they cannot contribute an empty section.
+    let mut resolved: Vec<(String, String, String, u32)> = Vec::with_capacity(models.len());
+    let mut used_groups: HashSet<String> = HashSet::new();
     let mut implicit: Vec<&str> = Vec::new();
     for (id, provider) in &models {
         let item = item_by_ref.get(&format!("{provider}\0{id}"));
-        let explicit = item
+        if !item.map(|item| item.visible).unwrap_or(auto_include) {
+            continue;
+        }
+        let group = item
             .and_then(|item| item.group.as_deref())
-            .filter(|group| group_ids.contains(group));
-        let group = explicit
+            .filter(|group| group_by_id.contains_key(group))
             .map(str::to_string)
             .or_else(|| {
                 provider_groups
@@ -147,6 +152,13 @@ async fn grouped_models(
                 }
                 id
             });
+        if group_by_id
+            .get(group.as_str())
+            .is_some_and(|group| !group.visible)
+        {
+            continue;
+        }
+        used_groups.insert(group.clone());
         let position = item
             .map(|item| {
                 if item.visible {
@@ -156,34 +168,32 @@ async fn grouped_models(
                 }
             })
             .unwrap_or(u32::MAX);
-        resolved.push((id.clone(), provider.clone(), Some(group), position));
+        resolved.push((id.clone(), provider.clone(), group, position));
     }
 
-    // Explicit groups keep their stored order; implicit buckets follow in first-seen
-    // provider order. A group with no models still appears, so an operator can create an
-    // empty bucket before assigning anything.
+    // Explicit groups keep their stored order; implicit provider buckets follow in
+    // first-seen order. Only groups with a listed model are advertised.
     let mut group_order: Vec<(String, String, Option<String>)> = Vec::new();
-    for group in explicit_groups.drain(..) {
-        // A provider bucket with no models from a connected provider is stale: the
-        // connection was removed. Keep a free-form (empty) group, but do not advertise a
-        // provider the gateway cannot route to.
-        if group
-            .provider
-            .as_deref()
-            .is_some_and(|provider| !model_providers.contains(provider))
-        {
+    for group in explicit_groups {
+        if !used_groups.contains(&group.id) {
             continue;
         }
         group_order.push((group.id.clone(), group.name.clone(), group.provider.clone()));
     }
     for provider in implicit {
         let id = format!("provider:{provider}");
-        if !group_order.iter().any(|(existing, _, _)| *existing == id) {
-            let name = rrouter_auth::registry::get(provider)
-                .map(|spec| spec.display.to_string())
-                .unwrap_or_else(|| provider.to_string());
-            group_order.push((id, name, Some(provider.to_string())));
+        if !used_groups.contains(&id) || group_order.iter().any(|(existing, _, _)| *existing == id)
+        {
+            continue;
         }
+        let name = if provider == "rrouter" {
+            "RRouter".to_string()
+        } else {
+            rrouter_auth::registry::get(provider)
+                .map(|spec| spec.display.to_string())
+                .unwrap_or_else(|| provider.to_string())
+        };
+        group_order.push((id, name, Some(provider.to_string())));
     }
     let index: HashMap<&str, usize> = group_order
         .iter()
@@ -192,14 +202,8 @@ async fn grouped_models(
         .collect();
 
     resolved.sort_by(|a, b| {
-        let a_index = index
-            .get(a.2.as_deref().unwrap_or(""))
-            .copied()
-            .unwrap_or(usize::MAX);
-        let b_index = index
-            .get(b.2.as_deref().unwrap_or(""))
-            .copied()
-            .unwrap_or(usize::MAX);
+        let a_index = index.get(a.2.as_str()).copied().unwrap_or(usize::MAX);
+        let b_index = index.get(b.2.as_str()).copied().unwrap_or(usize::MAX);
         a_index
             .cmp(&b_index)
             .then(a.3.cmp(&b.3))

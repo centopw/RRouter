@@ -709,6 +709,65 @@ async fn opencode_go_uses_its_own_base_path_and_paid_opencode_does_not() {
 }
 
 #[tokio::test]
+async fn opencode_sends_a_stable_session_id_per_conversation() {
+    let mock = Mock::start(vec![
+        openai_reply("one"),
+        openai_reply("two"),
+        openai_reply("three"),
+        openai_reply("four"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("opencode-go", &mock).await;
+
+    let first = openai_chat_body("opencode-go/kimi-k3");
+    let (status, _) = h.post("/v1/chat/completions", first.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h.post("/v1/chat/completions", first).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut other = openai_chat_body("opencode-go/kimi-k3");
+    other["messages"][1]["content"] = json!("different conversation");
+    let (status, _) = h.post("/v1/chat/completions", other).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let session = |index: usize| {
+        mock.headers(index)
+            .expect("headers")
+            .into_iter()
+            .find(|(name, _)| name == "x-opencode-session")
+            .map(|(_, value)| value)
+    };
+    assert!(
+        session(0).is_some(),
+        "OpenCode Go requires the session header"
+    );
+    assert_eq!(
+        session(0),
+        session(1),
+        "one conversation keeps one session id"
+    );
+    assert_ne!(
+        session(0),
+        session(2),
+        "a different first turn gets a different session id"
+    );
+    let generated = session(0).expect("session");
+    assert!(generated.starts_with("ses_"), "{generated}");
+    assert_eq!(generated.len(), 36, "ses_ plus 32 hex: {generated}");
+
+    // A native OpenCode session id is preserved rather than replaced.
+    let (status, _) = h
+        .post_with(
+            "/v1/chat/completions",
+            openai_chat_body("opencode-go/kimi-k3"),
+            &[("x-opencode-session", "native-session")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(session(3).as_deref(), Some("native-session"));
+}
+
+#[tokio::test]
 async fn openai_non_streaming_round_trip() {
     let mock = Mock::start(vec![openai_reply("hello there")]).await;
     let h = harness(false);

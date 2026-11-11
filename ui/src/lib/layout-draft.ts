@@ -41,6 +41,8 @@ export type DraftGroup = {
   id: string;
   name: string;
   provider?: string;
+  /** Whether the group and its models are advertised by `/v1/models`. */
+  visible: boolean;
 };
 
 export type DraftState = "clean" | "dirty" | "saving" | "conflict";
@@ -67,6 +69,10 @@ export type LayoutDraft = {
   ensureProviderGroups: (providers: Array<{ provider: string; name: string }>) => void;
   /** Move a model into a group; `null` returns it to its provider bucket. */
   assignGroup: (ref: string, group: string | null) => void;
+  /** Toggle whether a group and its models are advertised by `/v1/models`. */
+  setGroupVisible: (id: string, visible: boolean) => void;
+  /** Show/hide one entry, adding it to the layout when it was never stored. */
+  setVisible: (ref: string, visible: boolean) => void;
   hide: (ref: string) => void;
   restore: (ref: string) => void;
   /** Bring every hidden row back, and adopt registry refs the preset never stored. */
@@ -100,7 +106,10 @@ export function entriesOf(layout: LayoutDocument | undefined): DraftEntry[] {
 
 /** The explicit groups stored in a layout, in display order. */
 export function groupsOf(layout: LayoutDocument | undefined): DraftGroup[] {
-  return (layout?.groups ?? []).map((group) => ({ ...group }));
+  return (layout?.groups ?? []).map((group) => ({
+    ...group,
+    visible: group.visible !== false,
+  }));
 }
 
 /** The document the gateway validates: dense, zero-based positions per visibility group. */
@@ -133,6 +142,7 @@ export function layoutFor(
       id: group.id,
       name: group.name,
       ...(group.provider === undefined ? {} : { provider: group.provider }),
+      visible: group.visible,
     })),
     items: [
       ...items(entries.filter((entry) => entry.visible)),
@@ -174,6 +184,7 @@ export function effectiveGroups(
       id,
       name: nameOfProvider(provider),
       provider,
+      visible: true,
       implicit: true,
     });
   }
@@ -345,7 +356,10 @@ export function useLayoutDraft(
     },
     createGroup: (name) => {
       const id = `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      change(entries, [...groups, { id, name: name.trim() || "New group" }]);
+      change(entries, [
+        ...groups,
+        { id, name: name.trim() || "New group", visible: true },
+      ]);
       return id;
     },
     renameGroup: (id, name) => {
@@ -385,16 +399,33 @@ export function useLayoutDraft(
           id: `provider:${provider.provider}`,
           name: provider.name,
           provider: provider.provider,
+          visible: true,
         }));
       if (added.length > 0) change(entries, [...groups, ...added]);
     },
     assignGroup: (ref, group) => {
+      const known = entries.some((entry) => entry.ref === ref);
+      const assigned = group === null ? { group: undefined } : { group };
       change(
-        entries.map((entry) =>
-          entry.ref === ref
-            ? { ...entry, ...(group === null ? { group: undefined } : { group }) }
-            : entry,
-        ),
+        known
+          ? entries.map((entry) =>
+              entry.ref === ref ? { ...entry, ...assigned } : entry,
+            )
+          : [...entries, { ref, visible: true, ...assigned }],
+      );
+    },
+    setGroupVisible: (id, visible) => {
+      change(
+        entries,
+        groups.map((group) => (group.id === id ? { ...group, visible } : group)),
+      );
+    },
+    setVisible: (ref, visible) => {
+      const known = entries.some((entry) => entry.ref === ref);
+      change(
+        known
+          ? entries.map((entry) => (entry.ref === ref ? { ...entry, visible } : entry))
+          : [...entries, { ref, visible }],
       );
     },
     hide: (ref) => {

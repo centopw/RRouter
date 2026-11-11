@@ -2,6 +2,21 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.7.2 — 2026-11-11
+
+### Fixed
+- OpenCode and OpenCode Go requests now send a stable `x-opencode-session` derived from the
+  conversation affinity, fixing `400 MissingSessionID` on OpenCode Go.
+- Group headings use the same horizontal padding and border treatment as the grouped table.
+
+### Changed
+- The default model preset now controls `/v1/models` discovery: hidden items are omitted,
+  a group toggled off is omitted with its models, and `auto_include_new: false` drops models
+  the preset never names. Routing is unchanged; hidden models still work when named.
+- The group manager can add or remove models directly for a custom group, with a filter.
+  Aliases and combos are listed there and in a new **Aliases & combos** card, with a group
+  picker and a `/v1/models` visibility toggle.
+
 ## 0.7.1 — 2026-11-11
 
 ### Fixed

@@ -10,12 +10,14 @@ call right now, from connected providers.
 - **Custom models** — any id with limits/capabilities/price for providers without a list.
   Custom rows win and survive syncs.
 - **Disabled models** — disabled rows leave the active table and `/v1/models`; enabling
-  restores them. Disabling is by canonical id, so a shared model is disabled on every provider.
+  restores them. A row hidden in the default preset also leaves `/v1/models` while remaining
+  routable. Disabling is by canonical id, so a shared model is disabled on every provider.
 - **Provider coverage** — a model id served by several providers shows a provider count and
   peer popover with price/state; `shared only` filters to those ids.
 - **Groups** — the board is grouped by provider by default. A preset can create free-form
-  groups, rename providers' buckets, reorder groups, and move a model to another group;
-  grouping is presentation only. `/v1/models` carries the same groups additively.
+  groups, rename providers' buckets, reorder groups, add/remove models, and move a model to
+  another group. A group or model can also be hidden from `/v1/models`; routing is unchanged.
+  Aliases and combos have their own card with the same group and visibility controls.
 - **Preferred provider** — pin one provider for a bare model id. Bare requests use it first;
   explicit `provider/model` ignores it. `/v1/models` reports it as `owned_by`.
 - **Test** — a real 16-token completion through the planner, dispatcher and reassembly path.

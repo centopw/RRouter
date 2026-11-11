@@ -128,6 +128,10 @@ pub struct LayoutGroup {
     /// Provider whose unassigned models belong here. Omitted for a free-form group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Whether this group is advertised and its models listed by `/v1/models`. The
+    /// dashboard keeps showing a hidden group; only API discovery changes.
+    #[serde(default = "default_true")]
+    pub visible: bool,
 }
 
 /// A model preset layout document, exactly as stored in `layout_json`.

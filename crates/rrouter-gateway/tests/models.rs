@@ -449,16 +449,19 @@ async fn v1_models_groups_follow_the_default_preset() {
                 id: "g-fast".into(),
                 name: "Fast".into(),
                 provider: None,
+                visible: true,
             },
             LayoutGroup {
                 id: "provider:openai".into(),
                 name: "OpenAI custom".into(),
                 provider: Some("openai".into()),
+                visible: true,
             },
             LayoutGroup {
                 id: "provider:anthropic".into(),
                 name: "Anthropic custom".into(),
                 provider: Some("anthropic".into()),
+                visible: true,
             },
         ],
         items: vec![
@@ -534,6 +537,7 @@ async fn v1_models_groups_follow_the_default_preset() {
         id: "provider:gone".into(),
         name: "Gone".into(),
         provider: Some("gone".into()),
+        visible: true,
     });
     stale.items.push(LayoutItem {
         provider: "gone".into(),
@@ -565,6 +569,157 @@ async fn v1_models_groups_follow_the_default_preset() {
             .iter()
             .all(|model| model["id"] != "old-model"),
         "a disconnected provider's stale model is not advertised: {body}"
+    );
+
+    // The default preset is also the discovery policy: a hidden item and every model in
+    // a group toggled off disappear from `/v1/models`, while routing is untouched.
+    let current = h
+        .state
+        .store
+        .default_model_preset()
+        .await
+        .expect("preset lookup")
+        .expect("default");
+    let hidden = LayoutDocument {
+        schema_version: rrouter_store::LAYOUT_SCHEMA_VERSION,
+        auto_include_new: true,
+        groups: vec![LayoutGroup {
+            id: "g-hidden".into(),
+            name: "Hidden".into(),
+            provider: None,
+            visible: false,
+        }],
+        items: vec![
+            LayoutItem {
+                provider: "anthropic".into(),
+                id: "claude-sonnet-4-5".into(),
+                group: None,
+                position: 0,
+                visible: true,
+                last_visible_position: None,
+                hidden_at: None,
+            },
+            LayoutItem {
+                provider: "openai".into(),
+                id: "gpt-4.1".into(),
+                group: None,
+                position: 0,
+                visible: false,
+                last_visible_position: Some(1),
+                hidden_at: Some(1),
+            },
+            LayoutItem {
+                provider: "anthropic".into(),
+                id: "claude-opus-4-1".into(),
+                group: Some("g-hidden".into()),
+                position: 1,
+                visible: true,
+                last_visible_position: None,
+                hidden_at: None,
+            },
+        ],
+    };
+    h.state
+        .store
+        .update_model_preset_layout(current.id, current.revision, &hidden, "test")
+        .await
+        .expect("visibility layout write");
+    let (_, body) = h.get("/v1/models").await;
+    let data = body["data"].as_array().expect("data");
+    assert!(
+        data.iter().all(|model| model["id"] != "gpt-4.1"),
+        "a hidden item is omitted: {body}"
+    );
+    assert!(
+        data.iter().all(|model| model["id"] != "claude-opus-4-1"),
+        "a hidden group's models are omitted: {body}"
+    );
+    assert!(
+        data.iter().any(|model| model["id"] == "claude-sonnet-4-5"),
+        "a visible item remains listed: {body}"
+    );
+    assert!(
+        body["groups"]
+            .as_array()
+            .expect("groups")
+            .iter()
+            .all(|group| group["id"] != "g-hidden"),
+        "a hidden group is not advertised: {body}"
+    );
+
+    // Aliases and combos are routable names too: they join the default group by default
+    // and can be hidden or assigned through the same layout items.
+    h.state
+        .store
+        .upsert_alias("fast", "openai/gpt-4.1")
+        .await
+        .expect("alias");
+    h.state
+        .store
+        .upsert_combo("duo", &["openai/gpt-4.1".to_string()])
+        .await
+        .expect("combo");
+    let (_, body) = h.get("/v1/models").await;
+    let data = body["data"].as_array().expect("data");
+    assert!(
+        data.iter()
+            .any(|model| model["id"] == "fast" && model["owned_by"] == "rrouter"),
+        "alias is listed: {body}"
+    );
+    assert!(
+        data.iter()
+            .any(|model| model["id"] == "duo" && model["owned_by"] == "rrouter"),
+        "combo is listed: {body}"
+    );
+
+    let current = h
+        .state
+        .store
+        .default_model_preset()
+        .await
+        .expect("preset lookup")
+        .expect("default");
+    let mut aliases_hidden = current.layout.clone();
+    aliases_hidden.groups.push(LayoutGroup {
+        id: "g-hidden-names".into(),
+        name: "Hidden names".into(),
+        provider: None,
+        visible: false,
+    });
+    aliases_hidden.items.extend([
+        LayoutItem {
+            provider: "rrouter".into(),
+            id: "fast".into(),
+            group: None,
+            position: 1,
+            visible: false,
+            last_visible_position: Some(2),
+            hidden_at: Some(1),
+        },
+        LayoutItem {
+            provider: "rrouter".into(),
+            id: "duo".into(),
+            group: Some("g-hidden-names".into()),
+            position: 2,
+            visible: true,
+            last_visible_position: None,
+            hidden_at: None,
+        },
+    ]);
+    h.state
+        .store
+        .update_model_preset_layout(current.id, current.revision, &aliases_hidden, "test")
+        .await
+        .expect("alias layout write");
+    let (_, body) = h.get("/v1/models").await;
+    let data = body["data"].as_array().expect("data");
+    assert!(
+        data.iter().all(|model| model["id"] != "fast"),
+        "hidden alias is omitted: {body}"
+    );
+    assert!(
+        data.iter().all(|model| model["id"] != "duo"),
+        "combo in a hidden group is omitted: {body}"
     );
 }
 
