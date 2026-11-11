@@ -29,6 +29,19 @@ for path in sys.argv[1:]:
   || fail "a release script has a syntax error"
 pass "bash and Python release tools parse"
 
+python3 - <<'PY' || exit 1
+import importlib.util
+spec = importlib.util.spec_from_file_location("release_tool", "scripts/release.py")
+release = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(release)
+# Patch numbers are ordinary integers, not a two-digit field.
+assert release.bump_version("0.9.121", "patch") == "0.9.122"
+assert release.bump_version("0.9.121", "minor") == "0.10.0"
+assert release.bump_version("0.9.121", "major") == "1.0.0"
+assert release.normalize("v0.9.121") == "0.9.121"
+PY
+pass "SemVer bump handles patch numbers above 100"
+
 step "SBOM determinism and shape"
 python3 scripts/sbom.py --artifact rrouter-linux-amd64 --version 0.0.0-test \
   --commit deadbeef --output "$TMP/a.json" >/dev/null
