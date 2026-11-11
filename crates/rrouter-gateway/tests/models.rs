@@ -412,7 +412,7 @@ async fn model_preferences_drive_api_rows_and_v1_owned_by() {
         .as_array()
         .expect("v1 data")
         .iter()
-        .filter(|row| row["id"] == "shared-model")
+        .filter(|row| row["id"] == "github/shared-model")
         .collect();
     assert_eq!(shared.len(), 1, "one entry per id");
     assert_eq!(shared[0]["owned_by"], "github");
@@ -431,7 +431,7 @@ async fn model_preferences_drive_api_rows_and_v1_owned_by() {
         .as_array()
         .expect("v1 data")
         .iter()
-        .find(|row| row["id"] == "shared-model")
+        .find(|row| row["id"] == "github/shared-model")
         .expect("shared entry");
     assert_eq!(
         shared["owned_by"], "github",
@@ -519,7 +519,9 @@ async fn v1_models_carry_limits_capabilities_and_native_metadata() {
             .unwrap_or_else(|| panic!("{id} missing: {body}"))
     };
 
-    let flash = find("rich-flash");
+    let flash = find("openai/rich-flash");
+    assert_eq!(flash["model"], "rich-flash");
+    assert_eq!(flash["owned_by"], "openai");
     assert_eq!(flash["name"], "RICH-FLASH");
     assert_eq!(flash["context_window"], 1_048_576);
     assert_eq!(flash["context_length"], 1_048_576);
@@ -586,7 +588,7 @@ async fn v1_models_groups_follow_the_default_preset() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|model| model["id"] == "gpt-4.1" && model["owned_by"] == "openai")
+        .find(|model| model["id"] == "openai/gpt-4.1" && model["owned_by"] == "openai")
         .expect("gpt-4.1");
     assert_eq!(gpt["group"], "provider:openai");
 
@@ -660,17 +662,19 @@ async fn v1_models_groups_follow_the_default_preset() {
     let data = body["data"].as_array().expect("data");
     let gpt = data
         .iter()
-        .find(|model| model["id"] == "gpt-4.1" && model["owned_by"] == "openai")
+        .find(|model| model["id"] == "openai/gpt-4.1" && model["owned_by"] == "openai")
         .expect("gpt-4.1 after grouping");
     assert_eq!(gpt["group"], "g-fast");
     let claude = data
         .iter()
-        .find(|model| model["id"] == "claude-sonnet-4-5" && model["owned_by"] == "anthropic")
+        .find(|model| {
+            model["id"] == "anthropic/claude-sonnet-4-5" && model["owned_by"] == "anthropic"
+        })
         .expect("claude after grouping");
     assert_eq!(claude["group"], "provider:anthropic");
     assert_eq!(
         data.first().map(|model| model["id"].clone()),
-        Some(Value::String("gpt-4.1".into())),
+        Some(Value::String("openai/gpt-4.1".into())),
         "the custom group is first: {body}"
     );
     // Grouping does not hide models: every entry still reports a group.
@@ -723,7 +727,7 @@ async fn v1_models_groups_follow_the_default_preset() {
             .as_array()
             .expect("data")
             .iter()
-            .all(|model| model["id"] != "old-model"),
+            .all(|model| model["id"] != "gone/old-model"),
         "a disconnected provider's stale model is not advertised: {body}"
     );
 
@@ -783,15 +787,17 @@ async fn v1_models_groups_follow_the_default_preset() {
     let (_, body) = h.get("/v1/models").await;
     let data = body["data"].as_array().expect("data");
     assert!(
-        data.iter().all(|model| model["id"] != "gpt-4.1"),
+        data.iter().all(|model| model["id"] != "openai/gpt-4.1"),
         "a hidden item is omitted: {body}"
     );
     assert!(
-        data.iter().all(|model| model["id"] != "claude-opus-4-1"),
+        data.iter()
+            .all(|model| model["id"] != "anthropic/claude-opus-4-1"),
         "a hidden group's models are omitted: {body}"
     );
     assert!(
-        data.iter().any(|model| model["id"] == "claude-sonnet-4-5"),
+        data.iter()
+            .any(|model| model["id"] == "anthropic/claude-sonnet-4-5"),
         "a visible item remains listed: {body}"
     );
     assert!(
@@ -1059,7 +1065,7 @@ async fn v1_models_omits_disabled_models_and_keeps_preferred_ownership() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|row| row["id"] == "shared-id")
+        .find(|row| row["id"] == "github/shared-id")
         .expect("enabled shared id");
     assert_eq!(shared["owned_by"], "github", "preference still wins");
 
@@ -1071,7 +1077,9 @@ async fn v1_models_omits_disabled_models_and_keeps_preferred_ownership() {
             .as_array()
             .expect("data")
             .iter()
-            .any(|row| row["id"] == "shared-id"),
+            .any(|row| row["id"]
+                .as_str()
+                .is_some_and(|id| id.ends_with("/shared-id"))),
         "a disabled model is not advertised: {body}"
     );
 
@@ -1084,7 +1092,7 @@ async fn v1_models_omits_disabled_models_and_keeps_preferred_ownership() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|row| row["id"] == "shared-id")
+        .find(|row| row["id"] == "github/shared-id")
         .expect("re-enabled id returns");
     assert_eq!(shared["owned_by"], "github");
 
@@ -1108,7 +1116,7 @@ async fn v1_models_omits_disabled_models_and_keeps_preferred_ownership() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|row| row["id"] == "shared-id")
+        .find(|row| row["id"] == "openai/shared-id")
         .expect("one enabled provider still lists the id");
     assert_eq!(shared["owned_by"], "openai");
 }
@@ -1867,8 +1875,9 @@ async fn connection_fetch_stores_and_lists_native_model_metadata() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|model| model["id"] == "deepseek-flash")
+        .find(|model| model["id"] == "openai/deepseek-flash")
         .expect("listed model");
+    assert_eq!(model["model"], "deepseek-flash");
     assert_eq!(model["name"], "DeepSeek-V4.1-Flash");
     assert_eq!(model["context_length"], 1_048_576);
     assert_eq!(model["max_completion_tokens"], 393_216);

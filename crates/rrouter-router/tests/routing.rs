@@ -202,6 +202,39 @@ async fn self_referential_alias_does_not_loop() {
 }
 
 #[tokio::test]
+async fn a_dotted_bare_id_with_no_catalog_entry_widens_to_active_providers() {
+    // The regression: `deepseek-v4.1-flash` was fuzzy-resolved to three unrelated
+    // DeepSeek catalog models, so its catalog providers (none connected) produced
+    // "no eligible upstream" instead of trying the live OpenCode Go account.
+    let store = Store::open_in_memory().unwrap();
+    let go = conn(&store, "opencode-go", "deepseek-v4.1-flash", 0).await;
+    let planner = Planner::new();
+    let plan = planner
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            PlanRequest {
+                model: "deepseek-v4.1-flash",
+                stream: false,
+                affinity: None,
+                strategy: Strategy::Priority,
+                policy: None,
+                allowed_models: None,
+                team_id: None,
+                canary: None,
+                canary_seed: 0,
+                combo_start: None,
+            },
+        )
+        .await
+        .expect("bare dotted id is routable");
+    assert_eq!(plan.candidates.len(), 1, "{:?}", plan.candidates);
+    assert_eq!(plan.candidates[0].provider, "opencode-go");
+    assert_eq!(plan.candidates[0].model, "deepseek-v4.1-flash");
+    assert_eq!(plan.candidates[0].connection, go);
+}
+
+#[tokio::test]
 async fn explicit_provider_is_not_widened_for_unknown_ids() {
     // A bare id the catalog does not know is normally handed to every active
     // provider; naming the provider must stop that, or a Claude model reaches a

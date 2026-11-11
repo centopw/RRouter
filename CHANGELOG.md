@@ -2,6 +2,19 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.9.0 — 2026-11-11
+
+### Changed
+- `/v1/models` identifies provider models as `provider/model` (the same reference routing
+  accepts) and keeps the bare id in `model`. Aliases and combos keep their bare names. This
+  is a breaking change for clients that expected the bare id in `id`; `GET /v1/models/{id}`
+  still accepts either spelling and returns the canonical `provider/model` id.
+- Bare ids no longer fuzzy-match across unrelated families. Dotted version segments stay in
+  the model core, so `deepseek-v4.1-flash` is treated as an unknown id and tried against
+  active providers instead of pinning itself to unconnected DeepSeek catalog entries. This
+  removes the `no eligible upstream … resolved to 3 provider/model target(s)` 404 for bare
+  requests that a connected aggregator (for example OpenCode Go) actually serves.
+
 ## 0.8.0 — 2026-11-11
 
 ### Added

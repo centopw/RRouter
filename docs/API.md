@@ -43,11 +43,17 @@ discovery policy: an item hidden in it, or a group toggled off, is omitted from 
 unaffected, so hidden models still work when a client names them explicitly. A client that
 ignores `groups` still reads a normal OpenAI `data` list.
 
+Every entry is identified as `provider/model`, the same reference routing accepts. Names the
+gateway owns (aliases, combos) stay bare, matching their own routing syntax. Each provider
+entry also carries `model` with the bare id, so a client never has to split the id.
+
 Every entry also carries the registry's model metadata, so a client can choose a model
 without a second lookup. Unknown fields are omitted, never invented:
 
 | Field | Meaning |
 | --- | --- |
+| `id` | `provider/model` for a provider model; the alias/combo name otherwise. |
+| `model` | Bare model id for provider entries (absent on aliases and combos). |
 | `name` | Operator/provider display name. |
 | `context_window`, `context_length` | Context window in tokens (both spellings). |
 | `max_output_tokens`, `max_completion_tokens` | Output cap in tokens (both spellings). |

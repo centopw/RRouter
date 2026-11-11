@@ -14,7 +14,11 @@ call right now, from connected providers.
   restores them. A row hidden in the default preset also leaves `/v1/models` while remaining
   routable. Disabling is by canonical id, so a shared model is disabled on every provider.
 - **Provider coverage** — a model id served by several providers shows a provider count and
-  peer popover with price/state; `shared only` filters to those ids.
+  peer popover with price/state; `shared only` filters to those ids. `/v1/models` advertises
+  the callable form `provider/model` and keeps the bare id in `model`, so a client pins the
+  route it discovered. Aliases and combos keep their bare names. A bare request still routes:
+  an id with no exact catalog entry is tried against every active provider, never pinned to
+  an unconnected family match.
 - **Groups** — the board is grouped by provider by default. A preset can create free-form
   groups, rename providers' buckets, reorder groups, add/remove models, and move a model to
   another group. A group or model can also be hidden from `/v1/models`; routing is unchanged.

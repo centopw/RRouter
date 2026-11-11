@@ -375,7 +375,22 @@ fn model_json(
     meta: Option<&models_registry::ModelItem>,
 ) -> Value {
     let mut object = Map::new();
-    object.insert("id".into(), Value::String(id.to_string()));
+    // Provider models are advertised as `provider/model` so a client can pin the exact
+    // route it discovered. Names the gateway owns (aliases, combos) stay bare, matching
+    // their own routing syntax.
+    let listed_id = if owned_by == "rrouter" {
+        id.to_string()
+    } else {
+        let prefix = format!("{owned_by}/");
+        let bare = id.strip_prefix(&prefix).unwrap_or(id);
+        format!("{owned_by}/{bare}")
+    };
+    object.insert("id".into(), Value::String(listed_id));
+    // The bare id remains available to clients that need it, without a second request.
+    if owned_by != "rrouter" {
+        let bare = id.strip_prefix(&format!("{owned_by}/")).unwrap_or(id);
+        object.insert("model".into(), Value::String(bare.to_string()));
+    }
     object.insert("object".into(), Value::String("model".into()));
     object.insert("owned_by".into(), Value::String(owned_by.to_string()));
     object.insert("created".into(), Value::Number(created.into()));

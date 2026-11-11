@@ -275,11 +275,17 @@ const BUILTIN: &[ProviderRow] = &[
 fn core_of(model: &str) -> &str {
     let mut end = 0usize;
     for seg in model.split('-') {
-        let ascii_alnum = !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric());
+        // A dot belongs to a version (`v4.1`), not a boundary. Treating it as one folded
+        // every DeepSeek variant into the core `deepseek` and made an unknown id pin
+        // itself to unrelated catalog models with no connection.
+        let ascii_name = !seg.is_empty()
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
         // Trailing date/size stamps (`2024`, `20250807`); short numeric version
         // segments (`4`, `3.5` written `4-1`) are part of the name.
         let dateish = seg.len() >= 4 && seg.chars().all(|c| c.is_ascii_digit());
-        if !ascii_alnum || dateish {
+        if !ascii_name || dateish {
             break;
         }
         end += seg.len() + 1;
@@ -498,6 +504,25 @@ mod tests {
 
         assert!(catalog.resolve("no-such-model-xyz").is_empty());
         assert!(!catalog.is_known("no-such-model-xyz"));
+    }
+
+    #[test]
+    fn dotted_versions_do_not_fold_into_the_family_core() {
+        let catalog = Catalog::builtin();
+        // `deepseek-v4.1-flash` is not a known id; before the dot fix its core was
+        // `deepseek` and it fuzzy-matched three unrelated catalog models.
+        assert!(
+            catalog.resolve("deepseek-v4.1-flash").is_empty(),
+            "an unknown dotted version must not borrow another family's providers"
+        );
+        assert!(catalog
+            .resolve("deepseek-v3.2-exp")
+            .iter()
+            .any(|model| model.provider == "deepseek"));
+        assert!(catalog
+            .resolve("gpt-4o-2024-08-06")
+            .iter()
+            .any(|model| model.provider == "github"));
     }
 
     #[test]

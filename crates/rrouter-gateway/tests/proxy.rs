@@ -663,7 +663,7 @@ async fn health_and_models() {
         .filter_map(|m| m["id"].as_str())
         .collect();
     // A connected provider contributes its catalog models.
-    assert!(ids.contains(&"gpt-4.1"), "models: {ids:?}");
+    assert!(ids.contains(&"openai/gpt-4.1"), "models: {ids:?}");
     assert!(ids.len() > 5);
 }
 
@@ -3390,7 +3390,7 @@ async fn model_by_id_answers_the_object_and_404_for_unknown_or_disabled() {
 
     let (status, body) = h.get("/v1/models/gpt-4.1").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["id"], "gpt-4.1");
+    assert_eq!(body["id"], "openai/gpt-4.1");
     assert_eq!(body["object"], "model");
     assert_eq!(body["owned_by"], "openai");
     assert!(body["created"].as_i64().unwrap_or_default() > 0);
