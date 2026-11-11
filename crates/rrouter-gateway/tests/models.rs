@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use http_body_util::BodyExt;
 use rrouter_auth::Credentials;
-use rrouter_gateway::models_registry::{parse_models_dev, MAX_FETCHED_IDS};
+use rrouter_gateway::models_registry::{parse_models_dev, MAX_FETCHED_IDS, SOURCE_UPSTREAM};
 use rrouter_gateway::{app, config::Config, AppState};
 use rrouter_router::{Breaker, Catalog, Dispatcher, Planner};
 use rrouter_store::{LayoutDocument, LayoutGroup, LayoutItem, ModelRow, Store};
@@ -91,6 +91,46 @@ async fn start_mock() -> String {
         .route("/v1/models", get(mock_models))
         .route("/v1/chat/completions", post(mock_chat))
         .with_state(Mock);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    format!("http://{addr}")
+}
+
+/// A DeepSeek/9router-shaped catalogue: limits, modalities, effort and API quirks.
+async fn rich_models() -> Response {
+    axum::Json(json!({
+        "object": "list",
+        "data": [{
+            "id": "deepseek-flash",
+            "object": "model",
+            "owned_by": "deepseek",
+            "name": "DeepSeek-V4.1-Flash",
+            "context_window": 1_048_576,
+            "max_output_tokens": 393_216,
+            "input_modalities": ["text", "image"],
+            "output_modalities": ["text"],
+            "effort": {
+                "supported_levels": ["low", "high", "max"],
+                "default_level": "high"
+            },
+            "api_capabilities": {
+                "anthropic_messages": {
+                    "system_prompt_update": "in-history",
+                    "tool_update": "addition-only"
+                }
+            }
+        }]
+    }))
+    .into_response()
+}
+
+async fn start_rich_mock() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock");
+    let addr = listener.local_addr().expect("addr");
+    let router = Router::new().route("/v1/models", get(rich_models));
     tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
@@ -406,6 +446,122 @@ async fn model_preferences_drive_api_rows_and_v1_owned_by() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+/// `/v1/models` carries what the registry knows: limits, modalities, the nine flags,
+/// provider-native reasoning keys, and the conservative intersection for a combo.
+#[tokio::test]
+async fn v1_models_carry_limits_capabilities_and_native_metadata() {
+    let h = harness();
+    h.connect("openai", "http://127.0.0.1:9").await;
+    let row = |model: &str, context: u32, max_output: u32, vision: bool, reasoning: bool| {
+        let levels = if reasoning {
+            json!(["low", "high"])
+        } else {
+            json!(["low"])
+        };
+        ModelRow {
+            provider: "openai".into(),
+            model: model.into(),
+            display: Some(model.to_uppercase()),
+            context: Some(context),
+            max_output: Some(max_output),
+            caps: json!({
+                "vision": vision,
+                "reasoning": reasoning,
+                "tools": true,
+                "native": {"thinkingFormat": "openai"},
+                "effort": {"supported_levels": levels, "default_level": "high"},
+                "api_capabilities": {"anthropic_messages": {"tool_update": "addition-only"}},
+            }),
+            cost: None,
+            source: SOURCE_UPSTREAM.into(),
+            updated_at: 0,
+        }
+    };
+    h.state
+        .store
+        .upsert_model(&row("rich-flash", 1_048_576, 393_216, true, true))
+        .await
+        .expect("first model");
+    h.state
+        .store
+        .upsert_model(&row("rich-pro", 200_000, 64_000, true, false))
+        .await
+        .expect("second model");
+    h.state
+        .store
+        .upsert_alias("fast", "openai/rich-flash")
+        .await
+        .expect("alias");
+    h.state
+        .store
+        .upsert_combo(
+            "mix",
+            &["openai/rich-flash".into(), "openai/rich-pro".into()],
+        )
+        .await
+        .expect("combo");
+    h.state
+        .store
+        .upsert_combo("partial", &["openai/rich-flash".into(), "missing/x".into()])
+        .await
+        .expect("partial combo");
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let find = |id: &str| {
+        body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .find(|model| model["id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing: {body}"))
+    };
+
+    let flash = find("rich-flash");
+    assert_eq!(flash["name"], "RICH-FLASH");
+    assert_eq!(flash["context_window"], 1_048_576);
+    assert_eq!(flash["context_length"], 1_048_576);
+    assert_eq!(flash["max_output_tokens"], 393_216);
+    assert_eq!(flash["max_completion_tokens"], 393_216);
+    assert_eq!(flash["input_modalities"], json!(["text", "image"]));
+    assert_eq!(flash["output_modalities"], json!(["text"]));
+    assert_eq!(flash["capabilities"]["vision"], true);
+    assert_eq!(flash["capabilities"]["reasoning"], true);
+    assert_eq!(flash["capabilities"]["tools"], true);
+    assert_eq!(flash["capabilities"]["contextWindow"], 1_048_576);
+    assert_eq!(flash["capabilities"]["maxOutput"], 393_216);
+    assert_eq!(flash["capabilities"]["thinkingFormat"], "openai");
+    assert_eq!(flash["effort"]["default_level"], "high");
+    assert_eq!(
+        flash["api_capabilities"]["anthropic_messages"]["tool_update"],
+        "addition-only"
+    );
+
+    let alias = find("fast");
+    assert_eq!(alias["owned_by"], "rrouter");
+    assert_eq!(alias["context_length"], 1_048_576);
+    assert_eq!(alias["capabilities"]["vision"], true);
+    assert!(alias.get("name").is_none(), "an alias name is the id");
+
+    let combo = find("mix");
+    assert_eq!(combo["owned_by"], "rrouter");
+    assert_eq!(combo["context_length"], 200_000, "smallest member window");
+    assert_eq!(combo["max_completion_tokens"], 64_000);
+    assert_eq!(combo["capabilities"]["vision"], true);
+    assert_eq!(combo["capabilities"]["tools"], true);
+    assert_eq!(combo["capabilities"]["reasoning"], false);
+    assert!(
+        combo.get("effort").is_none(),
+        "members disagree on effort levels"
+    );
+
+    let partial = find("partial");
+    assert!(
+        partial.get("context_length").is_none(),
+        "an unresolved member makes the combo limits unknown"
+    );
 }
 
 /// `/v1/models` stays an OpenAI list but carries additive group metadata. With no
@@ -1670,6 +1826,61 @@ async fn connection_create_returns_after_the_model_fetch() {
         rows.iter()
             .any(|row| row.provider == "openai" && row.model == "alpha"),
         "the rows exist before the response: {rows:?}"
+    );
+}
+
+/// A provider's own catalogue metadata survives the fetch, storage and `/v1/models`
+/// without a models.dev row supplying it.
+#[tokio::test]
+async fn connection_fetch_stores_and_lists_native_model_metadata() {
+    let h = harness();
+    let mock = start_rich_mock().await;
+    let (status, created) = h
+        .post(
+            "/api/connections",
+            json!({
+                "provider": "openai",
+                "auth_type": "api_key",
+                "name": "rich-catalogue",
+                "credentials": {
+                    "api_key": "test-key",
+                    "base_url_override": mock,
+                },
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let rows = h.state.store.list_models().await.expect("models");
+    let row = rows
+        .iter()
+        .find(|row| row.provider == "openai" && row.model == "deepseek-flash")
+        .expect("fetched row");
+    assert_eq!(row.display.as_deref(), Some("DeepSeek-V4.1-Flash"));
+    assert_eq!(row.context, Some(1_048_576));
+    assert_eq!(row.max_output, Some(393_216));
+    assert_eq!(row.caps["vision"], true);
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let model = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|model| model["id"] == "deepseek-flash")
+        .expect("listed model");
+    assert_eq!(model["name"], "DeepSeek-V4.1-Flash");
+    assert_eq!(model["context_length"], 1_048_576);
+    assert_eq!(model["max_completion_tokens"], 393_216);
+    assert_eq!(model["input_modalities"], json!(["text", "image"]));
+    assert_eq!(model["capabilities"]["vision"], true);
+    assert_eq!(
+        model["effort"]["supported_levels"],
+        json!(["low", "high", "max"])
+    );
+    assert_eq!(
+        model["api_capabilities"]["anthropic_messages"]["system_prompt_update"],
+        "in-history"
     );
 }
 

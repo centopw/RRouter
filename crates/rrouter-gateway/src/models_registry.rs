@@ -81,14 +81,32 @@ impl Capabilities {
                 "vision" => self.vision = flag,
                 "pdf" => self.pdf = flag,
                 "audio_input" => self.audio_input = flag,
+                "audioInput" => self.audio_input = flag,
                 "video_input" => self.video_input = flag,
+                "videoInput" => self.video_input = flag,
                 "image_output" => self.image_output = flag,
+                "imageOutput" => self.image_output = flag,
                 "audio_output" => self.audio_output = flag,
+                "audioOutput" => self.audio_output = flag,
                 "tools" => self.tools = flag,
                 "reasoning" => self.reasoning = flag,
                 "search" => self.search = flag,
                 _ => {}
             }
+        }
+    }
+    /// A capability a fallback combo can rely on when every member has it.
+    pub fn intersect(self, other: Self) -> Self {
+        Self {
+            vision: self.vision && other.vision,
+            pdf: self.pdf && other.pdf,
+            audio_input: self.audio_input && other.audio_input,
+            video_input: self.video_input && other.video_input,
+            image_output: self.image_output && other.image_output,
+            audio_output: self.audio_output && other.audio_output,
+            tools: self.tools && other.tools,
+            reasoning: self.reasoning && other.reasoning,
+            search: self.search && other.search,
         }
     }
 }
@@ -116,6 +134,16 @@ pub struct ModelItem {
     pub context: Option<u32>,
     pub max_output: Option<u32>,
     pub capabilities: Capabilities,
+    /// Provider-native capability keys that the nine flags do not cover, such as
+    /// `thinkingFormat`. Echoed verbatim in `/v1/models`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities_extra: Option<Map<String, Value>>,
+    /// Provider-native reasoning levels, when the provider publishes them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Value>,
+    /// Provider-native API quirks (for example Anthropic message rules).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_capabilities: Option<Value>,
     pub cost: Option<Cost>,
     pub source: String,
     pub enabled: bool,
@@ -138,6 +166,9 @@ impl ModelItem {
             context: None,
             max_output: None,
             capabilities: Capabilities::default(),
+            capabilities_extra: None,
+            effort: None,
+            api_capabilities: None,
             cost: None,
             source: source.to_string(),
             enabled: true,
@@ -260,6 +291,21 @@ fn overlay(item: &mut ModelItem, row: &ModelRow) {
         item.cost = row.cost.as_ref().and_then(parse_cost);
     }
     item.capabilities.overlay(&row.caps);
+    if let Some(extra) = row.caps.get("native").and_then(Value::as_object) {
+        item.capabilities_extra
+            .get_or_insert_with(Map::new)
+            .extend(extra.clone());
+    }
+    if let Some(effort) = row.caps.get("effort").filter(|value| value.is_object()) {
+        item.effort = Some(effort.clone());
+    }
+    if let Some(api) = row
+        .caps
+        .get("api_capabilities")
+        .filter(|value| value.is_object())
+    {
+        item.api_capabilities = Some(api.clone());
+    }
     if row.caps.get("deprecated").and_then(Value::as_bool) == Some(true) {
         item.deprecated = true;
     }
@@ -598,9 +644,22 @@ pub fn models_url(base: &str) -> String {
     }
 }
 
-/// Extract `data[].id` from a provider's model-list response, dropping empty ids and
-/// duplicates. Also accepts a bare array of strings.
-pub fn parse_model_ids(body: &Value) -> Vec<String> {
+/// One model from a provider's own `/models` response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FetchedModel {
+    pub id: String,
+    pub display: Option<String>,
+    pub context: Option<u32>,
+    pub max_output: Option<u32>,
+    /// Normalized capability flags plus the provider-native keys `/v1/models` echoes.
+    pub caps: Value,
+}
+
+/// Extract models from a provider's model-list response, dropping empty ids and
+/// duplicates. Also accepts a bare array of strings. Metadata is optional: OpenAI's
+/// list carries only ids, while DeepSeek and 9router-style gateways publish limits,
+/// modalities, reasoning effort and Anthropic API quirks.
+pub fn parse_models(body: &Value) -> Vec<FetchedModel> {
     let entries = match body {
         Value::Array(entries) => entries,
         Value::Object(object) => match object.get("data").and_then(Value::as_array) {
@@ -609,22 +668,189 @@ pub fn parse_model_ids(body: &Value) -> Vec<String> {
         },
         _ => return Vec::new(),
     };
-    let mut ids: Vec<String> = Vec::with_capacity(entries.len());
+    let mut out: Vec<FetchedModel> = Vec::with_capacity(entries.len());
     for entry in entries {
-        let id = match entry {
-            Value::String(id) => id.trim(),
-            Value::Object(object) => object
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or(""),
-            _ => "",
+        let model = match entry {
+            Value::String(id) => FetchedModel {
+                id: id.trim().to_string(),
+                display: None,
+                context: None,
+                max_output: None,
+                caps: Value::Object(Map::new()),
+            },
+            Value::Object(object) => fetched_model(object),
+            _ => continue,
         };
-        if !id.is_empty() && !ids.iter().any(|seen| seen == id) {
-            ids.push(id.to_string());
+        if model.id.is_empty() || out.iter().any(|seen| seen.id == model.id) {
+            continue;
+        }
+        out.push(model);
+    }
+    out
+}
+
+fn fetched_model(object: &Map<String, Value>) -> FetchedModel {
+    let text = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let native_caps = object.get("capabilities").and_then(Value::as_object);
+    // DeepSeek publishes limits at the top level and inside `capabilities`; 9router
+    // publishes both too. Prefer the top level, then fall back to the nested copy.
+    let limit = |keys: &[&str], nested: &str| {
+        keys.iter()
+            .find_map(|key| object.get(*key).and_then(token_limit))
+            .or_else(|| {
+                native_caps
+                    .and_then(|caps| caps.get(nested))
+                    .and_then(token_limit)
+            })
+    };
+    FetchedModel {
+        id: text("id").unwrap_or_default(),
+        display: text("name"),
+        context: limit(
+            &["context_window", "context_length", "max_context", "context"],
+            "contextWindow",
+        ),
+        max_output: limit(
+            &[
+                "max_output_tokens",
+                "max_completion_tokens",
+                "max_output",
+                "max_tokens",
+            ],
+            "maxOutput",
+        ),
+        caps: upstream_caps(object),
+    }
+}
+
+/// Token counts below one are "unpublished", not a zero-token window.
+fn token_limit(value: &Value) -> Option<u32> {
+    value
+        .as_u64()
+        .filter(|value| *value > 0)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+/// Normalize a provider's own capability vocabulary into the registry's flags, while
+/// keeping the extra reasoning keys the OpenAI shape cannot express.
+fn upstream_caps(entry: &Map<String, Value>) -> Value {
+    let mut caps = Map::new();
+    if let Some(native) = entry.get("capabilities").and_then(Value::as_object) {
+        for (source, target) in [
+            ("vision", "vision"),
+            ("pdf", "pdf"),
+            ("audioInput", "audio_input"),
+            ("audio_input", "audio_input"),
+            ("videoInput", "video_input"),
+            ("video_input", "video_input"),
+            ("imageOutput", "image_output"),
+            ("image_output", "image_output"),
+            ("audioOutput", "audio_output"),
+            ("audio_output", "audio_output"),
+            ("tools", "tools"),
+            ("reasoning", "reasoning"),
+            ("search", "search"),
+        ] {
+            if let Some(flag) = native.get(source).and_then(Value::as_bool) {
+                caps.insert(target.to_string(), Value::Bool(flag));
+            }
+        }
+        let mut extra = Map::new();
+        for key in [
+            "thinkingFormat",
+            "thinkingCanDisable",
+            "thinkingRange",
+            "thinkingEffortSupported",
+            "thinkingOffType",
+            "forcedToolChoice",
+        ] {
+            let Some(value) = native.get(key) else {
+                continue;
+            };
+            let keep = match key {
+                "thinkingFormat" | "thinkingOffType" => value.is_string(),
+                "thinkingCanDisable" | "thinkingEffortSupported" | "forcedToolChoice" => {
+                    value.is_boolean()
+                }
+                "thinkingRange" => value.is_object() || value.is_array() || value.is_null(),
+                _ => false,
+            };
+            if keep {
+                extra.insert(key.to_string(), value.clone());
+            }
+        }
+        if !extra.is_empty() {
+            caps.insert("native".to_string(), Value::Object(extra));
         }
     }
-    ids
+    // Modality arrays are authoritative when present, the same rule models.dev follows.
+    for (key, target) in [
+        ("input_modalities", "vision"),
+        ("input_modalities", "pdf"),
+        ("input_modalities", "audio_input"),
+        ("input_modalities", "video_input"),
+    ] {
+        if let Some(list) = entry.get(key).and_then(Value::as_array) {
+            let modality = match target {
+                "vision" => "image",
+                "pdf" => "pdf",
+                "audio_input" => "audio",
+                _ => "video",
+            };
+            caps.insert(
+                target.to_string(),
+                Value::Bool(list.iter().any(|value| value.as_str() == Some(modality))),
+            );
+        }
+    }
+    for (target, modality) in [("image_output", "image"), ("audio_output", "audio")] {
+        if let Some(list) = entry.get("output_modalities").and_then(Value::as_array) {
+            caps.insert(
+                target.to_string(),
+                Value::Bool(list.iter().any(|value| value.as_str() == Some(modality))),
+            );
+        }
+    }
+    if let Some(effort) = entry.get("effort").and_then(valid_effort) {
+        caps.insert("effort".to_string(), effort);
+    }
+    if let Some(api) = entry
+        .get("api_capabilities")
+        .filter(|value| value.is_object() && bounded(value, 4096))
+    {
+        caps.insert("api_capabilities".to_string(), api.clone());
+    }
+    Value::Object(caps)
+}
+
+/// Reasoning levels are the one part of a native `effort` block a client can rely on.
+fn valid_effort(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let levels = object.get("supported_levels")?.as_array()?;
+    if levels.is_empty() || !levels.iter().all(Value::is_string) {
+        return None;
+    }
+    let mut out = Map::new();
+    out.insert("supported_levels".to_string(), Value::Array(levels.clone()));
+    if let Some(default) = object.get("default_level").and_then(Value::as_str) {
+        out.insert(
+            "default_level".to_string(),
+            Value::String(default.to_string()),
+        );
+    }
+    Some(Value::Object(out))
+}
+
+/// Bound an untrusted provider blob before it reaches SQLite.
+fn bounded(value: &Value, max_bytes: usize) -> bool {
+    serde_json::to_string(value).is_ok_and(|encoded| encoded.len() <= max_bytes)
 }
 
 /// Whether a provider can enumerate its models over HTTP.
@@ -759,11 +985,126 @@ mod tests {
     }
 
     #[test]
-    fn parse_ids_dedupes_and_ignores_empty() {
+    fn parse_models_dedupes_and_ignores_empty() {
         let body = json!({"data": [{"id": "a"}, {"id": "a"}, {"id": ""}, {"id": "b"}]});
-        assert_eq!(parse_model_ids(&body), vec!["a", "b"]);
-        assert_eq!(parse_model_ids(&json!(["x", "x", " "])), vec!["x"]);
-        assert!(parse_model_ids(&json!({"nope": []})).is_empty());
+        let parsed = parse_models(&body);
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        let parsed = parse_models(&json!(["x", "x", " "]));
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["x"]
+        );
+        assert!(parse_models(&json!({"nope": []})).is_empty());
+    }
+
+    #[test]
+    fn parse_models_keeps_deepseek_limits_modalities_and_effort() {
+        let body = json!({"object": "list", "data": [{
+            "id": "deepseek-flash",
+            "object": "model",
+            "owned_by": "deepseek",
+            "name": "DeepSeek-V4.1-Flash",
+            "context_window": 1_048_576,
+            "max_output_tokens": 393_216,
+            "input_modalities": ["text", "image", "audio"],
+            "output_modalities": ["text", "image"],
+            "effort": {
+                "supported_levels": ["low", "high", "max"],
+                "default_level": "high",
+                "ignored": true
+            },
+            "api_capabilities": {
+                "anthropic_messages": {"system_prompt_update": "in-history"}
+            }
+        }]});
+        let model = &parse_models(&body)[0];
+        assert_eq!(model.display.as_deref(), Some("DeepSeek-V4.1-Flash"));
+        assert_eq!(model.context, Some(1_048_576));
+        assert_eq!(model.max_output, Some(393_216));
+        assert_eq!(model.caps["vision"], true);
+        assert_eq!(model.caps["audio_input"], true);
+        assert_eq!(model.caps["image_output"], true);
+        assert_eq!(model.caps["audio_output"], false);
+        assert_eq!(
+            model.caps["effort"],
+            json!({"supported_levels": ["low", "high", "max"], "default_level": "high"})
+        );
+        assert_eq!(
+            model.caps["api_capabilities"],
+            json!({"anthropic_messages": {"system_prompt_update": "in-history"}})
+        );
+    }
+
+    #[test]
+    fn parse_models_reads_nested_limits_and_thinking_keys() {
+        let body = json!({"data": [{
+            "id": "core",
+            "capabilities": {
+                "vision": true,
+                "pdf": true,
+                "audioInput": false,
+                "videoInput": false,
+                "imageOutput": false,
+                "audioOutput": false,
+                "search": true,
+                "tools": true,
+                "reasoning": true,
+                "thinkingFormat": "claude-adaptive",
+                "thinkingCanDisable": true,
+                "thinkingRange": null,
+                "contextWindow": 200_000,
+                "maxOutput": 128_000
+            }
+        }]});
+        let model = &parse_models(&body)[0];
+        assert_eq!(model.context, Some(200_000));
+        assert_eq!(model.max_output, Some(128_000));
+        assert_eq!(model.caps["vision"], true);
+        assert_eq!(model.caps["audio_input"], false);
+        assert_eq!(
+            model.caps["native"],
+            json!({
+                "thinkingFormat": "claude-adaptive",
+                "thinkingCanDisable": true,
+                "thinkingRange": null
+            })
+        );
+    }
+
+    #[test]
+    fn parse_models_leaves_an_id_only_list_unenriched() {
+        let body = json!({"data": [{
+            "id": "gpt-4.1", "object": "model", "created": 1, "owned_by": "system"
+        }]});
+        let model = &parse_models(&body)[0];
+        assert_eq!(model.context, None);
+        assert_eq!(model.max_output, None);
+        assert_eq!(model.caps, json!({}));
+    }
+
+    #[test]
+    fn parse_models_refuses_hostile_metadata() {
+        let body = json!({"data": [{
+            "id": "x",
+            "context_window": 0,
+            "max_output_tokens": -1,
+            "effort": {"supported_levels": [1, 2]},
+            "api_capabilities": "nope",
+            "capabilities": {"thinkingFormat": 5, "tools": "yes"}
+        }]});
+        let model = &parse_models(&body)[0];
+        assert_eq!(model.context, None);
+        assert_eq!(model.max_output, None);
+        assert_eq!(model.caps, json!({}));
     }
 
     #[test]

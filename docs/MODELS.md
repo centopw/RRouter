@@ -4,9 +4,10 @@
 call right now, from connected providers.
 
 - **Provider lists** — adding a provider fetches its own `/models` endpoint; Fetch re-runs it.
-  Codex cannot enumerate, so its verified ids come from the built-in catalog.
+  Limits, modalities, reasoning effort and API quirks published there are kept and echoed by
+  `/v1/models`. Codex cannot enumerate, so its verified ids come from the built-in catalog.
 - **models.dev sync** — metadata only: context, output cap, capabilities and price. It never
-  adds a model.
+  adds a model. It overlays provider-native metadata field by field.
 - **Custom models** — any id with limits/capabilities/price for providers without a list.
   Custom rows win and survive syncs.
 - **Disabled models** — disabled rows leave the active table and `/v1/models`; enabling

@@ -18,52 +18,87 @@ use super::{admin_error, body_json, ok_json};
 use crate::models_registry::{self, SOURCE_CUSTOM, SOURCE_UPSTREAM};
 use crate::state::AppState;
 
+/// One `/v1/models` entry before preset grouping: the id, who owns it, and the registry
+/// row that describes its limits and capabilities.
+struct ListedModel {
+    id: String,
+    provider: String,
+    meta: Option<models_registry::ModelItem>,
+}
+
 /// Models a client can actually call: the registry (already limited to connected
 /// providers) plus aliases and combos.
 pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
     // One entry per id. A model row carries the operator's preferred provider for that
     // bare id; use it for `owned_by` only when that provider actually serves the id.
+    let registry = match models_registry::list(&state).await {
+        Ok(items) => items,
+        Err(e) => return admin_error(&e),
+    };
     let mut entries: BTreeMap<String, (String, Option<String>, bool)> = BTreeMap::new();
-    match models_registry::list(&state).await {
-        Ok(items) => {
-            for item in items {
-                // A disabled model is not callable and must not be advertised. Other
-                // enabled providers of the same id still list it below.
-                if !item.enabled {
-                    continue;
-                }
-                let entry = entries.entry(item.id).or_insert((
-                    item.provider.clone(),
-                    item.preferred_provider.clone(),
-                    false,
-                ));
-                if let Some(preferred) = &item.preferred_provider {
-                    entry.1 = Some(preferred.clone());
-                    if item.provider == *preferred {
-                        entry.2 = true;
-                    }
-                }
+    for item in &registry {
+        // A disabled model is not callable and must not be advertised. Other
+        // enabled providers of the same id still list it below.
+        if !item.enabled {
+            continue;
+        }
+        let entry = entries.entry(item.id.clone()).or_insert((
+            item.provider.clone(),
+            item.preferred_provider.clone(),
+            false,
+        ));
+        if let Some(preferred) = &item.preferred_provider {
+            entry.1 = Some(preferred.clone());
+            if item.provider == *preferred {
+                entry.2 = true;
             }
         }
-        Err(e) => return admin_error(&e),
     }
+
+    // Enrichment is resolved from the row that actually owns the id. A bare id served by
+    // several providers uses the same provider the client is routed to.
+    let by_ref: HashMap<String, models_registry::ModelItem> = registry
+        .iter()
+        .filter(|item| item.enabled)
+        .map(|item| (item.reference.clone(), item.clone()))
+        .collect();
+    let by_id: HashMap<String, models_registry::ModelItem> = registry
+        .iter()
+        .filter(|item| item.enabled)
+        .fold(HashMap::new(), |mut map, item| {
+            map.entry(item.id.clone()).or_insert_with(|| item.clone());
+            map
+        });
+    // Names the gateway owns are not registry rows. An explicit entry (even `None`)
+    // stops the generic lookup from borrowing an unrelated model's metadata.
+    let mut owned_meta: HashMap<String, Option<models_registry::ModelItem>> = HashMap::new();
+
     if let Ok(aliases) = state.store.list_aliases().await {
         for alias in aliases {
-            entries
-                .entry(alias.alias)
+            let owned = entries
+                .entry(alias.alias.clone())
                 .or_insert_with(|| ("rrouter".to_string(), None, false));
+            // An alias that collides with a real model id keeps the model's routing and
+            // metadata; only the names the gateway owns borrow a target's metadata.
+            if owned.0 == "rrouter" {
+                let meta = resolve_meta(&alias.target, &by_ref, &by_id).map(without_display);
+                owned_meta.insert(alias.alias, meta);
+            }
         }
     }
     if let Ok(combos) = state.store.list_combos().await {
         for combo in combos {
-            entries
-                .entry(combo.name)
+            let owned = entries
+                .entry(combo.name.clone())
                 .or_insert_with(|| ("rrouter".to_string(), None, false));
+            if owned.0 == "rrouter" {
+                owned_meta.insert(combo.name, combo_meta(&combo.models, &by_ref, &by_id));
+            }
         }
     }
 
     let created = crate::now_unix();
-    let models: Vec<(String, String)> = entries
+    let models: Vec<ListedModel> = entries
         .into_iter()
         .map(|(id, (fallback, preferred, preferred_serves))| {
             let owned_by = if preferred_serves {
@@ -71,11 +106,98 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
             } else {
                 fallback
             };
-            (id, owned_by)
+            let meta = match owned_meta.remove(&id) {
+                Some(explicit) => explicit,
+                None => by_ref
+                    .get(&format!("{owned_by}/{id}"))
+                    .cloned()
+                    .or_else(|| by_id.get(&id).cloned()),
+            };
+            ListedModel {
+                id,
+                provider: owned_by,
+                meta,
+            }
         })
         .collect();
     let (data, groups) = grouped_models(&state, created, models).await;
     ok_json(json!({ "object": "list", "data": data, "groups": groups }))
+}
+
+/// Resolve an alias target or combo member to its registry row.
+fn resolve_meta(
+    reference: &str,
+    by_ref: &HashMap<String, models_registry::ModelItem>,
+    by_id: &HashMap<String, models_registry::ModelItem>,
+) -> Option<models_registry::ModelItem> {
+    by_ref
+        .get(reference)
+        .cloned()
+        .or_else(|| {
+            reference
+                .split_once('/')
+                .filter(|(provider, _)| rrouter_auth::registry::get(provider).is_some())
+                .and_then(|(_, id)| by_id.get(id).cloned())
+        })
+        .or_else(|| by_id.get(reference).cloned())
+}
+
+fn without_display(mut meta: models_registry::ModelItem) -> models_registry::ModelItem {
+    meta.display = None;
+    meta
+}
+
+/// A combo can land on any member, so advertise only what every member supports and the
+/// smallest limits. Unknown members make the whole answer unknown.
+fn combo_meta(
+    members: &[String],
+    by_ref: &HashMap<String, models_registry::ModelItem>,
+    by_id: &HashMap<String, models_registry::ModelItem>,
+) -> Option<models_registry::ModelItem> {
+    let mut out: Option<models_registry::ModelItem> = None;
+    for member in members {
+        let meta = without_display(resolve_meta(member, by_ref, by_id)?);
+        out = Some(match out {
+            None => meta,
+            Some(current) => intersect_meta(current, meta),
+        });
+    }
+    out
+}
+
+fn intersect_meta(
+    mut left: models_registry::ModelItem,
+    right: models_registry::ModelItem,
+) -> models_registry::ModelItem {
+    left.context = min_limit(left.context, right.context);
+    left.max_output = min_limit(left.max_output, right.max_output);
+    left.capabilities = left.capabilities.intersect(right.capabilities);
+    left.capabilities_extra = if left.capabilities_extra == right.capabilities_extra {
+        left.capabilities_extra
+    } else {
+        None
+    };
+    left.effort = if left.effort == right.effort {
+        left.effort
+    } else {
+        None
+    };
+    left.api_capabilities = if left.api_capabilities == right.api_capabilities {
+        left.api_capabilities
+    } else {
+        None
+    };
+    left.deprecated |= right.deprecated;
+    left.display = None;
+    left.cost = None;
+    left
+}
+
+fn min_limit(left: Option<u32>, right: Option<u32>) -> Option<u32> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        _ => None,
+    }
 }
 
 /// Apply the default preset's groups and visibility to the flat `/v1/models` list.
@@ -88,7 +210,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
 async fn grouped_models(
     state: &AppState,
     created: i64,
-    models: Vec<(String, String)>,
+    models: Vec<ListedModel>,
 ) -> (Vec<Value>, Vec<Value>) {
     let layout = state
         .store
@@ -131,7 +253,9 @@ async fn grouped_models(
     let mut resolved: Vec<(String, String, String, u32)> = Vec::with_capacity(models.len());
     let mut used_groups: HashSet<String> = HashSet::new();
     let mut implicit: Vec<&str> = Vec::new();
-    for (id, provider) in &models {
+    for model in &models {
+        let id = &model.id;
+        let provider = &model.provider;
         let item = item_by_ref.get(&format!("{provider}\0{id}"));
         if !item.map(|item| item.visible).unwrap_or(auto_include) {
             continue;
@@ -222,19 +346,130 @@ async fn grouped_models(
             })
         })
         .collect();
+    let meta_by_id: HashMap<&str, &models_registry::ModelItem> = models
+        .iter()
+        .filter_map(|model| model.meta.as_ref().map(|meta| (model.id.as_str(), meta)))
+        .collect();
     let data = resolved
         .into_iter()
         .map(|(id, provider, group, _)| {
-            json!({
-                "id": id,
-                "object": "model",
-                "owned_by": provider,
-                "created": created,
-                "group": group,
-            })
+            model_json(
+                &id,
+                &provider,
+                created,
+                Some(&group),
+                meta_by_id.get(id.as_str()).copied(),
+            )
         })
         .collect();
     (data, groups)
+}
+
+/// The OpenAI model object plus the additive capability metadata clients use to pick a
+/// model. Unknown fields are omitted, never invented.
+fn model_json(
+    id: &str,
+    owned_by: &str,
+    created: i64,
+    group: Option<&str>,
+    meta: Option<&models_registry::ModelItem>,
+) -> Value {
+    let mut object = Map::new();
+    object.insert("id".into(), Value::String(id.to_string()));
+    object.insert("object".into(), Value::String("model".into()));
+    object.insert("owned_by".into(), Value::String(owned_by.to_string()));
+    object.insert("created".into(), Value::Number(created.into()));
+    if let Some(group) = group {
+        object.insert("group".into(), Value::String(group.to_string()));
+    }
+    let Some(meta) = meta else {
+        return Value::Object(object);
+    };
+    if let Some(name) = &meta.display {
+        object.insert("name".into(), Value::String(name.clone()));
+    }
+    if let Some(context) = meta.context {
+        object.insert("context_window".into(), Value::Number(context.into()));
+        object.insert("context_length".into(), Value::Number(context.into()));
+    }
+    if let Some(max_output) = meta.max_output {
+        object.insert("max_output_tokens".into(), Value::Number(max_output.into()));
+        object.insert(
+            "max_completion_tokens".into(),
+            Value::Number(max_output.into()),
+        );
+    }
+    let caps = meta.capabilities;
+    // Modalities are emitted only when something is actually known. A bare upstream id
+    // with no limits and no modality flag must not claim text-only or audio support.
+    if meta.context.is_some()
+        || meta.max_output.is_some()
+        || caps.vision
+        || caps.pdf
+        || caps.audio_input
+        || caps.video_input
+        || caps.image_output
+        || caps.audio_output
+    {
+        let mut input = vec!["text"];
+        if caps.vision {
+            input.push("image");
+        }
+        if caps.pdf {
+            input.push("pdf");
+        }
+        if caps.audio_input {
+            input.push("audio");
+        }
+        if caps.video_input {
+            input.push("video");
+        }
+        let mut output = vec!["text"];
+        if caps.image_output {
+            output.push("image");
+        }
+        if caps.audio_output {
+            output.push("audio");
+        }
+        object.insert("input_modalities".into(), json!(input));
+        object.insert("output_modalities".into(), json!(output));
+    }
+    let mut capabilities = Map::new();
+    for (key, flag) in [
+        ("vision", caps.vision),
+        ("pdf", caps.pdf),
+        ("audioInput", caps.audio_input),
+        ("videoInput", caps.video_input),
+        ("imageOutput", caps.image_output),
+        ("audioOutput", caps.audio_output),
+        ("search", caps.search),
+        ("tools", caps.tools),
+        ("reasoning", caps.reasoning),
+    ] {
+        capabilities.insert(key.into(), Value::Bool(flag));
+    }
+    if let Some(context) = meta.context {
+        capabilities.insert("contextWindow".into(), Value::Number(context.into()));
+    }
+    if let Some(max_output) = meta.max_output {
+        capabilities.insert("maxOutput".into(), Value::Number(max_output.into()));
+    }
+    if let Some(extra) = &meta.capabilities_extra {
+        for (key, value) in extra {
+            capabilities.insert(key.clone(), value.clone());
+        }
+    }
+    object.insert("capabilities".into(), Value::Object(capabilities));
+    if let Some(effort) = &meta.effort {
+        object.insert("effort".into(), effort.clone());
+    }
+    if let Some(api) = &meta.api_capabilities {
+        object.insert("api_capabilities".into(), api.clone());
+    }
+    if meta.deprecated {
+        object.insert("deprecated".into(), Value::Bool(true));
+    }
+    Value::Object(object)
 }
 
 /// `GET /v1/models/{id}`: the OpenAI model object for a routable `id` or `provider/id`.
@@ -247,13 +482,14 @@ pub async fn get_model(
     Path(reference): Path<String>,
 ) -> Response {
     let reference = reference.trim_start_matches('/');
-    match routable_owner(&state, reference).await {
-        Ok(Some(owned_by)) => ok_json(json!({
-            "id": reference,
-            "object": "model",
-            "created": crate::now_unix(),
-            "owned_by": owned_by,
-        })),
+    match routable_model(&state, reference).await {
+        Ok(Some((owned_by, meta))) => ok_json(model_json(
+            reference,
+            &owned_by,
+            crate::now_unix(),
+            None,
+            meta.as_ref(),
+        )),
         Ok(None) => crate::error::error_response(
             Dialect::OpenAiChat,
             &Error::NotFound(format!("model {reference} is not available")),
@@ -262,8 +498,12 @@ pub async fn get_model(
     }
 }
 
-/// Which provider owns `reference`, when the gateway can route it.
-async fn routable_owner(state: &AppState, reference: &str) -> rrouter_core::Result<Option<String>> {
+/// Which provider owns `reference` and what the gateway knows about the model, when it
+/// can route the name.
+async fn routable_model(
+    state: &AppState,
+    reference: &str,
+) -> rrouter_core::Result<Option<(String, Option<models_registry::ModelItem>)>> {
     // `provider/id` only splits when the prefix is a registry provider: ids such as
     // `meta-llama/Llama-3-70B` carry a slash of their own.
     let (provider, bare) = match reference.split_once('/') {
@@ -275,25 +515,43 @@ async fn routable_owner(state: &AppState, reference: &str) -> rrouter_core::Resu
         .iter()
         .find(|item| item.enabled && item.id == bare && provider.is_none_or(|p| item.provider == p))
     {
-        return Ok(Some(item.provider.clone()));
+        return Ok(Some((item.provider.clone(), Some(item.clone()))));
     }
-    if state
+
+    // Alias and combo metadata comes from the registry rows they resolve to.
+    let by_ref: HashMap<String, models_registry::ModelItem> = items
+        .iter()
+        .filter(|item| item.enabled)
+        .map(|item| (item.reference.clone(), item.clone()))
+        .collect();
+    let by_id: HashMap<String, models_registry::ModelItem> = items
+        .iter()
+        .filter(|item| item.enabled)
+        .fold(HashMap::new(), |mut map, item| {
+            map.entry(item.id.clone()).or_insert_with(|| item.clone());
+            map
+        });
+    if let Some(alias) = state
         .store
         .list_aliases()
         .await?
-        .iter()
-        .any(|a| a.alias == reference)
+        .into_iter()
+        .find(|alias| alias.alias == reference)
     {
-        return Ok(Some("rrouter".to_string()));
+        let meta = resolve_meta(&alias.target, &by_ref, &by_id).map(without_display);
+        return Ok(Some(("rrouter".to_string(), meta)));
     }
-    if state
+    if let Some(combo) = state
         .store
         .list_combos()
         .await?
-        .iter()
-        .any(|c| c.name == reference)
+        .into_iter()
+        .find(|combo| combo.name == reference)
     {
-        return Ok(Some("rrouter".to_string()));
+        return Ok(Some((
+            "rrouter".to_string(),
+            combo_meta(&combo.models, &by_ref, &by_id),
+        )));
     }
     Ok(None)
 }
@@ -682,7 +940,13 @@ async fn fetch_upstream(
         .await?;
         let items = models
             .into_iter()
-            .map(|model| (model.id, model.display))
+            .map(|model| models_registry::FetchedModel {
+                id: model.id,
+                display: model.display,
+                context: None,
+                max_output: None,
+                caps: Value::Object(Map::new()),
+            })
             .collect();
         return store_fetched(state, conn, status, items).await;
     }
@@ -726,11 +990,7 @@ async fn fetch_upstream(
         });
     }
     let body: Value = response.json().await.map_err(transport_error)?;
-    let items = models_registry::parse_model_ids(&body)
-        .into_iter()
-        .map(|id| (id, None))
-        .collect();
-    store_fetched(state, conn, status, items).await
+    store_fetched(state, conn, status, models_registry::parse_models(&body)).await
 }
 
 /// `POST <prod>/v1internal:fetchAvailableModels` with the account's Cloud project.
@@ -788,7 +1048,7 @@ async fn store_fetched(
     state: &AppState,
     conn: &Connection,
     status: u16,
-    mut items: Vec<(String, Option<String>)>,
+    mut items: Vec<models_registry::FetchedModel>,
 ) -> rrouter_core::Result<Value> {
     items.truncate(models_registry::MAX_FETCHED_IDS);
 
@@ -801,18 +1061,18 @@ async fn store_fetched(
         .collect();
     let added = items
         .iter()
-        .filter(|(id, _)| !known.contains(&(conn.provider.clone(), id.clone())))
+        .filter(|item| !known.contains(&(conn.provider.clone(), item.id.clone())))
         .count();
-    for (id, display) in &items {
+    for item in &items {
         state
             .store
             .upsert_model(&ModelRow {
                 provider: conn.provider.clone(),
-                model: id.clone(),
-                display: display.clone(),
-                context: None,
-                max_output: None,
-                caps: Value::Object(Map::new()),
+                model: item.id.clone(),
+                display: item.display.clone(),
+                context: item.context,
+                max_output: item.max_output,
+                caps: item.caps.clone(),
                 // A provider's own list carries ids, not prices; models.dev supplies them.
                 cost: None,
                 source: SOURCE_UPSTREAM.to_string(),
@@ -820,7 +1080,7 @@ async fn store_fetched(
             })
             .await?;
     }
-    let ids: Vec<String> = items.into_iter().map(|(id, _)| id).collect();
+    let ids: Vec<String> = items.into_iter().map(|item| item.id).collect();
     Ok(json!({
         "provider": conn.provider,
         "status": status,

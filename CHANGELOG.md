@@ -2,6 +2,22 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.8.0 — 2026-11-11
+
+### Added
+- `/v1/models` and `/v1/models/{id}` entries now carry model metadata: `name`,
+  `context_window`/`context_length`, `max_output_tokens`/`max_completion_tokens`,
+  `input_modalities`, `output_modalities`, the nine capability flags in camelCase,
+  provider-published `effort` and `api_capabilities`, and `deprecated` when known.
+  The OpenAI list shape stays additive and unchanged for clients that ignore the fields.
+- Provider `/models` fetches now keep native metadata instead of only ids: DeepSeek-style
+  top-level limits and modalities, and 9router-style `capabilities` with
+  `thinkingFormat`/`thinkingRange` are normalized and stored. An id-only list (OpenAI)
+  still works and is enriched from models.dev or operator rows.
+- Alias entries borrow their target's metadata. Combo entries advertise the conservative
+  intersection of their members: smallest context/output and only capabilities every
+  member supports; an unresolved member leaves the combo metadata unknown.
+
 ## 0.7.3 — 2026-11-11
 
 ### Fixed

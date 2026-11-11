@@ -43,6 +43,29 @@ discovery policy: an item hidden in it, or a group toggled off, is omitted from 
 unaffected, so hidden models still work when a client names them explicitly. A client that
 ignores `groups` still reads a normal OpenAI `data` list.
 
+Every entry also carries the registry's model metadata, so a client can choose a model
+without a second lookup. Unknown fields are omitted, never invented:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Operator/provider display name. |
+| `context_window`, `context_length` | Context window in tokens (both spellings). |
+| `max_output_tokens`, `max_completion_tokens` | Output cap in tokens (both spellings). |
+| `input_modalities` / `output_modalities` | Derived from the capability flags: `text`, `image`, `pdf`, `audio`, `video`. |
+| `capabilities` | The nine flags in camelCase (`vision`, `pdf`, `audioInput`, `videoInput`, `imageOutput`, `audioOutput`, `search`, `tools`, `reasoning`), plus `contextWindow`/`maxOutput` and provider-native reasoning keys such as `thinkingFormat`. |
+| `effort` | Provider-published reasoning levels (`supported_levels`, `default_level`). |
+| `api_capabilities` | Provider-published API quirks (for example Anthropic message rules). |
+| `deprecated` | Present and `true` when the catalog marks the family retired. |
+
+Limits, modalities, `effort` and `api_capabilities` are stored from the provider's own
+`/models` response when it publishes them (DeepSeek and 9router-style gateways do), and are
+overlaid by the models.dev sync and operator-defined rows. An id-only provider list (OpenAI)
+gets enrichment only from those sources. Aliases borrow their target's metadata; a combo
+advertises the conservative intersection of its members (smallest context/output, capability
+flags every member has) and omits metadata when a member cannot be resolved.
+
+`GET /v1/models/{id}` returns the same object for one routable id (with no `group`).
+
 ## Web search
 
 `POST /v1/search` runs a provider's own hosted search tool and returns one answer with
