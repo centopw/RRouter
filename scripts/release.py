@@ -447,7 +447,7 @@ def publish(root: Path, version: str, verify: bool) -> int:
     if existing:
         print(f"release: tag v{version} already exists", file=sys.stderr)
         return 1
-    git(root, "add", *sorted(allowed))
+    git(root, "add", "-u", *sorted(allowed))
     dirty = git(root, "diff", "--cached", "--quiet", check=False).returncode != 0
     if dirty:
         git(root, "commit", "-m", f"chore(release): v{version}")
