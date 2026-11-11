@@ -781,7 +781,7 @@ fn v15_database_migrates_to_current_with_the_scope_column() {
         // Start from the current schema, then remove exactly what v16 adds.
         drop(Store::open(&dir.db(), None).expect("current schema"));
         rewind_past_v24(&conn);
-        conn.execute_batch("ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 15;")
+        conn.execute_batch("ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; ALTER TABLE api_keys DROP COLUMN owner_user_id; PRAGMA user_version = 15;")
             .expect("rewind to v15");
         conn.execute(
             "INSERT INTO api_keys (id, key_hash, name, is_active, created_at) \
@@ -1378,7 +1378,7 @@ fn v10_database_migrates_to_current() {
         conn.execute_batch(
             "DROP TABLE response_cache; ALTER TABLE api_keys DROP COLUMN budget_window; \
              ALTER TABLE api_keys DROP COLUMN guardrails; \
-             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 10;",
+             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; ALTER TABLE api_keys DROP COLUMN owner_user_id; PRAGMA user_version = 10;",
         )
         .expect("rewind to v10");
     }
@@ -2466,7 +2466,7 @@ fn v11_database_migrates_to_current_with_total_windows() {
         conn.execute_batch(
             "ALTER TABLE api_keys DROP COLUMN budget_window; \
              ALTER TABLE api_keys DROP COLUMN guardrails; \
-             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 11;",
+             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; ALTER TABLE api_keys DROP COLUMN owner_user_id; PRAGMA user_version = 11;",
         )
         .expect("rewind to v11");
         conn.execute(
@@ -2506,7 +2506,7 @@ fn v12_database_migrates_to_current_with_the_attempt_ts_index() {
         rewind_past_v24(&conn);
         conn.execute_batch(
             "DROP INDEX idx_attempts_ts; ALTER TABLE api_keys DROP COLUMN guardrails; \
-             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 12;",
+             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; ALTER TABLE api_keys DROP COLUMN owner_user_id; PRAGMA user_version = 12;",
         )
         .expect("rewind to v12");
     }
@@ -2887,7 +2887,7 @@ fn v13_database_migrates_to_current_with_the_guardrails_column() {
         rewind_past_v24(&conn);
         conn.execute_batch(
             "ALTER TABLE api_keys DROP COLUMN guardrails; \
-             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 13;",
+             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; ALTER TABLE api_keys DROP COLUMN owner_user_id; PRAGMA user_version = 13;",
         )
         .expect("rewind to v13");
         conn.execute(
@@ -2935,7 +2935,7 @@ fn v14_database_migrates_to_current_with_the_template_tables() {
         rewind_past_v24(&conn);
         conn.execute_batch(
             "DROP TABLE prompt_template_versions; DROP TABLE prompt_templates; \
-             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 14;",
+             ALTER TABLE api_keys DROP COLUMN scope; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; ALTER TABLE api_keys DROP COLUMN owner_user_id; PRAGMA user_version = 14;",
         )
         .expect("rewind to v14");
         conn.execute(
@@ -3909,7 +3909,7 @@ fn v16_database_migrates_to_current_with_account_quotas() {
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("raw");
         rewind_past_v24(&conn);
-        conn.execute_batch("DROP TABLE account_quotas; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 16;")
+        conn.execute_batch("DROP TABLE account_quotas; ALTER TABLE usage DROP COLUMN upstream_ms; ALTER TABLE user_sessions DROP COLUMN remember; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; ALTER TABLE api_keys DROP COLUMN owner_user_id; PRAGMA user_version = 16;")
             .expect("rewind to v16");
     }
     let store = Store::open(&dir.db(), None).expect("open runs the v17 step");
@@ -3956,7 +3956,7 @@ fn v17_database_migrates_to_current_with_users() {
         rewind_past_v24(&conn);
         conn.execute_batch(
             "DROP TABLE invites; DROP TABLE user_recovery_codes; DROP TABLE user_sessions; \
-             DROP TABLE users; ALTER TABLE usage DROP COLUMN upstream_ms; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; PRAGMA user_version = 17;",
+             DROP TABLE users; ALTER TABLE usage DROP COLUMN upstream_ms; DROP TABLE IF EXISTS team_members; DROP TABLE IF EXISTS teams; DROP INDEX IF EXISTS idx_usage_team_ts; DROP INDEX IF EXISTS idx_usage_connection_ts; ALTER TABLE api_keys DROP COLUMN team_id; ALTER TABLE usage DROP COLUMN team_id; ALTER TABLE api_keys DROP COLUMN owner_user_id; PRAGMA user_version = 17;",
         )
         .expect("rewind to v17");
     }
@@ -4094,8 +4094,10 @@ fn v24_database_upgrades_with_legacy_rows_shared() {
     {
         let conn = rusqlite::Connection::open(dir.db()).expect("raw");
         rewind_past_v24(&conn);
-        conn.execute_batch("PRAGMA user_version = 24;")
-            .expect("rewind to v24");
+        conn.execute_batch(
+            "ALTER TABLE api_keys DROP COLUMN owner_user_id; PRAGMA user_version = 24;",
+        )
+        .expect("rewind to v24");
         conn.execute(
             "INSERT INTO usage (ts, provider, model, status, connection_id) \
              VALUES (1, 'openai', 'gpt-4.1', 200, ?1)",

@@ -244,6 +244,31 @@ impl Harness {
         .await
     }
 
+    async fn get_as(&self, uri: &str, token: &str) -> (StatusCode, Value) {
+        self.call(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+    }
+
+    async fn post_as(&self, uri: &str, token: &str, body: Value) -> (StatusCode, Value) {
+        self.call(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+    }
+
     async fn send(&self, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
         self.call(
             Request::builder()
@@ -566,6 +591,181 @@ async fn v1_models_carry_limits_capabilities_and_native_metadata() {
     );
 }
 
+/// A free-form group's name is a model-id prefix: `/v1/models` advertises it, the
+/// by-id lookup resolves it, and a chat request routes through the group's members.
+#[tokio::test]
+async fn free_form_group_name_is_a_routable_alias() {
+    let h = harness();
+    let mock = start_mock().await;
+    h.connect("openai", &mock).await;
+    let preset = h
+        .state
+        .store
+        .default_model_preset()
+        .await
+        .expect("preset lookup")
+        .expect("seeded default");
+    let layout = LayoutDocument {
+        schema_version: rrouter_store::LAYOUT_SCHEMA_VERSION,
+        auto_include_new: true,
+        groups: vec![LayoutGroup {
+            id: "g-main".into(),
+            name: "main".into(),
+            provider: None,
+            visible: true,
+            access: None,
+        }],
+        items: vec![LayoutItem {
+            provider: "openai".into(),
+            id: "gpt-4.1".into(),
+            group: Some("g-main".into()),
+            position: 0,
+            visible: true,
+            last_visible_position: None,
+            hidden_at: None,
+        }],
+    };
+    h.state
+        .store
+        .update_model_preset_layout(preset.id, preset.revision, &layout, "test")
+        .await
+        .expect("layout write");
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|model| model["id"] == "main/gpt-4.1")
+        .unwrap_or_else(|| panic!("group-qualified id missing: {body}"));
+    assert_eq!(listed["model"], "gpt-4.1");
+    assert_eq!(listed["owned_by"], "openai");
+    assert_eq!(listed["group"], "g-main");
+
+    let (status, body) = h.get("/v1/models/main/gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "main/gpt-4.1");
+    assert_eq!(body["model"], "gpt-4.1");
+    assert_eq!(body["owned_by"], "openai");
+
+    let (status, body) = h
+        .post(
+            "/v1/chat/completions",
+            json!({
+                "model": "main/gpt-4.1",
+                "messages": [{"role": "user", "content": "ping"}],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "pong");
+}
+
+/// Group grants scope discovery, the by-id lookup and the group alias itself.
+#[tokio::test]
+async fn group_access_scopes_discovery_lookup_and_routing() {
+    let h = harness();
+    let mock = start_mock().await;
+    h.connect("openai", &mock).await;
+    let (allowed_secret, allowed) = h
+        .state
+        .store
+        .create_api_key(Some("group-allowed"))
+        .await
+        .expect("allowed key");
+    let (denied_secret, _) = h
+        .state
+        .store
+        .create_api_key(Some("group-denied"))
+        .await
+        .expect("denied key");
+    let preset = h
+        .state
+        .store
+        .default_model_preset()
+        .await
+        .expect("preset lookup")
+        .expect("seeded default");
+    let layout = LayoutDocument {
+        schema_version: rrouter_store::LAYOUT_SCHEMA_VERSION,
+        auto_include_new: true,
+        groups: vec![LayoutGroup {
+            id: "g-main".into(),
+            name: "main".into(),
+            provider: None,
+            visible: true,
+            access: None,
+        }],
+        items: vec![LayoutItem {
+            provider: "openai".into(),
+            id: "gpt-4.1".into(),
+            group: Some("g-main".into()),
+            position: 0,
+            visible: true,
+            last_visible_position: None,
+            hidden_at: None,
+        }],
+    };
+    h.state
+        .store
+        .update_model_preset_layout(preset.id, preset.revision, &layout, "test")
+        .await
+        .expect("layout write");
+    let (status, body) = h
+        .send(
+            "PUT",
+            "/api/model-groups/g-main/access",
+            json!({"keys": [allowed.id]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["group_id"], "g-main");
+    assert_eq!(body["access"]["keys"], json!([allowed.id]));
+
+    let listed = |body: &Value| {
+        body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .any(|model| model["id"] == "main/gpt-4.1")
+    };
+    let (_, anonymous) = h.get("/v1/models").await;
+    assert!(!listed(&anonymous), "anonymous sees no restricted group");
+    let (_, permitted) = h.get_as("/v1/models", &allowed_secret).await;
+    assert!(listed(&permitted), "granted key sees the group");
+    let (_, denied) = h.get_as("/v1/models", &denied_secret).await;
+    assert!(!listed(&denied), "ungranted key sees no restricted group");
+
+    assert_eq!(
+        h.get("/v1/models/main/gpt-4.1").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, body) = h.get_as("/v1/models/main/gpt-4.1", &allowed_secret).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "main/gpt-4.1");
+
+    let chat = json!({
+        "model": "main/gpt-4.1",
+        "messages": [{"role": "user", "content": "ping"}],
+    });
+    assert_eq!(
+        h.post("/v1/chat/completions", chat.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.post_as("/v1/chat/completions", &denied_secret, chat.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, body) = h
+        .post_as("/v1/chat/completions", &allowed_secret, chat)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "pong");
+}
+
 /// `/v1/models` stays an OpenAI list but carries additive group metadata. With no
 /// customized preset every provider is an implicit bucket; a default preset can rename
 /// the buckets, add a mixed group and reorder them without changing the model set.
@@ -608,18 +808,21 @@ async fn v1_models_groups_follow_the_default_preset() {
                 name: "Fast".into(),
                 provider: None,
                 visible: true,
+                access: None,
             },
             LayoutGroup {
                 id: "provider:openai".into(),
                 name: "OpenAI custom".into(),
                 provider: Some("openai".into()),
                 visible: true,
+                access: None,
             },
             LayoutGroup {
                 id: "provider:anthropic".into(),
                 name: "Anthropic custom".into(),
                 provider: Some("anthropic".into()),
                 visible: true,
+                access: None,
             },
         ],
         items: vec![
@@ -662,7 +865,7 @@ async fn v1_models_groups_follow_the_default_preset() {
     let data = body["data"].as_array().expect("data");
     let gpt = data
         .iter()
-        .find(|model| model["id"] == "openai/gpt-4.1" && model["owned_by"] == "openai")
+        .find(|model| model["id"] == "Fast/gpt-4.1" && model["owned_by"] == "openai")
         .expect("gpt-4.1 after grouping");
     assert_eq!(gpt["group"], "g-fast");
     let claude = data
@@ -674,7 +877,7 @@ async fn v1_models_groups_follow_the_default_preset() {
     assert_eq!(claude["group"], "provider:anthropic");
     assert_eq!(
         data.first().map(|model| model["id"].clone()),
-        Some(Value::String("openai/gpt-4.1".into())),
+        Some(Value::String("Fast/gpt-4.1".into())),
         "the custom group is first: {body}"
     );
     // Grouping does not hide models: every entry still reports a group.
@@ -698,6 +901,7 @@ async fn v1_models_groups_follow_the_default_preset() {
         name: "Gone".into(),
         provider: Some("gone".into()),
         visible: true,
+        access: None,
     });
     stale.items.push(LayoutItem {
         provider: "gone".into(),
@@ -748,6 +952,7 @@ async fn v1_models_groups_follow_the_default_preset() {
             name: "Hidden".into(),
             provider: None,
             visible: false,
+            access: None,
         }],
         items: vec![
             LayoutItem {
@@ -847,6 +1052,7 @@ async fn v1_models_groups_follow_the_default_preset() {
         name: "Hidden names".into(),
         provider: None,
         visible: false,
+        access: None,
     });
     aliases_hidden.items.extend([
         LayoutItem {

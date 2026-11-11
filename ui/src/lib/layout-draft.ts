@@ -3,6 +3,7 @@ import {
   ApiError,
   api,
   LAYOUT_SCHEMA_VERSION,
+  type GroupAccess,
   type LayoutDocument,
   type ModelPreset,
 } from "./api";
@@ -43,6 +44,8 @@ export type DraftGroup = {
   provider?: string;
   /** Whether the group and its models are advertised by `/v1/models`. */
   visible: boolean;
+  /** Team/key/user grants; absent means the group is open to every caller. */
+  access?: GroupAccess;
 };
 
 export type DraftState = "clean" | "dirty" | "saving" | "conflict";
@@ -143,6 +146,7 @@ export function layoutFor(
       name: group.name,
       ...(group.provider === undefined ? {} : { provider: group.provider }),
       visible: group.visible,
+      ...(group.access === undefined ? {} : { access: group.access }),
     })),
     items: [
       ...items(entries.filter((entry) => entry.visible)),

@@ -12,13 +12,19 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 34;
+pub const SCHEMA_VERSION: i64 = 35;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35,
 ];
+
+/// V35: API-key ownership. A key can belong to a user as well as a team; group access
+/// grants can target that user. Existing keys stay ownerless (instance-wide).
+const V35: &str = r#"
+ALTER TABLE api_keys ADD COLUMN owner_user_id TEXT;
+"#;
 
 /// V34: subscription quota auto-ping. `quota_pings` is one operator configuration per
 /// connection (absent means the API's off defaults); `quota_ping_samples` is the rolling

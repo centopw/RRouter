@@ -180,6 +180,10 @@ pub fn app(state: Arc<AppState>) -> Router {
             put(routes::model_presets::save_layout),
         )
         .route(
+            "/model-groups/{group_id}/access",
+            put(routes::model_presets::set_group_access),
+        )
+        .route(
             "/model-presets/{id}/default",
             post(routes::model_presets::set_default),
         )
@@ -748,25 +752,34 @@ pub(crate) fn overloaded_response(inbound: rrouter_core::Dialect) -> Response {
 /// `/v1/models` takes a concurrency slot like every other `/v1/*` route: a client that
 /// saturates the gateway is told to back off whatever it asks for. The catalog answer is
 /// built in memory, so the permit ends with this scope.
-async fn v1_models(axum::extract::State(state): axum::extract::State<Arc<AppState>>) -> Response {
+async fn v1_models(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     let _permit = match state.try_slot() {
         state::Slot::Granted(permit) => permit,
         state::Slot::Full => return overloaded_response(rrouter_core::Dialect::OpenAiChat),
     };
-    routes::models::list_models(axum::extract::State(state)).await
+    routes::models::list_models(axum::extract::State(state), headers).await
 }
 
 /// `GET /v1/models/{id}` shares `/v1/models`' slot rule: a catalog answer is still a
 /// `/v1/*` request, and the id may contain slashes (`openai/gpt-image-1`).
 async fn v1_model(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
     let _permit = match state.try_slot() {
         state::Slot::Granted(permit) => permit,
         state::Slot::Full => return overloaded_response(rrouter_core::Dialect::OpenAiChat),
     };
-    routes::models::get_model(axum::extract::State(state), axum::extract::Path(id)).await
+    routes::models::get_model(
+        axum::extract::State(state),
+        headers,
+        axum::extract::Path(id),
+    )
+    .await
 }
 
 /// `403 admin_required`: a live key asked for admin surface with `scope=inference`.

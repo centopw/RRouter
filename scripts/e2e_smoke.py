@@ -249,7 +249,7 @@ def main():
             st, listed = http("GET", "/v1/models")
             models = json.loads(listed)
             groups = models.get("groups") or []
-            gpt = next((m for m in models.get("data", []) if m.get("id") == "openai/gpt-4.1"), {})
+            gpt = next((m for m in models.get("data", []) if m.get("id") == "Fast/gpt-4.1"), {})
             check("v1/models groups use the preset name and order",
                   st == 200 and groups and groups[0].get("name") == "Fast",
                   str(groups)[:100])

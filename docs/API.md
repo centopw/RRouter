@@ -43,16 +43,34 @@ discovery policy: an item hidden in it, or a group toggled off, is omitted from 
 unaffected, so hidden models still work when a client names them explicitly. A client that
 ignores `groups` still reads a normal OpenAI `data` list.
 
-Every entry is identified as `provider/model`, the same reference routing accepts. Names the
-gateway owns (aliases, combos) stay bare, matching their own routing syntax. Each provider
-entry also carries `model` with the bare id, so a client never has to split the id.
+Every entry is identified by the route a client should use: a free-form group's name plus
+the model id (`main/deepseek-v4.1-flash`), the provider id for a provider bucket
+(`opencode-go/...`), or the bare alias/combo name. The planner resolves a group name to the
+models the board places in that group, so the provider is still chosen by the gateway. Each
+provider entry also carries `model` with the bare id, so a client never has to split the id.
+
+Group access is opt-in. A group with no `access` object is open to everyone; otherwise
+`/v1/models` omits it (and its models) unless the caller's key, key team or key owner is
+granted, and the `<group>/<model>` alias answers `403` for an ungranted caller.
+
+```sh
+# Open the group to everyone, or restrict it to identities:
+curl -X PUT localhost:20128/api/model-groups/g-main/access \
+  -H "Content-Type: application/json" \
+  -d '{"keys":["<key-uuid>"],"teams":[],"users":[]}'
+curl -X PUT localhost:20128/api/model-groups/g-main/access \
+  -H "Content-Type: application/json" -d '{"all":true}'
+```
+
+A gateway key can carry `owner_user_id` (a user uuid), so user-targeted grants match the
+key's owner. Existing keys are ownerless until set.
 
 Every entry also carries the registry's model metadata, so a client can choose a model
 without a second lookup. Unknown fields are omitted, never invented:
 
 | Field | Meaning |
 | --- | --- |
-| `id` | `provider/model` for a provider model; the alias/combo name otherwise. |
+| `id` | `<group>/<model>` for a free-form group, `<provider>/<model>` for a provider bucket, or the alias/combo name. |
 | `model` | Bare model id for provider entries (absent on aliases and combos). |
 | `name` | Operator/provider display name. |
 | `context_window`, `context_length` | Context window in tokens (both spellings). |

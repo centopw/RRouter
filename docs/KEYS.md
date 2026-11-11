@@ -11,10 +11,15 @@ A gateway key is a credential plus the limits an operator needs.
 | `allowed_models` | exact refs or `provider/*` globs; otherwise `403 model_not_allowed` |
 | `expires_at` | after that moment `403 api_key_expired` |
 | `guardrails` | prompt cap, blocked phrases, output scan, PII redaction |
+| `owner_user_id` | the person the key belongs to; user-targeted model-group grants match it |
 
 Spend is read from the usage table, not a drifting counter. The API Keys page edits limits,
 renames keys, maps models and shows spend. Keys are stored as SHA-256 hashes; plaintext is
 shown once.
+
+Model groups can be granted to a team, a key or a user, or left open to everyone. A key's
+team and `owner_user_id` are both identities for those grants, so a team grant covers its
+keys and a user grant covers keys created by that user.
 
 ## Teams
 

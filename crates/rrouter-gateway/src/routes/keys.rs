@@ -56,6 +56,7 @@ fn row(
         "expires_at": key.expires_at,
         "guardrails": key.guardrails,
         "team_id": team_id.map(|team| team.to_string()),
+        "owner_user_id": key.owner_user_id.map(|user| user.to_string()),
         "models": models_value(models),
     })
 }
@@ -180,9 +181,25 @@ pub async fn create(
         Ok(team) => team.flatten(),
         Err(e) => return admin_error(&e),
     };
+    let owner_user_id = match value.get("owner_user_id") {
+        Some(Value::Null) => None,
+        Some(raw) => match raw.as_str().and_then(|id| uuid::Uuid::parse_str(id).ok()) {
+            Some(user) => Some(user),
+            None => {
+                return admin_error(&Error::BadRequest(
+                    "owner_user_id must be a uuid or null".into(),
+                ))
+            }
+        },
+        // A key created from the dashboard belongs to the signed-in user; the owner is
+        // the identity user-targeted group grants match.
+        None => super::auth::current_user(&state, &headers)
+            .await
+            .map(|user| user.id),
+    };
     match state
         .store
-        .create_api_key_in_team(name.as_deref(), team_id)
+        .create_api_key_for(name.as_deref(), team_id, owner_user_id)
         .await
     {
         Ok((plaintext, key)) => {
@@ -534,6 +551,19 @@ fn patch_from(value: &Value) -> Result<ApiKeyPatch, Error> {
                 patch.expires_at = Some(match raw {
                     Value::Null => None,
                     other => Some(i64_field(other, "expires_at")?),
+                });
+            }
+            "owner_user_id" => {
+                patch.owner_user_id = Some(match raw {
+                    Value::Null => None,
+                    Value::String(id) => Some(uuid::Uuid::parse_str(id).map_err(|_| {
+                        Error::BadRequest("owner_user_id must be a uuid or null".into())
+                    })?),
+                    _ => {
+                        return Err(Error::BadRequest(
+                            "owner_user_id must be a uuid or null".into(),
+                        ))
+                    }
                 });
             }
             "guardrails" => {

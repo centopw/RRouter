@@ -54,6 +54,7 @@ import {
   useAliases,
   useCombos,
   useIsAdmin,
+  useKeys,
   useModelProviders,
   useModels,
   usePatchPreset,
@@ -61,6 +62,8 @@ import {
   usePresetLayout,
   useActivatePreset,
   useMakeDefaultPreset,
+  useTeams,
+  useUsers,
 } from "../lib/queries";
 import {
   ApiError,
@@ -68,11 +71,15 @@ import {
   type Alias,
   type Capabilities,
   type Combo,
+  type KeyResult,
   type Model,
   type ModelProvider,
   type ModelTest,
   type SyncResult,
+  type Team,
+  setGroupAccess,
 } from "../lib/api";
+import type { AuthUser } from "../lib/auth";
 
 const ALL = "all";
 /** Page sizes the registry offers; 50 is the default because it fills a laptop viewport. */
@@ -535,7 +542,10 @@ export default function Models() {
               >
                 {m.id}
               </span>
-              <CopyIconButton value={m.ref} label={`Copy ${m.ref}`} />
+              <CopyIconButton
+                value={groupModelRef(m, groupOf(m.ref), groupChoices)}
+                label={`Copy model reference ${m.id}`}
+              />
               <CoveragePeers
                 model={m}
                 peers={coverage.get(m.id) ?? []}
@@ -1204,6 +1214,7 @@ export default function Models() {
         candidates={groupCandidates}
         onAssign={(ref, group) => layoutDraft.assignGroup(ref, group)}
         onSetVisible={(id, visible) => layoutDraft.setGroupVisible(id, visible)}
+        isDefault={presetId === presets.data?.default_id}
       />
 
       {customOpen ? (
@@ -1511,7 +1522,10 @@ function ModelCardBody({
                 >
                   {m.id}
                 </h3>
-                <CopyIconButton value={m.ref} label={`Copy ${m.ref}`} />
+                <CopyIconButton
+                  value={groupModelRef(m, currentGroup, groups)}
+                  label={`Copy model reference ${m.id}`}
+                />
                 <CoveragePeers
                   model={m}
                   peers={coverageFor(m.id)}
@@ -1683,6 +1697,16 @@ function AliasesCombosCard({
   );
 }
 
+/** The `/v1/models` id for a row: group name for a free-form group, provider otherwise. */
+function groupModelRef(
+  model: Model,
+  groupId: string | undefined,
+  groups: Array<DraftGroup & { implicit?: boolean }> | undefined,
+): string {
+  const group = groups?.find((candidate) => candidate.id === groupId);
+  return group && !group.provider ? `${group.name}/${model.id}` : model.ref;
+}
+
 /** A section title above one group's table; the controls live in the group manager. */
 function GroupHeading({
   group,
@@ -1754,6 +1778,7 @@ function GroupManager({
   candidates,
   onAssign,
   onSetVisible,
+  isDefault,
 }: {
   open: boolean;
   groups: Array<DraftGroup & { implicit?: boolean }>;
@@ -1766,10 +1791,16 @@ function GroupManager({
   candidates: GroupCandidate[];
   onAssign: (ref: string, group: string | null) => void;
   onSetVisible: (id: string, visible: boolean) => void;
+  isDefault: boolean;
 }) {
   const [name, setName] = useState("");
   const [openModels, setOpenModels] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [accessFor, setAccessFor] = useState<DraftGroup | null>(null);
+  const admin = useIsAdmin();
+  const teams = useTeams();
+  const keys = useKeys(admin);
+  const users = useUsers(admin);
   useEffect(() => {
     if (open) {
       setName("");
@@ -1798,6 +1829,19 @@ function GroupManager({
             <Badge tone={group.provider ? "neutral" : "accent"}>
               {group.provider ? "provider" : "custom"}
             </Badge>
+            <Button
+              variant="quiet"
+              ariaLabel={`Access for ${group.name}`}
+              disabled={!isDefault}
+              title={
+                isDefault
+                  ? "Team, key and user access for this group"
+                  : "Access is stored on the instance default preset"
+              }
+              onClick={() => setAccessFor(group)}
+            >
+              {group.access ? "restricted" : "access"}
+            </Button>
             <span className="flex items-center gap-1.5 text-caption text-faint">
               <Toggle
                 size="sm"
@@ -1914,6 +1958,147 @@ function GroupManager({
           add group
         </Button>
       </form>
+      {accessFor ? (
+        <GroupAccessDialog
+          group={accessFor}
+          teams={teams.data ?? []}
+          keys={keys.data ?? []}
+          users={users.data ?? []}
+          onClose={() => setAccessFor(null)}
+        />
+      ) : null}
+    </Modal>
+  );
+}
+
+/** Team/key/user grants for one group. `Everyone` clears the access object. */
+function GroupAccessDialog({
+  group,
+  teams,
+  keys,
+  users,
+  onClose,
+}: {
+  group: DraftGroup;
+  teams: Team[];
+  keys: KeyResult[];
+  users: AuthUser[];
+  onClose: () => void;
+}) {
+  const client = useQueryClient();
+  const [everyone, setEveryone] = useState(!group.access);
+  const [teamIds, setTeamIds] = useState<string[]>(group.access?.teams ?? []);
+  const [keyIds, setKeyIds] = useState<string[]>(group.access?.keys ?? []);
+  const [userIds, setUserIds] = useState<string[]>(group.access?.users ?? []);
+  const save = useMutation({
+    mutationFn: () =>
+      setGroupAccess(
+        group.id,
+        everyone
+          ? null
+          : {
+              teams: teamIds,
+              keys: keyIds,
+              users: userIds,
+            },
+      ),
+    onSuccess: () => {
+      void client.invalidateQueries();
+      onClose();
+    },
+  });
+  const section = (
+    title: string,
+    rows: Array<{ id: string; label: string }>,
+    selected: string[],
+    set: (next: string[]) => void,
+  ) => (
+    <div className="min-w-0">
+      <div className="text-caption uppercase tracking-[0.06em] text-faint">{title}</div>
+      <div className="mt-1 max-h-36 overflow-y-auto rounded-lg border border-line bg-surface-2 p-1">
+        {rows.length === 0 ? (
+          <div className="px-2 py-1.5 text-small text-faint">none</div>
+        ) : (
+          rows.map((row) => (
+            <div
+              key={row.id}
+              className="flex items-center gap-2 rounded px-2 py-1 text-small hover:bg-surface-3"
+            >
+              <Checkbox
+                checked={selected.includes(row.id)}
+                label={row.label}
+                onChange={() =>
+                  set(
+                    selected.includes(row.id)
+                      ? selected.filter((item) => item !== row.id)
+                      : [...selected, row.id],
+                  )
+                }
+              />
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+  return (
+    <Modal
+      title={`access · ${group.name}`}
+      description="Who may use this group's /v1/models entry and its group/model alias."
+      open
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>cancel</Button>
+          <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
+            save access
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <label className="flex items-center gap-2 text-body">
+          <input
+            type="radio"
+            name={`access-${group.id}`}
+            checked={everyone}
+            onChange={() => setEveryone(true)}
+          />
+          Everyone
+        </label>
+        <label className="flex items-center gap-2 text-body">
+          <input
+            type="radio"
+            name={`access-${group.id}`}
+            checked={!everyone}
+            onChange={() => setEveryone(false)}
+          />
+          Only selected teams, keys and users
+        </label>
+        {!everyone ? (
+          <>
+            {section(
+              "teams",
+              teams.map((team) => ({ id: team.id, label: team.name })),
+              teamIds,
+              setTeamIds,
+            )}
+            {section(
+              "api keys",
+              keys.map((key) => ({ id: key.id, label: key.name ?? key.id.slice(0, 8) })),
+              keyIds,
+              setKeyIds,
+            )}
+            {section(
+              "users",
+              users.map((user) => ({ id: user.id, label: `${user.name} · ${user.email}` })),
+              userIds,
+              setUserIds,
+            )}
+          </>
+        ) : null}
+        {save.error ? <ErrorNote error={save.error} /> : null}
+      </div>
     </Modal>
   );
 }

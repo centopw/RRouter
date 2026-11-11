@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::{admin_error, body_json, ok_json};
 use crate::models_registry::{self, SOURCE_CUSTOM, SOURCE_UPSTREAM};
-use crate::state::AppState;
+use crate::state::{AppState, Caller};
 
 /// One `/v1/models` entry before preset grouping: the id, who owns it, and the registry
 /// row that describes its limits and capabilities.
@@ -27,8 +27,15 @@ struct ListedModel {
 }
 
 /// Models a client can actually call: the registry (already limited to connected
-/// providers) plus aliases and combos.
-pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
+/// providers) plus aliases and combos. Group grants filter both explicit groups and
+/// their models; implicit provider buckets stay open.
+pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let caller = match state.authenticate(&headers).await {
+        Ok(caller) => caller,
+        Err(e) => {
+            return crate::error::error_response(Dialect::OpenAiChat, &e);
+        }
+    };
     // One entry per id. A model row carries the operator's preferred provider for that
     // bare id; use it for `owned_by` only when that provider actually serves the id.
     let registry = match models_registry::list(&state).await {
@@ -120,7 +127,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
             }
         })
         .collect();
-    let (data, groups) = grouped_models(&state, created, models).await;
+    let (data, groups) = grouped_models(&state, created, models, &caller).await;
     ok_json(json!({ "object": "list", "data": data, "groups": groups }))
 }
 
@@ -211,6 +218,7 @@ async fn grouped_models(
     state: &AppState,
     created: i64,
     models: Vec<ListedModel>,
+    caller: &Caller,
 ) -> (Vec<Value>, Vec<Value>) {
     let layout = state
         .store
@@ -235,6 +243,20 @@ async fn grouped_models(
     let provider_groups: HashMap<&str, &str> = explicit_groups
         .iter()
         .filter_map(|group| group.provider.as_deref().map(|p| (p, group.id.as_str())))
+        .collect();
+    // A group grant scopes discovery: its models and bucket disappear for callers that
+    // do not match. Implicit provider buckets have no grant and stay open.
+    let denied: HashSet<&str> = explicit_groups
+        .iter()
+        .filter(|group| {
+            !rrouter_store::LayoutDocument::allows(
+                group,
+                caller.key_id(),
+                caller.team_id(),
+                caller.owner_user_id(),
+            )
+        })
+        .map(|group| group.id.as_str())
         .collect();
     let item_by_ref: HashMap<String, &rrouter_store::LayoutItem> = layout
         .as_ref()
@@ -280,6 +302,9 @@ async fn grouped_models(
             .get(group.as_str())
             .is_some_and(|group| !group.visible)
         {
+            continue;
+        }
+        if denied.contains(group.as_str()) {
             continue;
         }
         used_groups.insert(group.clone());
@@ -350,11 +375,32 @@ async fn grouped_models(
         .iter()
         .filter_map(|model| model.meta.as_ref().map(|meta| (model.id.as_str(), meta)))
         .collect();
+    let group_meta: HashMap<&str, (&str, Option<&str>)> = group_order
+        .iter()
+        .map(|(id, name, provider)| (id.as_str(), (name.as_str(), provider.as_deref())))
+        .collect();
     let data = resolved
         .into_iter()
         .map(|(id, provider, group, _)| {
+            let (canonical, bare) = if provider == "rrouter" {
+                (id.clone(), None)
+            } else {
+                let (name, source) = group_meta
+                    .get(group.as_str())
+                    .copied()
+                    .unwrap_or((provider.as_str(), Some(provider.as_str())));
+                // A provider bucket keeps the stable provider id; a free-form group is
+                // addressed by its name, which is the alias the planner resolves.
+                let qualifier = if source.is_some() {
+                    provider.as_str()
+                } else {
+                    name
+                };
+                (format!("{qualifier}/{id}"), Some(id.clone()))
+            };
             model_json(
-                &id,
+                &canonical,
+                bare.as_deref(),
                 &provider,
                 created,
                 Some(&group),
@@ -369,26 +415,16 @@ async fn grouped_models(
 /// model. Unknown fields are omitted, never invented.
 fn model_json(
     id: &str,
+    bare: Option<&str>,
     owned_by: &str,
     created: i64,
     group: Option<&str>,
     meta: Option<&models_registry::ModelItem>,
 ) -> Value {
     let mut object = Map::new();
-    // Provider models are advertised as `provider/model` so a client can pin the exact
-    // route it discovered. Names the gateway owns (aliases, combos) stay bare, matching
-    // their own routing syntax.
-    let listed_id = if owned_by == "rrouter" {
-        id.to_string()
-    } else {
-        let prefix = format!("{owned_by}/");
-        let bare = id.strip_prefix(&prefix).unwrap_or(id);
-        format!("{owned_by}/{bare}")
-    };
-    object.insert("id".into(), Value::String(listed_id));
+    object.insert("id".into(), Value::String(id.to_string()));
     // The bare id remains available to clients that need it, without a second request.
-    if owned_by != "rrouter" {
-        let bare = id.strip_prefix(&format!("{owned_by}/")).unwrap_or(id);
+    if let Some(bare) = bare {
         object.insert("model".into(), Value::String(bare.to_string()));
     }
     object.insert("object".into(), Value::String("model".into()));
@@ -494,12 +530,20 @@ fn model_json(
 /// Anything else is the OpenAI 404 `model_not_found`, never a guess.
 pub async fn get_model(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
 ) -> Response {
+    let caller = match state.authenticate(&headers).await {
+        Ok(caller) => caller,
+        Err(e) => {
+            return crate::error::error_response(Dialect::OpenAiChat, &e);
+        }
+    };
     let reference = reference.trim_start_matches('/');
-    match routable_model(&state, reference).await {
-        Ok(Some((owned_by, meta))) => ok_json(model_json(
-            reference,
+    match routable_model(&state, reference, &caller).await {
+        Ok(Some((owned_by, canonical, bare, meta))) => ok_json(model_json(
+            &canonical,
+            bare.as_deref(),
             &owned_by,
             crate::now_unix(),
             None,
@@ -513,12 +557,22 @@ pub async fn get_model(
     }
 }
 
+/// What `GET /v1/models/{id}` resolved to: owner, advertised id, bare id, metadata.
+type RoutedModel = (
+    String,
+    String,
+    Option<String>,
+    Option<models_registry::ModelItem>,
+);
+
 /// Which provider owns `reference` and what the gateway knows about the model, when it
-/// can route the name.
+/// can route the name. A free-form group prefix (`main/model`) resolves through the
+/// default preset; a registered provider prefix stays authoritative.
 async fn routable_model(
     state: &AppState,
     reference: &str,
-) -> rrouter_core::Result<Option<(String, Option<models_registry::ModelItem>)>> {
+    caller: &Caller,
+) -> rrouter_core::Result<Option<RoutedModel>> {
     // `provider/id` only splits when the prefix is a registry provider: ids such as
     // `meta-llama/Llama-3-70B` carry a slash of their own.
     let (provider, bare) = match reference.split_once('/') {
@@ -530,7 +584,66 @@ async fn routable_model(
         .iter()
         .find(|item| item.enabled && item.id == bare && provider.is_none_or(|p| item.provider == p))
     {
-        return Ok(Some((item.provider.clone(), Some(item.clone()))));
+        return Ok(Some((
+            item.provider.clone(),
+            format!("{}/{}", item.provider, item.id),
+            Some(item.id.clone()),
+            Some(item.clone()),
+        )));
+    }
+
+    // A free-form group name is a routing alias. Resolve only when the prefix is not a
+    // registered provider, so provider ids never become ambiguous.
+    if provider.is_none() {
+        if let Some((head, rest)) = reference.split_once('/') {
+            if let Some(preset) = state.store.default_model_preset().await? {
+                if let Some(group) = preset.layout.group_by_name(head) {
+                    if !rrouter_store::LayoutDocument::allows(
+                        group,
+                        caller.key_id(),
+                        caller.team_id(),
+                        caller.owner_user_id(),
+                    ) {
+                        return Ok(None);
+                    }
+                    let members = preset.layout.group_members(
+                        items
+                            .iter()
+                            .filter(|item| item.enabled)
+                            .map(|item| (item.provider.clone(), item.id.clone())),
+                        group,
+                        rest,
+                    );
+                    let preferred = items
+                        .iter()
+                        .find(|item| item.id == rest)
+                        .and_then(|item| item.preferred_provider.as_deref());
+                    let chosen = members
+                        .iter()
+                        .filter_map(|(provider, id)| {
+                            items.iter().find(|item| {
+                                item.enabled && &item.provider == provider && &item.id == id
+                            })
+                        })
+                        .find(|item| preferred == Some(item.provider.as_str()))
+                        .or_else(|| {
+                            members.iter().find_map(|(provider, id)| {
+                                items.iter().find(|item| {
+                                    item.enabled && &item.provider == provider && &item.id == id
+                                })
+                            })
+                        });
+                    return Ok(chosen.map(|item| {
+                        (
+                            item.provider.clone(),
+                            reference.to_string(),
+                            Some(rest.to_string()),
+                            Some(item.clone()),
+                        )
+                    }));
+                }
+            }
+        }
     }
 
     // Alias and combo metadata comes from the registry rows they resolve to.
@@ -554,7 +667,12 @@ async fn routable_model(
         .find(|alias| alias.alias == reference)
     {
         let meta = resolve_meta(&alias.target, &by_ref, &by_id).map(without_display);
-        return Ok(Some(("rrouter".to_string(), meta)));
+        return Ok(Some((
+            "rrouter".to_string(),
+            reference.to_string(),
+            None,
+            meta,
+        )));
     }
     if let Some(combo) = state
         .store
@@ -565,6 +683,8 @@ async fn routable_model(
     {
         return Ok(Some((
             "rrouter".to_string(),
+            reference.to_string(),
+            None,
             combo_meta(&combo.models, &by_ref, &by_id),
         )));
     }

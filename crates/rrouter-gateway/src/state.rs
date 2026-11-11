@@ -423,6 +423,31 @@ impl AppState {
     /// the response headers: a client that reads `remaining-requests: 0` has actually
     /// spent its last slot. Anonymous traffic has no key policy and therefore no limits.
     pub async fn admit(&self, caller: &Caller, model: &str) -> Result<Option<RateLimits>> {
+        // A free-form group prefix is a routing alias with its own grant list. Resolve
+        // one alias hop first, or `fast -> main/gpt-4.1` would bypass the group check.
+        let resolved = self.resolve_alias(model).await?;
+        if let Some((head, _)) = resolved.split_once('/') {
+            if rrouter_auth::registry::get(head).is_none() {
+                if let Some(preset) = self.store.default_model_preset().await? {
+                    if let Some(group) = preset.layout.group_by_name(head) {
+                        if !rrouter_store::LayoutDocument::allows(
+                            group,
+                            caller.key_id(),
+                            caller.team_id(),
+                            caller.owner_user_id(),
+                        ) {
+                            return Err(Error::Forbidden {
+                                code: "model_not_allowed",
+                                message: format!(
+                                    "this caller is not allowed to use model group {}",
+                                    group.name
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
         let Caller::Key(key) = caller else {
             return Ok(None);
         };
@@ -646,6 +671,14 @@ impl Caller {
         match self {
             Self::Anonymous => None,
             Self::Key(key) => key.team_id,
+        }
+    }
+
+    /// The paying key's owner, when it has one. User-targeted group grants match this.
+    pub fn owner_user_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Anonymous => None,
+            Self::Key(key) => key.owner_user_id,
         }
     }
 

@@ -160,6 +160,9 @@ pub struct ApiKey {
     /// Owning team; `None` = an instance-wide key. A team key is routed only to that
     /// team's provider accounts (see [`ConnectionScope`]).
     pub team_id: Option<Uuid>,
+    /// Owning user; `None` = not attributed to a person. Group access grants to users
+    /// match this identity.
+    pub owner_user_id: Option<Uuid>,
 }
 
 impl ApiKey {
@@ -293,6 +296,8 @@ pub struct ApiKeyPatch {
     /// `Some(None)` clears the policy. An empty document is normalised to `None`, so
     /// `{}` and `null` leave a key with no guardrails.
     pub guardrails: Option<Option<Guardrails>>,
+    /// `Some(None)` clears the owner.
+    pub owner_user_id: Option<Option<Uuid>>,
 }
 
 impl ApiKeyPatch {
@@ -337,6 +342,9 @@ impl ApiKeyPatch {
             // `{}` and `null` are the same policy: none. Normalising here keeps the
             // merged row identical to what a later read returns.
             key.guardrails = v.clone().filter(|g| !g.is_empty());
+        }
+        if let Some(v) = self.owner_user_id {
+            key.owner_user_id = v;
         }
     }
 }
@@ -1547,7 +1555,7 @@ impl Store {
     /// The key columns every read selects, in [`row_to_api_key`]'s order.
     const KEY_COLUMNS: &'static str =
         "id, key_hash, name, is_active, created_at, rpm, tpm, budget_tokens, allowed_models, \
-         expires_at, budget_micros, budget_window, guardrails, scope, team_id";
+         expires_at, budget_micros, budget_window, guardrails, scope, team_id, owner_user_id";
 
     /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
     ///
@@ -1562,11 +1570,26 @@ impl Store {
         name: Option<&str>,
         team_id: Option<Uuid>,
     ) -> Result<(String, ApiKey)> {
+        self.create_api_key_for(name, team_id, None).await
+    }
+
+    /// Same, with an owning user for group access grants.
+    pub async fn create_api_key_for(
+        &self,
+        name: Option<&str>,
+        team_id: Option<Uuid>,
+        owner_user_id: Option<Uuid>,
+    ) -> Result<(String, ApiKey)> {
         // A key must never point at a team that does not exist: the row would be invisible
         // to every team report and impossible to release.
         if let Some(team) = team_id {
             if self.team(team).await?.is_none() {
                 return Err(Error::NotFound(format!("team {team}")));
+            }
+        }
+        if let Some(user) = owner_user_id {
+            if self.user(user).await?.is_none() {
+                return Err(Error::NotFound(format!("user {user}")));
             }
         }
         let plaintext = generate_api_key();
@@ -1575,14 +1598,16 @@ impl Store {
         let created_at = now();
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at, team_id) \
-             VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+            "INSERT INTO api_keys \
+             (id, key_hash, name, is_active, created_at, team_id, owner_user_id) \
+             VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)",
             params![
                 id.to_string(),
                 key_hash,
                 name,
                 created_at,
-                team_id.map(|t| t.to_string())
+                team_id.map(|t| t.to_string()),
+                owner_user_id.map(|u| u.to_string())
             ],
         )
         .map_err(migrations::db_err)?;
@@ -1604,6 +1629,7 @@ impl Store {
                 budget_window: BudgetWindow::Total,
                 guardrails: None,
                 team_id,
+                owner_user_id,
             },
         ))
     }
@@ -1808,7 +1834,7 @@ impl Store {
         conn.execute(
             "UPDATE api_keys SET is_active = ?2, rpm = ?3, tpm = ?4, budget_tokens = ?5, \
              allowed_models = ?6, expires_at = ?7, budget_micros = ?8, budget_window = ?9, \
-             guardrails = ?10, scope = ?11, name = ?12 WHERE id = ?1",
+             guardrails = ?10, scope = ?11, name = ?12, owner_user_id = ?13 WHERE id = ?1",
             params![
                 id.to_string(),
                 key.is_active as i64,
@@ -1822,6 +1848,7 @@ impl Store {
                 guardrails,
                 key.scope.as_str(),
                 key.name,
+                key.owner_user_id.map(|user| user.to_string()),
             ],
         )
         .map_err(migrations::db_err)?;
@@ -3956,6 +3983,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         guardrails,
         scope: KeyScope::from_stored(&r.get::<_, String>(13)?),
         team_id: opt_uuid_col(r.get(14)?)?,
+        owner_user_id: opt_uuid_col(r.get(15)?)?,
     })
 }
 

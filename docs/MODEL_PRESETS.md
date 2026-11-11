@@ -2,8 +2,10 @@
 
 Layout presets for the **Models** page: a named, ordered board of registry models with
 groups and a per-row visibility flag. A preset changes what an operator sees and how it is
-ordered; it does **not** change routing. Hiding a row or group removes it from `/v1/models`
-discovery but leaves the model routable, and nothing here writes `disabled_models`.
+ordered. A free-form group's name is also a routing alias: `/v1/models` advertises
+`<group>/<model>` and the planner resolves it to that group's members. Hiding a row or group
+removes it from `/v1/models` discovery but leaves the model routable, and nothing here
+writes `disabled_models`.
 
 Status: shipped. The routes below are served by this build, the dashboard is the reference
 client (`ui/src/lib/api.ts`, `ui/src/lib/layout-draft.ts`, `ui/src/components/model-presets.tsx`),
@@ -14,7 +16,8 @@ and `scripts/model_presets_smoke.py` is the API half of acceptance.
 | State | Where it lives | Effect |
 | --- | --- | --- |
 | **Preset** | server-side library, `scope: "global"` | Named layout document, instance-wide, admin-managed |
-| **Group** | preset `layout.groups[]` | `{ id, name, provider?, visible }`; array order is display order. Provider buckets use `provider:<provider>` |
+| **Group** | preset `layout.groups[]` | `{ id, name, provider?, visible, access? }`; array order is display order. Provider buckets use `provider:<provider>`. A free-form group's name prefixes model ids |
+| **Access** | group `access` | `{ teams?, keys?, users? }` UUID grants; absent = everyone. Ungranted callers lose the group and its `/v1/models` models; the group alias returns `403` |
 | **Item** | preset `layout.items[]` | `{ provider, id, group?, position, visible }`; `group` is an explicit group id, omitted means the provider bucket |
 | **visible: false** | item flag | The row is hidden from this preset's active list and from `/v1/models` when this is the default preset; it **stays routable** |
 | **`disabled_models`** | routing registry | Separate `PUT /api/disabled/{model}` state. Hiding a preset row never touches it |
@@ -102,7 +105,8 @@ stores nothing of its own.
 | --- | --- |
 | `schema_version` | exactly `1`; anything else is `400 layout_invalid` |
 | `auto_include_new` | default `true`; when true the registry merges models the document does not name |
-| `groups` | at most 500; `id` ≤ 64 chars and unique, `name` ≤ 80 chars and non-empty, `provider` ≤ 64 chars, `visible` defaults true |
+| `groups` | at most 500; `id` ≤ 64 chars and unique, `name` ≤ 80 chars, unique, non-empty, and must not contain `/`; `provider` ≤ 64 chars, `visible` defaults true |
+| `group.access` | optional; `teams`/`keys`/`users` hold at most 500 unique UUIDs. Absent = every caller |
 | provider group | `provider` set; the id must be exactly `provider:<provider>` and each provider appears once |
 | free-form group | no `provider`; its id must not start with `provider:` |
 | `items` | at most 20,000; `provider` ≤ 64 chars, `id` ≤ 200, both non-empty after trim |

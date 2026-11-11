@@ -1,8 +1,9 @@
 //! Model presets: a named, revisioned layout of the model catalog.
 //!
 //! A preset is a saved view of the model list — which entries are shown, which are
-//! inactive, and in what order. It is *not* a routing configuration: nothing here
-//! changes how a request is dispatched. The layout is a document:
+//! inactive, and in what order. A free-form group's name is also a routing alias
+//! (`<group>/<model>`), but the layout never changes which provider a model already
+//! resolves to; it only narrows that set to the group's members. The layout is a document:
 //!
 //! ```json
 //! {"schema_version":1,"auto_include_new":true,"items":[
@@ -113,12 +114,38 @@ pub struct LayoutItem {
     pub hidden_at: Option<i64>,
 }
 
+/// At most this many team/key/user grants on one group.
+pub const MAX_GROUP_ACCESS: usize = 500;
+
+/// Who may use a free-form group through its `<group>/<model>` alias and see it in
+/// `/v1/models`. Absent (`None` on the group) means everyone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupAccess {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teams: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<Uuid>,
+}
+
+impl GroupAccess {
+    /// Match any of the caller's identities: key, team, or owning user.
+    pub fn allows(&self, key: Option<Uuid>, team: Option<Uuid>, user: Option<Uuid>) -> bool {
+        key.is_some_and(|id| self.keys.contains(&id))
+            || team.is_some_and(|id| self.teams.contains(&id))
+            || user.is_some_and(|id| self.users.contains(&id))
+    }
+}
+
 /// One named group on a preset board.
 ///
-/// Groups are presentation, not routing. A group with `provider` set is the bucket for
-/// that provider's unassigned models and must use the stable id `provider:<provider>`;
-/// a group without one is a free-form group that can mix providers. Array order is the
-/// display order.
+/// A group is presentation, and a free-form group's name is also a routing alias:
+/// `/v1/models` advertises `<group name>/<model>` and the planner resolves it to the
+/// group's members. A group with `provider` set is the bucket for that provider's
+/// unassigned models and must use the stable id `provider:<provider>`; a group without
+/// one is a free-form group that can mix providers. Array order is the display order and
+/// names are unique because they prefix model ids.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutGroup {
     /// Stable id; `provider:<provider>` for a provider bucket, a client-chosen id for a
@@ -132,6 +159,9 @@ pub struct LayoutGroup {
     /// dashboard keeps showing a hidden group; only API discovery changes.
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// Who may use the group alias. `None` = everyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<GroupAccess>,
 }
 
 /// A model preset layout document, exactly as stored in `layout_json`.
@@ -164,6 +194,70 @@ impl Default for LayoutDocument {
 }
 
 impl LayoutDocument {
+    /// The group whose display name is `name`, for `<group>/<model>` routing.
+    pub fn group_by_name(&self, name: &str) -> Option<&LayoutGroup> {
+        self.groups.iter().find(|group| group.name == name)
+    }
+
+    /// Whether `group` lets this caller use its alias.
+    pub fn allows(
+        group: &LayoutGroup,
+        key: Option<Uuid>,
+        team: Option<Uuid>,
+        user: Option<Uuid>,
+    ) -> bool {
+        group
+            .access
+            .as_ref()
+            .is_none_or(|access| access.allows(key, team, user))
+    }
+
+    /// The group a `(provider, model)` row belongs to, following the board's rules:
+    /// an explicit item assignment wins; otherwise the provider's bucket, then the
+    /// implicit `provider:<provider>` bucket.
+    pub fn group_id_for(&self, provider: &str, id: &str) -> String {
+        if let Some(item) = self
+            .items
+            .iter()
+            .find(|item| item.provider == provider && item.id == id)
+        {
+            if let Some(group) = item
+                .group
+                .as_deref()
+                .filter(|group| self.groups.iter().any(|candidate| candidate.id == *group))
+            {
+                return group.to_string();
+            }
+        }
+        self.groups
+            .iter()
+            .find(|group| group.provider.as_deref() == Some(provider))
+            .map(|group| group.id.clone())
+            .unwrap_or_else(|| format!("provider:{provider}"))
+    }
+
+    /// Every `(provider, model)` in `group` for one model id, sorted by provider.
+    /// `models` is the caller's model universe (catalog plus stored rows in the gateway,
+    /// the same in the planner); duplicate pairs collapse. A member is an entry whose
+    /// board group is exactly `group.id`.
+    pub fn group_members<I>(
+        &self,
+        models: I,
+        group: &LayoutGroup,
+        model: &str,
+    ) -> Vec<(String, String)>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        let mut members: Vec<(String, String)> = models
+            .into_iter()
+            .filter(|(provider, id)| id == model && self.group_id_for(provider, id) == group.id)
+            .collect();
+        members.sort();
+        members.dedup();
+        members
+    }
+
     /// Reject a document the store will not persist.
     ///
     /// Rules, in the order they are checked:
@@ -196,6 +290,7 @@ impl LayoutDocument {
 
         let mut group_by_id: std::collections::HashMap<&str, &LayoutGroup> =
             std::collections::HashMap::with_capacity(self.groups.len());
+        let mut names: HashSet<&str> = HashSet::with_capacity(self.groups.len());
         let mut providers = HashSet::with_capacity(self.groups.len());
         for group in &self.groups {
             let id = group.id.trim();
@@ -215,6 +310,36 @@ impl LayoutDocument {
                 return Err(Error::BadRequest(format!(
                     "a layout group name is limited to {MAX_LAYOUT_GROUP_NAME} characters"
                 )));
+            }
+            if name.contains('/') {
+                return Err(Error::BadRequest(
+                    "a layout group name cannot contain '/' because it prefixes model ids"
+                        .to_string(),
+                ));
+            }
+            if !names.insert(name) {
+                return Err(Error::BadRequest(format!(
+                    "duplicate layout group name: {name}"
+                )));
+            }
+            if let Some(access) = &group.access {
+                for (label, ids) in [
+                    ("teams", &access.teams),
+                    ("keys", &access.keys),
+                    ("users", &access.users),
+                ] {
+                    if ids.len() > MAX_GROUP_ACCESS {
+                        return Err(Error::BadRequest(format!(
+                            "a group grants at most {MAX_GROUP_ACCESS} {label}"
+                        )));
+                    }
+                    let mut seen = HashSet::with_capacity(ids.len());
+                    if ids.iter().any(|id| !seen.insert(*id)) {
+                        return Err(Error::BadRequest(format!(
+                            "duplicate {label} grant on group {id}"
+                        )));
+                    }
+                }
             }
             if group_by_id.insert(id, group).is_some() {
                 return Err(Error::BadRequest(format!(
@@ -909,5 +1034,110 @@ impl Store {
         .map_err(migrations::db_err)?;
         tx.commit().map_err(migrations::db_err)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn document(groups: Vec<LayoutGroup>, items: Vec<LayoutItem>) -> LayoutDocument {
+        LayoutDocument {
+            schema_version: LAYOUT_SCHEMA_VERSION,
+            auto_include_new: true,
+            groups,
+            items,
+        }
+    }
+
+    fn group(id: &str, name: &str, provider: Option<&str>) -> LayoutGroup {
+        LayoutGroup {
+            id: id.into(),
+            name: name.into(),
+            provider: provider.map(str::to_string),
+            visible: true,
+            access: None,
+        }
+    }
+
+    fn item(provider: &str, id: &str, group: Option<&str>) -> LayoutItem {
+        LayoutItem {
+            provider: provider.into(),
+            id: id.into(),
+            group: group.map(str::to_string),
+            position: 0,
+            visible: true,
+            last_visible_position: None,
+            hidden_at: None,
+        }
+    }
+
+    #[test]
+    fn access_matches_any_caller_identity() {
+        let key = Uuid::new_v4();
+        let team = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let access = GroupAccess {
+            keys: vec![key],
+            teams: vec![team],
+            users: vec![user],
+        };
+        assert!(access.allows(Some(key), None, None));
+        assert!(access.allows(None, Some(team), None));
+        assert!(access.allows(None, None, Some(user)));
+        assert!(!access.allows(Some(Uuid::new_v4()), None, None));
+        assert!(!GroupAccess::default().allows(Some(key), None, None));
+    }
+
+    #[test]
+    fn group_names_are_valid_routing_segments() {
+        let duplicate = document(
+            vec![group("a", "main", None), group("b", "main", None)],
+            Vec::new(),
+        );
+        assert!(duplicate.validate().is_err(), "duplicate names");
+
+        let slash = document(vec![group("a", "main/eu", None)], Vec::new());
+        assert!(slash.validate().is_err(), "a name is one path segment");
+
+        let mut permitted = group("a", "main", None);
+        permitted.access = Some(GroupAccess {
+            keys: vec![Uuid::new_v4()],
+            ..GroupAccess::default()
+        });
+        document(vec![permitted], Vec::new())
+            .validate()
+            .expect("a grant list is valid");
+    }
+
+    #[test]
+    fn membership_follows_the_board_and_provider_buckets() {
+        let layout = document(
+            vec![
+                group("g-main", "main", None),
+                group("provider:openai", "OpenAI", Some("openai")),
+            ],
+            vec![
+                item("openai", "gpt-4.1", Some("g-main")),
+                item("openai", "gpt-4o", Some("provider:openai")),
+            ],
+        );
+        assert_eq!(layout.group_id_for("openai", "gpt-4.1"), "g-main");
+        assert_eq!(layout.group_id_for("openai", "gpt-4o"), "provider:openai");
+        assert_eq!(
+            layout.group_id_for("anthropic", "claude"),
+            "provider:anthropic"
+        );
+
+        let universe = vec![
+            ("openai".to_string(), "gpt-4.1".to_string()),
+            ("openai".to_string(), "gpt-4o".to_string()),
+            ("anthropic".to_string(), "gpt-4.1".to_string()),
+        ];
+        let main = layout.group_by_name("main").expect("main");
+        assert_eq!(
+            layout.group_members(universe, main, "gpt-4.1"),
+            vec![("openai".to_string(), "gpt-4.1".to_string())]
+        );
     }
 }

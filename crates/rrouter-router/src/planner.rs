@@ -689,7 +689,7 @@ impl Planner {
                     .get(entry.as_str())
                     .copied()
                     .unwrap_or(entry.as_str());
-                out.extend(self.expand_entry(catalog, resolved));
+                out.extend(self.expand_entry_resolved(catalog, store, resolved).await?);
             }
             return Ok(out);
         }
@@ -697,7 +697,45 @@ impl Planner {
             return Err(Error::NotFound(format!("combo {}", combo_name)));
         }
 
-        Ok(self.expand_entry(catalog, &current))
+        self.expand_entry_resolved(catalog, store, &current).await
+    }
+
+    /// Resolve a free-form group prefix (`main/model`) before falling back to the
+    /// provider/catalog grammar. The group's name is the routing alias; its members are
+    /// exactly the rows the Models board places in that group.
+    async fn expand_entry_resolved(
+        &self,
+        catalog: &Catalog,
+        store: &Store,
+        entry: &str,
+    ) -> Result<Vec<(String, String, bool)>> {
+        if let Some((head, rest)) = entry.split_once('/') {
+            if !rest.is_empty() && !is_registered_provider(head) {
+                if let Some(preset) = store.default_model_preset().await? {
+                    if let Some(group) = preset.layout.group_by_name(head) {
+                        let mut universe: Vec<(String, String)> = catalog
+                            .all()
+                            .into_iter()
+                            .map(|model| (model.provider, model.id))
+                            .collect();
+                        universe.extend(
+                            store
+                                .list_models()
+                                .await?
+                                .into_iter()
+                                .map(|row| (row.provider, row.model)),
+                        );
+                        return Ok(preset
+                            .layout
+                            .group_members(universe, group, rest)
+                            .into_iter()
+                            .map(|(provider, model)| (provider, model, true))
+                            .collect());
+                    }
+                }
+            }
+        }
+        Ok(self.expand_entry(catalog, entry))
     }
 
     /// Expand one non-combo model string into `(provider, model, explicit)` targets.

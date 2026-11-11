@@ -518,6 +518,104 @@ pub async fn save_layout(
     }
 }
 
+/// `PUT /api/model-groups/{group_id}/access` — who may use a free-form group's alias.
+///
+/// Body: `{ "all": true }` clears the restriction, or `{ "all": false, "teams": [...],
+/// "keys": [...], "users": [...] }` restricts it to those identities. Operates on the
+/// instance default preset, because that is the document `/v1/models` and routing read.
+pub async fn set_group_access(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    body: Body,
+) -> Response {
+    let value = match body_json(body).await {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let access = match group_access_field(&value) {
+        Ok(access) => access,
+        Err(response) => return *response,
+    };
+    let Some(preset) = state.store.default_model_preset().await.ok().flatten() else {
+        return admin_error(&Error::NotFound("no default model preset".into()));
+    };
+    let mut layout = preset.layout.clone();
+    let Some(group) = layout.groups.iter_mut().find(|group| group.id == group_id) else {
+        return admin_error(&Error::NotFound(format!("model group {group_id}")));
+    };
+    group.access = access;
+    let actor = actor(&state, &headers).await;
+    match state
+        .store
+        .update_model_preset_layout(preset.id, preset.revision, &layout, &actor)
+        .await
+    {
+        Ok(PresetUpdateOutcome::Updated(updated)) => {
+            audit(
+                &state,
+                "group_access_saved",
+                Some(&actor),
+                &crate::auth::client_ip(&headers, None),
+                &format!("group {group_id} · preset {}", updated.id),
+            )
+            .await;
+            let group = updated
+                .layout
+                .groups
+                .iter()
+                .find(|group| group.id == group_id);
+            ok_json(json!({
+                "group_id": group_id,
+                "access": group.and_then(|group| group.access.clone()),
+            }))
+        }
+        Ok(PresetUpdateOutcome::Conflict { current_revision }) => conflict(current_revision),
+        Ok(PresetUpdateOutcome::NotFound) => {
+            admin_error(&Error::NotFound(format!("model group {group_id}")))
+        }
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// Decode the access body. `all: true` (or a null body) means everyone.
+fn group_access_field(value: &Value) -> Result<Option<rrouter_store::GroupAccess>, Box<Response>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(object) = value.as_object() else {
+        return Err(Box::new(bad_request("access body must be an object")));
+    };
+    if object.get("all").and_then(Value::as_bool) == Some(true) {
+        return Ok(None);
+    }
+    let list = |key: &str| -> Result<Vec<Uuid>, Box<Response>> {
+        let Some(raw) = object.get(key) else {
+            return Ok(Vec::new());
+        };
+        let Some(items) = raw.as_array() else {
+            return Err(Box::new(bad_request(&format!(
+                "{key} must be an array of uuids"
+            ))));
+        };
+        let mut ids = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(id) = item.as_str().and_then(|id| Uuid::parse_str(id).ok()) else {
+                return Err(Box::new(bad_request(&format!("{key} must contain uuids"))));
+            };
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    };
+    Ok(Some(rrouter_store::GroupAccess {
+        teams: list("teams")?,
+        keys: list("keys")?,
+        users: list("users")?,
+    }))
+}
+
 /// `POST /api/model-presets/{id}/default` — promote a preset to the instance default.
 ///
 /// Admin-only, like the rest of the library: the default is what a caller with no

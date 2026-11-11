@@ -21,8 +21,14 @@ call right now, from connected providers.
   an unconnected family match.
 - **Groups** — the board is grouped by provider by default. A preset can create free-form
   groups, rename providers' buckets, reorder groups, add/remove models, and move a model to
-  another group. A group or model can also be hidden from `/v1/models`; routing is unchanged.
-  Aliases and combos have their own card with the same group and visibility controls.
+  another group. A free-form group's **name is a routing alias**: `/v1/models` advertises
+  `<group>/<model>` (for example `main/deepseek-v4.1-flash`) and the planner resolves it to
+  that group's members, then picks their providers. A group or model can also be hidden
+  from `/v1/models`; routing is unchanged for hidden names. Aliases and combos have their
+  own card with the same group and visibility controls.
+- **Group access** — a group can be granted to teams, API keys or users, or left open to
+  everyone. Ungranted callers do not see the group in `/v1/models` and get `403` if they
+  try its alias. Keys inherit their team and can carry an `owner_user_id` for user grants.
 - **Preferred provider** — pin one provider for a bare model id. Bare requests use it first;
   explicit `provider/model` ignores it. `/v1/models` reports it as `owned_by`.
 - **Test** — a real 16-token completion through the planner, dispatcher and reassembly path.

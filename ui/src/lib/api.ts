@@ -810,6 +810,13 @@ export type ModelProvider = {
 /** The only layout format this build reads and writes. */
 export const LAYOUT_SCHEMA_VERSION = 1;
 
+/** Who may use a free-form group's `<group>/<model>` alias. Absent = everyone. */
+export type GroupAccess = {
+  teams?: string[];
+  keys?: string[];
+  users?: string[];
+};
+
 /** One named group on a preset board. Provider groups use `provider:<provider>`. */
 export type LayoutGroup = {
   id: string;
@@ -817,6 +824,8 @@ export type LayoutGroup = {
   provider?: string;
   /** Whether the group and its models are advertised by `/v1/models`. Default true. */
   visible?: boolean;
+  /** Team/key/user grants; absent means the group is open to every caller. */
+  access?: GroupAccess;
 };
 
 /** One model on a preset's board. `position` is dense and zero-based inside its group. */
@@ -845,6 +854,17 @@ export type LayoutDocument = {
   groups?: LayoutGroup[];
   items: LayoutItem[];
 };
+
+/** Replace one group's team/key/user grants in the instance default preset. */
+export async function setGroupAccess(
+  groupId: string,
+  access: GroupAccess | null,
+): Promise<{ group_id: string; access?: GroupAccess }> {
+  return api.put<{ group_id: string; access?: GroupAccess }>(
+    `/api/model-groups/${encodeURIComponent(groupId)}/access`,
+    access ?? { all: true },
+  );
+}
 
 export type ModelPreset = {
   id: string;

@@ -210,6 +210,7 @@ fn layout_groups_are_unique_ordered_and_bound_to_providers() {
         name: name.to_string(),
         provider: provider.map(str::to_string),
         visible: true,
+        access: None,
     };
     let valid = LayoutDocument {
         schema_version: LAYOUT_SCHEMA_VERSION,
@@ -754,6 +755,7 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
              ALTER TABLE combos DROP COLUMN cursor; \
              ALTER TABLE eval_suites DROP COLUMN system_prompt; \
              ALTER TABLE eval_runs DROP COLUMN judge_model; \
+             ALTER TABLE api_keys DROP COLUMN owner_user_id; \
              PRAGMA user_version = 29;",
         )
         .expect("rewind to v29");
@@ -786,5 +788,5 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
     assert_eq!(version, SCHEMA_VERSION);
-    assert_eq!(version, 34);
+    assert_eq!(version, 35);
 }
