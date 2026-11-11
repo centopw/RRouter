@@ -3,7 +3,7 @@ name: rrouter
 description: Self-hosted AI gateway with a single Rust binary and SQLite storage.
 type: application
 version: 0.1.4
-appVersion: "0.10.0"
+appVersion: "0.11.0"
 home: https://github.com/centopw/RRouter
 sources:
   - https://github.com/centopw/RRouter

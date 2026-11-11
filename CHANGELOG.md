@@ -2,6 +2,16 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.11.0 — 2026-11-11
+
+### Features
+
+- feat(models): group-qualified ids, routing and access grants ([`ffb5f53`](https://github.com/centopw/RRouter/commit/ffb5f5378758d7de5e477dc5702c151751aaf5eb))
+
+### Build & CI
+
+- ci(release): validate version carriers at the tag ([`11811b5`](https://github.com/centopw/RRouter/commit/11811b57f524d1531fb8cc442fe0cc377cbdff20))
+
 ## 0.10.0 — 2026-11-11
 
 ### Features
