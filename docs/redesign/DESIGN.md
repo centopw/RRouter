@@ -47,7 +47,7 @@ The redesign is one top-to-bottom story:
 Principles to preserve when you make trade-offs:
 
 - **Everything cross-links.** Click a model, the log filters. Click a request, the detail opens.
-  Click "View failing requests" on the banner, the log filters to errors.
+  Click "View failing requests" on the banner, **Logs** opens filtered to that model's errors.
 - **Nothing is shown twice.** "Top models" and "Traffic by model" merge into one table.
 - **Problems get louder than health.** Green is quiet (a small dot). Red is the only thing that
   earns a banner, a coloured stat and an error lane.
@@ -79,10 +79,14 @@ Requests panel    filter chips, log table | detail panel, footer
 ### 3.2 Alert banner (conditional)
 Shown when any model in the window has an error rate above 20% **and** at least 3 failures (tune later).
 - Red-tinted surface: border `neg` at ~30% alpha, background `neg` at ~8% alpha over `bg`. `role="alert"`.
-- Title: `<provider>/<model> is failing`. Body: one sentence with counts and the dominant status
-  (for example "5 of its 9 requests returned 429"), plus one actionable hint.
-- Actions: primary **View failing requests** (sets Errors filter and that model), ghost link **Open Combos**.
-- Only one banner: the worst model. Not dismissible in v1 (it disappears when the condition clears).
+- Title: `<provider>/<model> is failing`, or `<model> is failing` when no provider was
+  recorded. Body: one sentence with counts and the dominant status (for example "5 of its 9
+  requests returned 429"), plus one actionable hint.
+- Actions: primary **View failing requests** (opens **Logs** with the error status, failing
+  model and current range preselected), plus **Open providers** when the incident names a
+  provider. A close control dismisses the banner for the tab; the dismissal clears once the
+  condition resolves, so a later recurrence alerts again.
+- Only one banner: the worst model.
 
 ### 3.3 Overview panel
 **Readouts**: CSS grid `repeat(auto-fit, minmax(150px, 1fr))`, 1px gaps over `line`, each cell padding `20px 24px`.
@@ -292,7 +296,9 @@ column says and must not wait on them.
 - [ ] Incident, empty-gateway and phone layouts match their boards.
 - [ ] Range control works for the ranges the API supports; unsupported ones are hidden, not disabled.
 - [ ] Clicking a model filters the log; clicking it again clears; the chip shows and clears the filter.
-- [ ] Errors chip and "View failing requests" produce the same filter.
+- [ ] Errors chip and "View failing requests" both narrow to failures; the banner opens Logs
+  with the failing model preselected, and its dismiss control hides it until the incident
+  resolves.
 - [ ] Selecting a row shows detail; close works; selection survives refetch.
 - [ ] Tooltip works with mouse and keyboard; peak tooltip shows by default.
 - [ ] Zero buckets show a stub; an all-zero window shows the "No requests in this window" message.

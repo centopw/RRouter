@@ -2,6 +2,17 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.7.3 — 2026-11-11
+
+### Fixed
+- The Activity failing-model alert can be dismissed; the dismissal lasts for the tab and
+  clears once the incident resolves, so a later recurrence alerts again. Its primary action
+  now opens **Logs** with the failing model, error status and current range preselected, and
+  the dead-end **Combos** link is gone.
+- **Logs** accepts `status`, `provider`, `model` and `range` deep links. A deep-linked
+  provider or model the catalogue does not list stays visible in its select instead of
+  snapping back to "All".
+
 ## 0.7.2 — 2026-11-11
 
 ### Fixed

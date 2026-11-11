@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Badge, Button, Card, EmptyState, ErrorNote, PageHeader, Segmented, Select, cx } from "../components/ui";
 import { Divider } from "../components/atoms";
 import { ago, compact, ms, splitRef } from "../lib/format";
@@ -28,11 +29,20 @@ type RangeId = (typeof RANGES)[number]["id"];
 type Status = "all" | "errors" | "2xx";
 
 export default function Logs() {
-  const [status, setStatus] = useState<Status>("all");
-  const [provider, setProvider] = useState(ALL);
-  const [model, setModel] = useState(ALL);
+  // The Activity incident banner links here with the failing model preselected. Read
+  // once: these are landing filters, and the selects stay local from then on.
+  const [params, setParams] = useSearchParams();
+  const [status, setStatus] = useState<Status>(() => {
+    const value = params.get("status");
+    return value === "error" || value === "errors" ? "errors" : value === "2xx" ? "2xx" : "all";
+  });
+  const [provider, setProvider] = useState(() => params.get("provider") || ALL);
+  const [model, setModel] = useState(() => params.get("model") || ALL);
   const [keyId, setKeyId] = useState(ALL);
-  const [rangeId, setRangeId] = useState<RangeId>("24h");
+  const [rangeId, setRangeId] = useState<RangeId>(() => {
+    const value = params.get("range");
+    return RANGES.some((range) => range.id === value) ? (value as RangeId) : "24h";
+  });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -84,6 +94,11 @@ export default function Logs() {
     }
     return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [models.data]);
+  // A deep-linked incident can name a model or provider the catalogue does not list
+  // (an unknown id, or a connection that was removed). Keep its value visible and
+  // filterable instead of silently snapping the select to "All".
+  const modelListed = model === ALL || modelGroups.some(([, list]) => list.some((m) => m.ref === model));
+  const providerListed = provider === ALL || providers.includes(provider);
 
   const filtersActive = status !== "all" || provider !== ALL || model !== ALL || keyId !== ALL;
   const baseUrl = `${window.location.origin}/v1`;
@@ -96,6 +111,9 @@ export default function Logs() {
     setProvider(ALL);
     setModel(ALL);
     setKeyId(ALL);
+    // The landing deep link is a starting point, not a permanent state: once the
+    // operator clears it, a refresh must not bring the incident filter back.
+    if (params.size > 0) setParams({}, { replace: true });
   };
 
   // Same filters as the table, without its cursor: the server streams every matching row.
@@ -164,6 +182,7 @@ export default function Logs() {
             </Select>
             <Select className="w-full min-w-0" value={provider} onChange={setProvider} ariaLabel="provider">
               <option value={ALL}>All providers</option>
+              {!providerListed ? <option value={provider}>{provider}</option> : null}
               {providers.map((p) => (
                 <option key={p} value={p}>
                   {p}
@@ -172,6 +191,7 @@ export default function Logs() {
             </Select>
             <Select className="w-full min-w-0" value={model} onChange={setModel} ariaLabel="model">
               <option value={ALL}>All models</option>
+              {!modelListed ? <option value={model}>{model}</option> : null}
               {modelGroups.map(([p, list]) => (
                 <optgroup key={p} label={p}>
                   {list.map((m) => (

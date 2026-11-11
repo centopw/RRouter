@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import {
   AlertBanner,
   Button,
@@ -45,6 +45,8 @@ import { Heading } from "../../components/atoms";
 
 /** The one id the chart uses when the per-model split is unavailable. */
 const ALL = "__all__";
+/** Dismissed incident survives a route change or reload inside the tab. */
+const DISMISSED_INCIDENT = "rrouter.activity.dismissed-incident";
 const METRICS = [
   { id: "requests", label: "Requests" },
   { id: "tokens", label: "Tokens" },
@@ -78,6 +80,7 @@ const ZERO: Totals = {
 };
 
 export default function Activity() {
+  const navigate = useNavigate();
   const [rangeId, setRangeId] = useState<RangeId>("7d");
   const [metric, setMetric] = useState<Metric>("requests");
   const [modelFilter, setModelFilter] = useState<string | null>(null);
@@ -86,6 +89,9 @@ export default function Activity() {
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const [dismissedIncident, setDismissedIncident] = useState<string | null>(() =>
+    sessionStorage.getItem(DISMISSED_INCIDENT),
+  );
 
   const spec = rangeOf(rangeId);
   const now = Math.floor(Date.now() / 1000);
@@ -163,6 +169,28 @@ export default function Activity() {
   const dominant = incidentRef
     ? dominantStatus(events.filter((e) => isFailure(e) && splitModel(e.provider, e.model).ref === incidentRef))
     : null;
+  const showIncident = incident !== null && incidentRef !== dismissedIncident;
+  const providerKnown = incident !== null && incident.provider !== "";
+  // The Logs page filters on the server and pages through every match, unlike the
+  // 200-row Activity log, so an older incident is still fully reachable here.
+  const failingLogHref = incident
+    ? (() => {
+        const query = new URLSearchParams({
+          status: "errors",
+          range: rangeId === "30d" ? "all" : rangeId,
+          model: incident.model,
+        });
+        if (incident.provider) query.set("provider", incident.provider);
+        return `/activity/logs?${query.toString()}`;
+      })()
+    : "/activity/logs";
+
+  // A resolved incident clears its dismissal, so a later recurrence alerts again.
+  useEffect(() => {
+    if (!summary.isSuccess || incidentRef !== null || dismissedIncident === null) return;
+    sessionStorage.removeItem(DISMISSED_INCIDENT);
+    setDismissedIncident(null);
+  }, [summary.isSuccess, incidentRef, dismissedIncident]);
 
   const chartBuckets = useMemo(
     () =>
@@ -227,27 +255,27 @@ export default function Activity() {
         </div>
       </header>
 
-      {incident && showPanels ? (
+      {incident && showPanels && showIncident ? (
         <AlertBanner
-          title={`${incident.provider}/${incident.model} is failing`}
+          title={
+            providerKnown
+              ? `${incident.provider}/${incident.model} is failing`
+              : `${incident.model} is failing`
+          }
+          onDismiss={() => {
+            if (incidentRef) sessionStorage.setItem(DISMISSED_INCIDENT, incidentRef);
+            setDismissedIncident(incidentRef);
+          }}
           actions={
             <>
-              <Button
-                variant="primary"
-                onClick={() => {
-                  setModelFilter(incidentRef);
-                  setErrorsOnly(true);
-                  setSelectedId(null);
-                }}
-              >
+              <Button variant="primary" onClick={() => navigate(failingLogHref)}>
                 View failing requests
               </Button>
-              <Link
-                to="/combos"
-                className="inline-flex h-8 items-center rounded-lg px-3 text-body text-muted transition-colors hover:bg-surface-2 hover:text-fg"
-              >
-                Open Combos →
-              </Link>
+              {providerKnown ? (
+                <Button variant="quiet" onClick={() => navigate("/routing/providers")}>
+                  Open providers
+                </Button>
+              ) : null}
             </>
           }
         >
@@ -259,7 +287,9 @@ export default function Activity() {
             ({pct(incident.rate * 100)}).
           </p>
           <p className="mt-1 text-faint">
-            Check the provider connection, or route around it with a combo while it recovers.
+            {providerKnown
+              ? "Check the provider connection."
+              : "No provider was recorded for these requests, so they failed before dispatch. Check the model id clients send and that a connection serves it."}
           </p>
         </AlertBanner>
       ) : null}
