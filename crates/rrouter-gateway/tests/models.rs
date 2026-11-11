@@ -519,6 +519,53 @@ async fn v1_models_groups_follow_the_default_preset() {
         data.iter().all(|model| model["group"].is_string()),
         "{body}"
     );
+
+    // A removed provider leaves rows behind in the preset (reconnect restores them), but
+    // neither the model nor its provider bucket may appear in the live list.
+    let current = h
+        .state
+        .store
+        .default_model_preset()
+        .await
+        .expect("preset lookup")
+        .expect("default");
+    let mut stale = current.layout.clone();
+    stale.groups.push(LayoutGroup {
+        id: "provider:gone".into(),
+        name: "Gone".into(),
+        provider: Some("gone".into()),
+    });
+    stale.items.push(LayoutItem {
+        provider: "gone".into(),
+        id: "old-model".into(),
+        group: None,
+        position: 2,
+        visible: true,
+        last_visible_position: None,
+        hidden_at: None,
+    });
+    h.state
+        .store
+        .update_model_preset_layout(current.id, current.revision, &stale, "test")
+        .await
+        .expect("stale layout write");
+    let (_, body) = h.get("/v1/models").await;
+    assert!(
+        body["groups"]
+            .as_array()
+            .expect("groups")
+            .iter()
+            .all(|group| group["id"] != "provider:gone"),
+        "a disconnected provider's bucket is not advertised: {body}"
+    );
+    assert!(
+        body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .all(|model| model["id"] != "old-model"),
+        "a disconnected provider's stale model is not advertised: {body}"
+    );
 }
 
 #[tokio::test]

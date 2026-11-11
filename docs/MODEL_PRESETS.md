@@ -23,8 +23,10 @@ and `scripts/model_presets_smoke.py` is the API half of acceptance.
 | **auto_include_new** | layout document | Registry models the document does not name are merged in rather than left unlisted |
 | **revision** | preset | Bumped only by a layout write; every save must send the revision it read |
 
-A preset item whose `provider`/`id` is no longer in the registry stays in the document, shows
-as **unavailable** in the dashboard, and is not a substitute for `disabled_models`.
+A preset item whose `provider`/`id` is no longer in the registry stays in the document so a
+reconnect restores it, but it is omitted from the visible board and counts while unavailable.
+That is not a substitute for `disabled_models`: a connected, disabled model remains visible in
+the Disabled table until enabled.
 
 ## Preset JSON
 

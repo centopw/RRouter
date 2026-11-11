@@ -105,6 +105,10 @@ async fn grouped_models(
         .map(|layout| layout.groups.iter().collect())
         .unwrap_or_default();
     let group_ids: HashSet<&str> = explicit_groups.iter().map(|g| g.id.as_str()).collect();
+    let model_providers: HashSet<&str> = models
+        .iter()
+        .map(|(_, provider)| provider.as_str())
+        .collect();
     let provider_groups: HashMap<&str, &str> = explicit_groups
         .iter()
         .filter_map(|group| group.provider.as_deref().map(|p| (p, group.id.as_str())))
@@ -160,6 +164,16 @@ async fn grouped_models(
     // empty bucket before assigning anything.
     let mut group_order: Vec<(String, String, Option<String>)> = Vec::new();
     for group in explicit_groups.drain(..) {
+        // A provider bucket with no models from a connected provider is stale: the
+        // connection was removed. Keep a free-form (empty) group, but do not advertise a
+        // provider the gateway cannot route to.
+        if group
+            .provider
+            .as_deref()
+            .is_some_and(|provider| !model_providers.contains(provider))
+        {
+            continue;
+        }
         group_order.push((group.id.clone(), group.name.clone(), group.provider.clone()));
     }
     for provider in implicit {

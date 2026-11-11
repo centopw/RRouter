@@ -2,6 +2,15 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.7.1 — 2026-11-11
+
+### Fixed
+- The Models board no longer renders preset entries whose provider is disconnected or
+  removed. The entries stay in the preset document so reconnecting restores them, but they
+  are omitted from the active/hidden lists, group buckets and counts. `/v1/models` likewise
+  no longer advertises a provider bucket that has no live model. This removes the stale
+  "unavailable" rows left behind after a provider connection was deleted.
+
 ## 0.7.0 — 2026-11-10
 
 ### Added

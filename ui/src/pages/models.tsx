@@ -302,15 +302,17 @@ export default function Models() {
     () => new Map(layoutDraft.entries.map((entry) => [entry.ref, entry] as const)),
     [layoutDraft.entries],
   );
-  const groupChoices = useMemo(
-    () =>
-      effectiveGroups(
-        layoutDraft.entries,
-        layoutDraft.groups,
-        (provider) => providerDisplay.get(provider) ?? provider,
+  const groupChoices = useMemo(() => {
+    const knownEntries = layoutDraft.entries.filter((entry) => byRef.has(entry.ref));
+    const knownProviders = new Set(Array.from(byRef.values(), (model) => model.provider));
+    return effectiveGroups(
+      knownEntries,
+      layoutDraft.groups.filter(
+        (group) => !group.provider || knownProviders.has(group.provider),
       ),
-    [layoutDraft.entries, layoutDraft.groups, providerDisplay],
-  );
+      (provider) => providerDisplay.get(provider) ?? provider,
+    );
+  }, [layoutDraft.entries, layoutDraft.groups, providerDisplay, byRef]);
   const groupIndex = useMemo(
     () => new Map(groupChoices.map((group, index) => [group.id, index] as const)),
     [groupChoices],
@@ -354,6 +356,7 @@ export default function Models() {
       visible: true,
       isNew: false,
     }))
+    .filter((row) => row.model !== null)
     .filter(matchesRow);
   const rowOrder = new Map(visibleRows.map((row, index) => [row.ref, index] as const));
   const activeRows = visibleRows
@@ -376,8 +379,11 @@ export default function Models() {
       visible: false,
       isNew: false,
     }))
+    .filter((row) => row.model !== null)
     .filter(matchesRow);
-  const hiddenCount = layoutDraft.entries.filter((entry) => !entry.visible).length;
+  // Entries whose provider was removed stay in the document (a reconnect restores
+  // them) but are not part of the visible board or its counts.
+  const hiddenCount = hiddenRows.length;
   const activePage = Math.min(
     Math.max(1, Number(params.get("page") ?? "1") || 1),
     Math.max(1, Math.ceil(activeRows.length / size)),
