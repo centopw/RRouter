@@ -5,6 +5,7 @@ import {
   Card,
   CardHeader,
   ConfirmDialog,
+  CopyChip,
   EmptyState,
   ErrorNote,
   Field,
@@ -15,7 +16,6 @@ import {
 import { DataTable, type Column } from "../components/table";
 import type { SessionRow } from "../lib/auth";
 import { useMe, useRevokeOtherSessions, useRevokeSession, useUpdateMe } from "../lib/queries";
-import { useCopy } from "../components/atoms/useCopy";
 import { usePhone } from "../lib/media";
 import { when } from "../lib/format";
 
@@ -45,7 +45,6 @@ export default function Account() {
   const sessions = me.data?.sessions ?? [];
   const currentSession = sessions.find((session) => session.current) ?? null;
   const phone = usePhone();
-  const [copied, copy] = useCopy();
 
   const saveName = () => {
     setFailure(null);
@@ -252,9 +251,11 @@ export default function Account() {
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <Badge tone="pos">this device</Badge>
-                  <Button variant="quiet" onClick={() => copy(currentSession.id)}>
-                    {copied === currentSession.id ? "copied" : "copy reference"}
-                  </Button>
+                  <CopyChip
+                    value={currentSession.id}
+                    label="session reference"
+                    className="w-[min(320px,46vw)]"
+                  />
                 </div>
               </div>
             </div>

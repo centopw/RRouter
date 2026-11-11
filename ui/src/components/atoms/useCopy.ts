@@ -15,20 +15,32 @@ export function useCopy(): [string | null, (value: string) => void] {
         if (timer.current !== null) window.clearTimeout(timer.current);
         timer.current = window.setTimeout(() => setCopied(null), 1_500);
       };
-      void navigator.clipboard
-        .writeText(value)
-        .then(done)
-        .catch(() => {
-          const area = document.createElement("textarea");
-          area.value = value;
-          area.style.position = "fixed";
-          area.style.opacity = "0";
-          document.body.appendChild(area);
-          area.select();
-          document.execCommand("copy");
+      // On an insecure origin (plain http on a LAN address) `navigator.clipboard` is
+      // undefined, not merely rejected. Guard the property before calling it.
+      const legacy = () => {
+        const area = document.createElement("textarea");
+        area.value = value;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.top = "0";
+        area.style.left = "0";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        area.setSelectionRange(0, value.length);
+        try {
+          if (document.execCommand("copy")) done();
+        } finally {
           area.remove();
-          done();
-        });
+        }
+      };
+      try {
+        const write = navigator.clipboard?.writeText;
+        if (write) void write.call(navigator.clipboard, value).then(done).catch(legacy);
+        else legacy();
+      } catch {
+        legacy();
+      }
     },
   ];
 }

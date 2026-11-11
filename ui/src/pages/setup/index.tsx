@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import {
   Button,
   CopyButton,
+  CopyChip,
   ErrorNote,
   Field,
   Input,
@@ -641,17 +642,15 @@ function KeyCreatedStep({
 
       <div className="mt-4">
         <div className="text-body text-muted">Your key</div>
-        <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-line bg-surface-2 py-1 pl-3.5 pr-1.5">
-          <code className="min-w-0 flex-1 truncate font-mono text-body">{created.key}</code>
-          <CopyButton value={created.key} label="Copy key" />
+        <div className="mt-1.5">
+          <CopyChip value={created.key} label="API key" className="w-full" />
         </div>
       </div>
 
       <div className="mt-4">
         <div className="text-body text-muted">Base URL</div>
-        <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-line bg-surface-2 py-1 pl-3.5 pr-1.5">
-          <code className="min-w-0 flex-1 truncate font-mono text-body">{baseUrl}</code>
-          <CopyButton value={baseUrl} label="Copy" />
+        <div className="mt-1.5">
+          <CopyChip value={baseUrl} label="base URL" className="w-full" />
         </div>
       </div>
 

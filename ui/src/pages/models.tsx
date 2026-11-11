@@ -16,6 +16,7 @@ import {
   Button,
   Card,
   CardHeader,
+  CopyIconButton,
   ErrorNote,
   Field,
   Input,
@@ -534,6 +535,7 @@ export default function Models() {
               >
                 {m.id}
               </span>
+              <CopyIconButton value={m.ref} label={`Copy ${m.ref}`} />
               <CoveragePeers
                 model={m}
                 peers={coverage.get(m.id) ?? []}
@@ -1509,6 +1511,7 @@ function ModelCardBody({
                 >
                   {m.id}
                 </h3>
+                <CopyIconButton value={m.ref} label={`Copy ${m.ref}`} />
                 <CoveragePeers
                   model={m}
                   peers={coverageFor(m.id)}
@@ -1644,6 +1647,7 @@ function AliasesCombosCard({
                 <span className="block truncate font-mono text-small text-fg">{row.name}</span>
                 <span className="block truncate text-caption text-faint">{row.detail}</span>
               </span>
+              <CopyIconButton value={row.name} label={`Copy ${row.kind} ${row.name}`} />
               {editable ? (
                 <>
                   <Select
@@ -1691,6 +1695,7 @@ function GroupHeading({
     <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-line bg-surface-2 px-4 py-2.5">
       <div className="flex min-w-0 items-baseline gap-2">
         <h3 className="truncate text-small font-semibold text-fg">{group.name}</h3>
+        <CopyIconButton value={group.name} label={`Copy group name ${group.name}`} />
         <span className="shrink-0 text-caption text-faint">
           {group.provider ? `provider · ${group.provider}` : "custom group"}
         </span>

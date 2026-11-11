@@ -324,7 +324,7 @@ function InviteModal({
         {link ? (
           <div className="flex flex-col gap-1.5">
             <span className="text-caption text-muted">Share this link once:</span>
-            <CopyChip value={link} />
+            <CopyChip value={link} label="invite link" className="w-full" />
           </div>
         ) : null}
         {failure ? <ErrorNote error={failure} /> : null}

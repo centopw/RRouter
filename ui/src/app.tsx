@@ -545,7 +545,7 @@ function SidebarFooter({
       <div className="rounded-[8px] border border-line bg-surface-2 px-2.5 py-2">
         <div className="text-caption font-semibold uppercase tracking-[0.12em] text-faint">Endpoint</div>
         <div className="mt-1 flex min-w-0">
-          <CopyChip value={endpoint} display={endpoint.replace(/^https?:\/\//, "")} />
+          <CopyChip value={endpoint} label="endpoint" className="w-full" />
         </div>
         <div className="mt-2 flex items-center gap-1.5 text-caption text-muted">
           <RunningDot running={running} />

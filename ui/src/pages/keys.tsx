@@ -174,7 +174,7 @@ export default function Keys() {
         />
         <div className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-3 text-caption text-faint">
           <span>endpoint</span>
-          <CopyChip value={`${window.location.origin}/v1`} />
+          <CopyChip value={`${window.location.origin}/v1`} label="endpoint" />
           <span className="ml-auto flex items-center gap-1.5">
             {system.data?.require_api_key ? (
               <>
@@ -599,7 +599,7 @@ function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated
         footer={<Button variant="primary" onClick={onCreated}>done</Button>}
       >
         <div className="flex flex-col gap-3">
-          <CopyChip value={created.key} />
+          <CopyChip value={created.key} label="API key" className="w-full" />
           <p className="text-small text-muted">
             Clients send it as <code className="font-mono text-caption">Authorization: Bearer …</code>{" "}
             against the endpoint on the Keys page.

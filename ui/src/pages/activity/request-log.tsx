@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Badge, Button, CopyButton, ErrorNote, StatusPill, cx, statusText } from "../../components/ui";
+import { Badge, Button, CopyButton, CopyChip, ErrorNote, StatusPill, cx, statusText } from "../../components/ui";
 import { compact, ms, splitRef, usd, when } from "../../lib/format";
 import { useUsageDetail } from "../../lib/queries";
 import type { UsageEvent } from "../../lib/api";
@@ -359,8 +359,10 @@ export function RequestDetail({
           </section>
         ) : null}
 
-        <div className="flex flex-wrap gap-2 pt-1">
-          {row.request_id ? <CopyButton value={row.request_id} label="Copy request ID" /> : null}
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          {row.request_id ? (
+            <CopyChip value={row.request_id} label="request ID" />
+          ) : null}
           <CopyButton
             value={curlFor(baseUrl, endpoint, row.model)}
             label="Copy as cURL"

@@ -1,62 +1,42 @@
-import { useEffect, useRef, useState } from "react";
-import { Check, Copy } from "@phosphor-icons/react";
+import { type FocusEvent } from "react";
+import { cx } from "../../lib/cx";
+import { CopyIconButton } from "./CopyIconButton";
 
 /**
- * A value the operator needs verbatim (an endpoint, a key): monospace, and one click
- * away from the clipboard. Copying a truncated string would be worse than useless, so
- * the full value is in `value` even when the visible text is shortened.
+ * A value the operator needs verbatim (an endpoint, a key): shown in a real read-only
+ * input so it can always be selected and copied by hand, with one small button for the
+ * clipboard. Never make the whole value a button — that forbids manual selection.
  */
 export function CopyChip({
   value,
-  prefix,
-  display,
+  label,
+  className,
 }: {
   value: string;
-  prefix?: string;
-  /** Shown instead of `value` when the full string cannot fit; the clipboard still gets
-   *  the full value. */
-  display?: string;
+  /** Accessible name for the value, used by the input and the copy button. */
+  label?: string;
+  className?: string;
 }) {
-  const [copied, setCopied] = useState(false);
-  const timer = useRef<number | null>(null);
-
-  useEffect(() => () => {
-    if (timer.current !== null) window.clearTimeout(timer.current);
-  }, []);
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      // Clipboard API needs a secure context; fall back to a hidden textarea.
-      const area = document.createElement("textarea");
-      area.value = value;
-      area.style.position = "fixed";
-      area.style.opacity = "0";
-      document.body.appendChild(area);
-      area.select();
-      document.execCommand("copy");
-      area.remove();
-    }
-    setCopied(true);
-    if (timer.current !== null) window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setCopied(false), 1_500);
+  const select = (event: FocusEvent<HTMLInputElement>) => {
+    event.currentTarget.select();
   };
-
   return (
-    <button
-      type="button"
-      onClick={copy}
-      aria-label={`copy ${value}`}
-      className="group inline-flex h-7 min-w-0 items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2 font-mono text-caption text-muted hover:border-line-strong hover:text-fg"
-    >
-      {prefix ? <span className="shrink-0 text-faint">{prefix}</span> : null}
-      <span className="truncate">{copied ? "copied" : (display ?? value)}</span>
-      {copied ? (
-        <Check size={12} weight="bold" aria-hidden className="shrink-0" />
-      ) : (
-        <Copy size={12} aria-hidden className="shrink-0 opacity-60 group-hover:opacity-100" />
+    <div
+      className={cx(
+        "inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border border-line bg-surface-2 py-0.5 pl-2.5 pr-1",
+        className,
       )}
-    </button>
+    >
+      <input
+        readOnly
+        value={value}
+        aria-label={label ?? value}
+        title={value}
+        spellCheck={false}
+        onFocus={select}
+        className="w-[11rem] min-w-0 flex-1 bg-transparent font-mono text-caption text-muted outline-none"
+      />
+      <CopyIconButton value={value} label={label ? `Copy ${label}` : `Copy ${value}`} />
+    </div>
   );
 }

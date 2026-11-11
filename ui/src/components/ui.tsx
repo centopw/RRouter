@@ -9,6 +9,7 @@ export { Input } from "./atoms/Input";
 export { Select } from "./atoms/Select";
 export { statusText, StatusPill } from "./atoms/StatusPill";
 export { CopyChip } from "./atoms/CopyChip";
+export { CopyIconButton } from "./atoms/CopyIconButton";
 export { useCopy } from "./atoms/useCopy";
 export { CopyButton } from "./atoms/CopyButton";
 export { Card } from "./molecules/Card";
