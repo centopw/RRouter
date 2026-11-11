@@ -55,6 +55,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
+          # `release.py --check` needs the tag it is validating and the commits behind it.
+          fetch-depth: 0
+
+      - name: Validate release metadata at the tag
+        run: python3 scripts/release.py --check
 
       - name: Validate CHANGELOG notes (dry run)
         run: python3 scripts/release-notes.py "${{ needs.prepare.outputs.tag }}" --check
