@@ -237,8 +237,68 @@ async fn an_older_release_is_not_an_update() {
     let status = updates::check_with(&state, &endpoints(&base), Some("t"), false, true)
         .await
         .expect("check");
-    assert_eq!(status["latest_version"], "0.0.1");
+    assert_eq!(
+        status["latest_version"],
+        Value::Null,
+        "a release older than this build is withheld: {status}"
+    );
     assert_eq!(status["update_available"], false, "{status}");
+    assert_eq!(status["up_to_date"], true, "{status}");
+}
+
+#[tokio::test]
+async fn a_cached_release_from_an_older_build_is_dropped_and_rechecked() {
+    let _guard = serial().await;
+    updates::reset_for_tests();
+    let (mock, base) = mock_server().await;
+    let state = harness();
+
+    // What a previous build left behind: a fresh check, its ETag, and a release that is
+    // now older than the running binary.
+    rrouter_gateway::settings::merge(
+        &state,
+        json!({ "update_check": {
+            "current_version": "0.0.1",
+            "checked_at": rrouter_gateway::now_unix(),
+            "etag": "\"old\"",
+            "latest": "0.0.1",
+            "notes": "stale notes",
+        }}),
+    )
+    .await
+    .expect("seed settings");
+
+    mock.plan(vec![Reply::Json {
+        status: 200,
+        headers: vec![("etag".into(), "\"new\"".into())],
+        body: release_json("9.9.3", "fresh notes"),
+    }]);
+    let status = updates::check_with(&state, &endpoints(&base), Some("t"), false, false)
+        .await
+        .expect("automatic check");
+
+    let requests = mock.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "the stale check is not treated as fresh: {:?}",
+        mock.paths()
+    );
+    assert!(
+        requests[0].headers.get("if-none-match").is_none(),
+        "the old build's ETag is not sent"
+    );
+    assert_eq!(status["latest_version"], "9.9.3", "{status}");
+    assert_eq!(status["notes"], "fresh notes");
+    assert_eq!(status["update_available"], true);
+
+    let stored = rrouter_gateway::settings::load(&state)
+        .await
+        .expect("settings");
+    assert_eq!(
+        stored["update_check"]["current_version"], status["current_version"],
+        "the new state is stamped with this build"
+    );
 }
 
 #[tokio::test]
@@ -540,6 +600,7 @@ async fn status_json_keeps_existing_fields_and_adds_backoff_fields() {
         "options",
         "rate_limited_until",
         "last_error",
+        "up_to_date",
     ] {
         assert!(status.get(field).is_some(), "status has {field}: {status}");
     }

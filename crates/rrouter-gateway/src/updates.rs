@@ -69,6 +69,9 @@ fn update_token() -> Option<String> {
 /// Check state persisted in the settings blob. Only metadata: never a token or URL query.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct Persisted {
+    /// The build that wrote this state. A different build (upgrade, downgrade, manual
+    /// binary swap) makes the cached release and its validators meaningless.
+    current_version: Option<String>,
     checked_at: Option<i64>,
     etag: Option<String>,
     last_modified: Option<String>,
@@ -78,6 +81,23 @@ struct Persisted {
     published_at: Option<String>,
     rate_limited_until: Option<i64>,
     last_error: Option<String>,
+}
+
+impl Persisted {
+    /// Drop everything another build learned. Without this, a restart after an upgrade
+    /// keeps the old "latest", skips the check as fresh, and a conditional GET with the
+    /// old ETag answers 304 and keeps it forever. State written before this field existed
+    /// has no version and is dropped once. The rate-limit backoff is per IP, not per
+    /// build, so it survives.
+    fn trusted(self) -> Self {
+        if self.current_version.as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+            return self;
+        }
+        Self {
+            rate_limited_until: self.rate_limited_until,
+            ..Self::default()
+        }
+    }
 }
 
 /// Whether a URL is a plain `http(s)` URL this build is willing to request. Overrides used
@@ -154,6 +174,7 @@ async fn hydrate(state: &std::sync::Arc<AppState>) {
     let Ok(persisted) = serde_json::from_value::<Persisted>(value.clone()) else {
         return;
     };
+    let persisted = persisted.trusted();
     let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
     if status.latest.is_none() && persisted.latest.is_some() {
         status.latest = persisted.latest;
@@ -175,6 +196,7 @@ async fn persist(state: &std::sync::Arc<AppState>) {
     let persisted = {
         let status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
         Persisted {
+            current_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             checked_at: status.checked_at,
             etag: status.etag.clone(),
             last_modified: status.last_modified.clone(),
@@ -348,10 +370,19 @@ pub async fn snapshot(state: &std::sync::Arc<AppState>) -> Value {
 
 fn status_json(status: &State, options: &Value) -> Value {
     let deployment = deployment();
+    let current = env!("CARGO_PKG_VERSION");
+    // A release older than this build is not "latest" from the operator's point of view:
+    // showing it reads as a downgrade. Only a release at or above this build is reported.
+    let latest = status
+        .latest
+        .as_deref()
+        .filter(|latest| !newer(latest, current));
+    let update_available = latest.is_some_and(|latest| newer(current, latest));
     json!({
-        "current_version": env!("CARGO_PKG_VERSION"),
-        "update_available": newer(env!("CARGO_PKG_VERSION"), status.latest.as_deref().unwrap_or("")),
-        "latest_version": status.latest,
+        "current_version": current,
+        "update_available": update_available,
+        "up_to_date": status.latest.is_some() && !update_available,
+        "latest_version": latest,
         "release_url": status.release_url.clone().unwrap_or_else(|| RELEASE_PAGE.to_string()),
         "notes": status.notes,
         "published_at": status.published_at,
@@ -557,8 +588,9 @@ async fn load_persisted(state: &std::sync::Arc<AppState>) -> Persisted {
     };
     settings
         .get(STATE_KEY)
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .and_then(|value| serde_json::from_value::<Persisted>(value.clone()).ok())
         .unwrap_or_default()
+        .trusted()
 }
 
 /// Testable core of a check: explicit endpoints, token and mode, so a mock server can
@@ -621,7 +653,15 @@ pub async fn check_with(
                 apply_api_release(&release, &version, now);
                 discovery = Some(Discovery::Api(release));
             }
-            Ok(ApiResult::NotModified) => {
+            // A 304 only confirms a release this process already knows; with nothing
+            // cached it says nothing, so discovery continues through the redirect.
+            Ok(ApiResult::NotModified)
+                if STATUS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .latest
+                    .is_some() =>
+            {
                 {
                     let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
                     status.checked_at = Some(now);
@@ -634,6 +674,7 @@ pub async fn check_with(
                 BUSY.store(false, Ordering::SeqCst);
                 return Ok(snapshot(state).await);
             }
+            Ok(ApiResult::NotModified) => {}
             Ok(ApiResult::RateLimited { until }) => {
                 rate_limited_until = Some(until);
                 tracing::warn!(
