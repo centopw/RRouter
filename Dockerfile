@@ -22,9 +22,11 @@ COPY --from=ui /ui/dist ./ui/dist
 # Cargo registry and target live in cache mounts: the multi-arch CI build compiles the
 # same dependencies twice per platform, and pulling them from cache is the difference
 # between a 3-minute and a 12-minute image.
+# cmake + make are for aws-lc-sys, the native backend behind `jsonwebtoken`'s
+# `aws_lc_rs` feature (HS256 session tokens); the image's gcc does the C compile.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    apt-get update && apt-get install -y --no-install-recommends pkg-config \
+    apt-get update && apt-get install -y --no-install-recommends pkg-config cmake make \
  && cargo build --release --locked \
  && cp target/release/rrouter /rrouter \
  && strip /rrouter
