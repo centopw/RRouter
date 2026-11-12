@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.12.0 — 2026-11-12
+
+### Features
+
+- feat(reasoning): normalize thinking effort across dialects ([`fbdabd8`](https://github.com/centopw/RRouter/commit/fbdabd834619005e81aaa834b66de8a86424a9d4))
+
 ## 0.11.0 — 2026-11-11
 
 ### Features
