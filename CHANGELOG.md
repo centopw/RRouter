@@ -2,6 +2,22 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.13.0 — 2026-11-12
+
+### Features
+
+- feat(playground): give the playground its own gateway key and prompt enhancer ([`600aa3f`](https://github.com/centopw/RRouter/commit/600aa3fae75c2f1eaf836cd26cea47f8b899e17e))
+
+### Bug Fixes
+
+- fix(playground): let the admin token admit the playground key ([`5f93f01`](https://github.com/centopw/RRouter/commit/5f93f01b24551789e222c665717c0d8b47bc0513))
+- fix(playground): admit the admin token as admin authority for /v1 ([`53a1b1f`](https://github.com/centopw/RRouter/commit/53a1b1fb89dbbb8408419f166b0db47a0efe1fe4))
+- fix(update): drop update state cached by another build ([`e471161`](https://github.com/centopw/RRouter/commit/e4711613996ee3debbf315fae51cd2355f81693f))
+
+### Build & CI
+
+- build(ui): rebuild dist with the playground key and update card changes ([`f4f1325`](https://github.com/centopw/RRouter/commit/f4f132541be71ad208266e03a3faf7274afebb35))
+
 ## 0.12.2 — 2026-11-12
 
 ### Bug Fixes
