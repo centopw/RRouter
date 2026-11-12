@@ -135,7 +135,7 @@ export function UpdateCard() {
               <Badge tone="accent">
                 {status.deployment.automatic ? "update available" : "update available · manual"}
               </Badge>
-            ) : status.latest_version ? (
+            ) : status.up_to_date && !status.error ? (
               <Badge tone="pos">up to date</Badge>
             ) : null}
             {status.downloaded ? <Badge tone="pos">downloaded</Badge> : null}

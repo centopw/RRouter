@@ -988,6 +988,9 @@ export type UpdateDeployment = {
 export type UpdateStatus = {
   current_version: string;
   update_available: boolean;
+  /** A check found a release and it is not newer than this build. */
+  up_to_date: boolean;
+  /** Withheld (null) when the last seen release is older than this build. */
   latest_version: string | null;
   release_url: string;
   notes: string | null;
