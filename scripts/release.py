@@ -430,6 +430,15 @@ def publish(root: Path, version: str, verify: bool) -> int:
         "docs/ROADMAP.md",
         "docs/deploy/helm.md",
     }
+    untracked = [line[3:] for line in status if line.startswith("??")]
+    if untracked:
+        print(
+            "release: untracked files are not part of the release; add them or ignore them:",
+            file=sys.stderr,
+        )
+        for path in untracked:
+            print(f"  {path}", file=sys.stderr)
+        return 1
     unexpected = [
         line for line in status if not line.startswith("??") and line[3:] not in allowed
     ]
