@@ -2,6 +2,13 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.13.1 — 2026-11-12
+
+### Bug Fixes
+
+- fix(deps): drop the RustCrypto RSA stack for the AWS-LC HS256 backend ([`340ea24`](https://github.com/centopw/RRouter/commit/340ea2409ab865003e55772768516a57e2778a31))
+- fix(deps): pin jsonwebtoken to the aws_lc_rs backend to drop the rsa stack ([`7f4d1c7`](https://github.com/centopw/RRouter/commit/7f4d1c71359e5effa080c852322d84c01f7aad7d))
+
 ## 0.13.0 — 2026-11-12
 
 ### Features
