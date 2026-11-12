@@ -2,6 +2,17 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.12.2 — 2026-11-12
+
+### Bug Fixes
+
+- fix(update): compare release SemVer and surface updates in the sidebar ([`64afdbd`](https://github.com/centopw/RRouter/commit/64afdbd63c89012c8db2074c47946ba14a8b20cc))
+- fix(release): refuse untracked files before publish ([`b357c2c`](https://github.com/centopw/RRouter/commit/b357c2c956c7a4857b4c216305094703fb125bbe))
+
+### Other Changes
+
+- chore: track the wiki sync tool and ignore dogfood output ([`8595bf4`](https://github.com/centopw/RRouter/commit/8595bf45de28336711614e6e8372f51498ad16a9))
+
 ## 0.12.1 — 2026-11-12
 
 ### Bug Fixes
