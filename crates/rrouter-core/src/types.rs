@@ -88,6 +88,21 @@ pub enum ToolChoice {
     Tool(String),
 }
 
+/// Normalized thinking controls. Clients express this as OpenAI `reasoning_effort`/a
+/// `reasoning` object, Anthropic `thinking`, or a Responses `reasoning` object; each
+/// encoder picks its native field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reasoning {
+    /// `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `none`, lowercased.
+    pub effort: Option<String>,
+    /// Anthropic-style thinking budget or the equivalent request.
+    pub max_tokens: Option<u32>,
+    /// Explicit on/off when the client sent no effort.
+    pub enabled: Option<bool>,
+    /// Chat Completions: ask the provider to reason without returning the trace.
+    pub exclude: Option<bool>,
+}
+
 /// Everything needed to send one non-streaming or streaming completion upstream.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
@@ -106,6 +121,8 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
+    /// Thinking controls; `None` preserves the provider's default.
+    pub reasoning: Option<Reasoning>,
     pub stop: Vec<String>,
     pub stream: bool,
     /// Dialect-level passthrough for fields RRouter does not model (e.g. `metadata`,
@@ -126,6 +143,7 @@ impl ChatRequest {
             max_tokens: None,
             temperature: None,
             top_p: None,
+            reasoning: None,
             stop: Vec::new(),
             stream: false,
             extra: None,

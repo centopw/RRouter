@@ -123,6 +123,23 @@ pub struct Cost {
     pub cache_write: Option<f64>,
 }
 
+/// One item's reasoning options, in the OpenRouter `/models` shape. Absent on models
+/// that do not reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReasoningSupport {
+    /// Accepted effort values, highest first. Omitted when the provider does not
+    /// publish a range; clients then offer an on/off control only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_efforts: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    pub default_enabled: bool,
+    /// The model accepts a token budget (`reasoning.max_tokens`).
+    pub supports_max_tokens: bool,
+    /// Reasoning cannot be disabled.
+    pub mandatory: bool,
+}
+
 /// One item of the `GET /api/models` payload.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ModelItem {
@@ -144,6 +161,9 @@ pub struct ModelItem {
     /// Provider-native API quirks (for example Anthropic message rules).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_capabilities: Option<Value>,
+    /// Normalized reasoning options for `/v1/models`; derived after every overlay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningSupport>,
     pub cost: Option<Cost>,
     pub source: String,
     pub enabled: bool,
@@ -169,6 +189,7 @@ impl ModelItem {
             capabilities_extra: None,
             effort: None,
             api_capabilities: None,
+            reasoning: None,
             cost: None,
             source: source.to_string(),
             enabled: true,
@@ -262,6 +283,7 @@ pub fn merge(
             item.available = true;
             item.deprecated =
                 item.deprecated || rrouter_router::catalog::is_retired(&item.provider, &item.id);
+            item.reasoning = reasoning_support(&item);
             item
         })
         .collect();
@@ -309,6 +331,104 @@ fn overlay(item: &mut ModelItem, row: &ModelRow) {
     if row.caps.get("deprecated").and_then(Value::as_bool) == Some(true) {
         item.deprecated = true;
     }
+}
+
+/// Default effort ranges for providers whose `/models` does not publish one. These are
+/// the levels their reasoning APIs accept, highest first; a provider-native `effort`
+/// block always wins.
+fn default_efforts(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "openai" | "codex" | "github" => &["high", "medium", "low", "minimal"],
+        "anthropic" | "claude" => &["high", "medium", "low"],
+        "gemini" | "google" => &["high", "medium", "low"],
+        "deepseek" => &["max", "high", "low"],
+        "xai" | "grok" => &["high", "low"],
+        "qwen" | "alibaba" => &["high", "medium", "low"],
+        _ => &[],
+    }
+}
+
+fn efforts_for_format(format: &str) -> &'static [&'static str] {
+    match format {
+        "openai" => &["high", "medium", "low", "minimal"],
+        "claude-adaptive" | "claude-budget" => &["high", "medium", "low"],
+        "gemini-level" => &["high", "medium", "low"],
+        "deepseek" => &["max", "high", "low"],
+        "qwen" | "zai" => &["high", "medium", "low"],
+        _ => &[],
+    }
+}
+
+fn reasoning_support(item: &ModelItem) -> Option<ReasoningSupport> {
+    let native_levels: Vec<String> = item
+        .effort
+        .as_ref()
+        .and_then(|effort| effort.get("supported_levels"))
+        .and_then(Value::as_array)
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|level| level.trim().to_lowercase())
+                .filter(|level| !level.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !item.capabilities.reasoning && native_levels.is_empty() {
+        return None;
+    }
+    let levels = if native_levels.is_empty() {
+        let native = item
+            .capabilities_extra
+            .as_ref()
+            .and_then(|extra| extra.get("thinkingFormat"))
+            .and_then(Value::as_str)
+            .map(efforts_for_format)
+            .unwrap_or(&[]);
+        let levels = if native.is_empty() {
+            default_efforts(&item.provider)
+        } else {
+            native
+        };
+        levels.iter().map(|level| (*level).to_string()).collect()
+    } else {
+        native_levels
+    };
+    let native_default = item
+        .effort
+        .as_ref()
+        .and_then(|effort| effort.get("default_level"))
+        .and_then(Value::as_str)
+        .map(|level| level.trim().to_lowercase());
+    let default_effort = native_default
+        .filter(|level| levels.iter().any(|candidate| candidate == level))
+        .or_else(|| {
+            ["medium", "high"]
+                .iter()
+                .find_map(|wanted| {
+                    levels
+                        .iter()
+                        .find(|level| level.as_str() == *wanted)
+                        .cloned()
+                })
+                .or_else(|| levels.first().cloned())
+        });
+    let mandatory = item
+        .capabilities_extra
+        .as_ref()
+        .and_then(|extra| extra.get("thinkingCanDisable"))
+        .and_then(Value::as_bool)
+        == Some(false);
+    Some(ReasoningSupport {
+        supported_efforts: (!levels.is_empty()).then_some(levels),
+        default_effort,
+        default_enabled: true,
+        supports_max_tokens: matches!(
+            item.provider.as_str(),
+            "anthropic" | "claude" | "gemini" | "google" | "qwen" | "alibaba"
+        ),
+        mandatory,
+    })
 }
 
 /// `cost: {input, output, cache_read, cache_write}` in USD per million tokens.

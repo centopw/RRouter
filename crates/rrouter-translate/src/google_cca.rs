@@ -211,6 +211,12 @@ fn generation_config(req: &ChatRequest) -> Map<String, Value> {
     if !req.stop.is_empty() {
         config.insert("stopSequences".into(), json!(req.stop));
     }
+    if let Some(reasoning) = &req.reasoning {
+        config.insert(
+            "thinkingConfig".into(),
+            super::reasoning::google_thinking(reasoning, &req.model),
+        );
+    }
     config
 }
 

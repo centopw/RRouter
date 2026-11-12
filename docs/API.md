@@ -78,6 +78,7 @@ without a second lookup. Unknown fields are omitted, never invented:
 | `input_modalities` / `output_modalities` | Derived from the capability flags: `text`, `image`, `pdf`, `audio`, `video`. |
 | `capabilities` | The nine flags in camelCase (`vision`, `pdf`, `audioInput`, `videoInput`, `imageOutput`, `audioOutput`, `search`, `tools`, `reasoning`), plus `contextWindow`/`maxOutput` and provider-native reasoning keys such as `thinkingFormat`. |
 | `effort` | Provider-published reasoning levels (`supported_levels`, `default_level`). |
+| `reasoning` | Normalized thinking options: `supported_efforts`, `default_effort`, `default_enabled`, `supports_max_tokens`, `mandatory`. See [Thinking effort](REASONING.md). |
 | `api_capabilities` | Provider-published API quirks (for example Anthropic message rules). |
 | `deprecated` | Present and `true` when the catalog marks the family retired. |
 

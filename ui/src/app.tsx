@@ -419,7 +419,7 @@ export function Shell() {
           {/* Keyed by path, not by query: a filter change inside a page must not remount
               it, while a route change fades the new page in. */}
           <div key={location.pathname} className="page-enter">
-            <Suspense fallback={<div className="text-body text-faint">loading…</div>}>
+            <Suspense fallback={<RouteLoading />}>
               <Outlet />
             </Suspense>
           </div>
@@ -840,6 +840,33 @@ function AdminGate({ onUnlock }: { onUnlock: () => void }) {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/** Route chunk fallback. A chunk that never resolves must not trap the tab on one word. */
+function RouteLoading() {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSlow(true), 8_000);
+    return () => window.clearTimeout(timer);
+  }, []);
+  return (
+    <div className="flex flex-col items-start gap-2 text-body text-faint" role="status">
+      <span>loading…</span>
+      {slow ? (
+        <span className="text-small">
+          This is taking longer than expected.{" "}
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="underline underline-offset-2 hover:text-fg"
+          >
+            Reload the dashboard
+          </button>
+          .
+        </span>
+      ) : null}
     </div>
   );
 }

@@ -142,8 +142,38 @@ fn the_responses_cap_follows_the_provider_default_too() {
 // Request round trips
 // ---------------------------------------------------------------------------
 
+/// Thinking effort survives Chat → Anthropic (budget) → Chat (effort), so a harness can
+/// keep one level while the routed model changes dialect.
 #[test]
-fn a_chat_request_round_trips_through_anthropic_unchanged_on_the_wire() {
+fn reasoning_effort_crosses_chat_and_anthropic() {
+    let chat = parse_request(
+        Dialect::OpenAiChat,
+        &json!({"model":"m","messages":[],"reasoning_effort":"high"}),
+    )
+    .unwrap();
+    let anthropic =
+        build_request_with(Dialect::AnthropicMessages, &chat, false, &claude_profile()).unwrap();
+    assert_eq!(anthropic["thinking"]["type"], "enabled");
+    let budget = anthropic["thinking"]["budget_tokens"]
+        .as_u64()
+        .expect("budget");
+    let max = anthropic["max_tokens"].as_u64().expect("max");
+    assert!(
+        budget < max,
+        "Claude requires max_tokens > budget: {anthropic}"
+    );
+
+    let back = parse_request(Dialect::AnthropicMessages, &anthropic).unwrap();
+    let chat = build_request_with(Dialect::OpenAiChat, &back, false, &openai_profile()).unwrap();
+    assert_eq!(chat["reasoning_effort"], "high");
+    assert!(
+        chat.get("temperature").is_none(),
+        "no invented sampling: {chat}"
+    );
+}
+
+#[test]
+fn a_client_request_round_trips_through_anthropic_unchanged_on_the_wire() {
     let original = chat_request();
     let first = parse_request(Dialect::OpenAiChat, &original).unwrap();
     let messages = build_request_with(

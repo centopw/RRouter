@@ -29,6 +29,9 @@ call right now, from connected providers.
 - **Group access** — a group can be granted to teams, API keys or users, or left open to
   everyone. Ungranted callers do not see the group in `/v1/models` and get `403` if they
   try its alias. Keys inherit their team and can carry an `owner_user_id` for user grants.
+- **Thinking effort** — reasoning models advertise a normalized `reasoning` object and
+  accept `reasoning_effort` / a `reasoning` object / Anthropic `thinking`. See
+  [Thinking effort](REASONING.md).
 - **Preferred provider** — pin one provider for a bare model id. Bare requests use it first;
   explicit `provider/model` ignores it. `/v1/models` reports it as `owned_by`.
 - **Test** — a real 16-token completion through the planner, dispatcher and reassembly path.

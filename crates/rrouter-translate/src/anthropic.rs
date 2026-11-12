@@ -27,6 +27,8 @@ const KNOWN_KEYS: &[&str] = &[
     "top_p",
     "stop_sequences",
     "stream",
+    "thinking",
+    "output_config",
 ];
 
 // ---------------------------------------------------------------------------
@@ -53,6 +55,7 @@ pub fn parse_request(body: &Value) -> Result<ChatRequest> {
     req.tools = tools;
     req.raw_tools = raw_tools.map(|t| (D, t));
     req.tool_choice = parse_tool_choice(body);
+    req.reasoning = super::reasoning::parse_anthropic(body)?;
 
     capture_extra(body, KNOWN_KEYS, D, &mut req)?;
     Ok(req)
@@ -237,10 +240,21 @@ pub fn build_request(req: &ChatRequest, stream: bool, wire: &WireProfile) -> Res
     // `max_tokens` is mandatory here. An omitted client value used to become a hardcoded
     // 4096, silently truncating every translated request that named no cap; the provider's
     // configured default (32k for Claude) now applies first.
-    body.insert(
-        "max_tokens".into(),
-        Value::from(wire.max_tokens(req.max_tokens)),
-    );
+    let mut max_tokens = wire.max_tokens(req.max_tokens);
+    if let Some(reasoning) = &req.reasoning {
+        if !super::reasoning::is_enabled(reasoning) {
+            body.insert("thinking".into(), json!({"type": "disabled"}));
+        } else if let Some((budget, required)) =
+            super::reasoning::anthropic_budget(reasoning, Some(max_tokens))
+        {
+            max_tokens = max_tokens.max(required);
+            body.insert(
+                "thinking".into(),
+                json!({"type": "enabled", "budget_tokens": budget}),
+            );
+        }
+    }
+    body.insert("max_tokens".into(), Value::from(max_tokens));
     body.insert("stream".into(), Value::Bool(stream));
     if let Some(system) = &req.system {
         if !system.is_empty() {

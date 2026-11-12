@@ -26,6 +26,8 @@ const KNOWN_KEYS: &[&str] = &[
     "temperature",
     "top_p",
     "stream",
+    "reasoning",
+    "reasoning_effort",
 ];
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,16 @@ pub fn parse_request(body: &Value) -> Result<ChatRequest> {
     req.tools = tools;
     req.raw_tools = raw_tools.map(|t| (D, t));
     req.tool_choice = body.get("tool_choice").and_then(parse_tool_choice);
+    req.reasoning = match body.get("reasoning").filter(|value| !value.is_null()) {
+        Some(value) => super::reasoning::parse_object(value, D)?,
+        None => match body
+            .get("reasoning_effort")
+            .filter(|value| !value.is_null())
+        {
+            Some(value) => super::reasoning::parse_effort_field(value, D)?,
+            None => None,
+        },
+    };
     capture_extra(body, KNOWN_KEYS, D, &mut req)?;
     Ok(req)
 }
@@ -335,6 +347,14 @@ pub fn build_request(req: &ChatRequest, stream: bool, wire: &WireProfile) -> Res
     // Optional here: the client's value wins, then the provider's configured default.
     if let Some(n) = wire.max_tokens_opt(req.max_tokens) {
         body.insert("max_output_tokens".into(), Value::from(n));
+    }
+    if let Some(reasoning) = &req.reasoning {
+        if let Some(effort) = super::reasoning::openai_effort(reasoning) {
+            body.insert(
+                "reasoning".into(),
+                json!({"effort": effort, "summary": "auto"}),
+            );
+        }
     }
     if let Some(t) = req.temperature {
         body.insert("temperature".into(), Value::from(t));

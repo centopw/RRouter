@@ -514,6 +514,12 @@ fn model_json(
     if let Some(effort) = &meta.effort {
         object.insert("effort".into(), effort.clone());
     }
+    if let Some(reasoning) = &meta.reasoning {
+        object.insert(
+            "reasoning".into(),
+            serde_json::to_value(reasoning).unwrap_or(Value::Null),
+        );
+    }
     if let Some(api) = &meta.api_capabilities {
         object.insert("api_capabilities".into(), api.clone());
     }

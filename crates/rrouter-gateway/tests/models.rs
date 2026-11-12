@@ -562,6 +562,13 @@ async fn v1_models_carry_limits_capabilities_and_native_metadata() {
     assert_eq!(flash["capabilities"]["thinkingFormat"], "openai");
     assert_eq!(flash["effort"]["default_level"], "high");
     assert_eq!(
+        flash["reasoning"]["supported_efforts"],
+        json!(["low", "high"])
+    );
+    assert_eq!(flash["reasoning"]["default_effort"], "high");
+    assert_eq!(flash["reasoning"]["default_enabled"], true);
+    assert_eq!(flash["reasoning"]["supports_max_tokens"], false);
+    assert_eq!(
         flash["api_capabilities"]["anthropic_messages"]["tool_update"],
         "addition-only"
     );
@@ -2093,6 +2100,11 @@ async fn connection_fetch_stores_and_lists_native_model_metadata() {
         model["effort"]["supported_levels"],
         json!(["low", "high", "max"])
     );
+    assert_eq!(
+        model["reasoning"]["supported_efforts"],
+        json!(["low", "high", "max"])
+    );
+    assert_eq!(model["reasoning"]["default_effort"], "high");
     assert_eq!(
         model["api_capabilities"]["anthropic_messages"]["system_prompt_update"],
         "in-history"

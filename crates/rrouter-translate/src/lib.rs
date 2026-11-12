@@ -9,6 +9,7 @@ mod anthropic;
 pub mod error;
 pub mod google_cca;
 mod openai_chat;
+mod reasoning;
 pub mod rerank;
 mod responses;
 pub mod search;
