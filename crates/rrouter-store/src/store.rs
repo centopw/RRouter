@@ -125,6 +125,46 @@ impl KeyScope {
     }
 }
 
+/// Who manages a key. `User` keys are created by an operator and their plaintext is shown
+/// once; a system kind is created and kept by the gateway itself, one row per kind, with
+/// its plaintext sealed at rest so the same key survives a restart.
+///
+/// Kind is a separate axis from [`KeyScope`]: scope says which surface a key may call,
+/// kind says who owns it and which extra admission rule the gateway applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyKind {
+    /// Operator-created. The default for every key, and for every key created before v36.
+    #[default]
+    User,
+    /// The dashboard playground's key: accepted on `/v1` only from the playground.
+    Playground,
+}
+
+impl KeyKind {
+    /// The wire and column spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Playground => "playground",
+        }
+    }
+
+    /// Lenient read for a stored value. An unknown spelling reads as `Playground`, the
+    /// most restricted kind: a system key written by a newer build must never become an
+    /// unrestricted user key on a build that does not understand its kind.
+    pub fn from_stored(raw: &str) -> Self {
+        match raw {
+            "user" => Self::User,
+            _ => Self::Playground,
+        }
+    }
+
+    /// Is this key managed by the gateway rather than an operator?
+    pub fn is_system(self) -> bool {
+        self != Self::User
+    }
+}
+
 /// A gateway API key. Only the SHA-256 hex of the plaintext is persisted.
 ///
 /// The governance columns are the virtual-key contract: `0` means unlimited for the
@@ -163,6 +203,8 @@ pub struct ApiKey {
     /// Owning user; `None` = not attributed to a person. Group access grants to users
     /// match this identity.
     pub owner_user_id: Option<Uuid>,
+    /// Who manages the key; see [`KeyKind`].
+    pub kind: KeyKind,
 }
 
 impl ApiKey {
@@ -1555,7 +1597,7 @@ impl Store {
     /// The key columns every read selects, in [`row_to_api_key`]'s order.
     const KEY_COLUMNS: &'static str =
         "id, key_hash, name, is_active, created_at, rpm, tpm, budget_tokens, allowed_models, \
-         expires_at, budget_micros, budget_window, guardrails, scope, team_id, owner_user_id";
+         expires_at, budget_micros, budget_window, guardrails, scope, team_id, owner_user_id, kind";
 
     /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
     ///
@@ -1630,8 +1672,85 @@ impl Store {
                 guardrails: None,
                 team_id,
                 owner_user_id,
+                kind: KeyKind::User,
             },
         ))
+    }
+
+    /// The gateway-managed key of `kind`, creating it on first use: `(plaintext, key,
+    /// created)`.
+    ///
+    /// A system key keeps ONE plaintext for its whole life so the dashboard can show it
+    /// again after a restart. The plaintext is sealed with the store's master-key cipher,
+    /// bound to the row id, and unsealed only here — no list or row read ever selects it.
+    /// Lookup and insert run under one connection lock and the partial unique index on
+    /// `kind` backs that up, so two concurrent first uses cannot mint two keys. Deleting
+    /// the row through [`Store::delete_api_key`] simply means the next call mints a new one.
+    pub async fn ensure_system_api_key(
+        &self,
+        kind: KeyKind,
+        name: &str,
+    ) -> Result<(String, ApiKey, bool)> {
+        if !kind.is_system() {
+            return Err(Error::BadRequest(
+                "only a system key kind can be ensured".into(),
+            ));
+        }
+        let conn = self.conn();
+        let existing: Option<(ApiKey, Option<Vec<u8>>)> = conn
+            .query_row(
+                &format!(
+                    "SELECT {}, sealed_secret FROM api_keys WHERE kind = ?1",
+                    Self::KEY_COLUMNS
+                ),
+                params![kind.as_str()],
+                |r| Ok((row_to_api_key(r)?, r.get(17)?)),
+            )
+            .optional()
+            .map_err(migrations::db_err)?;
+        if let Some((key, sealed)) = existing {
+            let sealed = sealed.ok_or_else(|| {
+                Error::Store(format!("system key {} has no sealed secret", key.id))
+            })?;
+            let plain = self.cipher.open(key.id.as_bytes(), &sealed)?;
+            let plaintext = String::from_utf8(plain)
+                .map_err(|e| Error::Store(format!("system key {} secret: {e}", key.id)))?;
+            // The hash is what `/v1` checks; a secret that no longer matches it would be
+            // shown to the operator and then refused, so it is a storage failure here.
+            if hash_api_key(&plaintext) != key.key_hash {
+                return Err(Error::Store(format!(
+                    "system key {} secret does not match its hash",
+                    key.id
+                )));
+            }
+            return Ok((plaintext, key, false));
+        }
+        let plaintext = generate_api_key();
+        let key_hash = hash_api_key(&plaintext);
+        let id = Uuid::new_v4();
+        let sealed = self.cipher.seal(id.as_bytes(), plaintext.as_bytes())?;
+        let created_at = now();
+        conn.execute(
+            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at, kind, sealed_secret) \
+             VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)",
+            params![
+                id.to_string(),
+                key_hash,
+                name,
+                created_at,
+                kind.as_str(),
+                sealed
+            ],
+        )
+        .map_err(migrations::db_err)?;
+        let key = conn
+            .query_row(
+                &format!("SELECT {} FROM api_keys WHERE id = ?1", Self::KEY_COLUMNS),
+                params![id.to_string()],
+                row_to_api_key,
+            )
+            .map_err(migrations::db_err)?;
+        Ok((plaintext, key, true))
     }
 
     /// `Some(key)` when `presented` matches a stored key, active or not.
@@ -1823,6 +1942,14 @@ impl Store {
             }
         }
         patch.apply(&mut key);
+        // A system key is handed to the dashboard in plaintext; letting it administer the
+        // gateway would turn the playground into an admin credential.
+        if key.kind.is_system() && key.scope == KeyScope::Admin {
+            return Err(Error::BadRequest(format!(
+                "a {} key cannot have admin scope",
+                key.kind.as_str()
+            )));
+        }
         let allowed = match &key.allowed_models {
             Some(models) => Some(serde_json::to_string(models)?),
             None => None,
@@ -2107,10 +2234,16 @@ impl Store {
         Ok(out)
     }
 
+    /// Operator-created keys only: a system key is the gateway's own, not a key an
+    /// operator configured.
     pub async fn count_api_keys(&self) -> Result<usize> {
         let conn = self.conn();
         let n: i64 = conn
-            .query_row("SELECT count(*) FROM api_keys", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM api_keys WHERE kind = 'user'",
+                [],
+                |r| r.get(0),
+            )
             .map_err(migrations::db_err)?;
         Ok(usize::try_from(n).unwrap_or(usize::MAX))
     }
@@ -3984,6 +4117,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         scope: KeyScope::from_stored(&r.get::<_, String>(13)?),
         team_id: opt_uuid_col(r.get(14)?)?,
         owner_user_id: opt_uuid_col(r.get(15)?)?,
+        kind: KeyKind::from_stored(&r.get::<_, String>(16)?),
     })
 }
 
@@ -4381,5 +4515,110 @@ mod window_tests {
         assert_eq!(BudgetWindow::from_stored("hourly"), BudgetWindow::Total);
         assert_eq!(BudgetWindow::parse("hourly"), None);
         assert_eq!(BudgetWindow::parse("monthly"), Some(BudgetWindow::Monthly));
+    }
+}
+
+#[cfg(test)]
+mod system_key_tests {
+    use super::{ApiKeyPatch, KeyKind, KeyScope, Store};
+
+    fn block<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    /// The playground key keeps one plaintext across a reopen, is never stored in the
+    /// clear, is not counted as an operator key, and is recreated after a delete.
+    #[test]
+    fn playground_key_is_stable_sealed_and_recreated() {
+        let dir = std::env::temp_dir().join(format!("rrouter-syskey-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let db = dir.join("rrouter.db");
+
+        let store = Store::open(&db, None).expect("open");
+        let (first, key, created) =
+            block(store.ensure_system_api_key(KeyKind::Playground, "Playground")).expect("ensure");
+        assert!(created);
+        assert_eq!(key.kind, KeyKind::Playground);
+        assert_eq!(key.scope, KeyScope::Inference);
+        let (again, same, created) =
+            block(store.ensure_system_api_key(KeyKind::Playground, "Playground")).expect("again");
+        assert!(!created);
+        assert_eq!((again.as_str(), same.id), (first.as_str(), key.id));
+        block(store.create_api_key(Some("user"))).expect("user key");
+        assert_eq!(block(store.count_api_keys()).expect("count"), 1);
+        assert_eq!(block(store.list_api_keys()).expect("list").len(), 2);
+        drop(store);
+
+        let bytes = std::fs::read(&db).expect("db bytes");
+        assert!(
+            !bytes.windows(first.len()).any(|w| w == first.as_bytes()),
+            "plaintext must not be stored in the clear"
+        );
+
+        let store = Store::open(&db, None).expect("reopen");
+        let (after, reopened, created) =
+            block(store.ensure_system_api_key(KeyKind::Playground, "Playground")).expect("reopen");
+        assert!(!created);
+        assert_eq!((after.as_str(), reopened.id), (first.as_str(), key.id));
+        assert_eq!(
+            block(store.verify_api_key(&after))
+                .expect("verify")
+                .map(|k| k.kind),
+            Some(KeyKind::Playground)
+        );
+
+        assert!(block(store.delete_api_key(key.id)).expect("delete"));
+        let (fresh, recreated, created) =
+            block(store.ensure_system_api_key(KeyKind::Playground, "Playground"))
+                .expect("recreate");
+        assert!(created);
+        assert_ne!(fresh, first);
+        assert_ne!(recreated.id, key.id);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A different master key cannot unseal the secret: it fails loudly, never as a key.
+    #[test]
+    fn a_foreign_master_key_cannot_unseal_the_playground_key() {
+        let dir = std::env::temp_dir().join(format!("rrouter-syskey-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let db = dir.join("rrouter.db");
+        let a = "11".repeat(32);
+        let b = "22".repeat(32);
+        let store = Store::open(&db, Some(a)).expect("open");
+        block(store.ensure_system_api_key(KeyKind::Playground, "Playground")).expect("ensure");
+        drop(store);
+        let store = Store::open(&db, Some(b)).expect("reopen");
+        assert!(block(store.ensure_system_api_key(KeyKind::Playground, "Playground")).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Limits stay editable, admin scope does not, and a user kind cannot be ensured.
+    #[test]
+    fn playground_key_cannot_become_admin() {
+        let store = Store::open_in_memory().expect("store");
+        let (_, key, _) =
+            block(store.ensure_system_api_key(KeyKind::Playground, "Playground")).expect("ensure");
+        let limited = block(store.update_api_key(
+            key.id,
+            &ApiKeyPatch {
+                rpm: Some(10),
+                allowed_models: Some(Some(vec!["openai/*".into()])),
+                ..Default::default()
+            },
+        ))
+        .expect("patch")
+        .expect("row");
+        assert_eq!(limited.rpm, 10);
+        assert_eq!(limited.kind, KeyKind::Playground);
+        let admin = ApiKeyPatch {
+            scope: Some(KeyScope::Admin),
+            ..Default::default()
+        };
+        assert!(block(store.update_api_key(key.id, &admin)).is_err());
+        assert!(block(store.ensure_system_api_key(KeyKind::User, "x")).is_err());
     }
 }

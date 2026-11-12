@@ -6,6 +6,7 @@ import {
   getAccountSubscriptions,
   getAccountQuotas,
   getQuotaPings,
+  ensurePlaygroundKey,
   getUpdateStatus,
   isEndpointMissing,
   list,
@@ -78,6 +79,8 @@ export const qk = {
   users: ["users"] as const,
   invites: ["users", "invites"] as const,
   keys: ["keys"] as const,
+  /** The dashboard's own playground key; `POST`-ensured, so never stale by policy. */
+  playgroundKey: ["playground", "key"] as const,
   teams: ["teams"] as const,
   evals: ["evals"] as const,
   /** Index and every layout document share this prefix so one invalidation covers both. */
@@ -193,6 +196,31 @@ export function useKeys(enabled = true) {
     queryKey: qk.keys,
     queryFn: () => list<KeyResult>("/api/keys"),
     enabled,
+  });
+}
+
+/**
+ * The playground key. A `POST` on purpose: the first call mints the row, so the key list
+ * and the system counts are invalidated whenever one was actually created. The plaintext
+ * never enters a persisted store, only this tab's query cache.
+ */
+export function usePlaygroundKey(enabled = true) {
+  const client = useQueryClient();
+  return useQuery({
+    queryKey: qk.playgroundKey,
+    queryFn: async () => {
+      const result = await ensurePlaygroundKey();
+      if (result.created) {
+        void client.invalidateQueries({ queryKey: qk.keys });
+        void client.invalidateQueries({ queryKey: qk.system });
+      }
+      return result;
+    },
+    enabled,
+    // The key is stable for its whole life; a refetch can only repeat the same answer.
+    staleTime: Infinity,
+    retry: 1,
+    refetchOnWindowFocus: false,
   });
 }
 

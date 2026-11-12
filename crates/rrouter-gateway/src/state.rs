@@ -13,13 +13,17 @@ use tokio::sync::OwnedMutexGuard;
 use axum::http::HeaderMap;
 use rrouter_core::{Dialect, Error, Result};
 use rrouter_router::{model_allowed, Catalog};
-use rrouter_store::{ApiKey, Guardrails, KeyScope, Store};
+use rrouter_store::{ApiKey, Guardrails, KeyKind, KeyScope, Store};
 use uuid::Uuid;
 
 use crate::config::{config_file::EnvLookup, Config, ConfigSnapshot, ReloadOutcome};
 
 /// Width of the sliding window behind `rpm` and `tpm`.
 const MINUTE: Duration = Duration::from_secs(60);
+
+/// Request header the dashboard playground sets on its `/v1` calls; see
+/// [`AppState::authenticate`].
+pub const PLAYGROUND_HEADER: &str = "x-rrouter-playground";
 
 /// How long the first retention sweep waits after startup: long enough for the bind and
 /// catalog refresh to finish, so a large first delete never delays `serve`.
@@ -308,7 +312,11 @@ impl AppState {
     ///   clients that send a placeholder token keep working;
     /// - an unknown or missing key is a `401` when keys are required;
     /// - an `admin`-scoped key is refused with `403 key_scope`: it administers the
-    ///   gateway, it does not spend tokens, so it has no business on `/v1/*`.
+    ///   gateway, it does not spend tokens, so it has no business on `/v1/*`;
+    /// - the system `playground` key is refused with `403 key_scope` unless the request
+    ///   carries [`PLAYGROUND_HEADER`]`: 1` **and** a valid admin dashboard session. Its
+    ///   plaintext is visible on the Access page, so the bearer alone must never be
+    ///   enough to spend through it from another client.
     ///
     /// Scope is checked after activity and expiry, so a disabled or expired admin key
     /// still gets the more specific refusal.
@@ -351,7 +359,28 @@ impl AppState {
                 message: "admin keys cannot call /v1".to_string(),
             });
         }
+        if key.kind == KeyKind::Playground && !self.is_playground_request(headers).await {
+            return Err(Error::Forbidden {
+                code: "key_scope",
+                message: "the playground key is accepted only from the dashboard playground"
+                    .to_string(),
+            });
+        }
         Ok(Caller::Key(key))
+    }
+
+    /// The playground marker plus a signed-in admin: the only context the playground key
+    /// is valid in. The header is checked first so ordinary traffic never pays for a
+    /// session lookup.
+    async fn is_playground_request(&self, headers: &HeaderMap) -> bool {
+        let marked = headers
+            .get(PLAYGROUND_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim() == "1");
+        marked
+            && crate::routes::auth::current_user(self, headers)
+                .await
+                .is_some_and(|user| user.is_admin())
     }
 
     /// The key `presented` names, when it is usable right now: it exists, is active and

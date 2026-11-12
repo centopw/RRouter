@@ -155,6 +155,8 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/keys/{id}/models",
             get(routes::keys::list_models).put(routes::keys::put_models),
         )
+        // The playground's own key, minted on first use; the only route that returns it.
+        .route("/playground/key", post(routes::keys::ensure_playground))
         .route(
             "/aliases",
             get(routes::models::list_aliases)
@@ -453,7 +455,8 @@ async fn cors(
     headers.insert(
         ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static(
-            "content-type, authorization, x-api-key, x-admin-token, anthropic-version, anthropic-beta",
+            "content-type, authorization, x-api-key, x-admin-token, anthropic-version, \
+             anthropic-beta, x-rrouter-playground",
         ),
     );
     headers.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));

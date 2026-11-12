@@ -21,7 +21,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use rrouter_core::Error;
 use rrouter_store::{
-    window_start, ApiKey, ApiKeyPatch, BudgetWindow, KeyModel, KeyScope, MAX_API_KEY_NAME,
+    window_start, ApiKey, ApiKeyPatch, BudgetWindow, KeyKind, KeyModel, KeyScope, MAX_API_KEY_NAME,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -57,6 +57,7 @@ fn row(
         "guardrails": key.guardrails,
         "team_id": team_id.map(|team| team.to_string()),
         "owner_user_id": key.owner_user_id.map(|user| user.to_string()),
+        "kind": key.kind.as_str(),
         "models": models_value(models),
     })
 }
@@ -343,6 +344,49 @@ pub async fn remove(
             ok_json(json!({ "deleted": true, "id": uuid.to_string() }))
         }
         Ok(false) => admin_error(&Error::NotFound(format!("key {uuid}"))),
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// Display name a freshly minted playground key gets; the operator may rename it.
+const PLAYGROUND_KEY_NAME: &str = "Playground";
+
+/// `POST /api/playground/key` — the dashboard playground's key, created on first use:
+/// `{key, id, created}`.
+///
+/// The key is an ordinary row of kind `playground`, so the Access page lists it and edits
+/// its models, limits and guardrails like any other key; deleting it there only means the
+/// next call here mints a new one. This is the only response that carries its plaintext.
+/// `/v1` accepts it solely with the playground header and an admin dashboard session (see
+/// [`AppState::authenticate`]), so the plaintext alone grants nothing to another client.
+pub async fn ensure_playground(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+) -> Response {
+    match state
+        .store
+        .ensure_system_api_key(KeyKind::Playground, PLAYGROUND_KEY_NAME)
+        .await
+    {
+        Ok((plaintext, key, created)) => {
+            if created {
+                let actor = super::auth::actor(&state, &headers).await;
+                super::auth::audit(
+                    &state,
+                    "key_created",
+                    Some(&actor),
+                    &crate::auth::client_ip(&headers, peer.0),
+                    &format!("key {} · kind {}", key.id, key.kind.as_str()),
+                )
+                .await;
+            }
+            ok_json(json!({
+                "key": plaintext,
+                "id": key.id.to_string(),
+                "created": created,
+            }))
+        }
         Err(e) => admin_error(&e),
     }
 }

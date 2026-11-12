@@ -54,11 +54,11 @@ pub use rrouter_auth::{CredentialStore, Credentials};
 pub use store::{
     cache_key, window_reset, window_start, AccountQuota, AccountQuotaState, AccountUsage, ApiKey,
     ApiKeyPatch, AttemptRecord, BudgetWindow, CacheEntry, Combo, ComboStrategy, Connection,
-    ConnectionScope, ExhaustedAccounts, Guardrails, KeyModel, KeyScope, ModelAlias, ModelCost,
-    ModelPreference, ModelRow, PromptTemplate, PromptTemplateVersion, PruneReport, QuotaPing,
-    QuotaPingMode, SemanticCacheCandidate, SemanticCacheEntry, SemanticCacheScope, StatusFilter,
-    Store, UsageBucket, UsageModelBucket, UsageQuery, UsageRecord, UsageSummary, API_KEY_PREFIX,
-    MAX_API_KEY_NAME, MAX_COMBO_ROUTER_MODEL, MAX_MODEL_PREFERENCE_MODEL,
+    ConnectionScope, ExhaustedAccounts, Guardrails, KeyKind, KeyModel, KeyScope, ModelAlias,
+    ModelCost, ModelPreference, ModelRow, PromptTemplate, PromptTemplateVersion, PruneReport,
+    QuotaPing, QuotaPingMode, SemanticCacheCandidate, SemanticCacheEntry, SemanticCacheScope,
+    StatusFilter, Store, UsageBucket, UsageModelBucket, UsageQuery, UsageRecord, UsageSummary,
+    API_KEY_PREFIX, MAX_API_KEY_NAME, MAX_COMBO_ROUTER_MODEL, MAX_MODEL_PREFERENCE_MODEL,
     MAX_MODEL_PREFERENCE_PROVIDER, MAX_QUOTA_PING_MODEL,
 };
 pub use teams::{normalize_name, Team, TeamMember, TeamPatch, TeamRole, TeamSpend, MAX_TEAM_NAME};

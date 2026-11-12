@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { ArrowUp, SlidersHorizontal, Square } from "@phosphor-icons/react";
+import { ArrowUp, MagicWand, SlidersHorizontal, Square } from "@phosphor-icons/react";
 import { useSearchParams } from "react-router-dom";
 import { ModelSelect } from "../components/model-select";
 import {
   Button,
+  CopyChip,
   ErrorNote,
   Field,
   Input,
@@ -14,7 +15,8 @@ import {
   statusText,
 } from "../components/ui";
 import { ms } from "../lib/format";
-import { useCreateTemplate, useModels, useSystem, useTemplates } from "../lib/queries";
+import { useCreateTemplate, useModels, usePlaygroundKey, useSystem, useTemplates } from "../lib/queries";
+import { PLAYGROUND_HEADERS, rewritePrompt } from "../lib/api";
 import { Heading } from "../components/atoms";
 
 /**
@@ -34,9 +36,6 @@ const ENDPOINTS: Record<Dialect, string> = {
   chat: "/v1/chat/completions",
   messages: "/v1/messages",
 };
-
-/** Session-only: a playground key must not outlive the tab or leak into a backup. */
-const KEY_STORAGE = "rrouter:playground:key";
 
 /** Anthropic requires `max_tokens`; the playground keeps one generous, fixed cap. */
 const MAX_OUTPUT_TOKENS = 2048;
@@ -70,13 +69,13 @@ export default function Playground() {
   const [temp, setTemp] = useState("1");
   const [draft, setDraft] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [apiKey, setApiKey] = useState(() => {
-    try {
-      return sessionStorage.getItem(KEY_STORAGE) ?? "";
-    } catch {
-      return "";
-    }
-  });
+  // The gateway's own key for this page: minted on first use, never pasted by hand.
+  const key = usePlaygroundKey();
+  const apiKey = key.data?.key ?? "";
+  // The enhancer streams a rewrite into the composer; `undoDraft` is what it replaced.
+  const [enhancing, setEnhancing] = useState(false);
+  const [enhanceError, setEnhanceError] = useState<string | null>(null);
+  const [undoDraft, setUndoDraft] = useState<string | null>(null);
 
   const templates = useTemplates();
   const createTemplate = useCreateTemplate();
@@ -89,8 +88,10 @@ export default function Playground() {
 
   const nextId = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+  const enhanceAbortRef = useRef<AbortController | null>(null);
   const streaming = turns.some((turn) => turn.status === "streaming");
   const needsKey = system.data?.require_api_key === true;
+  // Sending without a key is a 401 when enforcement is on, so the composer waits for ours.
   const keyMissing = needsKey && apiKey.trim() === "";
 
   // First usable model is the useful default: the page should send on first open.
@@ -106,16 +107,25 @@ export default function Playground() {
 
   // Escape stops a stream even when focus left the composer.
   useEffect(() => {
-    if (!streaming) return;
+    if (!streaming && !enhancing) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") abortRef.current?.abort();
+      if (event.key === "Escape") {
+        abortRef.current?.abort();
+        enhanceAbortRef.current?.abort();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [streaming]);
+  }, [streaming, enhancing]);
 
   // A route change must not leave an SSE connection running in the background.
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+      enhanceAbortRef.current?.abort();
+    },
+    [],
+  );
 
   // "Open in Playground" on the Templates page hands the body over as a query param.
   // Drop the param once the list resolves: a later reload must not overwrite an edit.
@@ -131,24 +141,23 @@ export default function Playground() {
     setSearchParams(next, { replace: true });
   }, [templateParam, templates.data, searchParams, setSearchParams]);
 
-  const rememberKey = (value: string) => {
-    setApiKey(value);
-    try {
-      if (value) sessionStorage.setItem(KEY_STORAGE, value);
-      else sessionStorage.removeItem(KEY_STORAGE);
-    } catch {
-      // Storage can be blocked; the field still works for this mount.
-    }
-  };
-
-  const canSend = draft.trim() !== "" && model !== "" && !streaming && !keyMissing;
+  const canSend = draft.trim() !== "" && model !== "" && !streaming && !enhancing && !keyMissing;
   const sendBlocker = keyMissing
-    ? "This gateway requires an API key"
+    ? "The playground key is not ready yet"
     : model === ""
       ? "Choose a model first"
       : draft.trim() === ""
         ? "Type a message first"
         : null;
+  const enhanceBlocker =
+    apiKey === ""
+      ? "The playground key is not ready yet"
+      : model === ""
+        ? "Choose a model first"
+        : draft.trim() === ""
+          ? "Type a draft first"
+          : null;
+  const canEnhance = enhanceBlocker === null && !streaming && !enhancing;
 
   const onComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
@@ -192,7 +201,12 @@ export default function Playground() {
       if (systemText) wire.system = systemText;
     }
 
-    const headers: Record<string, string> = { "content-type": "application/json" };
+    // The gateway accepts this key only with the playground marker (and an admin session,
+    // which the browser already carries), so every call here identifies itself.
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      ...PLAYGROUND_HEADERS,
+    };
     if (dialect === "messages") headers["anthropic-version"] = "2023-06-01";
     if (key) {
       if (dialect === "messages") headers["x-api-key"] = key;
@@ -338,6 +352,47 @@ export default function Playground() {
     })();
   };
 
+  /**
+   * Kilo-style enhance: the same selected model rewrites the draft on the playground key,
+   * streamed into the composer so the operator watches it happen. The replaced text is
+   * kept for one undo; an abort keeps whatever streamed.
+   */
+  const enhance = () => {
+    const text = draft.trim();
+    if (!text || model === "" || apiKey === "" || streaming || enhancing) return;
+    const controller = new AbortController();
+    enhanceAbortRef.current = controller;
+    setUndoDraft(draft);
+    setEnhanceError(null);
+    setEnhancing(true);
+    void (async () => {
+      try {
+        const rewrite = await rewritePrompt({
+          draft: text,
+          model,
+          key: apiKey,
+          signal: controller.signal,
+          onText: (soFar) => setDraft(soFar),
+        });
+        if (rewrite.trim() === "") setEnhanceError("The model returned an empty rewrite.");
+      } catch (error) {
+        // An abort is a deliberate stop, not a failure worth a message.
+        if (!controller.signal.aborted) {
+          setEnhanceError(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (enhanceAbortRef.current === controller) enhanceAbortRef.current = null;
+        setEnhancing(false);
+      }
+    })();
+  };
+
+  const undoEnhance = () => {
+    if (undoDraft === null) return;
+    setDraft(undoDraft);
+    setUndoDraft(null);
+  };
+
   const modelHint = models.isLoading
     ? "Loading the registry…"
     : models.isError
@@ -371,9 +426,11 @@ export default function Playground() {
       </header>
 
       {models.isError ? <ErrorNote error={models.error} onRetry={() => void models.refetch()} /> : null}
-      {keyMissing ? (
+      {key.isError ? (
+        <ErrorNote error={key.error} onRetry={() => void key.refetch()} />
+      ) : keyMissing && !key.isLoading ? (
         <div className="rounded-[8px] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-small text-[var(--color-warn-ink)]">
-          This gateway requires a key. Add one in Parameters before sending.
+          This gateway requires a key and the playground's own key was not issued.
         </div>
       ) : null}
 
@@ -388,11 +445,20 @@ export default function Playground() {
         )}
       </div>
 
+      {enhanceError ? (
+        <p role="alert" className="px-2 pb-1 text-caption text-neg">
+          {enhanceError}
+        </p>
+      ) : null}
+
       <div className="z-10 px-1 pb-1 pt-1">
         <div className="rounded-[16px] border border-line-strong bg-surface shadow-[0_1px_2px_rgba(16,18,20,0.05)] focus-within:border-[var(--color-accent-text)]">
           <textarea
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              setUndoDraft(null);
+            }}
             onKeyDown={onComposerKeyDown}
             rows={2}
             aria-label="message"
@@ -410,6 +476,40 @@ export default function Playground() {
             <span className="ml-auto hidden items-center gap-1 text-caption text-faint min-[820px]:flex">
               <kbd className={kbdClass}>⌘↵</kbd> send · <kbd className={kbdClass}>Esc</kbd> stop
             </span>
+            {enhancing ? (
+              <button
+                type="button"
+                onClick={() => enhanceAbortRef.current?.abort()}
+                aria-label="stop enhancing"
+                title="Stop the rewrite"
+                className="flex h-8 items-center gap-1.5 rounded-full border border-line-strong bg-surface px-2.5 text-small text-fg hover:bg-surface-3"
+              >
+                <Square size={10} weight="fill" aria-hidden />
+                stop
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={enhance}
+                disabled={!canEnhance}
+                aria-label="enhance prompt"
+                title={enhanceBlocker ?? "Rewrite the draft with this model"}
+                className="flex h-8 items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 text-small text-muted transition-colors hover:border-line-strong hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <MagicWand size={14} aria-hidden />
+                enhance
+              </button>
+            )}
+            {undoDraft !== null && !enhancing ? (
+              <button
+                type="button"
+                onClick={undoEnhance}
+                aria-label="undo the rewrite"
+                className="text-small text-muted underline underline-offset-2 hover:text-fg"
+              >
+                undo
+              </button>
+            ) : null}
             {streaming ? (
               <button
                 type="button"
@@ -475,17 +575,18 @@ export default function Playground() {
             </div>
           </Field>
 
-          {needsKey ? (
-            <Field label="API key" hint="Kept in this tab's session only.">
-              <Input
-                type="password"
-                value={apiKey}
-                onChange={rememberKey}
-                placeholder="sk-…"
-                ariaLabel="gateway API key"
-              />
-            </Field>
-          ) : null}
+          <Field
+            label="Key"
+            hint="The gateway issues this playground its own key; its limits and permissions are edited on the API Keys page."
+          >
+            {apiKey ? (
+              <CopyChip value={apiKey} label="playground key" className="w-full" />
+            ) : (
+              <span className="text-small text-faint">
+                {key.isError ? "the key could not be issued" : "minting the key…"}
+              </span>
+            )}
+          </Field>
 
           <div className="border-t border-line pt-4">
             <div className="flex flex-wrap items-center justify-between gap-2">

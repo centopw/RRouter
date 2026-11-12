@@ -2195,6 +2195,7 @@ async fn key_rows_match_the_governance_contract() {
         "guardrails": null,
         "team_id": null,
         "owner_user_id": null,
+        "kind": "user",
         "models": [],
     });
     assert_eq!(patched, expected);
