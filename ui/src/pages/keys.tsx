@@ -20,13 +20,14 @@ import {
 import { DataTable, type Column } from "../components/table";
 import { ModelPicker } from "../components/model-picker";
 import { Checkbox, IconButton } from "../components/atoms";
-import { PencilSimple, Trash } from "@phosphor-icons/react";
+import { Key as KeyIcon, PencilSimple, Trash } from "@phosphor-icons/react";
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
 import {
   qk,
   useKeyModels,
   useKeys,
   useModels,
+  usePlaygroundKey,
   useSystem,
   useTeams,
   useUpdateKey,
@@ -57,6 +58,9 @@ export default function Keys() {
   const [editing, setEditing] = useState<KeyResult | null>(null);
   const [creating, setCreating] = useState(false);
   const [revoking, setRevoking] = useState<KeyResult | null>(null);
+  const [revealing, setRevealing] = useState(false);
+  // The playground key is the gateway's own: it is listed here, but not an operator key.
+  const configured = (keys.data ?? []).filter((row) => row.kind !== "playground").length;
 
   // The Modal re-focuses itself whenever `onClose` changes identity; keep it stable.
   const closeEdit = useCallback(() => setEditing(null), []);
@@ -98,6 +102,14 @@ export default function Keys() {
       width: "5rem",
       render: (r) => (
         <span className="flex justify-end gap-0.5">
+          {r.kind === "playground" ? (
+            <IconButton
+              label="Show the playground key"
+              onClick={() => setRevealing(true)}
+            >
+              <KeyIcon size={15} aria-hidden />
+            </IconButton>
+          ) : null}
           <IconButton
             label={`Edit key settings for ${r.name ?? r.id}`}
             onClick={() => setEditing(r)}
@@ -158,7 +170,7 @@ export default function Keys() {
         <CardHeader
           title="Keys"
           action={
-            <span className="text-caption text-faint">{keys.data?.length ?? 0} configured</span>
+            <span className="text-caption text-faint">{configured} configured</span>
           }
         />
         <DataTable
@@ -203,6 +215,8 @@ export default function Keys() {
       {editing ? (
         <KeySettingsModal key={editing.id} row={editing} onClose={closeEdit} />
       ) : null}
+
+      {revealing ? <PlaygroundKeyModal onClose={() => setRevealing(false)} /> : null}
     </>
   );
 }
@@ -265,6 +279,14 @@ function KeyCell({ row, team }: { row: KeyResult; team: string | null }) {
         <Status row={row} />
       </div>
       <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-caption text-faint">
+        {row.kind === "playground" ? (
+          <Badge
+            tone="accent"
+            title="issued by the gateway; /v1 accepts it only from the dashboard playground"
+          >
+            playground
+          </Badge>
+        ) : null}
         {row.scope === "admin" ? (
           <Badge tone="accent" title="manages the gateway; cannot call /v1 or spend tokens">
             admin
@@ -705,6 +727,41 @@ function CreateKeyModal({ onClose, onCreated }: { onClose: () => void; onCreated
 
 const MAX_KEY_NAME = 100;
 
+/**
+ * The playground key's plaintext. The only endpoint that returns it is the ensure route,
+ * so this modal asks for it rather than reading it off a list row.
+ */
+function PlaygroundKeyModal({ onClose }: { onClose: () => void }) {
+  const key = usePlaygroundKey();
+  return (
+    <Modal
+      title="Playground key"
+      open
+      onClose={onClose}
+      description="Issued and kept by the gateway. It is accepted on /v1 only from this dashboard's playground, with an admin session."
+      footer={
+        <Button variant="primary" onClick={onClose}>
+          done
+        </Button>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        {key.isError ? (
+          <ErrorNote error={key.error} onRetry={() => void key.refetch()} />
+        ) : key.data ? (
+          <CopyChip value={key.data.key} label="playground key" className="w-full" />
+        ) : (
+          <p className="text-small text-faint">minting the key…</p>
+        )}
+        <p className="text-small text-muted">
+          Deleting the row revokes this key; the playground mints a new one on its next visit.
+          Limits, models and guardrails stay editable here like any other key.
+        </p>
+      </div>
+    </Modal>
+  );
+}
+
 function KeySettingsModal({ row, onClose }: { row: KeyResult; onClose: () => void }) {
   const [name, setName] = useState(row.name ?? "");
   const [active, setActive] = useState(row.is_active);
@@ -840,7 +897,8 @@ function KeySettingsModal({ row, onClose }: { row: KeyResult; onClose: () => voi
     const patch: UpdateKey = {
       name: trimmedName === "" ? null : trimmedName,
       is_active: active,
-      scope,
+      // A system key's scope is the gateway's decision; sending one is a 400 on admin.
+      ...(row.kind === "playground" ? {} : { scope }),
       rpm: toCount(rpm),
       tpm: toCount(tpm),
       budget_tokens: toCount(budget),
@@ -923,19 +981,28 @@ function KeySettingsModal({ row, onClose }: { row: KeyResult; onClose: () => voi
           <span className="text-caption font-medium uppercase tracking-[0.08em] text-faint">
             scope
           </span>
-          <Segmented
-            options={SCOPES}
-            value={scope}
-            onChange={(v) => {
-              if (!busy) setScope(v);
-            }}
-            ariaLabel="key scope"
-            className={busy ? "pointer-events-none opacity-60" : undefined}
-          />
-          <span className="text-caption text-faint">
-            admin keys manage the gateway and cannot spend tokens; inference keys call /v1 and
-            obey limits and guardrails.
-          </span>
+          {row.kind === "playground" ? (
+            <span className="text-small text-muted">
+              inference, fixed — the playground key is accepted on /v1 only from the playground,
+              and cannot administer the gateway.
+            </span>
+          ) : (
+            <>
+              <Segmented
+                options={SCOPES}
+                value={scope}
+                onChange={(v) => {
+                  if (!busy) setScope(v);
+                }}
+                ariaLabel="key scope"
+                className={busy ? "pointer-events-none opacity-60" : undefined}
+              />
+              <span className="text-caption text-faint">
+                admin keys manage the gateway and cannot spend tokens; inference keys call /v1 and
+                obey limits and guardrails.
+              </span>
+            </>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-3">

@@ -12,13 +12,25 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 35;
+pub const SCHEMA_VERSION: i64 = 36;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36,
 ];
+
+/// V36: system-managed keys. `kind` separates operator-created keys (`user`) from keys
+/// the gateway manages itself (`playground`); `sealed_secret` holds a system key's
+/// plaintext sealed with the master-key cipher (bound to the row id), so the same key
+/// survives a restart and can be shown again. User keys keep `sealed_secret` NULL: their
+/// plaintext is still shown once and only the hash is stored. The partial unique index
+/// is what makes "one key per system kind" a schema fact instead of a race.
+const V36: &str = r#"
+ALTER TABLE api_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE api_keys ADD COLUMN sealed_secret BLOB;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_system_kind ON api_keys(kind) WHERE kind <> 'user';
+"#;
 
 /// V35: API-key ownership. A key can belong to a user as well as a team; group access
 /// grants can target that user. Existing keys stay ownerless (instance-wide).
@@ -1411,6 +1423,41 @@ mod tests {
             (output, score, latency, error),
             (None, None, None, None),
             "a queued result has no answer yet"
+        );
+    }
+
+    /// v35 → v36: existing keys read as `user` with no sealed secret, and only one key
+    /// per system kind can exist.
+    #[test]
+    fn upgrades_from_v35_landing_v36_key_kind() {
+        let mut c = Connection::open_in_memory().expect("open");
+        at_version(&mut c, 35);
+        c.execute(
+            "INSERT INTO api_keys (id, key_hash, is_active, created_at) VALUES ('k', 'h', 1, 1)",
+            [],
+        )
+        .expect("v35 key");
+        assert!(!has_column(&c, "api_keys", "kind"));
+        migrate(&mut c).expect("upgrade");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+        assert!(has_index(&c, "api_keys", "idx_api_keys_system_kind"));
+        let (kind, sealed): (String, Option<Vec<u8>>) = c
+            .query_row(
+                "SELECT kind, sealed_secret FROM api_keys WHERE id = 'k'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!((kind.as_str(), sealed), ("user", None));
+        let insert = "INSERT INTO api_keys (id, key_hash, is_active, created_at, kind) \
+                      VALUES (?1, ?2, 1, 1, ?3)";
+        c.execute(insert, ["u2", "h2", "user"])
+            .expect("second user key");
+        c.execute(insert, ["p1", "h3", "playground"])
+            .expect("first playground key");
+        assert!(
+            c.execute(insert, ["p2", "h4", "playground"]).is_err(),
+            "a second playground key violates the partial unique index"
         );
     }
 

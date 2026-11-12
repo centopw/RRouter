@@ -413,6 +413,8 @@ export type KeyResult = {
   guardrails: Guardrails | null;
   /** Tenancy: the team this key spends for, or null for instance-wide. */
   team_id?: string | null;
+  /** Who manages the key; absent on builds that predate the playground key. */
+  kind?: KeyKind;
 };
 
 /** Exactly the fields `PATCH /api/keys/{id}` accepts; null clears a nullable field. */
@@ -436,6 +438,16 @@ export type UpdateKey = Partial<{
   /** Tenancy; null releases the key back to instance-wide. */
   team_id: string | null;
 }>;
+
+/**
+ * Who manages a key: the operator (`user`) or the gateway itself (`playground`). A
+ * playground key is an ordinary row on the Access page — editable limits, models and
+ * guardrails — but `/v1` accepts it only from the dashboard playground.
+ */
+export type KeyKind = "user" | "playground";
+
+/** The playground's own key: minted on first use and kept across restarts. */
+export type PlaygroundKey = { key: string; id: string; created: boolean };
 
 
 /** A member of a team; `team_admin` is scoped administration. */
@@ -972,6 +984,139 @@ export async function listPage<T>(path: string): Promise<Page<T>> {
     next_before: body.next_before ?? null,
     next_before_id: body.next_before_id ?? null,
   };
+}
+
+/**
+ * `POST /api/playground/key` — the playground's key, created on first use. The only
+ * response that carries its plaintext: `/api/keys` lists the row without it.
+ */
+export function ensurePlaygroundKey(): Promise<PlaygroundKey> {
+  return api.post<PlaygroundKey>("/api/playground/key", {});
+}
+
+/**
+ * Every `/v1` call the playground makes carries this marker. The gateway refuses its
+ * playground key without the marker and an admin dashboard session, so the plaintext
+ * alone buys another client nothing.
+ */
+export const PLAYGROUND_HEADERS: Record<string, string> = { "x-rrouter-playground": "1" };
+
+/** What the enhancer asks the model to do; the draft itself is the user message. */
+const REWRITE_INSTRUCTION = [
+  "You rewrite prompts for an AI assistant.",
+  "Turn the user's draft into one clearer, more specific prompt: keep its intent and every",
+  "constraint it states, add only detail that makes it unambiguous, and drop preamble.",
+  "Reply with the rewritten prompt alone — no commentary, no quotes, no code fences.",
+].join(" ");
+
+type RewriteOptions = {
+  draft: string;
+  model: string;
+  /** The playground key; the request also carries `PLAYGROUND_HEADERS`. */
+  key: string;
+  signal: AbortSignal;
+  /** The whole rewrite so far, so the composer can replace the draft as it streams. */
+  onText: (text: string) => void;
+};
+
+/**
+ * Stream a rewrite of `draft` through `model` and resolve with the final text. The reply
+ * is read as OpenAI chat deltas because the request is one; an abort rejects with the
+ * fetch's `AbortError` and the caller keeps whatever already streamed.
+ */
+export async function rewritePrompt({
+  draft,
+  model,
+  key,
+  signal,
+  onText,
+}: RewriteOptions): Promise<string> {
+  const path = "/v1/chat/completions";
+  const res = await fetch(path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${key}`,
+      ...PLAYGROUND_HEADERS,
+    },
+    body: JSON.stringify({
+      model,
+      stream: true,
+      temperature: 0.3,
+      messages: [
+        { role: "system", content: REWRITE_INSTRUCTION },
+        { role: "user", content: draft },
+      ],
+    }),
+    signal,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw apiError(res, text ? safeJson(text) : null, path);
+  }
+  if (!res.body) {
+    throw new ApiError(res.status, "The gateway returned no response body.", null);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let rewrite = "";
+  let finished = false;
+
+  /** One SSE frame: `data:` lines joined, `[DONE]` ends the stream. Returns "stop" when it did. */
+  const applyFrame = (frame: string): "stop" | null => {
+    const payload = frame
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice("data:".length).trimStart())
+      .join("\n")
+      .trim();
+    if (payload === "") return null;
+    if (payload === "[DONE]") return "stop";
+    let json: unknown;
+    try {
+      json = JSON.parse(payload);
+    } catch {
+      return null; // A non-JSON data line is a provider quirk, not a rewrite.
+    }
+    if (isObject(json) && isObject(json.error) && typeof json.error.message === "string") {
+      throw new ApiError(res.status, json.error.message, json);
+    }
+    if (!isObject(json) || !Array.isArray(json.choices)) return null;
+    const choice = json.choices[0];
+    if (!isObject(choice) || !isObject(choice.delta)) return null;
+    const piece = choice.delta.content;
+    if (typeof piece === "string" && piece !== "") {
+      rewrite += piece;
+      onText(rewrite);
+    }
+    return null;
+  };
+
+  try {
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      // Concatenate before normalising so a CRLF split across chunks still matches.
+      buffer = `${buffer}${decoder.decode(value, { stream: true })}`.replace(/\r\n/g, "\n");
+      let cut = buffer.indexOf("\n\n");
+      while (cut !== -1) {
+        const frame = buffer.slice(0, cut);
+        buffer = buffer.slice(cut + 2);
+        if (applyFrame(frame) === "stop") {
+          finished = true;
+          break;
+        }
+        cut = buffer.indexOf("\n\n");
+      }
+    }
+    // Some upstreams close without the blank-line terminator on the last frame.
+    if (!finished && buffer.trim() !== "") applyFrame(buffer);
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return rewrite;
 }
 
 /** Deployment mode plus what the update endpoint can do on this host. */
