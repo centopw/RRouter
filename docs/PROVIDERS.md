@@ -9,7 +9,7 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 | `claude` | Claude (Anthropic OAuth) | subscription (PKCE) | Messages | yes | Request must claim a current Claude Code version; a stale one is refused with "version 2.1.280 or newer is required". Callback host is `localhost`. Native web search through the Messages `web_search` tool. |
 | `codex` | Codex (ChatGPT OAuth) | subscription (PKCE, fixed port 1455) | Responses | **no** | Stream-only: non-streaming clients are served by reassembling the stream. Its five verified ids come from the built-in catalog. The subscription backend does not serve `/responses/compact`. Responses also exposes native web search. |
 | `github` | GitHub Copilot | subscription (device code) | Chat | yes | Also exposes Responses and Messages URLs; a Copilot-specific token refresh is handled per request. |
-| `google-antigravity` | Google Antigravity | subscription (PKCE, fixed port 51121) | Google Code Assist (`/v1internal:*`) | yes (project-scoped `POST`) | Sign-in returns a Google token; the account's Cloud project is discovered via `loadCodeAssist` (onboarding when absent) and stored as `credentials.extra.project_id`, which every CCA envelope carries. `POST /api/models/fetch` posts `v1internal:fetchAvailableModels` with that project and stores the catalogue's ids/`displayName` as upstream rows. |
+| `google-antigravity` | Google Antigravity | subscription (PKCE, dynamic loopback port) | Google Code Assist (`/v1internal:*`) | yes (project-scoped `POST`) | Sign-in returns a Google token; the account's Cloud project is discovered via `loadCodeAssist` (onboarding when absent) and stored as `credentials.extra.project_id`, which every CCA envelope carries. `POST /api/models/fetch` posts `v1internal:fetchAvailableModels` with that project and stores the catalogue's ids/`displayName` as upstream rows. |
 | `openai` | OpenAI | API key | Chat | yes | Responses and compaction available; `store:false` is enforced for Codex traffic. Native web search through Responses. |
 | `anthropic` | Anthropic | API key | Messages | yes | Exact token counting via `/v1/messages/count_tokens`. Native web search through the Messages `web_search` tool. |
 | `opencode` | OpenCode | API key | Chat | yes | Paid Console base `https://opencode.ai/inference/openai/v1`; Go plans use the separate `opencode-go` provider. |
@@ -32,7 +32,7 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 callback on its own loopback. The sign-in dialog never opens a browser automatically:
 it shows the authorize URL, an **open** button and a **copy** button, and the operator
 pastes the final browser URL back. Every PKCE provider advertises this mode: Codex uses
-its fixed port 1455, Google Antigravity uses 51121, and Claude uses the stable manual
+its fixed port 1455, Google Antigravity uses a dynamic loopback port, and Claude uses the stable manual
 callback `http://localhost:54545/callback`. Device-code sign-in (GitHub Copilot) needs no
 callback and works unchanged.
 
@@ -75,11 +75,11 @@ Code Assist access.
 
 | Item | Behaviour |
 | --- | --- |
-| Sign-in | Authorization code + PKCE against a Google OAuth **desktop client the operator registers**. No OAuth client credential ships in this repository: set `GOOGLE_ANTIGRAVITY_CLIENT_ID` and `GOOGLE_ANTIGRAVITY_CLIENT_SECRET` (a start request answers `400` naming both when either is missing). The redirect URI is fixed at `http://localhost:51121/oauth-callback`; the browser must reach that port on this host, or use the manual/remote callback mode. |
+| Sign-in | Authorization code + PKCE with the **built-in Antigravity public desktop client** (the same client 9router and the IDE ship). No OAuth client registration is needed. `GOOGLE_ANTIGRAVITY_CLIENT_ID` + `GOOGLE_ANTIGRAVITY_CLIENT_SECRET` optionally replace it as a pair. The callback is a dynamic loopback port with path `/callback`; the browser must reach this host, or use manual/remote callback mode. |
 | Project | Every envelope needs a Cloud project id. After the token exchange the gateway calls `POST /v1internal:loadCodeAssist`; if that names no project it onboards (`onboardUser`, up to five polls, two seconds apart). The result is stored once as `credentials.extra.project_id`. A missing project fails sign-in with a message naming Antigravity/Code Assist — it never connects an unusable account. |
-| Auth storage | Access and refresh tokens are encrypted at rest like every OAuth account. The OAuth client id/secret are read from the environment at each sign-in, exchange and refresh; they are never logged, returned to a client, or compiled into the binary (the registry row carries only a non-secret placeholder). |
+| Auth storage | Access and refresh tokens are encrypted at rest like every OAuth account. The public client secret is compiled in (installed-app secrets are not confidential); an environment override is read at each sign-in and refresh. Secrets are never logged or returned to a client. |
 | Model ids | There is no `GET /models`. `POST /api/models/fetch` (and the background fetch after sign-in) posts `POST /v1internal:fetchAvailableModels` to the production Cloud Code Assist host with `{project}` and the account token, then stores every `models[id].displayName` as an `upstream` row under `google-antigravity`. `quotaInfo` is read past, not persisted: quota belongs to the account usage surface. Models may also be added manually with `POST /api/models/custom`; the request `model` may be the bare id or `google-antigravity/<id>`. |
-| Envelope | `{model, userAgent: "antigravity", requestType: "agent", project, requestId: "agent-<uuid>", request: {contents, systemInstruction, generationConfig, tools?}}`; headers include `User-Agent: antigravity` and `X-Goog-Api-Client`. The nested `request` carries no model and no safety settings. |
+| Envelope | `{model, userAgent: "antigravity/hub/2.24.0 darwin/arm64", requestType: "agent", project, requestId: "agent-<uuid>", request: {contents, systemInstruction, generationConfig, tools?}}`; headers include that User-Agent, `X-Goog-Api-Client` and `x-request-source: local` on project discovery. The nested `request` carries no model and no safety settings. |
 | Responses | Both buffered and SSE bodies are `{"response": {candidates, usageMetadata}, "traceId"}`; the gateway unwraps `response` (and also accepts a bare Gemini body). Text, reasoning (`thought: true`), function calls and usage (`usageMetadata`) are translated to the canonical stream. |
 | Limits | Chat and streaming only. No embeddings, rerank, files, batches, images or audio endpoints; those paths answer `501` for this provider. The daily host is used first with the production host as a fallback (`RROUTER_ANTIGRAVITY_PROD_HOST` / `RROUTER_ANTIGRAVITY_DAILY_HOST` override both). Non-streaming clients are served normally; there is no stream-only restriction. |
 
@@ -99,13 +99,13 @@ onboarding poll, and a CCA SSE/buffered server; it asserts the token-exchange fo
 fields, `response.candidates` unwrapping, usage mapping, refresh single-flight, missing-project
 refusal, and that neither tokens nor secrets appear in logs or the database. It exits `3`
 with `BLOCKED-BY-BACKEND` if the provider routes are absent, and `4` if the fixed callback
-port 51121 is occupied.
+callback port cannot be bound.
 
 ### Live manual checklist (browser)
 
 1. **Add provider → Google Antigravity**; the dialog opens Google's consent page. Approve
    the Cloud Platform, userinfo, cclog and experiments/config scopes.
-2. Let the browser return to `localhost:51121/oauth-callback`; the dashboard connection
+2. Let the browser return to the dynamic `localhost:<port>/callback` shown in the dialog; the dashboard connection
    appears with the Google **email account label** and no token.
 3. Confirm the account is active and (if you need several accounts) that only one is
    active at a time while testing.
@@ -182,9 +182,9 @@ the browser landed on:
 ```text
 POST /api/oauth/{provider}/start       {"manual":true}
   -> {"id":"…","flow":"pkce","challenge":{"kind":"pkce","authorize_url":"…",
-      "redirect_uri":"http://localhost:51121/oauth-callback","manual":true}}
+      "redirect_uri":"http://localhost:54545/callback","manual":true}}
 
-POST /api/oauth/{provider}/complete    {"id":"…","callback_url":"http://localhost:51121/oauth-callback?code=…&state=…"}
+POST /api/oauth/{provider}/complete    {"id":"…","callback_url":"http://localhost:54545/callback?code=…&state=…"}
   -> {"id":"<connection>","provider":"…","name":"…","warning":null}
 ```
 

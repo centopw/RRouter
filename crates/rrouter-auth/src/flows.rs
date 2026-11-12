@@ -1393,7 +1393,7 @@ mod tests {
             &google,
             antigravity::PROVIDER_ID,
             "code",
-            "http://localhost:51121/oauth-callback",
+            "http://localhost:53000/callback",
             "v",
             "st",
         )
@@ -1408,7 +1408,7 @@ mod tests {
         assert_eq!(param("client_secret"), Some("env-client-secret"));
         assert_eq!(
             param("redirect_uri"),
-            Some("http://localhost:51121/oauth-callback")
+            Some("http://localhost:53000/callback")
         );
         assert_eq!(param("state"), None, "Google does not expect state back");
         assert_eq!(param("scope"), None, "the exchange sends no scope");
@@ -1421,10 +1421,9 @@ mod tests {
         }
     }
 
-    /// The placeholder is never used on the wire: without both env variables the exchange
-    /// is refused before any request.
+    /// The public desktop client is built in; no environment is required for sign-in.
     #[test]
-    fn google_exchange_refuses_missing_env_credentials() {
+    fn google_exchange_uses_the_builtin_client_without_env() {
         let _guard = crate::TEST_ENV
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1439,28 +1438,25 @@ mod tests {
         ] {
             std::env::remove_var(name);
         }
-        let err = authorization_params(
+        let params = authorization_params(
             &google,
             antigravity::PROVIDER_ID,
             "code",
-            "http://localhost:51121/oauth-callback",
+            "http://localhost:53000/callback",
             "v",
             "st",
         )
-        .expect_err("missing env");
-        assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
-        let message = err.to_string();
-        assert!(
-            message.contains("GOOGLE_ANTIGRAVITY_CLIENT_ID"),
-            "{message}"
-        );
-        assert!(
-            message.contains("GOOGLE_ANTIGRAVITY_CLIENT_SECRET"),
-            "{message}"
-        );
-        assert!(
-            !message.contains(antigravity::PLACEHOLDER_CLIENT),
-            "{message}"
+        .expect("built-in client");
+        let param = |name: &str| {
+            params
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(param("client_id"), Some(antigravity::DEFAULT_CLIENT_ID));
+        assert_eq!(
+            param("client_secret"),
+            Some(antigravity::DEFAULT_CLIENT_SECRET)
         );
     }
 
@@ -1545,9 +1541,13 @@ mod tests {
                 manual,
             } => {
                 assert!(manual);
-                assert_eq!(redirect_uri, "http://localhost:51121/oauth-callback");
+                assert!(
+                    redirect_uri.starts_with("http://localhost:")
+                        && redirect_uri.ends_with("/callback"),
+                    "{redirect_uri}"
+                );
                 assert!(authorize_url.contains("client_id=env-manual-id"));
-                assert!(!authorize_url.contains(antigravity::PLACEHOLDER_CLIENT));
+                assert!(!authorize_url.contains(antigravity::DEFAULT_CLIENT_ID));
                 assert!(authorize_url.contains("code_challenge_method=S256"));
                 assert!(authorize_url.contains("access_type=offline"));
                 assert!(authorize_url.contains("prompt=consent"));
@@ -1560,21 +1560,15 @@ mod tests {
             "the secret must never leave the server: {serialized}"
         );
         assert!(flows.is_pending(&id));
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 51121)).await;
-        assert!(
-            listener.is_ok(),
-            "manual start must not bind the registered redirect port"
-        );
-        drop(listener);
         assert!(flows.cancel(&id));
         std::env::remove_var("GOOGLE_ANTIGRAVITY_CLIENT_ID");
         std::env::remove_var("GOOGLE_ANTIGRAVITY_CLIENT_SECRET");
     }
 
-    /// No listener, no authorize URL and no pending login when the required env is absent.
+    /// Manual mode works with the built-in client and binds no listener.
     #[allow(clippy::await_holding_lock)] // serializes the process-wide env override
     #[tokio::test]
-    async fn manual_start_refuses_missing_google_client_env() {
+    async fn manual_start_uses_the_builtin_google_client() {
         let _guard = crate::TEST_ENV
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1589,21 +1583,17 @@ mod tests {
         let flows = OAuthFlows::new();
         let http = reqwest::Client::new();
         let spec = crate::registry::get("google-antigravity").expect("provider");
-        let err = flows
+        let (id, challenge) = flows
             .start_manual(&http, spec)
             .await
-            .expect_err("missing env");
-        assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
-        let message = err.to_string();
-        for name in [
-            "GOOGLE_ANTIGRAVITY_CLIENT_ID",
-            "GOOGLE_ANTIGRAVITY_CLIENT_SECRET",
-        ] {
-            assert!(message.contains(name), "{message}");
+            .expect("built-in client");
+        match challenge {
+            Challenge::Pkce { authorize_url, .. } => {
+                assert!(authorize_url.contains(antigravity::DEFAULT_CLIENT_ID));
+            }
+            other => panic!("expected PKCE, got {other:?}"),
         }
-        assert!(flows.pending_ids().is_empty(), "no pending login created");
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 51121)).await;
-        assert!(listener.is_ok(), "no listener was bound");
+        assert!(flows.cancel(&id));
     }
 
     #[tokio::test]

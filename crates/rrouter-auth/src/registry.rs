@@ -251,12 +251,11 @@ const CODEX_REFRESH: RefreshSpec = RefreshSpec {
 };
 
 /// Google Antigravity: the Google token endpoint authenticates both the code exchange
-/// and the refresh with an operator-supplied confidential client. The static fields are
-/// a non-secret placeholder; the runtime values come from `GOOGLE_ANTIGRAVITY_*`.
+/// and the refresh with the public desktop client. `GOOGLE_ANTIGRAVITY_*` overrides it.
 const GOOGLE_ANTIGRAVITY_REFRESH: RefreshSpec = RefreshSpec {
     token_url: crate::antigravity::TOKEN_URL,
-    client_id: crate::antigravity::PLACEHOLDER_CLIENT,
-    client_secret: Some(crate::antigravity::PLACEHOLDER_CLIENT),
+    client_id: crate::antigravity::DEFAULT_CLIENT_ID,
+    client_secret: Some(crate::antigravity::DEFAULT_CLIENT_SECRET),
     body: RefreshBody::Form,
 };
 
@@ -335,18 +334,17 @@ pub const GITHUB_LOGIN: LoginFlow = LoginFlow::DeviceCode(DeviceFlow {
 
 /// Google Antigravity sign-in: authorization code + PKCE on the registered fixed port.
 ///
-/// The client id/secret are operator-supplied (`GOOGLE_ANTIGRAVITY_CLIENT_ID`,
-/// `GOOGLE_ANTIGRAVITY_CLIENT_SECRET`) and replace these placeholders at runtime; a
-/// missing value is a 400 before any listener or request exists. `access_type=offline`
-/// is what makes Google issue a refresh token; `prompt=consent` forces it on a repeat
-/// sign-in.
+/// The public Antigravity desktop client is built in; `GOOGLE_ANTIGRAVITY_CLIENT_ID` and
+/// `GOOGLE_ANTIGRAVITY_CLIENT_SECRET` override it. `access_type=offline` is what makes
+/// Google issue a refresh token; `prompt=consent` forces it on a repeat sign-in. The
+/// callback uses a dynamic loopback port and `/callback`, matching the IDE.
 pub const GOOGLE_ANTIGRAVITY_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
-    client_id: crate::antigravity::PLACEHOLDER_CLIENT,
-    client_secret: Some(crate::antigravity::PLACEHOLDER_CLIENT),
+    client_id: crate::antigravity::DEFAULT_CLIENT_ID,
+    client_secret: Some(crate::antigravity::DEFAULT_CLIENT_SECRET),
     authorize_url: crate::antigravity::AUTHORIZE_URL,
     token_url: crate::antigravity::TOKEN_URL,
     scope: crate::antigravity::SCOPES,
-    fixed_port: Some(crate::antigravity::CALLBACK_PORT),
+    fixed_port: None,
     redirect_host: "localhost",
     callback_path: crate::antigravity::CALLBACK_PATH,
     extra_params: &[("access_type", "offline"), ("prompt", "consent")],
@@ -1127,15 +1125,17 @@ mod tests {
             "https://accounts.google.com/o/oauth2/v2/auth"
         );
         assert_eq!(login.token_url, "https://oauth2.googleapis.com/token");
-        assert_eq!(login.fixed_port, Some(51121));
+        assert_eq!(
+            login.fixed_port, None,
+            "the desktop client accepts any loopback port"
+        );
         assert_eq!(login.redirect_host, "localhost");
-        assert_eq!(login.callback_path, "/oauth-callback");
+        assert_eq!(login.callback_path, "/callback");
         assert_eq!(login.body, RefreshBody::Form);
-        // The static row must never carry a real credential.
-        assert_eq!(login.client_id, crate::antigravity::PLACEHOLDER_CLIENT);
+        assert_eq!(login.client_id, crate::antigravity::DEFAULT_CLIENT_ID);
         assert_eq!(
             login.client_secret,
-            Some(crate::antigravity::PLACEHOLDER_CLIENT)
+            Some(crate::antigravity::DEFAULT_CLIENT_SECRET)
         );
         for scope in [
             "cloud-platform",
@@ -1155,10 +1155,10 @@ mod tests {
 
         let refresh = spec.refresh.expect("refresh");
         assert_eq!(refresh.token_url, "https://oauth2.googleapis.com/token");
-        assert_eq!(refresh.client_id, crate::antigravity::PLACEHOLDER_CLIENT);
+        assert_eq!(refresh.client_id, crate::antigravity::DEFAULT_CLIENT_ID);
         assert_eq!(
             refresh.client_secret,
-            Some(crate::antigravity::PLACEHOLDER_CLIENT)
+            Some(crate::antigravity::DEFAULT_CLIENT_SECRET)
         );
         assert_eq!(refresh.body, RefreshBody::Form);
     }

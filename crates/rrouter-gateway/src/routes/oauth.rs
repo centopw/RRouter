@@ -16,7 +16,7 @@
 //! POST /api/oauth/{provider}/start        body: {} | {"manual":true}
 //! 200 {"id":"<uuid>","provider":"claude","flow":"pkce",
 //!      "challenge":{"kind":"pkce","authorize_url":"<url>",
-//!                   "redirect_uri":"http://localhost:51121/oauth-callback",
+//!                   "redirect_uri":"http://localhost:54545/callback",
 //!                   "manual":true}}
 //! 400 {"error":{"message":"manual callback requires a fixed redirect port; ..."}}
 //!

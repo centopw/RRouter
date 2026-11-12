@@ -235,7 +235,7 @@ impl Harness {
                     base_url_override: Some(mock.url()),
                     ..creds
                 },
-                Some("antigravity"),
+                Some(rrouter_translate::google_cca::USER_AGENT),
             )
             .await
             .expect("connection");
@@ -373,7 +373,7 @@ async fn openai_client_gets_cca_text_tools_usage_and_the_envelope() {
     assert_eq!(calls[0].uri, "/v1internal:generateContent");
     let sent = &calls[0].body;
     assert_eq!(sent["model"], "gemini-3-pro");
-    assert_eq!(sent["userAgent"], "antigravity");
+    assert_eq!(sent["userAgent"], rrouter_translate::google_cca::USER_AGENT);
     assert_eq!(sent["requestType"], "agent");
     assert_eq!(sent["project"], PROJECT);
     assert!(
@@ -388,7 +388,10 @@ async fn openai_client_gets_cca_text_tools_usage_and_the_envelope() {
         sent["request"]["tools"][0]["functionDeclarations"][0]["name"],
         "get_weather"
     );
-    assert_eq!(header(&calls[0].headers, "user-agent"), "antigravity");
+    assert_eq!(
+        header(&calls[0].headers, "user-agent"),
+        rrouter_translate::google_cca::USER_AGENT
+    );
     assert_eq!(
         header(&calls[0].headers, "x-goog-api-client"),
         "google-cloud-sdk vscode_cloudshelleditor/0.1"

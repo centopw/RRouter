@@ -411,7 +411,7 @@ export function OAuthDialog({
                       rows={3}
                       spellCheck={false}
                       autoComplete="off"
-                      placeholder="http://localhost:51121/oauth-callback?code=…&state=…"
+                      placeholder="http://localhost:<port>/callback?code=…&state=…"
                       aria-label="pasted callback URL"
                       aria-invalid={problem !== null || undefined}
                       className="w-full min-w-0 resize-y break-all rounded-[var(--radius-input)] border border-line-strong bg-surface px-2.5 py-2 font-mono text-small text-fg placeholder:text-faint focus:border-[var(--color-accent-text)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-text)]/25"

@@ -632,10 +632,10 @@ async fn loopback_failure_page_is_branded() {
 }
 
 /// No Google OAuth client ships in the repository: start must refuse with a 400 naming
-/// both required variables instead of building a placeholder authorize URL.
+/// The public desktop client is built in, so sign-in works without operator env.
 #[allow(clippy::await_holding_lock)] // serializes the credential env mutation
 #[tokio::test]
-async fn google_antigravity_start_requires_client_env() {
+async fn google_antigravity_start_uses_the_builtin_client() {
     let _guard = GOOGLE_ENV
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -655,9 +655,13 @@ async fn google_antigravity_start_requires_client_env() {
             json!({"manual": true}),
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    let text = body.to_string();
-    assert!(text.contains("GOOGLE_ANTIGRAVITY_CLIENT_ID"), "{text}");
-    assert!(text.contains("GOOGLE_ANTIGRAVITY_CLIENT_SECRET"), "{text}");
-    assert!(!text.contains("authorize_url"), "{text}");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let url = body["challenge"]["authorize_url"]
+        .as_str()
+        .expect("authorize_url");
+    assert!(
+        url.contains(rrouter_auth::antigravity::DEFAULT_CLIENT_ID),
+        "{url}"
+    );
+    assert!(url.contains("localhost%3A54545%2Fcallback"), "{url}");
 }

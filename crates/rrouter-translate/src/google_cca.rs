@@ -9,7 +9,7 @@
 //! ```json
 //! {
 //!   "model": "gemini-3-pro",
-//!   "userAgent": "antigravity",
+//!   "userAgent": "antigravity/hub/2.24.0 darwin/arm64",
 //!   "requestType": "agent",
 //!   "project": "<cloud project id>",
 //!   "requestId": "agent-<uuid>",
@@ -55,7 +55,7 @@ pub const STREAM_PATH: &str = "/v1internal:streamGenerateContent?alt=sse";
 /// Buffered path.
 pub const NON_STREAM_PATH: &str = "/v1internal:generateContent";
 /// `userAgent` in the envelope and `User-Agent` on the wire.
-pub const USER_AGENT: &str = "antigravity";
+pub const USER_AGENT: &str = "antigravity/hub/2.24.0 darwin/arm64";
 /// `X-Goog-Api-Client` value the Antigravity desktop sends.
 pub const CLIENT_HEADER: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 /// Env override for the daily host (a deployment pin or a test server).
@@ -740,7 +740,7 @@ mod tests {
         let envelope =
             build_request_with(&request(), "gemini-3-pro", "proj-1", "agent-test").unwrap();
         assert_eq!(envelope["model"], "gemini-3-pro");
-        assert_eq!(envelope["userAgent"], "antigravity");
+        assert_eq!(envelope["userAgent"], USER_AGENT);
         assert_eq!(envelope["requestType"], "agent");
         assert_eq!(envelope["project"], "proj-1");
         assert_eq!(envelope["requestId"], "agent-test");

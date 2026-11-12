@@ -65,29 +65,32 @@ fn client_env(provider: &str, kind: &str) -> Option<String> {
         .or_else(|| read_nonempty(&format!("RROUTER_OAUTH_{kind}_{normalized}")))
 }
 
-/// Client id/secret for one OAuth exchange or refresh.
-///
-/// Google Antigravity ships no built-in OAuth client: both
-/// `GOOGLE_ANTIGRAVITY_CLIENT_ID` and `GOOGLE_ANTIGRAVITY_CLIENT_SECRET` are required
-/// (the generic `RROUTER_OAUTH_CLIENT_*` names are accepted fallbacks). A missing value
-/// is a `400` naming both variables, raised before an authorize URL, listener or token
-/// request exists. Every other provider keeps its registered defaults.
+/// Client id/secret for one OAuth exchange or refresh: the environment override wins,
+/// otherwise the registered (possibly built-in public) client is used.
 pub fn oauth_client(
     provider: &str,
     default_id: &'static str,
     default_secret: Option<&'static str>,
 ) -> Result<(Cow<'static, str>, Option<Cow<'static, str>>)> {
     if provider == crate::antigravity::PROVIDER_ID {
-        let id = client_env(provider, "CLIENT_ID");
-        let secret = client_env(provider, "CLIENT_SECRET");
-        return match (id, secret) {
-            (Some(id), Some(secret)) => Ok((Cow::Owned(id), Some(Cow::Owned(secret)))),
-            _ => Err(Error::BadRequest(format!(
-                "{provider} requires GOOGLE_ANTIGRAVITY_CLIENT_ID and \
-                 GOOGLE_ANTIGRAVITY_CLIENT_SECRET; register your own Google OAuth desktop \
-                 client and set both variables (no credential is shipped in the repository)"
-            ))),
-        };
+        // A client id and secret are a pair: mixing an override with the built-in
+        // client produces a confusing `invalid_client`, so require both or neither.
+        match (
+            client_env(provider, "CLIENT_ID"),
+            client_env(provider, "CLIENT_SECRET"),
+        ) {
+            (None, None) => {}
+            (Some(id), Some(secret)) => {
+                return Ok((Cow::Owned(id), Some(Cow::Owned(secret))));
+            }
+            _ => {
+                return Err(Error::BadRequest(
+                    "set both GOOGLE_ANTIGRAVITY_CLIENT_ID and \
+                     GOOGLE_ANTIGRAVITY_CLIENT_SECRET, or neither to use the built-in client"
+                        .into(),
+                ));
+            }
+        }
     }
     Ok((
         client_id_for(provider, default_id),
@@ -234,33 +237,37 @@ mod tests {
             std::env::remove_var(name);
         }
 
-        let err = oauth_client(
+        let (id, secret) = oauth_client(
             "google-antigravity",
-            "placeholder-id",
-            Some("placeholder-secret"),
+            crate::antigravity::DEFAULT_CLIENT_ID,
+            Some(crate::antigravity::DEFAULT_CLIENT_SECRET),
         )
-        .expect_err("no env credentials");
-        assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
-        let message = err.to_string();
-        assert!(
-            message.contains("GOOGLE_ANTIGRAVITY_CLIENT_ID"),
-            "{message}"
+        .expect("built-in client");
+        assert_eq!(id.as_ref(), crate::antigravity::DEFAULT_CLIENT_ID);
+        assert_eq!(
+            secret.as_deref(),
+            Some(crate::antigravity::DEFAULT_CLIENT_SECRET)
         );
-        assert!(
-            message.contains("GOOGLE_ANTIGRAVITY_CLIENT_SECRET"),
-            "{message}"
-        );
-        assert!(!message.contains("placeholder"), "{message}");
 
         // One variable is not enough.
         std::env::set_var("GOOGLE_ANTIGRAVITY_CLIENT_ID", "env-id");
         assert!(
-            oauth_client("google-antigravity", "x", Some("y")).is_err(),
+            oauth_client(
+                "google-antigravity",
+                crate::antigravity::DEFAULT_CLIENT_ID,
+                Some(crate::antigravity::DEFAULT_CLIENT_SECRET)
+            )
+            .is_err(),
             "secret is still missing"
         );
 
         std::env::set_var("GOOGLE_ANTIGRAVITY_CLIENT_SECRET", "env-secret");
-        let (id, secret) = oauth_client("google-antigravity", "x", Some("y")).expect("env");
+        let (id, secret) = oauth_client(
+            "google-antigravity",
+            crate::antigravity::DEFAULT_CLIENT_ID,
+            Some(crate::antigravity::DEFAULT_CLIENT_SECRET),
+        )
+        .expect("env");
         assert_eq!(id.as_ref(), "env-id");
         assert_eq!(secret.as_deref(), Some("env-secret"));
 

@@ -11,7 +11,7 @@ No Google account, no real network, no token is written to the repository. The g
 pointed at the mock with the documented overrides
 (`RROUTER_OAUTH_OVERRIDE_GOOGLE_ANTIGRAVITY_{AUTHORIZE,TOKEN}`,
 `RROUTER_ANTIGRAVITY_{PROD,DAILY}_HOST`), and OAuth is driven through the real
-`/api/oauth/google-antigravity/*` endpoints and the fixed loopback callback.
+`/api/oauth/google-antigravity/*` endpoints and a dynamic loopback callback.
 
 This is deliberately separate from a live OAuth run: a live sign-in needs a real Google
 account and is a manual checklist item in `docs/PROVIDERS.md`.
@@ -20,9 +20,8 @@ Usage:
   RR=target/release/rrouter python3 scripts/antigravity_smoke.py
   python3 scripts/antigravity_smoke.py --check-backend   # only probe the routes
 
-Exit codes: 0 all checks pass, 1 a check failed, 3 the backend has not landed (the
-`google-antigravity` OAuth routes/provider are absent), 4 the fixed callback port 51121 is
-occupied (close the other process and retry).
+Exit codes: 0 all checks pass, 1 a check or setup failed, 3 the backend has not landed
+(the `google-antigravity` OAuth routes/provider are absent).
 """
 
 from __future__ import annotations
@@ -43,7 +42,6 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PROVIDER = "google-antigravity"
-CALLBACK_PORT = 51121
 ACCESS_PREFIX = "offline-access"
 REFRESH_PREFIX = "offline-refresh"
 MODEL = "gemini-3-pro"
@@ -55,12 +53,6 @@ def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
-
-
-def port_open(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.2)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
 def id_token(email: str) -> str:
@@ -132,7 +124,7 @@ class Mock(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self):
-        if self.path in ("/authorize", "/oauth-callback"):
+        if self.path in ("/authorize", "/callback"):
             return self._json(200, {"ok": True})
         self._json(404, {"error": "not_found"})
 
@@ -366,13 +358,6 @@ def main() -> int:
     if not os.path.exists(RR):
         print(f"missing gateway binary: {RR} (build with cargo build --release)", file=sys.stderr)
         return 1
-    if port_open(CALLBACK_PORT):
-        print(
-            f"callback port {CALLBACK_PORT} is occupied; close that process and retry",
-            file=sys.stderr,
-        )
-        return 4
-
     gateway_port = free_port()
     mock_state = MockState()
     mock = ThreadingHTTPServer(("127.0.0.1", 0), Mock)

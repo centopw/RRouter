@@ -4628,7 +4628,7 @@ mod tests {
             headers
                 .get(header::USER_AGENT)
                 .and_then(|value| value.to_str().ok()),
-            Some("antigravity")
+            Some(rrouter_translate::google_cca::USER_AGENT)
         );
         assert_eq!(
             headers

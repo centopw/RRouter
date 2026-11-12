@@ -748,8 +748,8 @@ mod tests {
             "the env secret must ride the refresh: {body}"
         );
         assert!(
-            !body.contains(crate::antigravity::PLACEHOLDER_CLIENT),
-            "the placeholder must never reach the wire: {body}"
+            !body.contains(crate::antigravity::DEFAULT_CLIENT_SECRET),
+            "the override replaces the built-in client: {body}"
         );
         assert!(
             !body.contains("scope="),
@@ -764,10 +764,10 @@ mod tests {
         }
     }
 
-    /// Missing credentials fail before the token endpoint is contacted.
+    /// A half-configured override fails before the token endpoint is contacted.
     #[allow(clippy::await_holding_lock)] // serializes env mutation against the override test
     #[tokio::test]
-    async fn google_refresh_refuses_missing_env_without_http() {
+    async fn google_refresh_refuses_a_half_configured_client_without_http() {
         let _guard = crate::TEST_ENV
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -779,6 +779,7 @@ mod tests {
         ] {
             std::env::remove_var(name);
         }
+        std::env::set_var("GOOGLE_ANTIGRAVITY_CLIENT_ID", "only-an-id");
 
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -799,17 +800,11 @@ mod tests {
         let err = Refresher::new(client())
             .fresh(store.as_ref(), &spec, Uuid::new_v4())
             .await
-            .expect_err("missing env");
+            .expect_err("half-configured client");
         assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
         let message = err.to_string();
-        assert!(
-            message.contains("GOOGLE_ANTIGRAVITY_CLIENT_ID"),
-            "{message}"
-        );
-        assert!(
-            message.contains("GOOGLE_ANTIGRAVITY_CLIENT_SECRET"),
-            "{message}"
-        );
+        assert!(message.contains("both"), "{message}");
+        std::env::remove_var("GOOGLE_ANTIGRAVITY_CLIENT_ID");
         assert_eq!(store.merges.load(Ordering::SeqCst), 0);
     }
 

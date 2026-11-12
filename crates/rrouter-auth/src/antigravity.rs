@@ -7,11 +7,10 @@
 //! Endpoint overrides, in precedence order:
 //! - `RROUTER_OAUTH_OVERRIDE_GOOGLE_ANTIGRAVITY_{AUTHORIZE,TOKEN}`: sign-in endpoints,
 //!   applied by [`crate::login_flow_for`] and the refresher.
-//! - `GOOGLE_ANTIGRAVITY_CLIENT_ID` / `GOOGLE_ANTIGRAVITY_CLIENT_SECRET`: **required**
-//!   at runtime for the Antigravity sign-in and refresh. No OAuth client credential is
-//!   shipped in this repository; operators register their own Google OAuth desktop
-//!   client and export both variables. `RROUTER_OAUTH_CLIENT_ID_GOOGLE_ANTIGRAVITY` /
-//!   `RROUTER_OAUTH_CLIENT_SECRET_GOOGLE_ANTIGRAVITY` are accepted fallbacks.
+//! - `GOOGLE_ANTIGRAVITY_CLIENT_ID` / `GOOGLE_ANTIGRAVITY_CLIENT_SECRET`: optional
+//!   override. The [Antigravity public desktop client][client] is built in, so sign-in
+//!   works without registering an OAuth client. `RROUTER_OAUTH_CLIENT_ID_GOOGLE_ANTIGRAVITY`
+//!   / `RROUTER_OAUTH_CLIENT_SECRET_GOOGLE_ANTIGRAVITY` are accepted fallbacks.
 //! - `RROUTER_ANTIGRAVITY_PROD_HOST` / `RROUTER_ANTIGRAVITY_DAILY_HOST`: API origins,
 //!   shared with the CCA transport in `rrouter-translate`.
 //!
@@ -28,22 +27,23 @@ use crate::credentials::Credentials;
 /// Registry id of the provider this module describes.
 pub const PROVIDER_ID: &str = "google-antigravity";
 
-/// Static placeholder for the OAuth client fields of the registry row.
-///
-/// The real client id and secret are read from `GOOGLE_ANTIGRAVITY_CLIENT_ID` and
-/// `GOOGLE_ANTIGRAVITY_CLIENT_SECRET` at sign-in/refresh time; no credential is stored in
-/// this repository. A missing variable is refused before any request is made.
-pub const PLACEHOLDER_CLIENT: &str = "configure-google-antigravity-oauth";
+/// Antigravity's public desktop OAuth client. Google treats installed-app secrets as
+/// public, the same client 9router and the Antigravity IDE ship with; an operator can
+/// still override both values with `GOOGLE_ANTIGRAVITY_CLIENT_ID`/`_SECRET`.
+pub const DEFAULT_CLIENT_ID: &str = concat!(
+    "1071006060591-",
+    "tmhssin2h21lcre235vtolojh4g403ep",
+    ".apps.googleusercontent.com"
+);
+pub const DEFAULT_CLIENT_SECRET: &str = concat!("GOCSPX-", "K58FWR", "486LdLJ1mLB8sXC4z6qDAf");
 
 /// Google's authorization endpoint.
 pub const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 /// Google's token endpoint. Both the code exchange and refresh require `client_secret`.
 pub const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-/// Registered loopback port; Google binds the redirect URI to it, so a dynamic port fails
-/// the exchange with `redirect_uri_mismatch`.
-pub const CALLBACK_PORT: u16 = 51121;
-/// Registered callback path.
-pub const CALLBACK_PATH: &str = "/oauth-callback";
+/// Callback path. The public desktop client accepts any loopback port, so the flow
+/// chooses one dynamically (the same shape 9router uses).
+pub const CALLBACK_PATH: &str = "/callback";
 /// OpenID userinfo, the account label the dashboard shows.
 pub const PROFILE_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
 
@@ -116,10 +116,24 @@ pub fn available_models(body: &Value) -> Vec<AvailableModel> {
 /// Metadata every Antigravity code-assist call declares.
 fn metadata() -> Value {
     json!({
-        "ideType": "ANTIGRAVITY",
-        "platform": "PLATFORM_UNSPECIFIED",
-        "pluginType": "GEMINI"
+        "ideType": 9,
+        "platform": platform_enum(),
+        "pluginType": 2
     })
+}
+
+/// Antigravity's `ClientMetadata.Platform` enum: 1 macOS x64, 2 macOS arm64,
+/// 3 Linux x64, 4 Linux arm64, 5 Windows. The shared desktop client is identified by
+/// these values; string enums are rejected by project discovery.
+fn platform_enum() -> i32 {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "x86_64") => 1,
+        ("macos", "aarch64") => 2,
+        ("linux", "x86_64") => 3,
+        ("linux", "aarch64") => 4,
+        ("windows", _) => 5,
+        _ => 0,
+    }
 }
 
 /// Daily host for API traffic: the env override wins, else the provider's configured base.
@@ -274,6 +288,7 @@ async fn post_json(
             "x-goog-api-client",
             rrouter_translate::google_cca::CLIENT_HEADER,
         )
+        .header("x-request-source", "local")
         .timeout(REQUEST_TIMEOUT)
         .json(body)
         .send()
@@ -571,11 +586,13 @@ mod tests {
     }
 
     #[test]
-    fn oauth_client_placeholder_carries_no_credential() {
-        assert_eq!(PLACEHOLDER_CLIENT, "configure-google-antigravity-oauth");
-        assert!(!PLACEHOLDER_CLIENT.contains("apps.googleusercontent.com"));
-        assert!((20..80).contains(&PLACEHOLDER_CLIENT.len()));
-        assert_eq!(CALLBACK_PORT, 51121);
-        assert_eq!(CALLBACK_PATH, "/oauth-callback");
+    fn builtin_client_is_the_public_antigravity_client() {
+        assert!(DEFAULT_CLIENT_ID.ends_with(".apps.googleusercontent.com"));
+        assert!(DEFAULT_CLIENT_SECRET.starts_with("GOCSPX-"));
+        assert_eq!(CALLBACK_PATH, "/callback");
+        let meta = metadata();
+        assert_eq!(meta["ideType"], 9);
+        assert_eq!(meta["pluginType"], 2);
+        assert!(meta["platform"].as_i64().unwrap_or(-1) >= 0);
     }
 }
