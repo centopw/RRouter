@@ -1,6 +1,7 @@
 //! The system-managed playground key end to end: minted on first use, stable across a
 //! restart, listed and editable on the Access page, and refused on `/v1` unless the
-//! request comes from the dashboard playground with an admin session.
+//! request comes from the dashboard playground with an admin session or the configured
+//! admin token.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -400,5 +401,71 @@ async fn playground_key_is_refused_on_v1_outside_the_playground() {
         .get("/v1/models", &[("authorization", user.as_str())])
         .await;
     assert_eq!(status, StatusCode::OK, "user key: {body}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A token-only instance has no dashboard session, so the configured admin token is the
+/// admin authority: the marker plus `x-admin-token` admits the playground key, the token
+/// without the marker is still outside the playground, a wrong token proves nothing, and
+/// a signed-in member gains no authority from the marker.
+#[tokio::test]
+async fn playground_key_is_admitted_by_the_admin_token_alone() {
+    let dir = data_dir();
+    let h = harness(&dir);
+    let owner = h.setup().await;
+    let member = h.member(&owner).await;
+    let (key, _, _) = h.ensure().await;
+    let bearer = format!("Bearer {key}");
+
+    // No cookie at all: the token is the whole authority.
+    let (status, body) = h
+        .get(
+            "/v1/models",
+            &[
+                ("authorization", bearer.as_str()),
+                ("x-admin-token", ADMIN_TOKEN),
+                ("x-rrouter-playground", "1"),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "admin token: {body}");
+
+    let (status, body) = h
+        .get(
+            "/v1/models",
+            &[
+                ("authorization", bearer.as_str()),
+                ("x-admin-token", ADMIN_TOKEN),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "no marker: {body}");
+    assert_eq!(code(&body), "key_scope");
+
+    let (status, body) = h
+        .get(
+            "/v1/models",
+            &[
+                ("authorization", bearer.as_str()),
+                ("x-admin-token", "not-the-admin-token"),
+                ("x-rrouter-playground", "1"),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "wrong token: {body}");
+    assert_eq!(code(&body), "key_scope");
+
+    let (status, body) = h
+        .get(
+            "/v1/models",
+            &[
+                ("authorization", bearer.as_str()),
+                ("x-rrouter-playground", "1"),
+                ("cookie", member.as_str()),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "member: {body}");
+    assert_eq!(code(&body), "key_scope");
     std::fs::remove_dir_all(&dir).ok();
 }

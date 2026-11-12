@@ -314,9 +314,11 @@ impl AppState {
     /// - an `admin`-scoped key is refused with `403 key_scope`: it administers the
     ///   gateway, it does not spend tokens, so it has no business on `/v1/*`;
     /// - the system `playground` key is refused with `403 key_scope` unless the request
-    ///   carries [`PLAYGROUND_HEADER`]`: 1` **and** a valid admin dashboard session. Its
-    ///   plaintext is visible on the Access page, so the bearer alone must never be
-    ///   enough to spend through it from another client.
+    ///   carries [`PLAYGROUND_HEADER`]`: 1` **and** admin authority — a signed-in admin
+    ///   or the configured `RROUTER_ADMIN_TOKEN`, which is how a token-only instance
+    ///   without sessions runs its playground. Its plaintext is visible on the Access
+    ///   page, so the bearer alone must never be enough to spend through it from another
+    ///   client.
     ///
     /// Scope is checked after activity and expiry, so a disabled or expired admin key
     /// still gets the more specific refusal.
@@ -369,18 +371,34 @@ impl AppState {
         Ok(Caller::Key(key))
     }
 
-    /// The playground marker plus a signed-in admin: the only context the playground key
-    /// is valid in. The header is checked first so ordinary traffic never pays for a
-    /// session lookup.
+    /// The playground marker plus admin authority: the only context the playground key is
+    /// valid in. The header is checked first so ordinary traffic never pays for a token
+    /// comparison or a session lookup.
     async fn is_playground_request(&self, headers: &HeaderMap) -> bool {
         let marked = headers
             .get(PLAYGROUND_HEADER)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.trim() == "1");
         marked
-            && crate::routes::auth::current_user(self, headers)
-                .await
-                .is_some_and(|user| user.is_admin())
+            && (self.admin_token_presented(headers)
+                || crate::routes::auth::current_user(self, headers)
+                    .await
+                    .is_some_and(|user| user.is_admin()))
+    }
+
+    /// The configured `RROUTER_ADMIN_TOKEN`, compared exactly as the admin gate compares
+    /// it. Read from `x-admin-token` alone: `Authorization` carries the playground key on
+    /// these calls, so `admin_credential` would stop at the bearer and never see the
+    /// token. An unset token leaves the session as the only authority.
+    fn admin_token_presented(&self, headers: &HeaderMap) -> bool {
+        let config = self.config.load();
+        let Some(expected) = config.admin_token.as_deref() else {
+            return false;
+        };
+        headers
+            .get("x-admin-token")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|presented| crate::constant_time_eq(presented.trim(), expected))
     }
 
     /// The key `presented` names, when it is usable right now: it exists, is active and
