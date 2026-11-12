@@ -2,6 +2,13 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.12.1 — 2026-11-12
+
+### Bug Fixes
+
+- fix(auth): ship the built-in Antigravity OAuth client ([`191cd86`](https://github.com/centopw/RRouter/commit/191cd86b1e9356db6616a6fc28d08b8a4b2588fc))
+- fix(release): track the reasoning translator module ([`5a16692`](https://github.com/centopw/RRouter/commit/5a16692e22131535dcba80bc72f5f6c27faaeb06))
+
 ## 0.12.0 — 2026-11-12
 
 ### Features
