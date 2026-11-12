@@ -13,7 +13,7 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
-import { useAuthState, useHealth, useIsAdmin, useModels, useSignOut, useSystem } from "./lib/queries";
+import { useAuthState, useHealth, useIsAdmin, useModels, useSignOut, useSystem, useUpdateStatus } from "./lib/queries";
 import { Button, CopyChip, Dot, cx } from "./components/ui";
 import { uptime } from "./lib/format";
 
@@ -358,6 +358,7 @@ export function Shell() {
           </ul>
         </nav>
 
+        <UpdateMarker collapsed={collapsed} />
         <SessionFooter collapsed={collapsed} />
 
         {collapsed ? (
@@ -476,6 +477,49 @@ function RunningDot({ running }: { running: boolean }) {
 
 /** Endpoint, liveness and version in one card. `CopyChip` carries its own aria-label,
  *  and truncates rather than widening the 236px rail. */
+/** A new release is otherwise invisible until someone opens Settings. */
+function UpdateMarker({ collapsed }: { collapsed?: boolean }) {
+  const admin = useIsAdmin();
+  const update = useUpdateStatus(admin);
+  const status = update.data;
+  if (!admin || !status?.update_available || !status.latest_version) return null;
+  const version = `v${status.latest_version}`;
+  const preview = (status.notes ?? "")
+    .split("\n")
+    .map((line) => line.replace(/^#{1,6}\s*/, "").replace(/^[-*]\s+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(" · ");
+  if (collapsed) {
+    return (
+      <Link
+        to="/system/settings"
+        title={`${version} available${preview ? ` — ${preview}` : ""}`}
+        aria-label={`${version} update available`}
+        className="mx-auto mb-1 flex h-8 w-8 items-center justify-center rounded-full bg-[var(--color-accent)] text-small font-semibold text-[var(--color-accent-ink)]"
+      >
+        ↑
+      </Link>
+    );
+  }
+  return (
+    <Link
+      to="/system/settings"
+      className="mx-3 mb-2 block rounded-[8px] border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-2.5 py-2 hover:brightness-[1.02]"
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-caption font-semibold text-[var(--color-accent-text)]">{version} available</span>
+        <span className="ml-auto text-caption text-faint">review →</span>
+      </div>
+      {preview ? (
+        <p className="mt-1 line-clamp-2 text-caption leading-snug text-muted" title={status.notes ?? undefined}>
+          {preview}
+        </p>
+      ) : null}
+    </Link>
+  );
+}
+
 /** The signed-in person, and the way out. */
 function SessionFooter({ collapsed }: { collapsed?: boolean }) {
   const state = useAuthState();

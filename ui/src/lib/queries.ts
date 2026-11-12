@@ -6,6 +6,7 @@ import {
   getAccountSubscriptions,
   getAccountQuotas,
   getQuotaPings,
+  getUpdateStatus,
   isEndpointMissing,
   list,
   listPage,
@@ -828,6 +829,18 @@ export function useDeleteWebhook() {
 }
 
 // ---------------------------------------------------------------- dashboard identity
+
+/** Update metadata for the sidebar marker; admin-only because the route is. */
+export function useUpdateStatus(enabled = true) {
+  return useQuery({
+    queryKey: ["update"] as const,
+    queryFn: getUpdateStatus,
+    enabled,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
+    retry: false,
+  });
+}
 
 export function useAuthState() {
   return useQuery({

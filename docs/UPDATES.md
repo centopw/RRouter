@@ -4,6 +4,13 @@ Settings → **Software updates** checks the latest GitHub release, shows releas
 can download the archive. Checking is daily by default; automatic downloading is opt-in.
 Archives are SHA-256 verified and staged under `<data_dir>/updates/<version>/`.
 
+`update_available` is a SemVer comparison, never string inequality: a last-seen release
+older than the running build (for example `v0.8.0` on a `v0.11.0` pod) shows **up to date**,
+not an update. Opening Settings also re-checks once when the persisted check is over a day
+old or failed, so an image upgrade does not leave stale release data on screen. The sidebar
+shows a compact **vX.Y.Z available** marker with the first lines of the release notes; it
+links to Settings. A failed automatic check is named instead of silently keeping old data.
+
 `RROUTER_UPDATE_TOKEN` (or `GITHUB_TOKEN`) raises GitHub's per-IP API limit; it is sent only
 as a bearer header and never logged or returned. Without a token, routine checks avoid the
 API and follow `releases/latest` to `/releases/tag/vX`; notes come from the last cached

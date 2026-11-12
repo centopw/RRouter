@@ -973,3 +973,39 @@ export async function listPage<T>(path: string): Promise<Page<T>> {
     next_before_id: body.next_before_id ?? null,
   };
 }
+
+/** Deployment mode plus what the update endpoint can do on this host. */
+export type UpdateDeployment = {
+  kind: string;
+  label: string;
+  automatic: boolean;
+  can_download: boolean;
+  command: string | null;
+  detail: string;
+};
+
+/** `/api/update` status. `update_available` is a semver comparison, never string inequality. */
+export type UpdateStatus = {
+  current_version: string;
+  update_available: boolean;
+  latest_version: string | null;
+  release_url: string;
+  notes: string | null;
+  published_at: string | null;
+  checked_at: number | null;
+  phase: string;
+  error: string | null;
+  last_error: string | null;
+  rate_limited_until: number | null;
+  downloaded: boolean;
+  deployment: UpdateDeployment;
+  options: { auto_check: boolean; auto_download: boolean };
+};
+
+export function getUpdateStatus(): Promise<UpdateStatus> {
+  return api.get<UpdateStatus>("/api/update");
+}
+
+export function checkForUpdate(): Promise<UpdateStatus> {
+  return api.post<UpdateStatus>("/api/update/check");
+}

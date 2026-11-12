@@ -1,32 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card, CardHeader, ConfirmDialog, Disclosure, ErrorNote } from "./ui";
 import { Checkbox, Grid, Stack } from "./atoms";
 import { useToast } from "./toast";
-import { api } from "../lib/api";
+import { api, getUpdateStatus, type UpdateStatus } from "../lib/api";
 import { when } from "../lib/format";
-
-type Deployment = {
-  kind: string;
-  label: string;
-  automatic: boolean;
-  can_download: boolean;
-  command: string | null;
-  detail: string;
-};
-
-type UpdateStatus = {
-  current_version: string;
-  latest_version: string | null;
-  release_url: string;
-  notes: string | null;
-  published_at: string | null;
-  checked_at: number | null;
-  phase: string;
-  error: string | null;
-  downloaded: boolean;
-  deployment: Deployment;
-  options: { auto_check: boolean; auto_download: boolean };
-};
 
 type ActionResult = { accepted?: boolean; restarting?: boolean; message?: string; warning?: string };
 
@@ -37,13 +15,15 @@ type ActionResult = { accepted?: boolean; restarting?: boolean; message?: string
  */
 export function UpdateCard() {
   const toast = useToast();
+  const client = useQueryClient();
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [failure, setFailure] = useState<unknown>(null);
   const [confirming, setConfirming] = useState(false);
+  const autoChecked = useRef(false);
 
   const load = useCallback(async () => {
-    const next = await api.get<UpdateStatus>("/api/update");
+    const next = await getUpdateStatus();
     setStatus(next);
   }, []);
 
@@ -53,6 +33,16 @@ export function UpdateCard() {
     return () => window.clearInterval(timer);
   }, [load]);
 
+  // A manual binary swap (Kubernetes image, package manager) leaves the persisted check
+  // older than this build. Refresh once on mount instead of showing stale release data.
+  useEffect(() => {
+    if (!status || autoChecked.current || !status.options.auto_check) return;
+    const age = status.checked_at ? Date.now() / 1000 - status.checked_at : Infinity;
+    if (age < 24 * 60 * 60 && !status.last_error) return;
+    autoChecked.current = true;
+    void run("/api/update/check", "Update check finished");
+  }, [status]);
+
   const run = async (path: string, label: string) => {
     setBusy(path);
     setFailure(null);
@@ -60,6 +50,7 @@ export function UpdateCard() {
       const result = await api.post<ActionResult>(path);
       if (result?.message) toast.success(label, result.message);
       await load();
+      void client.invalidateQueries({ queryKey: ["update"] });
     } catch (e) {
       setFailure(e);
     } finally {
@@ -72,6 +63,7 @@ export function UpdateCard() {
     try {
       const next = await api.put<UpdateStatus>("/api/update/settings", patch);
       setStatus(next);
+      void client.invalidateQueries({ queryKey: ["update"] });
     } catch (e) {
       setFailure(e);
     }
@@ -90,12 +82,14 @@ export function UpdateCard() {
     return (
       <Card className="mt-5">
         <CardHeader title="Software updates" />
-        <div className="px-5 pb-5 text-small text-faint">{failure ? <ErrorNote error={failure} /> : "loading…"}</div>
+        <div className="px-5 pb-5 text-small text-faint">
+          {failure ? <ErrorNote error={failure} /> : "loading…"}
+        </div>
       </Card>
     );
   }
 
-  const newer = status.latest_version !== null && status.latest_version !== status.current_version;
+  const newer = status.update_available;
   const working = busy !== null || status.phase === "checking" || status.phase === "downloading";
   const ready =
     newer && status.deployment.automatic && (status.downloaded || status.deployment.kind === "brew");
@@ -129,13 +123,18 @@ export function UpdateCard() {
         <Stack gap="lg" className="px-5 pb-5">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-small">
             <span className="text-muted">
-              latest <span className="font-mono text-fg">{status.latest_version ? `v${status.latest_version}` : "—"}</span>
+              {newer ? "latest" : "last seen"}{" "}
+              <span className="font-mono text-fg">
+                {status.latest_version ? `v${status.latest_version}` : "—"}
+              </span>
             </span>
             <span className="text-muted">
               checked <span className="text-fg">{status.checked_at ? when(status.checked_at) : "never"}</span>
             </span>
             {newer ? (
-              <Badge tone="accent">update available</Badge>
+              <Badge tone="accent">
+                {status.deployment.automatic ? "update available" : "update available · manual"}
+              </Badge>
             ) : status.latest_version ? (
               <Badge tone="pos">up to date</Badge>
             ) : null}
@@ -202,6 +201,11 @@ export function UpdateCard() {
           ) : null}
 
           {status.error ? <ErrorNote error={status.error} /> : null}
+          {!status.error && status.last_error ? (
+            <p className="text-caption text-faint">
+              The last automatic check failed: {status.last_error}
+            </p>
+          ) : null}
           {failure ? <ErrorNote error={failure} /> : null}
 
           <div className="flex flex-wrap items-center gap-2">

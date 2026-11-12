@@ -350,6 +350,7 @@ fn status_json(status: &State, options: &Value) -> Value {
     let deployment = deployment();
     json!({
         "current_version": env!("CARGO_PKG_VERSION"),
+        "update_available": newer(env!("CARGO_PKG_VERSION"), status.latest.as_deref().unwrap_or("")),
         "latest_version": status.latest,
         "release_url": status.release_url.clone().unwrap_or_else(|| RELEASE_PAGE.to_string()),
         "notes": status.notes,

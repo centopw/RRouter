@@ -224,6 +224,24 @@ fn release_json(version: &str, notes: &str) -> Value {
 }
 
 #[tokio::test]
+async fn an_older_release_is_not_an_update() {
+    let _guard = serial().await;
+    updates::reset_for_tests();
+    let (mock, base) = mock_server().await;
+    let state = harness();
+    mock.plan(vec![Reply::Json {
+        status: 200,
+        headers: vec![],
+        body: release_json("0.0.1", "ancient"),
+    }]);
+    let status = updates::check_with(&state, &endpoints(&base), Some("t"), false, true)
+        .await
+        .expect("check");
+    assert_eq!(status["latest_version"], "0.0.1");
+    assert_eq!(status["update_available"], false, "{status}");
+}
+
+#[tokio::test]
 async fn conditional_get_reuses_the_cached_release_on_304() {
     let _guard = serial().await;
     updates::reset_for_tests();
@@ -242,6 +260,7 @@ async fn conditional_get_reuses_the_cached_release_on_304() {
         .await
         .expect("first check");
     assert_eq!(first["latest_version"], "9.9.9");
+    assert_eq!(first["update_available"], true);
     assert_eq!(first["notes"], "notes from the API");
     assert_eq!(first["error"], Value::Null);
 
@@ -508,6 +527,7 @@ async fn status_json_keeps_existing_fields_and_adds_backoff_fields() {
     let status = updates::snapshot(&state).await;
     for field in [
         "current_version",
+        "update_available",
         "latest_version",
         "release_url",
         "notes",
