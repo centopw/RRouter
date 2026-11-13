@@ -83,7 +83,7 @@ Do not enable an Ingress without admin authentication or `admin.value`/`admin.ex
 
 ```sh
 helm upgrade rrouter deploy/helm/rrouter -n rrouter --reuse-values \
-  --set image.tag=0.13.1
+  --set image.tag=0.14.0
 
 helm uninstall rrouter -n rrouter
 ```

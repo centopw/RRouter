@@ -2,6 +2,27 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.14.0 — 2026-11-13
+
+### Features
+
+- feat(providers): let operators rename provider accounts ([`45505e7`](https://github.com/centopw/RRouter/commit/45505e7cf8208b9b512fbd996fa406eca36dfd99))
+- feat(providers): let an operator name a connection account ([`df420af`](https://github.com/centopw/RRouter/commit/df420af56bdea1444ad705c444a9fba22d20aa76))
+
+### Bug Fixes
+
+- fix(cca): repair envelope fields the upstream rejects ([`3edeafd`](https://github.com/centopw/RRouter/commit/3edeafd42b3dff7ad48d3f60144eaf720cfb9095))
+- fix(cca): repair an envelope field the upstream rejects instead of always sending it ([`6d31327`](https://github.com/centopw/RRouter/commit/6d3132724b6edb4f5055b3e275fcda43906b0b68))
+
+### Refactoring
+
+- refactor(ui): split Routing > Models into Active, Registry and Names views ([`3819e5d`](https://github.com/centopw/RRouter/commit/3819e5de2819f0d341b05707ee95e40ac1772e4f))
+- refactor(ui): split Routing → Models into Active, Registry and Names ([`bdb74a5`](https://github.com/centopw/RRouter/commit/bdb74a57e99033686c01a361a8b53bf94e13f962))
+
+### Build & CI
+
+- build(ui): rebuild dist with the models views and account rename ([`06fbecf`](https://github.com/centopw/RRouter/commit/06fbecff4e69b06ec7281a8e8fd324cb6c2bd921))
+
 ## 0.13.1 — 2026-11-12
 
 ### Bug Fixes
