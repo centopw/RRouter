@@ -63,6 +63,24 @@ fn is_google_cca(provider: &str) -> bool {
     provider == GOOGLE_ANTIGRAVITY
 }
 
+/// Registry id of Qoder, whose COSY-signed envelope is rebuilt and re-signed per attempt.
+const QODER: &str = "qoder";
+
+fn is_qoder(provider: &str) -> bool {
+    provider == QODER
+}
+
+/// `true` when a request to this provider's dialect can never be served from a cache: both
+/// upstream-only dialects embed per-attempt ids (and Qoder a timestamp-bound signature).
+fn cache_exempt(provider: &str) -> bool {
+    is_google_cca(provider) || is_qoder(provider)
+}
+
+/// Bytes of upstream SSE buffered while looking for Qoder's first frame. Beyond this the
+/// gateway stops waiting and forwards what it has: a first frame that large is not a failure
+/// signal, and a client waiting on a completion matters more than a late peek.
+const QODER_PEEK_LIMIT: usize = 64 * 1024;
+
 /// Project id the CCA envelope must carry, from the credential's provider-specific data.
 ///
 /// A missing project is a configuration error the operator can fix; answer `400` with the
@@ -90,6 +108,19 @@ struct Prepared {
     dialect: Dialect,
     headers: HeaderMap,
     project: Option<String>,
+    /// COSY state for a Qoder attempt; `None` for every other provider.
+    qoder: Option<QoderPrepared>,
+}
+
+/// What one Qoder attempt needs beyond its headers: the signer, the account's own
+/// `model_config` block for the model, and the envelope's model identity.
+struct QoderPrepared {
+    signer: rrouter_auth::qoder::QoderCredentials,
+    model_config: Value,
+    /// Canonical Qoder key, alias prefix stripped.
+    model: String,
+    /// Stable per-(account, model) session id; the upstream keys its queue by it.
+    session_id: String,
 }
 
 fn google_cca_headers(
@@ -107,6 +138,77 @@ fn google_cca_headers(
         HeaderValue::from_static(rrouter_translate::google_cca::CLIENT_HEADER),
     );
     Ok(headers)
+}
+
+/// Encode and sign one Qoder attempt: the obfuscated body plus the headers that cover it.
+///
+/// Separate from [`Prepared`] because the signature is body-bound: building it once per
+/// attempt (rather than once per request) is what makes a retry legal.
+fn signed_qoder_body(
+    prepared: &Prepared,
+    qoder: &QoderPrepared,
+    url: &str,
+    wire: &Value,
+) -> Result<(HeaderMap, Vec<u8>)> {
+    let body = rrouter_auth::qoder::encoding::encode_body(&serde_json::to_vec(wire)?);
+    let mut headers = prepared.headers.clone();
+    for (name, value) in rrouter_auth::qoder::cosy::sign_headers(&body, url, &qoder.signer)? {
+        let (Ok(name), Ok(value)) = (
+            header::HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        ) else {
+            return Err(Error::Translation(format!(
+                "qoder: header `{name}` is not a valid HTTP header"
+            )));
+        };
+        headers.insert(name, value);
+    }
+    Ok((headers, body))
+}
+
+/// Read Qoder's first SSE frame before the gateway commits to `200`.
+///
+/// The HTTP status is always `200`; a queued model, a quota block or an upstream failure
+/// arrives as the first `{statusCodeValue, body}` envelope. Those have to fail the attempt
+/// so the dispatcher can cool the candidate down and try the next one, which is only
+/// possible before a byte reaches the client. Everything buffered is forwarded untouched:
+/// the decoder re-reads it, so nothing is lost.
+pub(crate) async fn qoder_stream(resp: reqwest::Response) -> Result<ByteStream> {
+    use bytes::Buf as _;
+
+    let mut upstream = resp.bytes_stream();
+    let mut buffered = bytes::BytesMut::new();
+    loop {
+        if let Some((frame, consumed)) = rrouter_translate::qoder::first_line(&buffered) {
+            match frame {
+                rrouter_translate::qoder::Frame::Empty => {
+                    buffered.advance(consumed);
+                    continue;
+                }
+                rrouter_translate::qoder::Frame::Failed(error) => return Err(error),
+                rrouter_translate::qoder::Frame::Payload(_)
+                | rrouter_translate::qoder::Frame::Done => break,
+            }
+        }
+        if buffered.len() >= QODER_PEEK_LIMIT {
+            break;
+        }
+        match upstream.next().await {
+            Some(Ok(chunk)) => buffered.extend_from_slice(&chunk),
+            Some(Err(e)) => return Err(transport_error(e)),
+            None => break,
+        }
+    }
+    let rest = upstream.map(|chunk| chunk.map_err(transport_error));
+    match buffered.is_empty() {
+        true => Ok(Box::pin(rest)),
+        false => {
+            let head = buffered.freeze();
+            Ok(Box::pin(
+                futures_util::stream::once(async move { Ok(head) }).chain(rest),
+            ))
+        }
+    }
 }
 
 /// The store combo a model reference resolves to, mirroring the planner's one alias
@@ -1388,12 +1490,13 @@ async fn handle(
     let caching = !client_stream
         && !cache_bypassed(headers)
         && !plan.candidates.is_empty()
-        // CCA's envelope carries a per-attempt request id and a credential project, so
-        // its exact bytes are neither stable nor cacheable across accounts.
+        // CCA's envelope carries a per-attempt request id and a credential project, and
+        // Qoder's carries per-request ids plus a timestamp-bound signature, so neither's
+        // exact bytes are stable or cacheable across accounts.
         && !plan
             .candidates
             .iter()
-            .any(|candidate| is_google_cca(&candidate.provider));
+            .any(|candidate| cache_exempt(&candidate.provider));
     let cache_key = if caching
         && (config.cache == CacheMode::Sqlite || config.semantic_cache == CacheMode::Sqlite)
     {
@@ -2091,8 +2194,8 @@ fn same_dialect_body(
             }
         }
         Dialect::AnthropicMessages | Dialect::OpenAiEmbeddings => {}
-        // Upstream-only: the proxy never forwards an inbound CCA body.
-        Dialect::GoogleCodeAssist => {}
+        // Upstream-only: the proxy never forwards an inbound CCA or Qoder body.
+        Dialect::GoogleCodeAssist | Dialect::QoderAgent => {}
     }
     obj.insert("stream".into(), Value::Bool(stream));
     out
@@ -2119,7 +2222,9 @@ fn native_url(spec: &ProviderSpec, inbound: Dialect) -> Option<&'static str> {
         Dialect::OpenAiChat if spec.default_dialect == Dialect::OpenAiChat => Some(spec.base_url),
         Dialect::OpenAiChat => None,
         Dialect::OpenAiEmbeddings => None,
-        Dialect::GoogleCodeAssist => None,
+        // Both are upstream-only: the provider's base is an origin, and the transport
+        // builds the real URL (project id / COSY query) per attempt.
+        Dialect::GoogleCodeAssist | Dialect::QoderAgent => None,
     }
 }
 
@@ -2557,33 +2662,61 @@ impl Attempt<'_> {
         if is_google_cca(&candidate.provider) {
             return Dialect::GoogleCodeAssist;
         }
+        if is_qoder(&candidate.provider) {
+            return Dialect::QoderAgent;
+        }
         match rrouter_auth::get(&candidate.provider) {
             Some(spec) => endpoint(spec, None, self.inbound).1,
             None => candidate.dialect,
         }
     }
 
-    /// Build the upstream body for one attempt. Never mutates the canonical request, so
-    /// concurrent attempts all see the client's original values.
-    fn outbound(
-        &self,
-        candidate: &Candidate,
-        dialect: Dialect,
-        project: Option<&str>,
-    ) -> Result<Value> {
-        self.outbound_dropping(candidate, dialect, project, &[])
-    }
-
-    /// [`Self::outbound`] with extra CCA envelope fields dropped for this attempt, on top
-    /// of the ones this connection already rejected. `sessionId` is undocumented, so it is
-    /// built in by default and removed only where an upstream has said it does not exist.
+    /// Build the upstream body for one attempt: extra CCA envelope fields are dropped on
+    /// top of the ones this connection already rejected (`sessionId` is undocumented, so it
+    /// is built in by default and removed only where an upstream said it does not exist).
+    /// Never mutates the canonical request, so concurrent attempts all see the client's
+    /// original values.
     fn outbound_dropping(
         &self,
         candidate: &Candidate,
-        dialect: Dialect,
-        project: Option<&str>,
+        prepared: &Prepared,
         extra: &[&'static str],
     ) -> Result<Value> {
+        self.body_for(
+            candidate,
+            prepared.dialect,
+            prepared.project.as_deref(),
+            prepared.qoder.as_ref(),
+            extra,
+        )
+    }
+
+    /// The one body builder. Only the cache key passes `qoder: None`, and it never asks for
+    /// a dialect that needs per-attempt state; `extra` (CCA envelope repairs) never applies
+    /// to Qoder, whose envelope has no repairable field.
+    fn body_for(
+        &self,
+        candidate: &Candidate,
+        dialect: Dialect,
+        project: Option<&str>,
+        qoder: Option<&QoderPrepared>,
+        extra: &[&'static str],
+    ) -> Result<Value> {
+        if dialect == Dialect::QoderAgent {
+            let qoder = qoder.ok_or_else(|| {
+                Error::Translation("qoder needs the account's fetched model_config".into())
+            })?;
+            let mut request = self.canonical.clone();
+            request.model = candidate.model.clone();
+            return rrouter_translate::qoder::build_request(
+                &request,
+                &rrouter_translate::qoder::Envelope {
+                    model: &qoder.model,
+                    model_config: &qoder.model_config,
+                    session_id: &qoder.session_id,
+                },
+            );
+        }
         if dialect == Dialect::GoogleCodeAssist {
             let project = project.ok_or_else(|| {
                 Error::BadRequest(
@@ -2643,12 +2776,12 @@ impl Attempt<'_> {
     /// to the same upstream request.
     fn cache_key(&self, candidate: &Candidate) -> Result<CacheKey> {
         let dialect = self.route_dialect(candidate);
-        if dialect == Dialect::GoogleCodeAssist {
-            return Err(Error::Translation(
-                "google code assist envelopes are request-scoped and not cacheable".into(),
-            ));
+        if dialect == Dialect::GoogleCodeAssist || dialect == Dialect::QoderAgent {
+            return Err(Error::Translation(format!(
+                "{dialect} envelopes are request-scoped and not cacheable"
+            )));
         }
-        let body = self.outbound(candidate, dialect, None)?;
+        let body = self.body_for(candidate, dialect, None, None, &[])?;
         let mut canonical = String::with_capacity(1024);
         canonical.push_str(self.inbound.as_str());
         canonical.push('\n');
@@ -2696,7 +2829,11 @@ impl Attempt<'_> {
                 dialect: Dialect::GoogleCodeAssist,
                 headers,
                 project: Some(project),
+                qoder: None,
             });
+        }
+        if is_qoder(&candidate.provider) {
+            return self.prepare_qoder(spec, &creds, candidate, trace).await;
         }
         let (url, dialect) = endpoint(spec, creds.base_url_override.as_deref(), self.inbound);
         let mut headers = outbound_headers(spec, &creds, self.client_headers)?;
@@ -2715,6 +2852,70 @@ impl Attempt<'_> {
             dialect,
             headers,
             project: None,
+            qoder: None,
+        })
+    }
+
+    /// Prepare one Qoder attempt: resolve the COSY signer, fetch (or reuse) the account's
+    /// `model_config` for the model, and build the headers the envelope always carries.
+    ///
+    /// The signature itself is *not* built here: it covers the encoded body bytes, which the
+    /// repair loop can rebuild, so [`Self::post_with_fallback`] signs each send.
+    async fn prepare_qoder(
+        &self,
+        spec: &'static ProviderSpec,
+        creds: &Credentials,
+        candidate: &Candidate,
+        trace: &AttemptTrace,
+    ) -> Result<Prepared> {
+        let signer = rrouter_auth::qoder::signer(creds)?;
+        // An override is a deployment/test statement about where this account's traffic
+        // goes; the registry base is an origin either way.
+        let base = creds
+            .base_url_override
+            .as_deref()
+            .map(|base| base.trim().trim_end_matches('/').to_string())
+            .unwrap_or_else(|| spec.base_url.to_string());
+        // A client may write `qoder/<key>`; the envelope wants the bare catalog key.
+        let model = candidate
+            .model
+            .strip_prefix("qoder/")
+            .unwrap_or(&candidate.model)
+            .to_string();
+        // A model this account's catalog does not list is a hard error here, never a
+        // request the upstream would answer with a different model.
+        let model_config =
+            rrouter_auth::qoder::model_config(&self.state.http, &signer, &base, &model).await?;
+        let mut headers = outbound_headers(spec, creds, self.client_headers)?;
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        // gzip makes Qoder's CDN validate the signature against the compressed body.
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+        if let Ok(value) = HeaderValue::from_str(&model) {
+            headers.insert("x-model-key", value);
+        }
+        if let Some(source) = model_config.get("source").and_then(Value::as_str) {
+            if let Ok(value) = HeaderValue::from_str(source) {
+                headers.insert("x-model-source", value);
+            }
+        }
+        inject_trace_headers(&mut headers, trace);
+        Ok(Prepared {
+            urls: vec![rrouter_translate::qoder::chat_url(&base)],
+            dialect: Dialect::QoderAgent,
+            headers,
+            project: None,
+            qoder: Some(QoderPrepared {
+                session_id: rrouter_translate::qoder::session_id(&signer.user_id, &model),
+                signer,
+                model_config,
+                model,
+            }),
         })
     }
 
@@ -2731,16 +2932,28 @@ impl Attempt<'_> {
         let mut last_server_error: Option<(u16, Bytes)> = None;
         for url in &prepared.urls {
             let sent = Instant::now();
-            match self
+            // COSY signs the *obfuscated* body bytes, so the body is encoded and the
+            // signature rebuilt for every send: a fallback URL, a repaired envelope or a
+            // retry must never replay an earlier signature (the upstream answers 403 /
+            // code 103 for a reused requestId).
+            let (headers, body) = match &prepared.qoder {
+                Some(qoder) => match signed_qoder_body(prepared, qoder, url, wire) {
+                    Ok((headers, body)) => (headers, Some(body)),
+                    Err(error) => return Err(Box::new(Failure::transport(error))),
+                },
+                None => (prepared.headers.clone(), None),
+            };
+            let mut request = self
                 .state
                 .http
                 .post(url)
-                .headers(prepared.headers.clone())
-                .json(wire)
-                .timeout(self.state.request_timeout())
-                .send()
-                .await
-            {
+                .headers(headers)
+                .timeout(self.state.request_timeout());
+            request = match body {
+                Some(body) => request.body(body),
+                None => request.json(wire),
+            };
+            match request.send().await {
                 Ok(resp) => {
                     self.trace.set_upstream_ms(sent.elapsed());
                     let status = resp.status();
@@ -2786,12 +2999,7 @@ impl Attempt<'_> {
     ) -> Result<reqwest::Response> {
         let mut repair: Vec<&'static str> = Vec::new();
         loop {
-            let wire = self.outbound_dropping(
-                candidate,
-                prepared.dialect,
-                prepared.project.as_deref(),
-                &repair,
-            )?;
+            let wire = self.outbound_dropping(candidate, prepared, &repair)?;
             let failure = match self.post_with_fallback(candidate, prepared, &wire).await {
                 Ok(resp) => {
                     self.state.envelope_drops.record(
@@ -2874,6 +3082,9 @@ impl Attempt<'_> {
         let prepared = self.prepare(&candidate, &trace).await?;
         let resp = self.post_repairing(&candidate, &prepared).await?;
         let dialect = prepared.dialect;
+        if dialect == Dialect::QoderAgent {
+            return qoder_stream(resp).await;
+        }
         let content_type = resp
             .headers()
             .get(axum::http::header::CONTENT_TYPE)
@@ -3909,6 +4120,7 @@ fn endpoint_of(dialect: Dialect) -> &'static str {
         Dialect::OpenAiChat => "/v1/chat/completions",
         Dialect::OpenAiEmbeddings => "/v1/embeddings",
         Dialect::GoogleCodeAssist => "/v1internal:generateContent",
+        Dialect::QoderAgent => "/algo/api/v2/service/pro/sse/agent_chat_generation",
     }
 }
 

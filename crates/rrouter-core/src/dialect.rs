@@ -19,6 +19,11 @@ pub enum Dialect {
     /// by the Antigravity desktop client. Never an inbound route: [`Self::from_path`]
     /// does not yield it.
     GoogleCodeAssist,
+    /// Qoder's agent endpoint (`/algo/api/v2/service/pro/sse/agent_chat_generation`),
+    /// the upstream-only wire qodercli speaks. `POST` is a COSY-signed, obfuscated
+    /// envelope and the answer is a `{statusCodeValue, body}` SSE wrapper. Never an
+    /// inbound route: [`Self::from_path`] does not yield it.
+    QoderAgent,
 }
 
 impl Dialect {
@@ -41,6 +46,7 @@ impl Dialect {
             Self::AnthropicMessages => "anthropic_messages",
             Self::OpenAiEmbeddings => "openai_embeddings",
             Self::GoogleCodeAssist => "google_code_assist",
+            Self::QoderAgent => "qoder_agent",
         }
     }
 
@@ -78,5 +84,12 @@ mod tests {
         assert_eq!(Dialect::GoogleCodeAssist.as_str(), "google_code_assist");
         assert_eq!(Dialect::from_path("/v1internal:generateContent"), None);
         assert!(!Dialect::GoogleCodeAssist.is_event_framed());
+    }
+
+    #[test]
+    fn qoder_agent_is_upstream_only() {
+        assert_eq!(Dialect::QoderAgent.as_str(), "qoder_agent");
+        assert_eq!(Dialect::from_path("/algo/api/v2/model/list"), None);
+        assert!(!Dialect::QoderAgent.is_event_framed());
     }
 }

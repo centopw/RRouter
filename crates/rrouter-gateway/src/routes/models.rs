@@ -1092,6 +1092,44 @@ async fn fetch_upstream(
         return store_fetched(state, conn, status, items).await;
     }
 
+    // Qoder's catalogue is a COSY-signed, per-account `GET`; it is also the only source of
+    // the `model_config` block every envelope must carry.
+    if spec.id == rrouter_auth::qoder::PROVIDER_ID {
+        let signer = rrouter_auth::qoder::signer(&creds)?;
+        let base = creds
+            .base_url_override
+            .as_deref()
+            .unwrap_or(spec.base_url)
+            .trim_end_matches('/')
+            .to_string();
+        let catalog = rrouter_auth::qoder::catalog(&state.http, &signer, &base).await?;
+        let items = catalog
+            .entries()
+            .map(|(key, block)| models_registry::FetchedModel {
+                id: key.to_string(),
+                display: block
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .filter(|name| !name.is_empty()),
+                context: block
+                    .get("max_input_tokens")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok()),
+                max_output: block
+                    .get("max_output_tokens")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok()),
+                caps: json!({
+                    "vision": block.get("is_vl").and_then(Value::as_bool).unwrap_or(false),
+                    "reasoning": block.get("is_reasoning").and_then(Value::as_bool).unwrap_or(false),
+                    "tools": true,
+                }),
+            })
+            .collect();
+        return store_fetched(state, conn, 200, items).await;
+    }
+
     let base = creds.base_url_override.as_deref().unwrap_or(spec.base_url);
     let mut url = match (creds.base_url_override.as_deref(), spec.models_url) {
         // An override points at a different deployment, so its catalogue wins.

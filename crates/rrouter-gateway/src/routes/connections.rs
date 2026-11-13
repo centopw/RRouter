@@ -541,6 +541,11 @@ async fn probe(
     // placeholder like "ping" makes every provider answer 400 model_not_found,
     // which reads as a broken credential. Use the provider's cheapest known model.
     let model = probe_model(state, spec).await;
+    // Qoder is upstream-only *and* needs its catalog and a per-attempt signature, so it
+    // has its own probe: the catalog fetch alone already exercises the credential.
+    if spec.default_dialect == rrouter_core::Dialect::QoderAgent {
+        return probe_qoder(state, spec, &conn, &creds, &model).await;
+    }
     let mut req = ChatRequest::new(model);
     req.messages.push(Message::text(Role::User, "ping"));
     // Some providers reject a 1-token completion (minimum output length), so ask for
@@ -668,6 +673,122 @@ async fn probe(
         }
     }
     Ok(status)
+}
+
+/// Probe a Qoder connection: fetch the account's catalog (a signed `GET`), then send one
+/// 1-token completion through the real envelope and require a frame back.
+///
+/// The model is the catalog's own: a probe must not send a key the account cannot serve,
+/// and `model_config` has to be the account's block, exactly as chat does it.
+async fn probe_qoder(
+    state: &Arc<AppState>,
+    spec: &'static rrouter_auth::ProviderSpec,
+    conn: &Connection,
+    creds: &Credentials,
+    requested: &str,
+) -> Result<u16, Error> {
+    let signer = rrouter_auth::qoder::signer(creds)?;
+    let base = creds
+        .base_url_override
+        .as_deref()
+        .map(|base| base.trim().trim_end_matches('/').to_string())
+        .unwrap_or_else(|| spec.base_url.to_string());
+    let catalog = rrouter_auth::qoder::catalog(&state.http, &signer, &base).await?;
+    let model = catalog
+        .config(requested)
+        .map(|_| requested.to_string())
+        .or_else(|| catalog.default_model().map(str::to_string))
+        .ok_or_else(|| {
+            Error::BadRequest("qoder account catalog is empty; nothing to probe".into())
+        })?;
+    let Some(model_config) = catalog.config(&model).cloned() else {
+        return Err(Error::BadRequest(format!(
+            "qoder account does not list model \"{model}\""
+        )));
+    };
+
+    let mut request = ChatRequest::new(&model);
+    request.messages.push(Message::text(Role::User, "ping"));
+    request.max_tokens = Some(16);
+    let session_id = rrouter_translate::qoder::session_id(&signer.user_id, &model);
+    let body = rrouter_translate::qoder::build_request(
+        &request,
+        &rrouter_translate::qoder::Envelope {
+            model: &model,
+            model_config: &model_config,
+            session_id: &session_id,
+        },
+    )?;
+    let url = rrouter_translate::qoder::chat_url(&base);
+    let wire = rrouter_auth::qoder::encoding::encode_body(&serde_json::to_vec(&body)?);
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        axum::http::header::ACCEPT,
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(
+        axum::http::header::ACCEPT_ENCODING,
+        axum::http::HeaderValue::from_static("identity"),
+    );
+    for (name, value) in rrouter_auth::qoder::cosy::sign_headers(&wire, &url, &signer)? {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::header::HeaderName::from_bytes(name.as_bytes()),
+            axum::http::HeaderValue::from_str(&value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+
+    let response = state
+        .http
+        .post(&url)
+        .headers(headers)
+        .body(wire)
+        .timeout(state.request_timeout())
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                Error::Timeout(format!("qoder probe: {e}"))
+            } else {
+                Error::Transport(format!("qoder probe: {e}"))
+            }
+        })?;
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(Error::Upstream {
+            provider: conn.provider.clone(),
+            status,
+            body: text.chars().take(512).collect(),
+            payload: None,
+        });
+    }
+    // The HTTP status is 200 even for a queued model or a quota block; the peek maps those
+    // to a real error, so a broken account cannot report healthy.
+    use futures_util::StreamExt as _;
+    let mut stream = crate::proxy::qoder_stream(response).await?;
+    match stream.next().await {
+        Some(Ok(chunk)) if !chunk.is_empty() => Ok(status),
+        Some(Ok(_)) => Err(Error::Upstream {
+            provider: conn.provider.clone(),
+            status,
+            body: "stream closed before the first frame".into(),
+            payload: None,
+        }),
+        Some(Err(e)) => Err(e),
+        None => Err(Error::Upstream {
+            provider: conn.provider.clone(),
+            status,
+            body: "empty stream".into(),
+            payload: None,
+        }),
+    }
 }
 
 /// A model this provider can serve, for connectivity probes.
