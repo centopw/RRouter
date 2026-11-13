@@ -494,6 +494,7 @@ async fn serve(config: Config, log: LogReload) -> Result<(), String> {
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        envelope_drops: Default::default(),
         concurrency: std::sync::RwLock::new(concurrency_for(config.max_concurrency)),
         auth: rrouter_gateway::auth::Auth::load(&config.data_dir, users_exist),
     });

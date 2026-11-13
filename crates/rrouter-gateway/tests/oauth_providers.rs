@@ -64,6 +64,7 @@ fn test_state() -> Arc<AppState> {
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        envelope_drops: Default::default(),
         concurrency: std::sync::RwLock::new(None),
         auth: rrouter_gateway::auth::Auth::load(&std::env::temp_dir(), false),
     })

@@ -85,6 +85,9 @@ pub struct AppState {
     pub oauth: rrouter_auth::OAuthFlows,
     /// Per-key request/token windows for the caps that cannot be answered from SQL.
     pub counters: KeyCounters,
+    /// Top-level upstream envelope fields a provider rejected, so later requests skip
+    /// them instead of paying for the same 400 again.
+    pub envelope_drops: EnvelopeDrops,
     /// Caps concurrent `/v1/*` proxy requests; `None` when `RROUTER_MAX_CONCURRENCY`
     /// is 0. One permit spans a whole request, streamed body included. Reloadable: the
     /// semaphore is swapped atomically, and in-flight requests keep the old permits.
@@ -846,6 +849,44 @@ struct Window {
     requests: VecDeque<Instant>,
     /// `(arrival, tokens)` for finished responses, oldest first.
     tokens: VecDeque<(Instant, u64)>,
+}
+
+/// Envelope fields an upstream rejected, keyed by provider and connection.
+///
+/// In memory by design: a repair is a statement about one upstream account, learned from
+/// its own 400, and a restart simply re-learns it on the first request that needs it.
+/// The key is the account, not the model, because that is the granularity the gateway can
+/// act on cheaply: one connection is one upstream credential set, and the field it rejects
+/// is a property of that upstream build. A `google-antigravity` connection that serves
+/// models accepting `sessionId` keeps sending it — the entry appears only after an upstream
+/// answer named a field, so a repaired connection is the exception, never the default.
+#[derive(Default)]
+pub struct EnvelopeDrops {
+    inner: Mutex<HashMap<(String, Uuid), Vec<&'static str>>>,
+}
+
+impl EnvelopeDrops {
+    /// Fields this connection is already known to reject. Empty for an unseen one.
+    pub fn get(&self, provider: &str, connection: Uuid) -> Vec<&'static str> {
+        let map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        map.get(&(provider.to_string(), connection))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Remember a repair that made an attempt succeed.
+    pub fn record(&self, provider: &str, connection: Uuid, fields: &[&'static str]) {
+        if fields.is_empty() {
+            return;
+        }
+        let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let known = map.entry((provider.to_string(), connection)).or_default();
+        for field in fields {
+            if !known.contains(field) {
+                known.push(*field);
+            }
+        }
+    }
 }
 
 /// Which cap refused a request.

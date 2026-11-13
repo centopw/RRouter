@@ -2475,6 +2475,33 @@ impl Stream for OpenStream {
     }
 }
 
+/// An attempt that produced no response, with the upstream's answer when there was one.
+///
+/// The body is kept alongside the client-facing error so the caller can repair the request
+/// it was rejected for; [`Error::Upstream`] keeps a truncated, possibly redacted copy.
+struct Failure {
+    error: Error,
+    /// Status and raw body of the last upstream answer. `None` after a transport failure,
+    /// which nothing can repair.
+    answer: Option<(u16, Bytes)>,
+}
+
+impl Failure {
+    fn transport(error: Error) -> Self {
+        Self {
+            error,
+            answer: None,
+        }
+    }
+
+    fn answer(error: Error, status: u16, body: Bytes) -> Self {
+        Self {
+            error,
+            answer: Some((status, body)),
+        }
+    }
+}
+
 /// Per-request attempt state, shared across fallback attempts.
 struct Attempt<'a> {
     state: &'a Arc<AppState>,
@@ -2544,17 +2571,42 @@ impl Attempt<'_> {
         dialect: Dialect,
         project: Option<&str>,
     ) -> Result<Value> {
+        self.outbound_dropping(candidate, dialect, project, &[])
+    }
+
+    /// [`Self::outbound`] with extra CCA envelope fields dropped for this attempt, on top
+    /// of the ones this connection already rejected. `sessionId` is undocumented, so it is
+    /// built in by default and removed only where an upstream has said it does not exist.
+    fn outbound_dropping(
+        &self,
+        candidate: &Candidate,
+        dialect: Dialect,
+        project: Option<&str>,
+        extra: &[&'static str],
+    ) -> Result<Value> {
         if dialect == Dialect::GoogleCodeAssist {
             let project = project.ok_or_else(|| {
                 Error::BadRequest(
                     "google-antigravity connection is missing credentials.extra.project_id".into(),
                 )
             })?;
-            return rrouter_translate::google_cca::build_request(
+            let mut dropped = self
+                .state
+                .envelope_drops
+                .get(&candidate.provider, candidate.connection);
+            for field in extra {
+                if !dropped.contains(field) {
+                    dropped.push(field);
+                }
+            }
+            let envelope = rrouter_translate::google_cca::build_request(
                 &self.canonical,
                 &candidate.model,
                 project,
-            );
+            )?;
+            return Ok(rrouter_translate::google_cca::without_fields(
+                envelope, &dropped,
+            ));
         }
         let mut body = if dialect == self.inbound {
             same_dialect_body(
@@ -2674,7 +2726,7 @@ impl Attempt<'_> {
         candidate: &Candidate,
         prepared: &Prepared,
         wire: &Value,
-    ) -> Result<reqwest::Response> {
+    ) -> std::result::Result<reqwest::Response, Box<Failure>> {
         let mut transport: Option<Error> = None;
         let mut last_server_error: Option<(u16, Bytes)> = None;
         for url in &prepared.urls {
@@ -2695,9 +2747,13 @@ impl Attempt<'_> {
                     if status.is_success() {
                         return Ok(resp);
                     }
-                    let bytes = resp.bytes().await.map_err(transport_error)?;
+                    let bytes = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| Box::new(Failure::transport(transport_error(e))))?;
                     if status.as_u16() < 500 {
-                        return Err(self.upstream_error(candidate, status.as_u16(), &bytes));
+                        let error = self.upstream_error(candidate, status.as_u16(), &bytes);
+                        return Err(Box::new(Failure::answer(error, status.as_u16(), bytes)));
                     }
                     last_server_error = Some((status.as_u16(), bytes));
                     transport = None;
@@ -2706,9 +2762,77 @@ impl Attempt<'_> {
             }
         }
         if let Some((status, bytes)) = last_server_error {
-            return Err(self.upstream_error(candidate, status, &bytes));
+            let error = self.upstream_error(candidate, status, &bytes);
+            return Err(Box::new(Failure::answer(error, status, bytes)));
         }
-        Err(transport.unwrap_or_else(|| Error::Transport("no upstream endpoint".into())))
+        Err(Box::new(Failure::transport(transport.unwrap_or_else(
+            || Error::Transport("no upstream endpoint".into()),
+        ))))
+    }
+
+    /// POST this attempt's envelope, repairing it when an upstream rejects an undocumented
+    /// top-level field.
+    ///
+    /// The resend belongs to the same attempt: it never spends a fallback candidate, and it
+    /// happens before a byte reaches the client on either path, so the buffered body and
+    /// the SSE stream stay consistent. Exactly one repair is allowed per request — a second
+    /// 400 is the upstream's answer, not another invitation to guess — and a repair that
+    /// works is remembered per provider+connection, so the next request omits the field
+    /// without paying for a probe.
+    async fn post_repairing(
+        &self,
+        candidate: &Candidate,
+        prepared: &Prepared,
+    ) -> Result<reqwest::Response> {
+        let mut repair: Vec<&'static str> = Vec::new();
+        loop {
+            let wire = self.outbound_dropping(
+                candidate,
+                prepared.dialect,
+                prepared.project.as_deref(),
+                &repair,
+            )?;
+            let failure = match self.post_with_fallback(candidate, prepared, &wire).await {
+                Ok(resp) => {
+                    self.state.envelope_drops.record(
+                        &candidate.provider,
+                        candidate.connection,
+                        &repair,
+                    );
+                    return Ok(resp);
+                }
+                Err(failure) => failure,
+            };
+            let Some(fields) = self.repairable(prepared, &failure, &repair) else {
+                return Err(failure.error);
+            };
+            repair.extend(fields);
+        }
+    }
+
+    /// Fields to drop for one more try, or `None` when this answer is final.
+    ///
+    /// Only a `400` on the CCA dialect can be repaired: the upstream must name a top-level
+    /// envelope field, that field must still be in the wire, and nothing under `request`
+    /// ever qualifies (see [`rrouter_translate::google_cca::rejected_fields`]).
+    fn repairable(
+        &self,
+        prepared: &Prepared,
+        failure: &Failure,
+        repair: &[&'static str],
+    ) -> Option<Vec<&'static str>> {
+        if prepared.dialect != Dialect::GoogleCodeAssist || !repair.is_empty() {
+            return None;
+        }
+        let (status, bytes) = failure.answer.as_ref()?;
+        if *status != 400 {
+            return None;
+        }
+        let fields: Vec<&'static str> = rrouter_translate::google_cca::rejected_fields(bytes)
+            .into_iter()
+            .filter(|field| !repair.contains(field))
+            .collect();
+        (!fields.is_empty()).then_some(fields)
     }
 
     /// Non-streaming attempt.
@@ -2726,10 +2850,7 @@ impl Attempt<'_> {
         trace: std::sync::Arc<AttemptTrace>,
     ) -> Result<ChatResponse> {
         let prepared = self.prepare(&candidate, &trace).await?;
-        let wire = self.outbound(&candidate, prepared.dialect, prepared.project.as_deref())?;
-        let resp = self
-            .post_with_fallback(&candidate, &prepared, &wire)
-            .await?;
+        let resp = self.post_repairing(&candidate, &prepared).await?;
         let bytes = resp.bytes().await.map_err(transport_error)?;
         let value: Value = serde_json::from_slice(&bytes)?;
         rrouter_translate::parse_response(prepared.dialect, &value)
@@ -2751,10 +2872,7 @@ impl Attempt<'_> {
         trace: std::sync::Arc<AttemptTrace>,
     ) -> Result<ByteStream> {
         let prepared = self.prepare(&candidate, &trace).await?;
-        let wire = self.outbound(&candidate, prepared.dialect, prepared.project.as_deref())?;
-        let resp = self
-            .post_with_fallback(&candidate, &prepared, &wire)
-            .await?;
+        let resp = self.post_repairing(&candidate, &prepared).await?;
         let dialect = prepared.dialect;
         let content_type = resp
             .headers()

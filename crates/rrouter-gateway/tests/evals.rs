@@ -215,6 +215,7 @@ fn harness() -> H {
         started: std::time::Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        envelope_drops: Default::default(),
         concurrency: std::sync::RwLock::new(None),
         auth: Auth::load(&data_dir, false),
     });

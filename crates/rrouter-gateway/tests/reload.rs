@@ -42,6 +42,7 @@ fn state(config: Config) -> Arc<AppState> {
         started: std::time::Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        envelope_drops: Default::default(),
         concurrency: std::sync::RwLock::new(concurrency),
         auth: Auth::load(&data_dir, false),
     })

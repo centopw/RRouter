@@ -24,6 +24,13 @@
 //! `request` deliberately carries no `model` and no `safetySettings`: neither belongs in
 //! the inner Gemini request, and the Antigravity backend rejects a nested model.
 //!
+//! # Envelope repair
+//!
+//! `sessionId` is undocumented: the same host serves models that accept it and models that
+//! answer `400` `Unknown name "sessionId"`. [`rejected_fields`] reads such an answer and
+//! [`without_fields`] rebuilds the envelope without exactly the fields it named, so the
+//! gateway repairs the account that rejected it instead of guessing for all of them.
+//!
 //! # Responses
 //!
 //! Every buffered body and every SSE `data:` payload wraps the Gemini response:
@@ -252,6 +259,128 @@ fn session_id(req: &ChatRequest) -> Option<String> {
         feed(&first_user.joined_text(), &mut hash, &mut wrote);
     }
     wrote.then(|| format!("{hash:016x}"))
+}
+
+// ---------------------------------------------------------------------------
+// Envelope repair
+// ---------------------------------------------------------------------------
+
+/// Top-level envelope keys a rejected-field repair may drop. `request` is deliberately
+/// absent: it carries the translated conversation, so dropping a member of it would
+/// answer a different question instead of the same one in an older envelope shape.
+const DROPPABLE: [&str; 6] = [
+    "model",
+    "userAgent",
+    "requestType",
+    "project",
+    "requestId",
+    "sessionId",
+];
+
+/// Top-level envelope fields an upstream rejected, in the order the body named them.
+///
+/// Google's protobuf parser answers an undocumented envelope member with
+/// `{"error": {"status": "INVALID_ARGUMENT", "message": "Invalid JSON payload received.
+/// Unknown name \"sessionId\": Cannot find field.", "details": [{"@type":
+/// "type.googleapis.com/google.rpc.BadRequest", "fieldViolations": [{"field": "sessionId",
+/// …}]}]}}`. Both carriers are read because the violation path is sometimes the enclosing
+/// object rather than the offending name. Only [`DROPPABLE`] survives the filter — every
+/// field under `request` is ignored — so a malformed or unrelated 400 can never make the
+/// caller strip part of the conversation.
+pub fn rejected_fields(body: &[u8]) -> Vec<&'static str> {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    let Some(error) = value.get("error") else {
+        return Vec::new();
+    };
+    let details = error
+        .get("details")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let bad_request = error.get("status").and_then(Value::as_str) == Some("INVALID_ARGUMENT")
+        || details.iter().any(|detail| {
+            detail
+                .get("@type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.ends_with("BadRequest"))
+        });
+    if !bad_request {
+        return Vec::new();
+    }
+    let mut fields: Vec<&'static str> = Vec::new();
+    for detail in details {
+        let violations = detail
+            .get("fieldViolations")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for violation in violations {
+            if let Some(field) = violation.get("field").and_then(Value::as_str) {
+                named_field(&mut fields, field);
+            }
+            if let Some(text) = violation.get("description").and_then(Value::as_str) {
+                named_in_text(&mut fields, text);
+            }
+        }
+    }
+    if let Some(message) = error.get("message").and_then(Value::as_str) {
+        named_in_text(&mut fields, message);
+    }
+    fields
+}
+
+/// The envelope without `fields`, so a resend omits exactly what the upstream refused.
+/// A non-object passes through untouched: there is nothing to repair.
+pub fn without_fields(envelope: Value, fields: &[&str]) -> Value {
+    let Value::Object(mut envelope) = envelope else {
+        return envelope;
+    };
+    for field in fields {
+        envelope.remove(*field);
+    }
+    Value::Object(envelope)
+}
+
+/// Note `field` when it names a droppable top-level key: `sessionId`, `$.sessionId` and
+/// `sessionId.contents` all name the top-level `sessionId`.
+fn named_field(fields: &mut Vec<&'static str>, field: &str) {
+    let path = field.trim().trim_start_matches("$.").trim_matches('"');
+    let name = path.split('.').next().unwrap_or_default().trim();
+    if let Some(known) = droppable(name) {
+        push_unique(fields, known);
+    }
+}
+
+/// Note fields named in the parser's own wording: `Unknown name "sessionId"` and
+/// `Unknown name sessionId: Cannot find field.`
+fn named_in_text(fields: &mut Vec<&'static str>, text: &str) {
+    const MARKER: &str = "Unknown name";
+    let mut rest = text;
+    while let Some(at) = rest.find(MARKER) {
+        rest = rest[at + MARKER.len()..].trim_start();
+        let name = match rest.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next().unwrap_or_default(),
+            None => rest
+                .split(|c: char| c.is_ascii_whitespace() || c == ':' || c == ',' || c == '.')
+                .next()
+                .unwrap_or_default(),
+        };
+        if let Some(known) = droppable(name.trim()) {
+            push_unique(fields, known);
+        }
+    }
+}
+
+fn droppable(name: &str) -> Option<&'static str> {
+    DROPPABLE.iter().copied().find(|known| *known == name)
+}
+
+fn push_unique(fields: &mut Vec<&'static str>, field: &'static str) {
+    if !fields.contains(&field) {
+        fields.push(field);
+    }
 }
 
 fn contents_in(messages: &[Message], system_parts: &mut Vec<Value>) -> Result<Vec<Value>> {
@@ -1001,6 +1130,103 @@ mod tests {
             "{anthropic_wire}"
         );
         assert!(anthropic_wire.contains("message_stop"), "{anthropic_wire}");
+    }
+
+    #[test]
+    fn a_bad_request_violation_names_the_droppable_envelope_field() {
+        // The shape cloudcode-pa answers for the undocumented `sessionId`.
+        let body = json!({"error": {
+            "code": 400,
+            "message": "Invalid JSON payload received. Unknown name \"sessionId\": Cannot find field.",
+            "status": "INVALID_ARGUMENT",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.BadRequest",
+                "fieldViolations": [{
+                    "field": "sessionId",
+                    "description": "Invalid JSON payload received. Unknown name \"sessionId\"."
+                }]
+            }]
+        }});
+        assert_eq!(rejected_fields(body.to_string().as_bytes()), ["sessionId"]);
+    }
+
+    #[test]
+    fn the_violation_path_or_the_message_alone_is_enough() {
+        let by_violation = json!({"error": {
+            "status": "INVALID_ARGUMENT",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.BadRequest",
+                "fieldViolations": [{"field": "$.requestId.foo"}, {"field": "sessionId"}]
+            }]
+        }});
+        assert_eq!(
+            rejected_fields(by_violation.to_string().as_bytes()),
+            ["requestId", "sessionId"],
+            "a path names its first segment; duplicates collapse"
+        );
+
+        let by_message = json!({"error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT",
+            "message": "Invalid JSON payload received. Unknown name sessionId: Cannot find field."
+        }});
+        assert_eq!(
+            rejected_fields(by_message.to_string().as_bytes()),
+            ["sessionId"],
+            "the parser's own wording names the field even without a violation"
+        );
+    }
+
+    #[test]
+    fn only_droppable_top_level_fields_survive() {
+        let inner = json!({"error": {
+            "status": "INVALID_ARGUMENT",
+            "message": "Invalid JSON payload received. Unknown name \"contents\": Cannot find field.",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.BadRequest",
+                "fieldViolations": [
+                    {"field": "request.contents"},
+                    {"field": "toolConfig"},
+                    {"field": "userAgent"}
+                ]
+            }]
+        }});
+        assert_eq!(
+            rejected_fields(inner.to_string().as_bytes()),
+            ["userAgent"],
+            "nothing under request and nothing outside the allowlist is ever dropped"
+        );
+
+        let not_invalid = json!({"error": {
+            "code": 400,
+            "message": "Invalid JSON payload received. Unknown name \"sessionId\".",
+            "status": "FAILED_PRECONDITION"
+        }});
+        assert!(rejected_fields(not_invalid.to_string().as_bytes()).is_empty());
+        assert!(rejected_fields(b"not json").is_empty());
+        assert!(rejected_fields(b"{}").is_empty());
+    }
+
+    #[test]
+    fn rebuilding_without_fields_keeps_everything_else() {
+        let envelope = build_request_with(&request(), "gemini-3-pro", "proj-1", "agent-test")
+            .expect("envelope");
+        assert!(envelope["sessionId"].is_string());
+
+        let repaired = without_fields(envelope.clone(), &["sessionId"]);
+        assert!(repaired.get("sessionId").is_none(), "{repaired}");
+        assert_eq!(repaired["model"], "gemini-3-pro");
+        assert_eq!(repaired["requestId"], "agent-test");
+        assert_eq!(
+            repaired["request"]["contents"][0]["parts"][0]["text"],
+            "weather in Paris?"
+        );
+
+        assert_eq!(
+            without_fields(envelope.clone(), &[]),
+            envelope,
+            "no fields to drop is the envelope unchanged"
+        );
     }
 
     #[test]
