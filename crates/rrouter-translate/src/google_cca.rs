@@ -149,14 +149,13 @@ pub fn build_request_with(
                 if let Some(description) = tool.description.as_deref().filter(|d| !d.is_empty()) {
                     declaration.insert("description".into(), Value::from(description.to_string()));
                 }
-                declaration.insert(
-                    "parameters".into(),
-                    if tool.parameters.is_null() {
-                        json!({"type": "object", "properties": {}})
-                    } else {
-                        tool.parameters.clone()
-                    },
-                );
+                let mut parameters = if tool.parameters.is_null() {
+                    json!({"type": "object", "properties": {}})
+                } else {
+                    tool.parameters.clone()
+                };
+                gemini_schema(&mut parameters);
+                declaration.insert("parameters".into(), parameters);
                 Value::Object(declaration)
             })
             .collect();
@@ -259,6 +258,105 @@ fn session_id(req: &ChatRequest) -> Option<String> {
         feed(&first_user.joined_text(), &mut hash, &mut wrote);
     }
     wrote.then(|| format!("{hash:016x}"))
+}
+
+/// Adapts JSON Schema type unions into Gemini `Schema` proto compatible fields.
+///
+/// Upstream Google Code Assist / Antigravity returns 400 INVALID_ARGUMENT (`Proto field is not
+/// repeating, cannot start list`) when a schema node uses a JSON Schema type union array like
+/// `{"type": ["number", "null"]}` because the proto `Type` enum field is not repeated.
+/// This normalizes type arrays into a single `type` string with `nullable: true` or an `anyOf`
+/// alternative list.
+fn gemini_schema(schema: &mut Value) {
+    let Value::Object(map) = schema else {
+        return;
+    };
+
+    let type_rewrite = if let Some(Value::Array(arr)) = map.get("type") {
+        let is_nullable = arr.iter().any(|v| v.as_str() == Some("null"));
+        let mut non_null = Vec::new();
+        for v in arr {
+            if v.as_str() != Some("null") && !non_null.contains(v) {
+                non_null.push(v.clone());
+            }
+        }
+        Some((is_nullable, non_null))
+    } else {
+        None
+    };
+
+    if let Some((is_nullable, mut non_null)) = type_rewrite {
+        match non_null.len() {
+            0 => {
+                map.insert("type".into(), Value::String("null".into()));
+            }
+            1 => {
+                map.insert("type".into(), non_null.remove(0));
+            }
+            _ => {
+                if map.contains_key("anyOf") {
+                    map.insert("type".into(), non_null.remove(0));
+                } else {
+                    map.remove("type");
+                    let any_of = non_null.into_iter().map(|t| json!({ "type": t })).collect();
+                    map.insert("anyOf".into(), Value::Array(any_of));
+                }
+            }
+        }
+
+        if is_nullable {
+            map.insert("nullable".into(), Value::Bool(true));
+        }
+    }
+
+    if let Some(Value::Object(props)) = map.get_mut("properties") {
+        for s in props.values_mut() {
+            gemini_schema(s);
+        }
+    }
+    if let Some(Value::Object(props)) = map.get_mut("patternProperties") {
+        for s in props.values_mut() {
+            gemini_schema(s);
+        }
+    }
+    if let Some(Value::Object(defs)) = map.get_mut("$defs") {
+        for s in defs.values_mut() {
+            gemini_schema(s);
+        }
+    }
+    if let Some(Value::Object(defs)) = map.get_mut("definitions") {
+        for s in defs.values_mut() {
+            gemini_schema(s);
+        }
+    }
+    for kw in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+        if let Some(Value::Array(items)) = map.get_mut(kw) {
+            for s in items {
+                gemini_schema(s);
+            }
+        }
+    }
+    if let Some(items) = map.get_mut("items") {
+        match items {
+            Value::Object(_) => gemini_schema(items),
+            Value::Array(arr) => {
+                for s in arr {
+                    gemini_schema(s);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(add_props) = map.get_mut("additionalProperties") {
+        if add_props.is_object() {
+            gemini_schema(add_props);
+        }
+    }
+    if let Some(not_schema) = map.get_mut("not") {
+        if not_schema.is_object() {
+            gemini_schema(not_schema);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1239,5 +1337,168 @@ mod tests {
         let mut events = Vec::new();
         let err = decoder.push(frame.as_bytes(), &mut events).unwrap_err();
         assert!(err.to_string().contains("quota exhausted"), "{err}");
+    }
+
+    #[test]
+    fn adapts_json_schema_type_unions_for_gemini_proto() {
+        let mut req = ChatRequest::new("gemini-3-pro");
+        req.messages = vec![Message::text(Role::User, "run grep")];
+        req.tools = vec![ToolDef {
+            name: "grep".into(),
+            description: Some("Search files".into()),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "skip": {
+                        "type": ["number", "null"]
+                    },
+                    "patterns": {
+                        "type": "array",
+                        "items": {
+                            "type": ["string", "integer"]
+                        }
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["a", "b"]
+                    }
+                }
+            }),
+            strict: false,
+        }];
+
+        let envelope =
+            build_request_with(&req, "gemini-3-pro", "proj-1", "agent-test").expect("envelope");
+        let parameters = &envelope["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
+
+        assert_eq!(
+            parameters["properties"]["skip"],
+            json!({
+                "type": "number",
+                "nullable": true
+            })
+        );
+        assert_eq!(
+            parameters["properties"]["patterns"]["items"],
+            json!({
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "integer"}
+                ]
+            })
+        );
+        assert_eq!(
+            parameters["properties"]["type"],
+            json!({
+                "type": "string",
+                "enum": ["a", "b"]
+            })
+        );
+    }
+
+    #[test]
+    fn gemini_schema_handles_edge_cases_and_keywords() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "empty_type": { "type": [] },
+                "null_only": { "type": ["null"] },
+                "multi_with_existing_anyof": {
+                    "type": ["string", "integer"],
+                    "anyOf": [{"minLength": 2}]
+                },
+                "multi_with_null": {
+                    "type": ["boolean", "number", "null"]
+                },
+                "nested_defs": {
+                    "$defs": {
+                        "leaf": { "type": ["integer", "null"] }
+                    },
+                    "definitions": {
+                        "old_leaf": { "type": ["string", "null"] }
+                    },
+                    "patternProperties": {
+                        "^x-": { "type": ["boolean", "null"] }
+                    },
+                    "additionalProperties": {
+                        "type": ["string", "null"]
+                    },
+                    "not": {
+                        "type": ["number", "null"]
+                    },
+                    "oneOf": [
+                        { "type": ["string", "null"] }
+                    ],
+                    "allOf": [
+                        { "type": ["integer", "null"] }
+                    ],
+                    "prefixItems": [
+                        { "type": ["boolean", "null"] }
+                    ],
+                    "properties": {
+                        "tuple_items": {
+                            "type": "array",
+                            "items": [
+                                { "type": ["string", "null"] }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        gemini_schema(&mut schema);
+
+        let p = &schema["properties"];
+        assert_eq!(p["empty_type"], json!({"type": "null"}));
+        assert_eq!(p["null_only"], json!({"type": "null", "nullable": true}));
+        assert_eq!(
+            p["multi_with_existing_anyof"],
+            json!({
+                "type": "string",
+                "anyOf": [{"minLength": 2}]
+            })
+        );
+        assert_eq!(
+            p["multi_with_null"],
+            json!({
+                "anyOf": [{"type": "boolean"}, {"type": "number"}],
+                "nullable": true
+            })
+        );
+        let nested = &p["nested_defs"];
+        assert_eq!(
+            nested["$defs"]["leaf"],
+            json!({"type": "integer", "nullable": true})
+        );
+        assert_eq!(
+            nested["definitions"]["old_leaf"],
+            json!({"type": "string", "nullable": true})
+        );
+        assert_eq!(
+            nested["patternProperties"]["^x-"],
+            json!({"type": "boolean", "nullable": true})
+        );
+        assert_eq!(
+            nested["additionalProperties"],
+            json!({"type": "string", "nullable": true})
+        );
+        assert_eq!(nested["not"], json!({"type": "number", "nullable": true}));
+        assert_eq!(
+            nested["oneOf"][0],
+            json!({"type": "string", "nullable": true})
+        );
+        assert_eq!(
+            nested["allOf"][0],
+            json!({"type": "integer", "nullable": true})
+        );
+        assert_eq!(
+            nested["prefixItems"][0],
+            json!({"type": "boolean", "nullable": true})
+        );
+        assert_eq!(
+            nested["properties"]["tuple_items"]["items"][0],
+            json!({"type": "string", "nullable": true})
+        );
     }
 }
