@@ -1095,11 +1095,11 @@ async fn fetch_upstream(
     // Qoder's catalogue is a COSY-signed, per-account `GET`; it is also the only source of
     // the `model_config` block every envelope must carry.
     if spec.id == rrouter_auth::qoder::PROVIDER_ID {
-        let signer = rrouter_auth::qoder::signer(&creds)?;
+        let signer = rrouter_auth::qoder::resolve(&state.http, &creds).await?;
         let base = creds
             .base_url_override
             .as_deref()
-            .unwrap_or(spec.base_url)
+            .unwrap_or_else(|| rrouter_translate::qoder::base_for(&signer.token))
             .trim_end_matches('/')
             .to_string();
         let catalog = rrouter_auth::qoder::catalog(&state.http, &signer, &base).await?;

@@ -65,6 +65,23 @@ use crate::openai_chat::{function_tools, messages_out, OpenAiChatDecoder};
 /// a connection elsewhere with `base_url_override`.
 pub const DEFAULT_BASE: &str = "https://api3.qoder.sh";
 
+/// Origin that serves job tokens (`jt-…`). `api3` answers them with `Login expired`
+/// (`403`), so an exchanged PAT must use this host for **both** chat and the catalogue.
+pub const ALT_BASE: &str = "https://api2.qoder.sh";
+
+/// Origin that serves this credential's chat and catalogue traffic.
+///
+/// A job token (`jt-…`) — every PAT connection, after `rrouter_auth::qoder::resolve`
+/// exchanges it — must use [`ALT_BASE`]. Device tokens (`dt-…`) keep [`DEFAULT_BASE`]. A
+/// connection's `base_url_override` still wins over this choice.
+pub fn base_for(token: &str) -> &'static str {
+    if token.starts_with("jt-") {
+        ALT_BASE
+    } else {
+        DEFAULT_BASE
+    }
+}
+
 /// Inference path under `/algo`. Also the `Cosy-Sigpath` value (the signer strips `/algo`).
 pub const CHAT_SIG_PATH: &str = "/api/v2/service/pro/sse/agent_chat_generation";
 
@@ -592,5 +609,23 @@ fn scalar_number(value: Option<&Value>) -> Option<f64> {
         Value::Number(number) => number.as_f64(),
         Value::String(text) => text.trim().parse().ok(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_job_token_uses_api2_for_chat_and_catalog_while_a_device_token_uses_api3() {
+        assert_eq!(base_for("jt-job"), ALT_BASE);
+        assert_eq!(base_for("dt-device"), DEFAULT_BASE);
+        assert_eq!(base_for(""), DEFAULT_BASE);
+
+        for (token, origin) in [("jt-job", ALT_BASE), ("dt-device", DEFAULT_BASE)] {
+            let base = base_for(token);
+            assert!(chat_url(base).starts_with(&format!("{origin}/algo/")));
+            assert!(models_url(base).starts_with(&format!("{origin}/algo/")));
+        }
     }
 }

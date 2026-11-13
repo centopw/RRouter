@@ -2868,14 +2868,15 @@ impl Attempt<'_> {
         candidate: &Candidate,
         trace: &AttemptTrace,
     ) -> Result<Prepared> {
-        let signer = rrouter_auth::qoder::signer(creds)?;
+        let signer = rrouter_auth::qoder::resolve(&self.state.http, creds).await?;
         // An override is a deployment/test statement about where this account's traffic
-        // goes; the registry base is an origin either way.
+        // goes; otherwise the resolved token picks the origin: job tokens are served by
+        // api2, device tokens by api3.
         let base = creds
             .base_url_override
             .as_deref()
             .map(|base| base.trim().trim_end_matches('/').to_string())
-            .unwrap_or_else(|| spec.base_url.to_string());
+            .unwrap_or_else(|| rrouter_translate::qoder::base_for(&signer.token).to_string());
         // A client may write `qoder/<key>`; the envelope wants the bare catalog key.
         let model = candidate
             .model

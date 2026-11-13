@@ -544,7 +544,7 @@ async fn probe(
     // Qoder is upstream-only *and* needs its catalog and a per-attempt signature, so it
     // has its own probe: the catalog fetch alone already exercises the credential.
     if spec.default_dialect == rrouter_core::Dialect::QoderAgent {
-        return probe_qoder(state, spec, &conn, &creds, &model).await;
+        return probe_qoder(state, &conn, &creds, &model).await;
     }
     let mut req = ChatRequest::new(model);
     req.messages.push(Message::text(Role::User, "ping"));
@@ -682,17 +682,16 @@ async fn probe(
 /// and `model_config` has to be the account's block, exactly as chat does it.
 async fn probe_qoder(
     state: &Arc<AppState>,
-    spec: &'static rrouter_auth::ProviderSpec,
     conn: &Connection,
     creds: &Credentials,
     requested: &str,
 ) -> Result<u16, Error> {
-    let signer = rrouter_auth::qoder::signer(creds)?;
+    let signer = rrouter_auth::qoder::resolve(&state.http, creds).await?;
     let base = creds
         .base_url_override
         .as_deref()
         .map(|base| base.trim().trim_end_matches('/').to_string())
-        .unwrap_or_else(|| spec.base_url.to_string());
+        .unwrap_or_else(|| rrouter_translate::qoder::base_for(&signer.token).to_string());
     let catalog = rrouter_auth::qoder::catalog(&state.http, &signer, &base).await?;
     let model = catalog
         .config(requested)

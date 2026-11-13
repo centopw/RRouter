@@ -76,7 +76,8 @@ pub const ENV_RSA_PUBLIC_KEY: &str = "RROUTER_QODER_RSA_PUBLIC_KEY";
 /// [`Credentials`](crate::Credentials).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QoderCredentials {
-    /// Device access token (`dt-…`). Travels only inside the AES blob.
+    /// Credential sealed inside the AES blob: the device access token (`dt-…`) or the job
+    /// token (`jt-…`) a PAT was exchanged for.
     pub token: String,
     /// Stable Qoder user id. Sent in clear as `Cosy-User` and inside the AES blob.
     pub user_id: String,
@@ -93,8 +94,10 @@ pub struct QoderCredentials {
 ///
 /// The operator supplies `credentials.api_key` (or `access_token`) plus
 /// `credentials.extra.user_id`; `credentials.extra.machine_id` is optional and derived
-/// deterministically from the user id when absent. See the module docs on the provider
-/// module for what to paste and where qodercli keeps it.
+/// deterministically from the user id when absent. A `pt-` personal access token may omit
+/// `user_id`: [`crate::qoder::pat::resolve`] fills it from `userinfo` and derives the
+/// machine id from the resolved id. See the module docs on the provider module for what to
+/// paste and where qodercli keeps it.
 pub fn signer(source: &crate::credentials::Credentials) -> Result<QoderCredentials> {
     let token = source
         .api_key
@@ -104,7 +107,9 @@ pub fn signer(source: &crate::credentials::Credentials) -> Result<QoderCredentia
         .filter(|token| !token.is_empty())
         .ok_or_else(|| {
             Error::Unauthorized(
-                "qoder connection is missing credentials.api_key (the `dt-…` device token)".into(),
+                "qoder connection is missing credentials.api_key (a `pt-…` personal access \
+                 token or a `dt-…` device token)"
+                    .into(),
             )
         })?;
     let user_id = source
@@ -112,13 +117,18 @@ pub fn signer(source: &crate::credentials::Credentials) -> Result<QoderCredentia
         .get(crate::qoder::USER_ID_KEY)
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| {
-            Error::Unauthorized(
+        .filter(|id| !id.is_empty());
+    let pat = token.starts_with(crate::qoder::PAT_PREFIX);
+    let user_id = match user_id {
+        Some(id) => id,
+        None if pat => "",
+        None => {
+            return Err(Error::Unauthorized(
                 "qoder connection is missing credentials.extra.user_id; COSY signing needs it"
                     .into(),
-            )
-        })?;
+            ))
+        }
+    };
     let machine_id = source
         .extra
         .get(crate::qoder::MACHINE_ID_KEY)
@@ -126,7 +136,15 @@ pub fn signer(source: &crate::credentials::Credentials) -> Result<QoderCredentia
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| derive_machine_id(user_id));
+        // Without a user id there is nothing to derive from yet; `pat::resolve` derives it
+        // once `userinfo` answers.
+        .unwrap_or_else(|| {
+            if user_id.is_empty() {
+                String::new()
+            } else {
+                derive_machine_id(user_id)
+            }
+        });
     Ok(QoderCredentials {
         token: token.to_string(),
         user_id: user_id.to_string(),

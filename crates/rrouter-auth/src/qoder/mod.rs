@@ -22,11 +22,14 @@
 //! }
 //! ```
 //!
-//! - `api_key` — the **device access token** (`dt-…`), the same string qodercli stores after
-//!   a browser sign-in. `access_token` is accepted as an alias.
+//! - `api_key` — a **personal access token** (`pt-…`) or the **device access token**
+//!   (`dt-…`) qodercli stores after a browser sign-in. `access_token` is accepted as an
+//!   alias. A PAT is exchanged for a short-lived job token (`jt-…`) by [`pat::resolve`];
+//!   the exchange, its cache and the userinfo lookup live in [`pat`].
 //! - `user_id` — the account's stable Qoder user id. COSY signing puts it in the clear
 //!   (`Cosy-User`) and inside the encrypted blob, so a wrong value signs every request
-//!   wrongly.
+//!   wrongly. With a PAT it is optional: the id is read from `/api/v1/userinfo` and this
+//!   value is the fallback when that call fails.
 //! - `machine_id` — optional. qodercli generates one UUID per install and reuses it for
 //!   every request; Qoder tracks per-device queue position by it. When it is omitted RRouter
 //!   derives a stable one from `user_id` ([`cosy::derive_machine_id`]), which keeps queue
@@ -53,15 +56,16 @@
 //!
 //! - The signature covers the encoded body bytes, so every attempt is re-encoded and
 //!   re-signed; a replayed signature is rejected (`403`, code `103`).
-//! - Only `dt-` device tokens are supported. A `pt-` personal access token has to be
-//!   exchanged for a job token (`jt-`) on a different host first; that exchange is not
-//!   implemented, and a `pt-` token fails loudly at signing time instead of silently at the
-//!   first inference call.
+//! - A `pt-` personal access token is exchanged for a job token (`jt-…`) on the openapi
+//!   host first ([`pat`]). Job tokens are served by `api2.qoder.sh`; `api3` answers them
+//!   with `Login expired` (`403`), so callers pick the origin with
+//!   [`rrouter_translate::qoder::base_for`]. Device tokens stay on `api3`.
 //! - Requests are never cached, because the body embeds fresh ids and the signature covers
 //!   a timestamp.
 
 pub mod cosy;
 pub mod encoding;
+pub mod pat;
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -73,6 +77,7 @@ use sha2::{Digest, Sha256};
 use rrouter_core::{Error, Result};
 
 pub use cosy::{signer, QoderCredentials};
+pub use pat::resolve;
 
 /// Registry id of the provider.
 pub const PROVIDER_ID: &str = "qoder";
@@ -89,8 +94,9 @@ const CATALOG_TTL: Duration = Duration::from_secs(60 * 60);
 /// Deadline for one catalogue fetch.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Prefix of a personal access token. These cannot sign COSY requests directly.
-const PAT_PREFIX: &str = "pt-";
+/// Prefix of a personal access token. These cannot sign COSY requests directly; they are
+/// exchanged for a job token first ([`pat`]).
+pub const PAT_PREFIX: &str = "pt-";
 
 /// One account's model catalogue: the raw `model_config` blocks keyed by model id.
 #[derive(Debug, Clone, Default, PartialEq)]
