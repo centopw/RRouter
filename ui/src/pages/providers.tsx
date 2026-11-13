@@ -49,6 +49,7 @@ import { apiCode } from "../lib/auth";
 import {
   api,
   isEndpointMissing,
+  MAX_CONNECTION_NAME,
   type AccountQuotaRow,
   type AccountQuotaWindow,
   type AccountSubscription,
@@ -91,6 +92,7 @@ export default function Providers() {
   const [quotaFor, setQuotaFor] = useState<AccountQuotaRow | null>(null);
   const [pingFor, setPingFor] = useState<QuotaPingRow | null>(null);
   const [removing, setRemoving] = useState<Connection | null>(null);
+  const [renaming, setRenaming] = useState<Connection | null>(null);
   const quotas = useAccountQuotas(isAdmin);
   const subscriptions = useAccountSubscriptions();
   const pings = useQuotaPings();
@@ -308,34 +310,7 @@ export default function Providers() {
     {
       key: "account",
       title: "account",
-      render: (r) => (
-        <div className="min-w-0">
-          <span
-            className="block min-w-0 truncate text-muted"
-            title={r.name ?? r.email ?? undefined}
-          >
-            {r.name ?? r.email ?? <span className="text-faint">unnamed</span>}
-          </span>
-          {r.email && r.email !== r.name ? (
-            <div className="truncate text-caption text-faint" title={r.email}>
-              {r.email}
-            </div>
-          ) : null}
-          {r.project_id ? (
-            <div className="truncate font-mono text-caption text-faint" title={r.project_id}>
-              project {r.project_id}
-            </div>
-          ) : null}
-          {r.base_url_override ? (
-            <div
-              className="truncate font-mono text-caption text-faint"
-              title={r.base_url_override}
-            >
-              {hostOf(r.base_url_override)}
-            </div>
-          ) : null}
-        </div>
-      ),
+      render: (r) => <AccountCell connection={r} display={displayOf(r.provider)} />,
     },
     {
       key: "auth",
@@ -421,6 +396,7 @@ export default function Providers() {
               display={displayOf(r.provider)}
               scope={teamName(r.team_id) ?? "shared"}
               testing={testingId === r.id}
+              onRename={() => setRenaming(r)}
               onTeam={() => setTeamFor(r)}
               onBaseUrl={() => setBaseUrlFor(r)}
               onRouting={() => setRouting(r)}
@@ -673,6 +649,16 @@ export default function Providers() {
         }}
       />
 
+      {renaming ? (
+        <RenameModal
+          key={renaming.id}
+          connection={renaming}
+          display={displayOf(renaming.provider)}
+          onClose={() => setRenaming(null)}
+          onDone={(text) => setNotice({ tone: "pos", text })}
+        />
+      ) : null}
+
       {routing ? (
         <RoutingModal key={routing.id} connection={routing} onClose={() => setRouting(null)} />
       ) : null}
@@ -734,7 +720,60 @@ export default function Providers() {
   );
 }
 
-/** Whole number inside `min..=max`; the server clamps, but a silent clamp would hide typos. */
+/**
+ * What identifies an account when it carries no operator name: the sign-in's email, the
+ * Cloud Code Assist project, and the provider's own OAuth marker. The first one is the
+ * placeholder the rename field offers, because it is what the row would read anyway.
+ */
+function derivedIdentifiers(connection: Connection, display: string): Array<{ text: string; mono?: boolean }> {
+  const parts: Array<{ text: string; mono?: boolean }> = [];
+  if (connection.email) parts.push({ text: connection.email });
+  if (connection.project_id) {
+    parts.push({ text: `project ${connection.project_id}`, mono: true });
+  }
+  if (connection.auth_type === "oauth") parts.push({ text: `${display} (OAuth)` });
+  return parts;
+}
+
+/**
+ * The account column: the operator's name first, then the identifiers that name the
+ * upstream account itself. Clearing the name leaves those lines alone, so a row is never
+ * blank: the first identifier becomes the primary line.
+ */
+function AccountCell({ connection, display }: { connection: Connection; display: string }) {
+  const derived = derivedIdentifiers(connection, display);
+  const primary = connection.name ?? derived[0]?.text ?? null;
+  const secondary = derived.filter((part) => part.text !== primary);
+  const title = [primary, ...secondary.map((part) => part.text)].filter(Boolean).join(" · ");
+  return (
+    <div className="min-w-0">
+      <span
+        className={cx("block min-w-0 truncate", connection.name ? "text-fg" : "text-muted")}
+        title={title || undefined}
+      >
+        {primary ?? <span className="text-faint">unnamed</span>}
+      </span>
+      {secondary.map((part) => (
+        <div
+          key={part.text}
+          className={cx("truncate text-caption text-faint", part.mono && "font-mono")}
+          title={part.text}
+        >
+          {part.text}
+        </div>
+      ))}
+      {connection.base_url_override ? (
+        <div
+          className="truncate font-mono text-caption text-faint"
+          title={connection.base_url_override}
+        >
+          {hostOf(connection.base_url_override)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** The host an override points at, for the account cell. */
 function hostOf(url: string): string {
   return url
@@ -771,6 +810,7 @@ function baseUrlProblem(value: string, required: boolean): string | null {
   return null;
 }
 
+/** Whole number inside `min..=max`; the server clamps, but a silent clamp would hide typos. */
 function intProblem(value: string, min: number, max: number): string | null {
   const text = value.trim();
   if (text === "") return "required";
@@ -877,6 +917,108 @@ function RoutingModal({ connection, onClose }: { connection: Connection; onClose
           <span className="font-mono">{connection.id}</span>
         </div>
 
+        {failure ? <ErrorNote error={failure} /> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * The operator's label for one account.
+ *
+ * The name is dashboard text: routing, keys and the provider never read it, so a rename
+ * cannot change what the account does. Clearing is its own button — Save stays disabled
+ * on a blank field — and the placeholder shows what the row would read without a name.
+ */
+function RenameModal({
+  connection,
+  display,
+  onClose,
+  onDone,
+}: {
+  connection: Connection;
+  display: string;
+  onClose: () => void;
+  onDone: (text: string) => void;
+}) {
+  const update = useUpdateConnection();
+  const [value, setValue] = useState(connection.name ?? "");
+  const [failure, setFailure] = useState<unknown>(null);
+  const fallback = derivedIdentifiers(connection, display)[0]?.text ?? `${display} account`;
+  const trimmed = value.trim();
+  const problem =
+    Array.from(trimmed).length > MAX_CONNECTION_NAME
+      ? `a name is limited to ${MAX_CONNECTION_NAME} characters`
+      : null;
+  const unchanged = trimmed === (connection.name ?? "");
+  const busy = update.isPending;
+
+  const write = (name: string | null) => {
+    if (busy) return;
+    setFailure(null);
+    update.mutate(
+      { id: connection.id, patch: { name } },
+      {
+        // The dialog closes only once the server has stored the name; a refusal keeps the
+        // typed value and the reason on screen, and the table still shows the old label.
+        onSuccess: () => {
+          onDone(name === null ? `Name cleared · ${fallback}` : `Renamed to ${name}`);
+          onClose();
+        },
+        onError: setFailure,
+      },
+    );
+  };
+
+  return (
+    <Modal
+      title="Rename account"
+      open
+      variant="dialog"
+      width="md"
+      description="A label for this table only. Routing, keys and the provider's own account are unaffected."
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            cancel
+          </Button>
+          {connection.name !== null ? (
+            <Button variant="quiet" onClick={() => write(null)} disabled={busy}>
+              clear name
+            </Button>
+          ) : null}
+          <Button
+            variant="primary"
+            onClick={() => write(trimmed)}
+            disabled={busy || unchanged || trimmed === "" || problem !== null}
+          >
+            {busy ? "saving…" : "save"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <Field
+          label="name"
+          hint={problem ?? `${MAX_CONNECTION_NAME} characters at most; shown instead of “${fallback}”`}
+        >
+          <Input
+            value={value}
+            onChange={(next) => {
+              setValue(next);
+              setFailure(null);
+            }}
+            placeholder={fallback}
+            ariaLabel="account name"
+            disabled={busy}
+            autoFocus
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || unchanged || trimmed === "" || problem !== null) return;
+              write(trimmed);
+            }}
+          />
+        </Field>
         {failure ? <ErrorNote error={failure} /> : null}
       </div>
     </Modal>
@@ -2375,6 +2517,7 @@ function ConnectionMenu({
   display,
   scope,
   testing,
+  onRename,
   onTeam,
   onBaseUrl,
   onRouting,
@@ -2387,6 +2530,7 @@ function ConnectionMenu({
   /** Owner scope, priority and weight live in columns that collapse on narrow screens. */
   scope: string;
   testing: boolean;
+  onRename: () => void;
   onTeam: () => void;
   onBaseUrl: () => void;
   onRouting: () => void;
@@ -2468,6 +2612,7 @@ function ConnectionMenu({
           <div className="px-2 pb-1.5 pt-1 text-caption leading-relaxed text-faint">
             {scope} · priority {connection.priority} · weight {connection.weight}
           </div>
+          {entry("Rename…", onRename)}
           {entry("Team…", onTeam)}
           {entry("Routing…", onRouting)}
           {entry("Base URL…", onBaseUrl)}

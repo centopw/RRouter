@@ -11,7 +11,7 @@ use rrouter_store::{
     cache_key, window_start, AccountQuota, ApiKey, ApiKeyPatch, AttemptRecord, BudgetWindow,
     ComboStrategy, ConnectionScope, Credentials, Guardrails, KeyModel, KeyScope, ModelRow,
     PruneReport, QuotaPing, QuotaPingMode, StatusFilter, Store, UsageQuery, UsageRecord,
-    API_KEY_PREFIX, KEY_FILE_NAME,
+    API_KEY_PREFIX, KEY_FILE_NAME, MAX_CONNECTION_NAME,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -1453,6 +1453,95 @@ fn connection_weight_is_clamped_into_the_supported_range() {
         assert!(
             store
                 .set_connection_weight(Uuid::new_v4(), 5)
+                .await
+                .is_err(),
+            "an unknown connection is reported, not silently ignored"
+        );
+    });
+}
+
+#[test]
+fn connection_name_is_trimmed_cleared_and_bounded() {
+    let store = Store::open_in_memory().expect("mem");
+    rt().block_on(async {
+        let c = store
+            .create_connection("openai", "api_key", creds("k"), None)
+            .await
+            .expect("connection");
+        assert_eq!(c.name, None, "an unnamed account starts without a label");
+
+        store
+            .set_connection_name(c.id, Some("  My Claude  "))
+            .await
+            .expect("rename");
+        let read = store
+            .get_connection(c.id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            read.name.as_deref(),
+            Some("My Claude"),
+            "the value is trimmed"
+        );
+
+        store
+            .set_connection_name(c.id, Some("   "))
+            .await
+            .expect("blank clears");
+        let read = store
+            .get_connection(c.id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(read.name, None, "whitespace stores NULL, not a blank label");
+
+        store
+            .set_connection_name(c.id, Some("Team key"))
+            .await
+            .expect("rename");
+        store
+            .set_connection_name(c.id, None)
+            .await
+            .expect("none clears");
+        let read = store
+            .get_connection(c.id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(read.name, None);
+
+        let exact = "y".repeat(MAX_CONNECTION_NAME);
+        store
+            .set_connection_name(c.id, Some(&exact))
+            .await
+            .expect("a name at the limit is accepted");
+        let read = store
+            .get_connection(c.id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(read.name.as_deref(), Some(exact.as_str()));
+
+        let long = "x".repeat(MAX_CONNECTION_NAME + 1);
+        assert!(
+            store.set_connection_name(c.id, Some(&long)).await.is_err(),
+            "an over-long name is refused, not truncated"
+        );
+        let read = store
+            .get_connection(c.id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            read.name.as_deref(),
+            Some(exact.as_str()),
+            "a refused rename leaves the stored name alone"
+        );
+
+        assert!(
+            store
+                .set_connection_name(Uuid::new_v4(), Some("ghost"))
                 .await
                 .is_err(),
             "an unknown connection is reported, not silently ignored"

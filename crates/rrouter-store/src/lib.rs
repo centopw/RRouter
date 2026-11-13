@@ -58,8 +58,8 @@ pub use store::{
     ModelCost, ModelPreference, ModelRow, PromptTemplate, PromptTemplateVersion, PruneReport,
     QuotaPing, QuotaPingMode, SemanticCacheCandidate, SemanticCacheEntry, SemanticCacheScope,
     StatusFilter, Store, UsageBucket, UsageModelBucket, UsageQuery, UsageRecord, UsageSummary,
-    API_KEY_PREFIX, MAX_API_KEY_NAME, MAX_COMBO_ROUTER_MODEL, MAX_MODEL_PREFERENCE_MODEL,
-    MAX_MODEL_PREFERENCE_PROVIDER, MAX_QUOTA_PING_MODEL,
+    API_KEY_PREFIX, MAX_API_KEY_NAME, MAX_COMBO_ROUTER_MODEL, MAX_CONNECTION_NAME,
+    MAX_MODEL_PREFERENCE_MODEL, MAX_MODEL_PREFERENCE_PROVIDER, MAX_QUOTA_PING_MODEL,
 };
 pub use teams::{normalize_name, Team, TeamMember, TeamPatch, TeamRole, TeamSpend, MAX_TEAM_NAME};
 pub use users::{

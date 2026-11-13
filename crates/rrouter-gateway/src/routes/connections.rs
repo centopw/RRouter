@@ -126,6 +126,7 @@ fn patched_fields(value: &Value) -> String {
         "is_active",
         "last_error",
         "team_id",
+        "name",
     ];
     let mut seen: Vec<&str> = FIELDS
         .iter()
@@ -810,6 +811,16 @@ async fn apply_patch(state: &AppState, id: Uuid, value: Value) -> Result<(), Err
                 .update_connection_status(id, 0, None, None)
                 .await?;
         }
+    }
+    // The operator's label lives in its own column. `null` or a blank string clears it;
+    // the store trims and bounds it, so the audit row can name the field regardless.
+    if let Some(raw) = value.get("name") {
+        let name = match raw {
+            Value::Null => None,
+            Value::String(text) => Some(text.as_str()),
+            _ => return Err(Error::BadRequest("name must be a string or null".into())),
+        };
+        state.store.set_connection_name(id, name).await?;
     }
     if let Some(error) = value.get("last_error").and_then(Value::as_str) {
         state

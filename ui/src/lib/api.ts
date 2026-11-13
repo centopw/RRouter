@@ -602,10 +602,20 @@ export type WebhookStatus = {
   recent: WebhookAttempt[];
 };
 
-/** Exactly the fields `PATCH /api/connections/{id}` accepts; weight is clamped to 1..=1000. */
+/**
+ * Longest operator-given connection name; mirrors `MAX_CONNECTION_NAME` in
+ * `rrouter-store`, which refuses rather than truncates anything longer.
+ */
+export const MAX_CONNECTION_NAME = 80;
+
+/**
+ * Exactly the fields `PATCH /api/connections/{id}` accepts; weight is clamped to 1..=1000.
+ * `name: null` (or an empty string) clears the operator's label.
+ */
 export type UpdateConnection = Partial<{
   priority: number;
   weight: number;
+  name: string | null;
 }>;
 
 export type NewKey = { id: string; key: string };

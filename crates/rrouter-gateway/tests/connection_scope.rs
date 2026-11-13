@@ -777,3 +777,148 @@ async fn settings_updates_are_audited_by_key_name() {
         "settings values are not audited: {detail}"
     );
 }
+
+/// `PATCH {"name": …}` renames an account, and every name write names itself in the audit
+/// row. Clearing is explicit: `null` and `""` both erase the label, while whitespace
+/// stores nothing at all, so a row can never read as "named" with a blank string.
+#[tokio::test]
+async fn connection_name_is_set_cleared_and_audited() {
+    let h = harness();
+    let (owner, _) = h.setup().await;
+    let headers = [("cookie", owner.as_str()), ("x-rrouter-csrf", "1")];
+
+    let (status, created) = h
+        .post(
+            "/api/connections",
+            json!({
+                "provider": "openai",
+                "auth_type": "api_key",
+                // A closed local port: the model fetch and probe fail locally, never online.
+                "credentials": {"api_key": "sk-name-test", "base_url_override": "http://127.0.0.1:1"},
+            }),
+            &headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("id").to_string();
+    assert_eq!(created["name"], Value::Null, "a new account has no label");
+
+    let (status, renamed) = h
+        .patch(
+            &format!("/api/connections/{id}"),
+            json!({"name": "  My Claude  "}),
+            &headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["name"], json!("My Claude"), "the name is trimmed");
+
+    let (status, fetched) = h.get(&format!("/api/connections/{id}"), &headers).await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_eq!(fetched["name"], json!("My Claude"), "the name is durable");
+
+    // `null` clears it.
+    let (status, cleared) = h
+        .patch(
+            &format!("/api/connections/{id}"),
+            json!({"name": null}),
+            &headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["name"], Value::Null);
+
+    // An empty string clears it too.
+    let (status, _) = h
+        .patch(
+            &format!("/api/connections/{id}"),
+            json!({"name": "Temp"}),
+            &headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, emptied) = h
+        .patch(
+            &format!("/api/connections/{id}"),
+            json!({"name": ""}),
+            &headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{emptied}");
+    assert_eq!(
+        emptied["name"],
+        Value::Null,
+        "an empty string clears the label"
+    );
+
+    // Whitespace is not a name.
+    let (status, _) = h
+        .patch(
+            &format!("/api/connections/{id}"),
+            json!({"name": "Named"}),
+            &headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, blanked) = h
+        .patch(
+            &format!("/api/connections/{id}"),
+            json!({"name": "   "}),
+            &headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{blanked}");
+    assert_eq!(blanked["name"], Value::Null, "whitespace stores no label");
+
+    // Over the cap is a refusal, and the stored label survives it.
+    let (status, _) = h
+        .patch(
+            &format!("/api/connections/{id}"),
+            json!({"name": "Keeper"}),
+            &headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let too_long = "x".repeat(rrouter_store::MAX_CONNECTION_NAME + 1);
+    let (status, refused) = h
+        .patch(
+            &format!("/api/connections/{id}"),
+            json!({"name": too_long}),
+            &headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    let (_, fetched) = h.get(&format!("/api/connections/{id}"), &headers).await;
+    assert_eq!(fetched["name"], json!("Keeper"));
+
+    // A non-string name is refused rather than coerced.
+    let (status, _) = h
+        .patch(
+            &format!("/api/connections/{id}"),
+            json!({"name": 42}),
+            &headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Every committed rename wrote exactly one audit row that names the `name` field.
+    let (status, audit) = h.get("/api/audit?limit=50", &auth_headers(&owner)).await;
+    assert_eq!(status, StatusCode::OK, "{audit}");
+    let updated: Vec<Value> = audit["data"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter(|row| row["kind"] == json!("connection_updated"))
+        .cloned()
+        .collect();
+    assert_eq!(updated.len(), 7, "seven committed renames: {audit}");
+    for row in &updated {
+        let detail = row["detail"].as_str().expect("detail");
+        assert!(detail.contains(&id), "names the row: {detail}");
+        assert!(detail.contains("fields name"), "names the field: {detail}");
+    }
+    assert!(
+        !audit.to_string().contains("sk-name-test"),
+        "no credential value may reach the trail: {audit}"
+    );
+}
