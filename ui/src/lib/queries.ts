@@ -299,11 +299,11 @@ export function usePresetIndex(enabled = true) {
 }
 
 /** One preset including its layout and the revision its next save must carry. */
-export function usePresetLayout(id: string | null) {
+export function usePresetLayout(id: string | null, enabled = true) {
   return useQuery({
     queryKey: qk.modelPreset(id ?? "none"),
     queryFn: () => api.get<ModelPreset>(`/api/model-presets/${encodeURIComponent(id ?? "")}`),
-    enabled: Boolean(id),
+    enabled: enabled && Boolean(id),
     retry: false,
     staleTime: 5_000,
   });
@@ -392,12 +392,21 @@ export function useModelProviders() {
   });
 }
 
-export function useAliases() {
-  return useQuery({ queryKey: qk.aliases, queryFn: () => list<Alias>("/api/aliases") });
+/** Aliases and combos are admin reads: the Models page only asks once a view needs them. */
+export function useAliases(enabled = true) {
+  return useQuery({
+    queryKey: qk.aliases,
+    queryFn: () => list<Alias>("/api/aliases"),
+    enabled,
+  });
 }
 
-export function useCombos() {
-  return useQuery({ queryKey: qk.combos, queryFn: () => list<Combo>("/api/combos") });
+export function useCombos(enabled = true) {
+  return useQuery({
+    queryKey: qk.combos,
+    queryFn: () => list<Combo>("/api/combos"),
+    enabled,
+  });
 }
 
 export function useTemplates() {
