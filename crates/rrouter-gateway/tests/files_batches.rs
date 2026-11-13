@@ -237,6 +237,7 @@ fn harness(require_api_key: bool) -> H {
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        envelope_drops: Default::default(),
         concurrency: RwLock::new(concurrency),
         auth: rrouter_gateway::auth::Auth::load(&data_dir, false),
     });

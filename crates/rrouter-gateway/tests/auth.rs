@@ -79,6 +79,7 @@ fn harness() -> H {
         started: std::time::Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        envelope_drops: Default::default(),
         concurrency: std::sync::RwLock::new(None),
         // An admin token is configured, so the tests prove session auth stands on its
         // own rather than relying on the loopback shortcut.

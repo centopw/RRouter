@@ -345,6 +345,7 @@ fn build_state(config: Config) -> AppState {
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
+        envelope_drops: Default::default(),
         concurrency: std::sync::RwLock::new(concurrency),
         auth: rrouter_gateway::auth::Auth::load(&data_dir, false),
     }
