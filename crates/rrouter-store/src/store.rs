@@ -25,6 +25,8 @@ pub const API_KEY_PREFIX: &str = "sk-rr-";
 const API_KEY_SECRET_HEX_LEN: usize = 32;
 /// Longest human-readable API-key name.
 pub const MAX_API_KEY_NAME: usize = 100;
+/// Longest operator-given connection name shown on the dashboard.
+pub const MAX_CONNECTION_NAME: usize = 80;
 /// Longest smart-router model reference.
 pub const MAX_COMBO_ROUTER_MODEL: usize = 200;
 /// Longest bare model id in a provider preference.
@@ -1448,6 +1450,34 @@ impl Store {
             .execute(
                 "UPDATE connections SET priority = ?2, updated_at = ?3 WHERE id = ?1",
                 params![id.to_string(), priority, now()],
+            )
+            .map_err(migrations::db_err)?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("connection {id}")));
+        }
+        Ok(())
+    }
+
+    /// Rename a connection, or clear the name with `None` or a blank string.
+    ///
+    /// The name is dashboard text: routing, selection and the credential blob never read
+    /// it. The value is trimmed, blank stores `NULL` (the UI then falls back to the
+    /// derived identifier), and an over-long value is refused rather than truncated so an
+    /// operator never believes they saved a name the table is not showing.
+    pub async fn set_connection_name(&self, id: Uuid, name: Option<&str>) -> Result<()> {
+        let name = name.map(str::trim).filter(|value| !value.is_empty());
+        if let Some(name) = name {
+            if name.chars().count() > MAX_CONNECTION_NAME {
+                return Err(Error::BadRequest(format!(
+                    "a connection name is limited to {MAX_CONNECTION_NAME} characters"
+                )));
+            }
+        }
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "UPDATE connections SET name = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id.to_string(), name, now()],
             )
             .map_err(migrations::db_err)?;
         if n == 0 {
