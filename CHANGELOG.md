@@ -2,6 +2,14 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.15.0 — 2026-11-13
+
+### Features
+
+- feat(qoder): accept a personal access token via job-token exchange ([`18e8464`](https://github.com/centopw/RRouter/commit/18e8464f4e0b254a1a0e77dec5ed040a7d506522))
+- feat(qoder): first-class Qoder subscription provider with COSY signing ([`dcf7c0a`](https://github.com/centopw/RRouter/commit/dcf7c0aaf72c02843a10d47f9583f35074cb15ec))
+- feat(qoder): first-class Qoder provider over its COSY-signed agent wire ([`6f639d8`](https://github.com/centopw/RRouter/commit/6f639d87ea4ea151b4840709cc22f663b74d2ae1))
+
 ## 0.14.0 — 2026-11-13
 
 ### Features
