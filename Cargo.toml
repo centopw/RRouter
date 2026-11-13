@@ -43,6 +43,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 aes-gcm = "0.10"
+# Qoder COSY signing: AES-128-CBC payload, RSA PKCS#1 v1.5 key wrap, MD5 signature.
+# `rsa` is pinned to 0.10 because 0.9 is RUSTSEC-2023-0071 (Marvin attack).
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+rsa = { version = "0.10", features = ["pkcs1v15"] }
+md-5 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 uuid = { version = "1", features = ["v4", "serde"] }

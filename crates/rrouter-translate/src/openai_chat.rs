@@ -322,22 +322,7 @@ pub fn build_request(req: &ChatRequest, stream: bool, wire: &WireProfile) -> Res
     if stream {
         body.insert("stream_options".into(), json!({"include_usage": true}));
     }
-    let mut tools: Vec<Value> = req
-        .tools
-        .iter()
-        .map(|t| {
-            let mut func = Map::new();
-            func.insert("name".into(), Value::from(t.name.clone()));
-            if let Some(desc) = &t.description {
-                func.insert("description".into(), Value::from(desc.clone()));
-            }
-            func.insert("parameters".into(), t.parameters.clone());
-            if t.strict {
-                func.insert("strict".into(), Value::Bool(true));
-            }
-            json!({"type": "function", "function": Value::Object(func)})
-        })
-        .collect();
+    let mut tools = function_tools(req);
     if let Some((src, raw)) = &req.raw_tools {
         if *src == D {
             tools.extend(raw.iter().cloned());
@@ -374,6 +359,26 @@ pub fn build_request(req: &ChatRequest, stream: bool, wire: &WireProfile) -> Res
     Ok(value)
 }
 
+/// Function tools in OpenAI wire form. Provider-native tools (`raw_tools`) are not
+/// included: only the dialect that produced them can accept them.
+pub(crate) fn function_tools(req: &ChatRequest) -> Vec<Value> {
+    req.tools
+        .iter()
+        .map(|t| {
+            let mut func = Map::new();
+            func.insert("name".into(), Value::from(t.name.clone()));
+            if let Some(desc) = &t.description {
+                func.insert("description".into(), Value::from(desc.clone()));
+            }
+            func.insert("parameters".into(), t.parameters.clone());
+            if t.strict {
+                func.insert("strict".into(), Value::Bool(true));
+            }
+            json!({"type": "function", "function": Value::Object(func)})
+        })
+        .collect()
+}
+
 /// `[OI]` has no tool part: each tool result becomes its own `role:"tool"` message, so
 /// one canonical message may expand to several wire messages.
 ///
@@ -383,7 +388,7 @@ pub fn build_request(req: &ChatRequest, stream: bool, wire: &WireProfile) -> Res
 /// the prose first would put a `user` message between the call and its result, and the
 /// empty `user` message that used to be emitted for a tool-only turn is rejected by
 /// providers that validate `content`.
-fn messages_out(msg: &Message) -> Result<Vec<Value>> {
+pub(crate) fn messages_out(msg: &Message) -> Result<Vec<Value>> {
     let mut out: Vec<Value> = Vec::new();
     let mut texts: Vec<Value> = Vec::new();
     let mut calls: Vec<Value> = Vec::new();
@@ -629,6 +634,12 @@ impl OpenAiChatDecoder {
             return Ok(()); // keep-alive or non-JSON comment payload
         };
         self.chunk(&v, out)
+    }
+
+    /// Feed one already-unwrapped chunk. Qoder's envelope carries the OpenAI chunk as a
+    /// nested string, so a decoder of another dialect unwraps first and lands here.
+    pub(crate) fn push_value(&mut self, v: &Value, out: &mut Vec<StreamEvent>) -> Result<()> {
+        self.chunk(v, out)
     }
 
     fn chunk(&mut self, v: &Value, out: &mut Vec<StreamEvent>) -> Result<()> {

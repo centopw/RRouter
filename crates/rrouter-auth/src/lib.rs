@@ -16,6 +16,8 @@
 //!   connection (override origin, manifest query).
 //! - [`base_url`]: [`effective_base_url`], the per-account endpoint — and the refusal when a
 //!   provider's declared host is only a placeholder (`RESOURCE.openai.azure.com`).
+//! - [`qoder`]: Qoder's operator-supplied credential shape, its COSY request signing and
+//!   body obfuscation, and the cached per-account model catalogue.
 
 pub mod antigravity;
 pub mod base_url;
@@ -28,6 +30,7 @@ pub mod loopback;
 pub mod manifest;
 pub mod overrides;
 pub mod pkce;
+pub mod qoder;
 pub mod query;
 pub mod registry;
 

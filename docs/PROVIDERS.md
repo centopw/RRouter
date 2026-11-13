@@ -10,6 +10,7 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 | `codex` | Codex (ChatGPT OAuth) | subscription (PKCE, fixed port 1455) | Responses | **no** | Stream-only: non-streaming clients are served by reassembling the stream. Its five verified ids come from the built-in catalog. The subscription backend does not serve `/responses/compact`. Responses also exposes native web search. |
 | `github` | GitHub Copilot | subscription (device code) | Chat | yes | Also exposes Responses and Messages URLs; a Copilot-specific token refresh is handled per request. |
 | `google-antigravity` | Google Antigravity | subscription (PKCE, dynamic loopback port) | Google Code Assist (`/v1internal:*`) | yes (project-scoped `POST`) | Sign-in returns a Google token; the account's Cloud project is discovered via `loadCodeAssist` (onboarding when absent) and stored as `credentials.extra.project_id`, which every CCA envelope carries. `POST /api/models/fetch` posts `v1internal:fetchAvailableModels` with that project and stores the catalogue's ids/`displayName` as upstream rows. |
+| `qoder` | Qoder | operator-supplied device token | Qoder agent (`/algo/api/v2/service/pro/sse/agent_chat_generation`) | **no** (`/algo/api/v2/model/list` is COSY-signed and per account) | Stream-only, COSY-signed and body-obfuscated. The connection supplies `credentials.api_key` (`dt-…`), `credentials.extra.user_id` and optionally `extra.machine_id`; there is no OAuth flow. The account's catalog is fetched and cached by the gateway, and a model it does not list is refused rather than silently served as another model. See [Qoder](#qoder-api3qodersh). |
 | `openai` | OpenAI | API key | Chat | yes | Responses and compaction available; `store:false` is enforced for Codex traffic. Native web search through Responses. |
 | `anthropic` | Anthropic | API key | Messages | yes | Exact token counting via `/v1/messages/count_tokens`. Native web search through the Messages `web_search` tool. |
 | `opencode` | OpenCode | API key | Chat | yes | Paid Console base `https://opencode.ai/inference/openai/v1`; Go plans use the separate `opencode-go` provider. |
@@ -116,6 +117,27 @@ callback port cannot be bound.
    connection must fail with the "no Cloud project" message rather than connecting.
 6. Inspect the connection view: no access token, refresh token or client secret is shown.
    Do not paste tokens into issues; the repo has no fixture containing real credentials.
+
+## Qoder (api3.qoder.sh)
+
+Qoder is a subscription coding agent whose inference call is signed per request, not
+bearer-authenticated. RRouter implements the transport but **not** a sign-in flow: the
+operator supplies the credential material, which qodercli already holds on the machine
+where it is signed in.
+
+| | |
+| --- | --- |
+| Credential | `credentials.api_key` is the device access token (`dt-…`); `credentials.extra.user_id` is the account's stable Qoder user id. COSY signing needs both, and a wrong user id signs every request wrongly. `credentials.extra.machine_id` is optional. |
+| Where qodercli keeps it | `~/.qoder/.auth` (Windows: `%USERPROFILE%\.qoder\.auth`) holds the signed-in account record — token and user id; `~/.qoder/.qoder/machineid` holds the per-install machine UUID. RRouter never writes either file. |
+| Signing | COSY: a fresh AES-128 key per request sealed with RSA PKCS#1 v1.5, an AES-CBC blob holding the user id and token, and an MD5 signature over `payload …, cosyKey …, timestamp …, body, sigPath`, plus ~17 `Cosy-*` fingerprint headers. The signature covers the body **bytes**, so every attempt (retry, fallback) is re-encoded and re-signed. `Cosy-Date` is unix seconds. |
+| Body | Base64 → thirds reorder → custom-alphabet substitution, sent with `&Encode=1`. Obfuscation for the edge WAF, not encryption. |
+| `pt-` tokens | A personal access token cannot sign COSY requests; it has to be exchanged for a job token on a different host first. That exchange is not implemented, and a `pt-` token fails loudly at signing time. |
+| Models | `GET /algo/api/v2/model/list` is per account. The gateway fetches it once per account (1 h), uses the account's own `model_config` block in every envelope and refuses a model the catalog does not list: the chat endpoint validates nothing and would silently answer as a different model. |
+| Limits | The endpoint is SSE-only, so the gateway always streams upstream and reassembles for non-streaming clients. Responses are never cached (per-request ids plus a timestamp-bound signature). |
+| Errors | A `200` answer can still be a failure: the first envelope frame carries `statusCodeValue`. Code `10605` (`RESOURCE_LIMIT`) is a model queue — retryable, honoring `retryAfterSeconds`; codes `110`/`112` (or a `pricingUrl`) are quota blocks and take the gateway's existing quota-exhausted path (`429`, candidate cooled down). |
+
+Models are routed as `qoder/<key>` (or the bare key when the connection is unambiguous);
+`<key>` is the catalog's own id (`auto`, `qmodel`, `smodel`, …).
 
 ## Quota auto-ping (Claude / Codex)
 

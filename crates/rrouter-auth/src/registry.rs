@@ -472,6 +472,44 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         stream_only: false,
     },
     ProviderSpec {
+        id: crate::qoder::PROVIDER_ID,
+        display: "Qoder",
+        // Operator-supplied device token (`dt-…`) plus a user id. There is no OAuth flow to
+        // run and no expiring token to refresh; see `crate::qoder` for what to paste.
+        kind: ProviderKind::ApiKey,
+        // Origin only: the inference path, its query and the COSY signature all belong to
+        // the dialect (`rrouter_translate::qoder::chat_url`).
+        base_url: rrouter_translate::qoder::DEFAULT_BASE,
+        base_url_requires_override: false,
+        responses_url: None,
+        // `/algo/api/v2/model/list` is COSY-signed and per-account, so no generic
+        // `GET /models` fetch can read it; the catalog is fetched by `crate::qoder`.
+        models_url: None,
+        messages_url: None,
+        images_url: None,
+        audio_speech_url: None,
+        audio_transcriptions_url: None,
+        audio_voices_url: None,
+        default_dialect: Dialect::QoderAgent,
+        // The token never travels as a bearer header: it is sealed inside the COSY AES blob,
+        // and every attempt builds its own `Authorization` + `Cosy-*` header set.
+        auth: AuthStyle::None,
+        extra_headers: &[],
+        auth_header: "",
+        query: &[],
+        // The cap is `parameters.max_tokens` inside the envelope; WireProfile never reaches
+        // the wire for an upstream-only dialect.
+        max_tokens_key: MaxTokensKey::MaxTokens,
+        passthrough_headers: &[],
+        default_max_tokens: None,
+        refresh: None,
+        login: None,
+        profile_url: None,
+        // The inference endpoint is SSE-only: the gateway streams upstream and reassembles
+        // the answer for a non-streaming client.
+        stream_only: true,
+    },
+    ProviderSpec {
         id: "openai",
         display: "OpenAI",
         kind: ProviderKind::ApiKey,
@@ -1161,6 +1199,22 @@ mod tests {
             Some(crate::antigravity::DEFAULT_CLIENT_SECRET)
         );
         assert_eq!(refresh.body, RefreshBody::Form);
+    }
+
+    #[test]
+    fn qoder_is_an_upstream_only_dialect_with_no_bearer() {
+        let spec = get("qoder").expect("qoder");
+        assert_eq!(spec.display, "Qoder");
+        assert_eq!(spec.kind, ProviderKind::ApiKey);
+        assert_eq!(spec.default_dialect, Dialect::QoderAgent);
+        assert_eq!(spec.base_url, "https://api3.qoder.sh");
+        // The device token is sealed in the COSY blob; a bearer header would leak it and
+        // still be rejected.
+        assert_eq!(spec.auth, AuthStyle::None);
+        assert!(spec.login.is_none(), "no OAuth flow is implemented");
+        assert!(spec.refresh.is_none());
+        assert!(spec.stream_only, "the endpoint is SSE-only");
+        assert_eq!(spec.models_url, None, "the catalog is COSY-signed");
     }
 
     #[test]

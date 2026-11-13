@@ -9,6 +9,7 @@ mod anthropic;
 pub mod error;
 pub mod google_cca;
 mod openai_chat;
+pub mod qoder;
 mod reasoning;
 pub mod rerank;
 mod responses;
@@ -36,6 +37,9 @@ pub fn parse_request(dialect: Dialect, body: &Value) -> Result<ChatRequest> {
         Dialect::OpenAiEmbeddings => Ok(openai_chat::parse_embeddings_request(body)),
         Dialect::GoogleCodeAssist => Err(Error::Translation(
             "google code assist is an upstream-only dialect".into(),
+        )),
+        Dialect::QoderAgent => Err(Error::Translation(
+            "qoder agent is an upstream-only dialect".into(),
         )),
     }
 }
@@ -72,6 +76,9 @@ pub fn build_request_with(
              call google_cca::build_request"
                 .into(),
         )),
+        Dialect::QoderAgent => Err(Error::Translation(
+            "qoder agent needs the account's model_config; call qoder::build_request".into(),
+        )),
     }
 }
 
@@ -85,6 +92,10 @@ pub fn parse_response(dialect: Dialect, body: &Value) -> Result<ChatResponse> {
             "embeddings responses have no canonical chat form".into(),
         )),
         Dialect::GoogleCodeAssist => google_cca::parse_response(body),
+        // The Qoder surface is SSE-only: a buffered body is not one of its shapes.
+        Dialect::QoderAgent => Err(Error::Translation(
+            "qoder agent answers as an SSE envelope, not a JSON body".into(),
+        )),
     }
 }
 
@@ -100,6 +111,9 @@ pub fn build_response(dialect: Dialect, resp: &ChatResponse) -> Result<Value> {
         Dialect::GoogleCodeAssist => Err(Error::Translation(
             "google code assist is an upstream-only dialect".into(),
         )),
+        Dialect::QoderAgent => Err(Error::Translation(
+            "qoder agent is an upstream-only dialect".into(),
+        )),
     }
 }
 
@@ -109,6 +123,7 @@ pub enum StreamDecoder {
     Anthropic(AnthropicDecoder),
     Responses(ResponsesDecoder),
     GoogleCodeAssist(google_cca::GoogleCcaDecoder),
+    QoderAgent(qoder::QoderAgentDecoder),
 }
 
 impl StreamDecoder {
@@ -121,6 +136,7 @@ impl StreamDecoder {
             Dialect::GoogleCodeAssist => {
                 Self::GoogleCodeAssist(google_cca::GoogleCcaDecoder::new(model))
             }
+            Dialect::QoderAgent => Self::QoderAgent(qoder::QoderAgentDecoder::new(model)),
         }
     }
 
@@ -133,6 +149,7 @@ impl StreamDecoder {
             Self::Anthropic(d) => d.push(chunk, &mut out)?,
             Self::Responses(d) => d.push(chunk, &mut out)?,
             Self::GoogleCodeAssist(d) => d.push(chunk, &mut out)?,
+            Self::QoderAgent(d) => d.push(chunk, &mut out)?,
         }
         Ok(out)
     }
@@ -145,6 +162,7 @@ impl StreamDecoder {
             Self::Anthropic(d) => d.finish(&mut out)?,
             Self::Responses(d) => d.finish(&mut out)?,
             Self::GoogleCodeAssist(d) => d.finish(&mut out)?,
+            Self::QoderAgent(d) => d.finish(&mut out)?,
         }
         Ok(out)
     }
@@ -164,8 +182,11 @@ impl StreamEncoder {
             Dialect::AnthropicMessages => Self::Anthropic(AnthropicEncoder::new(model)),
             Dialect::OpenAiResponses => Self::Responses(ResponsesEncoder::new(model)),
             Dialect::OpenAiEmbeddings => Self::OpenAiChat(OpenAiChatEncoder::new(model)),
-            // CCA is upstream-only; the gateway never encodes a client response in it.
-            Dialect::GoogleCodeAssist => Self::OpenAiChat(OpenAiChatEncoder::new(model)),
+            // CCA and Qoder are upstream-only; the gateway never encodes a client
+            // response in either.
+            Dialect::GoogleCodeAssist | Dialect::QoderAgent => {
+                Self::OpenAiChat(OpenAiChatEncoder::new(model))
+            }
         }
     }
 
