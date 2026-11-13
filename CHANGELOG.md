@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.15.1 — 2026-11-13
+
+### Bug Fixes
+
+- fix(cca): adapt JSON Schema type unions in tool parameters for the Gemini proto ([`f8613f4`](https://github.com/centopw/RRouter/commit/f8613f47852f05023a4290d9d00b1a297bda3931))
+
 ## 0.15.0 — 2026-11-13
 
 ### Features
