@@ -2,6 +2,14 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.16.1 — 2026-11-16
+
+### Bug Fixes
+
+- fix(upstream): refuse a catalog with no routable rows ([`b1cb4ba`](https://github.com/centopw/RRouter/commit/b1cb4ba2163de82a6093af920b596e7d3dc87c9a))
+- fix(ui): repair models density, activity trends and first login ([`298c032`](https://github.com/centopw/RRouter/commit/298c03284b1e2ee006178da4f7f109cc474646c8))
+- fix(ui): repair models density, activity trends and first login ([`464554b`](https://github.com/centopw/RRouter/commit/464554b8933bf38a7a7e7267ba24cce2efaaf25f))
+
 ## 0.16.0 — 2026-11-15
 
 ### Features
