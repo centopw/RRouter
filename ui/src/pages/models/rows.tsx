@@ -168,7 +168,7 @@ export function RowMenu({
           {onHide ? (
             <Popover.Close asChild>
               <button type="button" role="menuitem" tabIndex={-1} onClick={onHide} className={item}>
-                Hide from the board and /v1/models
+                Remove from this preset
               </button>
             </Popover.Close>
           ) : null}
@@ -378,7 +378,7 @@ export function EmptyRegistry({
   );
 }
 
-/** `$2.50 / $10.00`, in the units the `price /1M` column names. */
+/** `$2.50 / $10.00`, the compact price line every model row shows. */
 export function priceLabel(model: Model): string | null {
   return model.cost
     ? `$${model.cost.input.toFixed(2)} / $${model.cost.output.toFixed(2)}`

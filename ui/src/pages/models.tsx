@@ -55,19 +55,17 @@ import {
 import {
   matchesSearch,
   statusOfModel,
-  statusOfName,
   type ModelRow,
-  type UnifiedRow,
 } from "./models/unified-rows";
 
 /**
  * Models: one page, one table.
  *
- * The table has three row kinds (registry model, alias, combo), one toolbar and one
- * pagination cursor. `Status`, `Names`, `Custom`, `Provider` and `q` narrow the same row
- * set; none of them swaps the surface. The preset header edits the draft that group and
- * `/v1` controls write to, and it is shared by every filter, so a save that is still
- * debouncing survives a switch between routed, hidden and named rows.
+ * The table holds registry models only; aliases and combos live on their own screens.
+ * `Status`, `Custom`, `Provider` and `q` narrow the same row set; none of them swaps the
+ * surface. The preset header edits the draft that group and `/v1` controls write to, and
+ * it is shared by every filter, so a save that is still debouncing survives a filter
+ * change.
  */
 export default function Models() {
   const isAdmin = useIsAdmin();
@@ -95,7 +93,6 @@ export default function Models() {
           (key === "status" && value === "routed") ||
           (key === "size" && Number(value) === DEFAULT_SIZE) ||
           (key === "page" && Number(value) === 1) ||
-          (key === "names" && value === "0") ||
           (key === "custom" && value === "0") ||
           (key === "shared" && value === "0");
         if (defaulted) next.delete(key);
@@ -118,7 +115,6 @@ export default function Models() {
   const appliedQuery = useDeferredValue(urlQuery).trim().toLowerCase();
 
   const requestedProvider = params.get("provider") ?? ALL;
-  const namesOn = isAdmin && params.get("names") === "1";
   const customOnly = params.get("custom") === "1";
   const sharedOnly = params.get("shared") === "1";
   const requestedStatus = useMemo(() => statusesOf(params), [params]);
@@ -230,39 +226,9 @@ export default function Models() {
     [all, entryByRef, presetAware],
   );
 
-  const nameRows = useMemo<UnifiedRow[]>(
-    () => [
-      ...aliasList.map((alias) => {
-        const ref = `rrouter/${alias.alias}`;
-        const entry = entryByRef.get(ref);
-        return {
-          kind: "alias" as const,
-          ref,
-          name: alias.alias,
-          alias,
-          entry,
-          status: statusOfName(entry, presetAware, layoutDraft.autoInclude),
-        };
-      }),
-      ...comboList.map((combo) => {
-        const ref = `rrouter/${combo.name}`;
-        const entry = entryByRef.get(ref);
-        return {
-          kind: "combo" as const,
-          ref,
-          name: combo.name,
-          combo,
-          entry,
-          status: statusOfName(entry, presetAware, layoutDraft.autoInclude),
-        };
-      }),
-    ],
-    [aliasList, comboList, entryByRef, presetAware, layoutDraft.autoInclude],
-  );
-
-  // A preset entry whose provider stopped listing it stays on the board, badged. A name
+  // A preset entry whose provider stopped listing it stays on the table, badged. A name
   // ref waits for the alias/combo lists, so it is not mistaken for a stale model mid-load.
-  const staleRows = useMemo<UnifiedRow[]>(() => {
+  const staleRows = useMemo<ModelRow[]>(() => {
     if (!hasPreset) return [];
     const namesLoaded = aliases.isSuccess && combos.isSuccess;
     const known = new Set([
@@ -313,24 +279,18 @@ export default function Models() {
   );
 
   const filteredRows = useMemo(() => {
-    const candidates: UnifiedRow[] = [...modelRows, ...(namesOn ? nameRows : []), ...staleRows];
+    const candidates: ModelRow[] = [...modelRows, ...staleRows];
     return candidates.filter((row) => {
-      if (row.kind === "model") {
-        if (effectiveProvider !== ALL && row.model?.provider !== effectiveProvider) return false;
-        if (sharedOnly && (!row.model || (coverage.get(row.model.id)?.length ?? 0) < 2)) {
-          return false;
-        }
-      } else if (effectiveProvider !== ALL || sharedOnly) {
+      if (effectiveProvider !== ALL && row.model?.provider !== effectiveProvider) return false;
+      if (sharedOnly && (!row.model || (coverage.get(row.model.id)?.length ?? 0) < 2)) {
         return false;
       }
-      if (customOnly && !(row.kind === "model" && row.model?.source === "custom")) return false;
+      if (customOnly && row.model?.source !== "custom") return false;
       return matchesSearch(row, appliedQuery, displayOf);
     });
   }, [
     modelRows,
-    nameRows,
     staleRows,
-    namesOn,
     effectiveProvider,
     sharedOnly,
     customOnly,
@@ -340,44 +300,34 @@ export default function Models() {
   ]);
 
   const statusAware = isAdmin && hasPreset;
-  // `status` is a model filter. A name row has no enable flag and no price, and the old
-  // Names view listed every alias/combo; so names obey the filter only when the operator
-  // spelled one out. The default state shows them all, badged with their own status.
-  const statusExplicit = params.has("status");
   const statusRows = useMemo(
     () =>
       statusAware
-        ? filteredRows.filter(
-            (row) =>
-              (row.kind !== "model" && !statusExplicit) ||
-              requestedStatus.has(row.status as StatusKey),
-          )
+        ? filteredRows.filter((row) => requestedStatus.has(row.status as StatusKey))
         : filteredRows,
-    [filteredRows, statusAware, statusExplicit, requestedStatus],
+    [filteredRows, statusAware, requestedStatus],
   );
 
   const counts = useMemo(() => {
     const result: Record<StatusKey, number> = { routed: 0, hidden: 0, disabled: 0, unrouted: 0 };
     for (const row of filteredRows) {
-      if (row.kind !== "model") continue;
       const status = row.status;
       if (status !== "catalog") result[status] += 1;
     }
     return result;
   }, [filteredRows]);
 
-  const namedCount = aliasList.length + comboList.length;
   const routedTotal = modelRows.filter((row) => row.status === "routed").length;
 
   const outside =
     statusAware && appliedQuery !== ""
       ? filteredRows.filter(
-          (row) => row.kind === "model" && !requestedStatus.has(row.status as StatusKey),
+          (row) => !requestedStatus.has(row.status as StatusKey),
         ).length
       : 0;
 
   const boardMode =
-    statusAware && !namesOn && requestedStatus.size === 1 && requestedStatus.has("routed");
+    statusAware && requestedStatus.size === 1 && requestedStatus.has("routed");
   const dragEnabled =
     boardMode &&
     editable &&
@@ -410,14 +360,14 @@ export default function Models() {
       if (ap !== undefined && bp !== undefined) return ap - bp;
       if (ap !== undefined) return -1;
       if (bp !== undefined) return 1;
-      if (a.kind === "model" && b.kind === "model" && a.model && b.model) {
+      if (a.model && b.model) {
         return (
           displayOf(a.model.provider).localeCompare(displayOf(b.model.provider)) ||
           compareModels(a.model, b.model)
         );
       }
-      if (a.kind === "model" && b.kind !== "model") return -1;
-      if (a.kind !== "model" && b.kind === "model") return 1;
+      if (a.model) return -1;
+      if (b.model) return 1;
       return a.ref.localeCompare(b.ref);
     });
   }, [boardMode, statusRows, entryPosition, displayOf]);
@@ -429,7 +379,7 @@ export default function Models() {
     [boardMode, boardRows, flatRows, page, size],
   );
   const boardGroups = useMemo(() => {
-    const byGroup = new Map<string, UnifiedRow[]>();
+    const byGroup = new Map<string, ModelRow[]>();
     for (const row of pageSlice) {
       const id = groupOf(row.ref);
       const list = byGroup.get(id);
@@ -583,14 +533,10 @@ export default function Models() {
     .map((status) => STATUS_LABELS[status])
     .join(", ");
   const caption = statusAware
-    ? namesOn
-      ? `${statusCaption} models and named routes in ${presetName}`
-      : `${statusCaption} rows in ${presetName}`
+    ? `${statusCaption} rows in ${presetName}`
     : "Every model this gateway can serve";
   const subtitle = hasPreset
-    ? `Every model this gateway can serve. ${routedTotal.toLocaleString()} routed · ${all.length.toLocaleString()} known${
-        namedCount > 0 ? ` · ${namedCount.toLocaleString()} named routes` : ""
-      }`
+    ? `Every model this gateway can serve. ${routedTotal.toLocaleString()} routed · ${all.length.toLocaleString()} known`
     : "Every model this gateway can serve.";
 
   const rowsNothing = total === 0;
@@ -599,7 +545,6 @@ export default function Models() {
     effectiveProvider !== ALL ||
     customOnly ||
     sharedOnly ||
-    namesOn ||
     (statusAware && statusParam(requestedStatus) !== null);
   const clearFilters = () => {
     setDraft("");
@@ -607,7 +552,6 @@ export default function Models() {
       q: null,
       provider: null,
       status: null,
-      names: null,
       custom: null,
       shared: null,
       page: null,
@@ -619,7 +563,6 @@ export default function Models() {
     urlQuery !== "" ||
     params.has("provider") ||
     params.has("status") ||
-    params.has("names") ||
     params.has("custom") ||
     params.has("shared");
 
@@ -675,7 +618,6 @@ export default function Models() {
     page,
     size,
     total,
-    // Names are rows too; "models" would undercount what the footer paginates.
     label: "rows",
     onPage: (next: number) => setFilters({ page: String(next) }),
     onSize: (next: number) => setFilters({ size: String(next), page: "1" }),
@@ -715,7 +657,7 @@ export default function Models() {
             </Button>
           }
         >
-          The table still lists every model; preset order, groups and named routes are
+          The table still lists every model; preset order, groups and `/v1` visibility are
           unavailable until the library answers.
         </AlertBanner>
       ) : null}
@@ -777,7 +719,7 @@ export default function Models() {
           className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-[8px] border border-line bg-surface px-4 py-2 text-small text-fg"
         >
           <span>
-            <span className="font-mono">{undo.ref}</span> hidden from this preset and
+            <span className="font-mono">{undo.ref}</span> removed from this preset and
             /v1/models. It still routes when named explicitly.
           </span>
           <span className="flex gap-1.5">
@@ -816,18 +758,19 @@ export default function Models() {
             counts={counts}
             showStatus={statusAware}
             onStatus={(next) => setFilters({ status: statusParam(next), page: "1" })}
-            showNames={isAdmin}
-            names={namesOn}
-            onNames={() => setFilters({ names: namesOn ? null : "1", page: "1" })}
             custom={customOnly}
             onCustom={() => setFilters({ custom: customOnly ? null : "1", page: "1" })}
             shared={sharedOnly}
             onShared={() => setFilters({ shared: sharedOnly ? null : "1", page: "1" })}
             extra={
-              hasPreset ? (
-                <Button variant="quiet" onClick={openGroups}>
-                  groups
-                </Button>
+              isAdmin ? (
+                <span className="flex items-center gap-2">
+                  {hasPreset ? (
+                    <Button variant="quiet" onClick={openGroups}>
+                      groups
+                    </Button>
+                  ) : null}
+                </span>
               ) : undefined
             }
             outside={outside}

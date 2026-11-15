@@ -57,11 +57,15 @@ export function mapLegacyView(params: URLSearchParams): boolean {
   if (view !== null) {
     if (view === "active") params.delete("status");
     else if (view === "registry") params.set("status", STATUSES.join(","));
-    else if (view === "names") {
-      params.set("status", "routed,hidden");
-      params.set("names", "1");
-    }
+    // Aliases and combos have their own screens now; an old link lands on the models
+    // they used to be mixed into, with the closest status filter.
+    else if (view === "names") params.set("status", "routed,hidden");
     params.delete("view");
+    changed = true;
+  }
+  // The old `names` toggle is gone; a bookmarked `?names=1` must not survive.
+  if (params.has("names")) {
+    params.delete("names");
     changed = true;
   }
   for (const key of ["ipage", "dpage"]) {

@@ -22,9 +22,6 @@ export function ModelFilters({
   counts,
   showStatus,
   onStatus,
-  showNames,
-  names,
-  onNames,
   custom,
   onCustom,
   shared,
@@ -45,14 +42,11 @@ export function ModelFilters({
   /** The status filter is preset-scoped: members have no preset, so they get no menu. */
   showStatus: boolean;
   onStatus: (next: Set<StatusKey>) => void;
-  showNames: boolean;
-  names: boolean;
-  onNames: () => void;
   custom: boolean;
   onCustom: () => void;
   shared: boolean;
   onShared: () => void;
-  /** A page-level action that belongs beside the filters (group manager). */
+  /** Page-level controls that belong beside the filters (groups, alias/combo links). */
   extra?: ReactNode;
   /** Rows a search found outside the current status filter. */
   outside: number;
@@ -67,8 +61,8 @@ export function ModelFilters({
           <Input
             value={query}
             onChange={onQuery}
-            placeholder="search models, aliases, combos…"
-            ariaLabel="Search models, aliases and combos"
+            placeholder="search models…"
+            ariaLabel="Search models"
           />
         </div>
         <div className="w-[180px]">
@@ -87,15 +81,6 @@ export function ModelFilters({
         </div>
         {showStatus ? (
           <StatusMenu statuses={statuses} counts={counts} onStatus={onStatus} />
-        ) : null}
-        {showNames ? (
-          <FilterChip
-            on={names}
-            onClick={onNames}
-            ariaLabel="Include aliases and combos as rows"
-          >
-            names
-          </FilterChip>
         ) : null}
         <FilterChip on={custom} onClick={onCustom} ariaLabel="Only custom model rows">
           custom

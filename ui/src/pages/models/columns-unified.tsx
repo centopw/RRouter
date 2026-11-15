@@ -1,16 +1,16 @@
 import { useMemo, type ReactNode } from "react";
-import { Link } from "react-router-dom";
 import { Badge, Button, Select } from "../../components/ui";
 import { Toggle } from "../../components/atoms";
 import type { Column } from "../../components/table";
 import { useModelColumns, type ModelColumnsOptions } from "./columns";
-import { NameIdentity, StaleIdentity } from "./table-unified";
-import type { AliasRow, ComboRow, UnifiedRow } from "./unified-rows";
+import { StaleIdentity } from "./table-unified";
+import type { UnifiedRow } from "./unified-rows";
 
 /**
- * One column definition for every row kind. Model cells reuse {@link useModelColumns}, so a
- * price, a capability badge or a row menu cannot drift between the board and a filter view;
- * the group and `/v1` cells are the two layout controls the old separate views owned.
+ * One column definition for the model table. Cells reuse {@link useModelColumns}, so a
+ * price, a capability badge or a row menu cannot drift between the board and a filter
+ * view; the group and `/v1` cells are the two layout controls this page owns. Aliases
+ * and combos live on their own screens, so there is no name row here.
  */
 export function useUnifiedColumns({
   model,
@@ -55,25 +55,11 @@ export function useUnifiedColumns({
       key: "model",
       title: "provider / name",
       render: (row) => {
-        if (row.kind !== "model") return <NameIdentity row={row} />;
+        if (row.kind !== "model") return null;
         if (row.model === null) return <StaleIdentity row={row} />;
         return identity ? dim(row, identity.render(row.model)) : null;
       },
     });
-
-    for (const key of ["context", "max_output", "cost", "capabilities"]) {
-      const column = byKey.get(key);
-      if (!column) continue;
-      columns.push({
-        ...column,
-        render: (row) =>
-          row.kind === "model" && row.model ? (
-            dim(row, column.render(row.model))
-          ) : (
-            <span className="text-faint">—</span>
-          ),
-      });
-    }
 
     if (isAdmin && presetScoped) {
       columns.push({
@@ -159,9 +145,10 @@ export function useUnifiedColumns({
         title: "Actions",
         srOnlyTitle: true,
         align: "right",
-        width: "5rem",
+        // Test + delete (custom only) + overflow, plus the cell's horizontal padding.
+        width: "8.5rem",
         render: (row) => {
-          if (row.kind !== "model") return <NameActions row={row} />;
+          if (row.kind !== "model") return null;
           if (!row.model) {
             return editable && row.entry ? (
               <div className="flex justify-end">
@@ -194,18 +181,4 @@ export function useUnifiedColumns({
     onVisible,
     onHide,
   ]);
-}
-
-function NameActions({ row }: { row: AliasRow | ComboRow }) {
-  const to = row.kind === "alias" ? "/routing/aliases" : "/routing/combos";
-  return (
-    <div className="flex justify-end">
-      <Link
-        to={to}
-        className="inline-flex h-8 items-center rounded-full px-2 text-small text-accent-text underline underline-offset-2"
-      >
-        edit
-      </Link>
-    </div>
-  );
 }

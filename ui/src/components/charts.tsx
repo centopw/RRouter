@@ -241,9 +241,8 @@ function amount(value: number, unit: TrafficUnit, round: boolean): string {
 }
 
 /**
- * Stacked traffic chart: one column per bucket, one segment per model, an error lane
- * under the plot, and a CSS-only tooltip (hover/focus; the peak bucket shows by
- * default). No chart library, no JS hover state.
+ * Traffic trend: one line per model across the buckets, an error lane under the
+ * plot, and a CSS-only tooltip (hover/focus). No chart library, no JS hover state.
  */
 export function TrafficChart({
   buckets,
@@ -261,6 +260,22 @@ export function TrafficChart({
   const max = niceMax(Math.max(0, ...buckets.map((b) => b.total)));
   const ticks = [1, 0.5, 0];
   const labelIdx = new Set(xLabelIndices(buckets.length, labelEvery ?? Math.ceil(buckets.length / 6)));
+  const count = buckets.length;
+  const series = [...new Set(buckets.flatMap((b) => b.parts.map((p) => p.id)))].map((id) => ({
+    id,
+    d: buckets
+      .map((b, i) => {
+        const value = b.parts.find((p) => p.id === id)?.value ?? 0;
+        // Series are drawn in one 0–100 viewBox and stretched to the panel, so x stays
+        // on bucket centres and a non-scaling stroke keeps the line weight honest.
+        const x = ((i + 0.5) / count) * 100;
+        const y = 100 - (max > 0 ? value / max : 0) * 100;
+        return `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
+      })
+      .join(" "),
+  }));
+  // A marker per point turns into noise past a couple of dozen buckets.
+  const showDots = count > 0 && count <= 24;
 
   return (
     <div className="traffic px-6 pb-4">
@@ -285,7 +300,26 @@ export function TrafficChart({
               style={{ top: `${(1 - t) * 100}%` }}
             />
           ))}
-          <div className="absolute inset-0 flex items-end">
+          <svg
+            aria-hidden
+            className="absolute inset-0 h-full w-full overflow-visible"
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+          >
+            {series.map((s) => (
+              <path
+                key={s.id}
+                d={s.d}
+                fill="none"
+                stroke={colorOf(s.id)}
+                strokeWidth="1.75"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
+          </svg>
+          <div className="absolute inset-0 flex items-stretch">
             {buckets.map((b, i) => {
               const left = i < buckets.length / 2;
               const aria = `${b.full}: ${amount(b.total, unit, false)} ${unit}${b.errors ? `, ${b.errors} failed` : ""}`;
@@ -296,33 +330,30 @@ export function TrafficChart({
                   tabIndex={0}
                   role="img"
                   aria-label={aria}
-                  className="group relative flex h-full min-w-0 flex-1 items-end justify-center focus-visible:outline-none"
+                  className="group relative flex h-full min-w-0 flex-1 items-stretch justify-center focus-visible:outline-none"
                 >
-                  <div
-                    className="flex h-full w-full max-w-[56px] flex-col-reverse rounded-t-[3px] outline-none group-focus-visible:ring-2 group-focus-visible:ring-[var(--color-accent)]"
-                    style={{ opacity: 1 }}
-                  >
-                    {b.total === 0 ? (
-                      <div
-                        aria-hidden
-                        className="w-full rounded-t-[1px] bg-[var(--color-rule)]"
-                        style={{ height: 2 }}
-                      />
-                    ) : null}
-                    {b.parts
-                      .filter((part) => part.value > 0)
-                      .map((part) => (
-                        <div
+                  <span
+                    aria-hidden
+                    className="pointer-events-none absolute inset-y-0 left-1/2 hidden w-px -translate-x-1/2 bg-[var(--color-line)] group-hover:block group-focus-within:block"
+                  />
+                  {showDots
+                    ? b.parts.map((part) => (
+                        <span
                           key={part.id}
-                          className="w-full border-t border-[var(--color-surface)] first:border-t-0"
+                          aria-hidden
+                          className="pointer-events-none absolute left-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full"
                           style={{
-                            height: `${(part.value / max) * 100}%`,
-                            minHeight: 3,
+                            top: `${100 - (part.value / max) * 100}%`,
                             background: colorOf(part.id),
+                            boxShadow: "0 0 0 1px var(--color-surface)",
                           }}
                         />
-                      ))}
-                  </div>
+                      ))
+                    : null}
+                  <span
+                    aria-hidden
+                    className="pointer-events-none absolute inset-0 rounded-sm outline-none group-focus-visible:ring-2 group-focus-visible:ring-inset group-focus-visible:ring-[var(--color-accent)]"
+                  />
                   <div
                     className="pointer-events-none absolute top-1/2 z-20 hidden w-[208px] -translate-y-1/2 group-hover:block group-focus-within:block"
                     style={left ? { left: "calc(100% + 8px)" } : { right: "calc(100% + 8px)" }}
@@ -341,7 +372,7 @@ export function TrafficChart({
         <div className="shrink-0 text-caption leading-4 text-faint" style={{ width: AXIS_WIDTH }}>
           Errors
         </div>
-        <div className="flex min-w-0 flex-1 gap-px">
+        <div className="flex min-w-0 flex-1">
           {buckets.map((b, i) => (
             <div
               key={`err-${i}`}
@@ -350,7 +381,7 @@ export function TrafficChart({
               aria-label={b.errors > 0 ? `${b.full}: ${b.errors} failed` : undefined}
               aria-hidden={b.errors === 0 ? true : undefined}
               className={cx(
-                "h-1.5 min-w-0 flex-1 rounded-[1px]",
+                "h-1.5 min-w-0 flex-1 border-r border-[var(--color-surface)] last:border-r-0",
                 b.errors > 0 ? "bg-[var(--color-neg)]" : "bg-[var(--color-rule)]",
               )}
             />

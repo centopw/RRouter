@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AlertBanner,
@@ -125,6 +125,21 @@ export default function Activity() {
       : (live.data ?? []).map((event) => event.provider);
     return [...new Set(seen)].sort();
   }, [isAdmin, connections.data, live.data]);
+  // The log stores ids; the rosters turn them into the labels the operator knows.
+  // Readers get no roster, so a row falls back to its recorded provider and a dash.
+  const keyNames = useMemo(
+    () => new Map((keys.data ?? []).map((k) => [k.id, k.name ?? "—"] as const)),
+    [keys.data],
+  );
+  const providerById = useMemo(
+    () => new Map((connections.data ?? []).map((c) => [c.id, c.name ?? c.provider] as const)),
+    [connections.data],
+  );
+  const providerOf = useCallback(
+    (row: UsageEvent) =>
+      (row.connection_id ? providerById.get(row.connection_id) : undefined) ?? row.provider,
+    [providerById],
+  );
 
   const currentBuckets = (series.data ?? []).filter((b) => b.start >= alignedFrom);
   const cur = totalsOf(currentBuckets);
@@ -636,6 +651,8 @@ export default function Activity() {
                       showAll={showAll}
                       onToggleAll={() => setShowAll((v) => !v)}
                       empty=""
+                      providerOf={providerOf}
+                      keyNames={keyNames}
                     />
                   </div>
                 )}
@@ -645,6 +662,7 @@ export default function Activity() {
               <RequestDetailDialog
                 row={selectedRow}
                 baseUrl={baseUrl}
+                keyNames={keyNames}
                 onClose={() => setSelectedId(null)}
               />
             ) : null}

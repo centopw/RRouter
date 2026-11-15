@@ -7,6 +7,10 @@ import type { UsageEvent } from "../../lib/api";
 
 /** Master/detail for one request: what it cost, how long it took, where it went. */
 
+/** Columns shared by the header and every row, so they cannot drift apart. */
+const GRID =
+  "grid grid-cols-[86px_minmax(0,1fr)_108px_108px_112px_76px_54px_82px] items-center gap-2";
+
 export function RequestLog({
   rows,
   total,
@@ -15,6 +19,8 @@ export function RequestLog({
   showAll,
   onToggleAll,
   empty,
+  providerOf,
+  keyNames,
 }: {
   rows: UsageEvent[];
   /** Rows that pass the filters (may exceed what is rendered). */
@@ -24,6 +30,10 @@ export function RequestLog({
   showAll: boolean;
   onToggleAll: () => void;
   empty: ReactNode;
+  /** Connection's provider, falling back to the one recorded on the request. */
+  providerOf: (row: UsageEvent) => string;
+  /** Key id -> key name; ids missing from the roster print as a dash. */
+  keyNames: Map<string, string>;
 }) {
   const visible = showAll ? rows : rows.slice(0, 8);
 
@@ -34,13 +44,20 @@ export function RequestLog({
   return (
     <div className="min-w-0">
       <div className="overflow-x-auto">
-        <div role="table" aria-label="request log" className="min-w-[560px]">
+        <div role="table" aria-label="request log" className="min-w-[880px]">
           <div
             role="row"
-            className="grid grid-cols-[86px_minmax(0,1fr)_112px_76px_54px_82px] items-center gap-2 border-b border-line px-6 py-2 text-caption uppercase tracking-[0.06em] text-faint"
+            className={cx(
+              GRID,
+              "border-b border-line px-6 py-2 text-caption uppercase tracking-[0.06em] text-faint",
+            )}
           >
             <span role="columnheader">Time</span>
             <span role="columnheader">Model</span>
+            <span role="columnheader">Provider</span>
+            <span role="columnheader" className="whitespace-nowrap">
+              API key
+            </span>
             <span role="columnheader" className="whitespace-nowrap text-right">
               Tokens in → out
             </span>
@@ -53,6 +70,8 @@ export function RequestLog({
           {visible.map((row) => {
             const failed = row.status >= 400 || row.error !== null;
             const selected = row.id !== null && row.id === selectedId;
+            const provider = providerOf(row);
+            const keyName = row.key_id ? (keyNames.get(row.key_id) ?? "—") : "—";
             return (
               <div
                 key={row.id ?? `${row.ts}-${row.model}`}
@@ -67,7 +86,8 @@ export function RequestLog({
                   }
                 }}
                 className={cx(
-                  "grid cursor-pointer grid-cols-[86px_minmax(0,1fr)_112px_76px_54px_82px] items-center gap-2 border-b border-[var(--color-rule)] px-6 py-2.5 text-body last:border-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text",
+                  GRID,
+                  "cursor-pointer border-b border-[var(--color-rule)] px-6 py-2.5 text-body last:border-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text",
                   selected ? "bg-[var(--color-surface-2)]" : "hover:bg-[var(--color-row-hover)]",
                 )}
               >
@@ -92,6 +112,12 @@ export function RequestLog({
                       );
                     })()}
                   </span>
+                </span>
+                <span role="cell" className="min-w-0 truncate text-small text-muted" title={provider}>
+                  {provider || "—"}
+                </span>
+                <span role="cell" className="min-w-0 truncate text-small text-muted" title={keyName}>
+                  {keyName}
                 </span>
                 <span
                   role="cell"
@@ -140,10 +166,13 @@ export function RequestDetail({
   row,
   onClose,
   baseUrl,
+  keyNames,
 }: {
   row: UsageEvent;
   onClose: () => void;
   baseUrl: string;
+  /** Key id -> key name; ids missing from the roster print as a dash. */
+  keyNames?: Map<string, string>;
 }) {
   const failed = row.status >= 400 || row.error !== null;
   const endpoint = row.endpoint ?? "/v1/chat/completions";
@@ -292,6 +321,7 @@ export function RequestDetail({
         <dl className="divide-y divide-[var(--color-rule)] text-body">
           <Row k="When" v={when(row.ts)} />
           <Row k="Provider" v={row.provider} />
+          <Row k="API key" v={(row.key_id ? keyNames?.get(row.key_id) : undefined) ?? "—"} />
           {row.endpoint ? <Row k="Endpoint" v={row.endpoint} mono /> : null}
           <Row k="Tokens" v={failed ? "—" : `${row.input_tokens} in · ${row.output_tokens} out`} mono />
           <Row k="Cost" v={usd(row.cost_micros, { dash: true })} mono />
@@ -378,10 +408,12 @@ export function RequestDetailDialog({
   row,
   onClose,
   baseUrl,
+  keyNames,
 }: {
   row: UsageEvent;
   onClose: () => void;
   baseUrl: string;
+  keyNames?: Map<string, string>;
 }) {
   return (
     <Dialog.Root open onOpenChange={(next) => { if (!next) onClose(); }}>
@@ -392,7 +424,7 @@ export function RequestDetailDialog({
           <Dialog.Description className="sr-only">
             One gateway request, its timing, attempts and error.
           </Dialog.Description>
-          <RequestDetail row={row} onClose={onClose} baseUrl={baseUrl} />
+          <RequestDetail row={row} onClose={onClose} baseUrl={baseUrl} keyNames={keyNames} providerName={providerName} />
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

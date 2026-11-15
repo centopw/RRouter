@@ -1,12 +1,13 @@
 import { useMemo } from "react";
+import { Trash } from "@phosphor-icons/react";
 import { Badge, CopyIconButton, cx } from "../../components/ui";
-import { Toggle } from "../../components/atoms";
+import { IconButton, Toggle } from "../../components/atoms";
 import { CapabilityChips } from "../../components/capability-chips";
 import type { Column } from "../../components/table";
 import { compact } from "../../lib/format";
 import type { Model } from "../../lib/api";
 import type { DraftGroup } from "../../lib/layout-draft";
-import { CoveragePeers, RowMenu, TestButton, groupModelRef, priceLabel, priceTitle } from "./rows";
+import { CoveragePeers, RowMenu, TestButton, groupModelRef, priceLabel } from "./rows";
 
 /**
  * The registry row, shared by the sortable board and the plain table: one definition, so a
@@ -61,9 +62,10 @@ export function useModelColumns({
         key: "model",
         title: "model",
         render: (m) => (
-          <div className="flex min-w-[190px] max-w-[360px] flex-col">
+          <div className="flex min-w-0 flex-col">
             <div className="flex min-w-0 items-center gap-1.5">
               <span className="sr-only">Model </span>
+              {/* The badge never shrinks: a truncated provider reads as a different one. */}
               <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.06em] text-muted">
                 {m.provider}
               </span>
@@ -121,57 +123,17 @@ export function useModelColumns({
             {m.display && m.display !== m.id ? (
               <div className="mt-0.5 min-w-0 truncate text-caption text-faint">{m.display}</div>
             ) : null}
-            {/* Below xl the secondary columns are gone; their values ride in this cell
-                instead of forcing a horizontal scroll. */}
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption text-faint xl:hidden">
+            {/* The metadata rides here and nowhere else: the table has no separate
+                context, max-output, price or capability columns. */}
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption text-faint">
               <span className="whitespace-nowrap tnum">ctx {compact(m.context)}</span>
               <span className="whitespace-nowrap tnum">max {compact(m.max_output)}</span>
               {priceLabel(m) ? (
-                <span className="whitespace-nowrap tnum lg:hidden">{priceLabel(m)}</span>
+                <span className="whitespace-nowrap tnum">{priceLabel(m)}</span>
               ) : null}
               <CapabilityChips capabilities={m.capabilities} max={2} subject={m.ref} />
             </div>
           </div>
-        ),
-      },
-      {
-        key: "context",
-        title: "context",
-        align: "right",
-        width: "4.5rem",
-        className: "hidden xl:table-cell",
-        render: (m) => <span className="text-muted">{compact(m.context)}</span>,
-      },
-      {
-        key: "max_output",
-        title: "max\u00A0out",
-        align: "right",
-        width: "5.5rem",
-        className: "hidden xl:table-cell",
-        render: (m) => <span className="text-muted">{compact(m.max_output)}</span>,
-      },
-      {
-        key: "cost",
-        title: "price\u00A0/1M",
-        align: "right",
-        width: "7.5rem",
-        className: "hidden lg:table-cell",
-        render: (m) =>
-          m.cost ? (
-            <span className="whitespace-nowrap text-muted tnum" title={priceTitle(m)}>
-              {priceLabel(m)}
-            </span>
-          ) : (
-            <span className="text-faint">—</span>
-          ),
-      },
-      {
-        key: "capabilities",
-        title: "capabilities",
-        width: "9.5rem",
-        className: "hidden xl:table-cell",
-        render: (m) => (
-          <CapabilityChips capabilities={m.capabilities} max={2} subject={m.ref} />
         ),
       },
       {
@@ -199,14 +161,25 @@ export function useModelColumns({
         title: "Actions",
         srOnlyTitle: true,
         align: "right",
-        width: "5rem",
+        // Test + delete (custom only) + overflow, plus the cell's horizontal padding.
+        width: "8.5rem",
         render: (m) => (
-          <div className="flex items-center justify-end gap-1">
+          <div className="flex items-center justify-end gap-0.5">
             <TestButton
               model={m}
               pending={testTarget === m.ref}
               onTest={() => onTest(m)}
             />
+            {m.source === "custom" ? (
+              <IconButton
+                label={`Delete custom model ${m.ref}`}
+                disabled={removeTarget === m.ref}
+                onClick={() => onDelete(m)}
+                className="hover:bg-[var(--color-neg-tint)] hover:text-[var(--color-neg-ink)]"
+              >
+                <Trash size={15} aria-hidden />
+              </IconButton>
+            ) : null}
             <RowMenu
               model={m}
               pendingDelete={removeTarget === m.ref}
