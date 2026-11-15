@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.16.0 — 2026-11-15
+
+### Features
+
+- feat(ui): unify models page and split routing navigation ([`ca73122`](https://github.com/centopw/RRouter/commit/ca731221fa5ddbdbf13dab3016f8001a0b31e3f4))
+
 ## 0.15.1 — 2026-11-13
 
 ### Bug Fixes
