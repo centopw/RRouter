@@ -1,0 +1,110 @@
+name: upstream-sync
+
+# models.dev and the provider manifests drift without a commit here, so this gate runs on a
+# schedule rather than on push. It never edits or merges anything: OAuth and protocol
+# changes still need a reviewed PR. A failing run opens (or refreshes) one issue so the
+# drift is visible; the next green run closes it.
+
+on:
+  schedule:
+    # Daily at 06:17 UTC — off the hour so it does not queue behind cron-heavy neighbours.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # Live models.dev plus the reviewed manifests, with one line per problem.
+      - name: Validate models.dev and community manifests
+        run: python3 scripts/validate-upstreams.py
+
+      # The remaining gates are independent of the catalog fetch: a malformed manifest
+      # should still surface even when models.dev is unreachable, so they always run.
+      - uses: dtolnay/rust-toolchain@stable
+        if: always()
+      - uses: Swatinem/rust-cache@v2
+        if: always()
+
+      - name: Registry and manifest tests
+        if: always()
+        run: |
+          cargo test -p rrouter-auth --test manifests
+          cargo test -p rrouter-auth registry::tests
+          cargo test -p rrouter-router catalog::tests
+
+      # One issue, updated in place: search open issues by exact title so daily failures
+      # never open a second report.
+      - name: Track the failure in one issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Upstream validation failed';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `Upstream validation failed in [run ${context.runId}](${runUrl}).`,
+              '',
+              `- Event: \`${context.eventName}\``,
+              `- Commit: \`${context.sha}\``,
+              '',
+              'models.dev or a manifest under `providers/community/` no longer satisfies the',
+              'checks in `scripts/validate-upstreams.py` and the registry tests. The job log',
+              'lists one line per problem. Fix the drift in a reviewed pull request; the next',
+              'green run closes this issue.',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            // The list endpoint also returns pull requests; only a plain issue is ours.
+            const existing = open.find((issue) => !issue.pull_request && issue.title === title);
+            if (existing) {
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+              core.info(`Updated issue #${existing.number}`);
+            } else {
+              const created = await github.rest.issues.create({ owner, repo, title, body });
+              core.info(`Opened issue #${created.data.number}`);
+            }
+
+      # Recovery is part of the report: an issue left open after a green run is noise.
+      - name: Close the tracking issue after a green run
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Upstream validation failed';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { owner, repo } = context.repo;
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = open.find((issue) => !issue.pull_request && issue.title === title);
+            if (!existing) {
+              core.info('No open tracking issue.');
+              return;
+            }
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: existing.number,
+              body: `Upstream validation passed again in [run ${context.runId}](${runUrl}).`,
+            });
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: existing.number,
+              state: 'closed',
+            });

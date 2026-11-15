@@ -167,12 +167,15 @@ export function RequestDetail({
   onClose,
   baseUrl,
   keyNames,
+  providerName,
 }: {
   row: UsageEvent;
   onClose: () => void;
   baseUrl: string;
   /** Key id -> key name; ids missing from the roster print as a dash. */
   keyNames?: Map<string, string>;
+  /** Connection label for this request, falling back to its recorded provider. */
+  providerName?: string;
 }) {
   const failed = row.status >= 400 || row.error !== null;
   const endpoint = row.endpoint ?? "/v1/chat/completions";
@@ -320,7 +323,7 @@ export function RequestDetail({
 
         <dl className="divide-y divide-[var(--color-rule)] text-body">
           <Row k="When" v={when(row.ts)} />
-          <Row k="Provider" v={row.provider} />
+          <Row k="Provider" v={providerName ?? row.provider} />
           <Row k="API key" v={(row.key_id ? keyNames?.get(row.key_id) : undefined) ?? "—"} />
           {row.endpoint ? <Row k="Endpoint" v={row.endpoint} mono /> : null}
           <Row k="Tokens" v={failed ? "—" : `${row.input_tokens} in · ${row.output_tokens} out`} mono />
@@ -409,11 +412,13 @@ export function RequestDetailDialog({
   onClose,
   baseUrl,
   keyNames,
+  providerName,
 }: {
   row: UsageEvent;
   onClose: () => void;
   baseUrl: string;
   keyNames?: Map<string, string>;
+  providerName?: string;
 }) {
   return (
     <Dialog.Root open onOpenChange={(next) => { if (!next) onClose(); }}>

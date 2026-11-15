@@ -163,7 +163,7 @@ function BoardTable({
                 style={column.width ? { width: column.width } : undefined}
                 className={cx(
                   "sticky top-0 z-20 border-b border-line bg-surface px-4 py-2.5 text-small font-semibold text-ink-soft",
-                  column.align === "right" && "text-right",
+                  column.align === "right" ? "text-right" : "text-left",
                   column.key === "actions" &&
                     "sticky right-0 z-30 border-l border-line bg-surface shadow-[-8px_0_8px_-8px_rgba(28,43,66,0.16)]",
                   column.className,

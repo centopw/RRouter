@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiCode, signIn } from "../../lib/auth";
+import { qk } from "../../lib/queries";
 import {
   AuthActions,
   AuthCard,
@@ -46,8 +47,17 @@ export default function SignIn() {
     setBusy(true);
     setFailure(null);
     signIn({ email: submittedEmail, password: submittedPassword, remember })
-      .then(async () => {
-        await client.invalidateQueries({ queryKey: ["auth", "state"] });
+      .then(async (result) => {
+        // The guard may mount on the next navigation while the auth query is inactive.
+        // Seed its cache from the login response so the first sign-in is enough; an
+        // invalidation alone leaves the old `user: null` in place until a refetch.
+        client.setQueryData(qk.authState, {
+          initialized: true,
+          setup_code_required: false,
+          signup: "invite_only",
+          user: result.user,
+        });
+        await client.invalidateQueries({ queryKey: qk.authState });
         navigate(next, { replace: true });
       })
       .catch((error: unknown) => {

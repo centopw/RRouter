@@ -10,6 +10,7 @@
 //! backslash-escaped, and a newline becomes `\n`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -262,14 +263,40 @@ fn truncate(value: &str, max_chars: usize) -> &str {
 /// Breaker state needs the live connection list: a connection that no longer exists
 /// must not keep a stale series alive, and one that exists but was never used is
 /// simply closed.
-static RTK_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static RTK_SAVED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RTK_REQUESTS: AtomicU64 = AtomicU64::new(0);
+static RTK_SAVED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Record one compressed request and its byte saving.
 pub fn rtk(stats: &rrouter_rtk::Stats) {
-    use std::sync::atomic::Ordering;
     RTK_REQUESTS.fetch_add(1, Ordering::Relaxed);
     RTK_SAVED_BYTES.fetch_add(stats.saved() as u64, Ordering::Relaxed);
+}
+
+/// Unix seconds of the last successful models.dev sync; `0` means none in this process.
+static MODEL_SYNC_LAST_SUCCESS: AtomicI64 = AtomicI64::new(0);
+/// Failed models.dev syncs, counting the daily loop and `POST /api/models/sync` once each.
+static MODEL_SYNC_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// `synced` rows stored by the last successful sync.
+static MODEL_SYNC_MODELS: AtomicU64 = AtomicU64::new(0);
+/// Distinct providers represented by the last successful sync.
+static MODEL_SYNC_PROVIDERS: AtomicU64 = AtomicU64::new(0);
+
+/// Record a successful models.dev sync: the row/provider gauges and when it landed.
+///
+/// The gauges describe the last success, so a later failure leaves them at the last known
+/// good values instead of rendering zero models and a sync that looks like a wipe.
+pub fn model_sync_ok(models: usize, providers: usize) {
+    MODEL_SYNC_MODELS.store(models as u64, Ordering::Relaxed);
+    MODEL_SYNC_PROVIDERS.store(providers as u64, Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    MODEL_SYNC_LAST_SUCCESS.store(now, Ordering::Relaxed);
+}
+
+/// Record a failed models.dev sync. Counters only: the last-good gauges stay put.
+pub fn model_sync_error() {
+    MODEL_SYNC_FAILURES.fetch_add(1, Ordering::Relaxed);
 }
 
 pub async fn scrape(State(state): State<Arc<AppState>>) -> Response {
@@ -389,7 +416,7 @@ impl Registry {
         out.push_str("# TYPE rrouter_rtk_requests_total counter\n");
         out.push_str(&format!(
             "rrouter_rtk_requests_total {}\n",
-            RTK_REQUESTS.load(std::sync::atomic::Ordering::Relaxed)
+            RTK_REQUESTS.load(Ordering::Relaxed)
         ));
         out.push_str(
             "# HELP rrouter_rtk_saved_bytes_total Context bytes removed by the Token Saver.\n",
@@ -397,8 +424,44 @@ impl Registry {
         out.push_str("# TYPE rrouter_rtk_saved_bytes_total counter\n");
         out.push_str(&format!(
             "rrouter_rtk_saved_bytes_total {}\n",
-            RTK_SAVED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+            RTK_SAVED_BYTES.load(Ordering::Relaxed)
         ));
+
+        // models.dev sync: every line is exposed at its zero, so a scrape can tell "never
+        // succeeded" from "no series" and a dashboard does not wait for the first failure.
+        out.push_str(
+            "# HELP rrouter_model_sync_last_success_timestamp_seconds Unix seconds of the last successful models.dev sync (0 = none yet).\n",
+        );
+        out.push_str("# TYPE rrouter_model_sync_last_success_timestamp_seconds gauge\n");
+        out.push_str(&format!(
+            "rrouter_model_sync_last_success_timestamp_seconds {}\n",
+            MODEL_SYNC_LAST_SUCCESS.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP rrouter_model_sync_failures_total models.dev syncs that failed, from the daily loop or the manual route.\n",
+        );
+        out.push_str("# TYPE rrouter_model_sync_failures_total counter\n");
+        out.push_str(&format!(
+            "rrouter_model_sync_failures_total {}\n",
+            MODEL_SYNC_FAILURES.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP rrouter_model_sync_models synced rows stored by the last successful models.dev sync.\n",
+        );
+        out.push_str("# TYPE rrouter_model_sync_models gauge\n");
+        out.push_str(&format!(
+            "rrouter_model_sync_models {}\n",
+            MODEL_SYNC_MODELS.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP rrouter_model_sync_providers distinct providers represented after the last successful models.dev sync.\n",
+        );
+        out.push_str("# TYPE rrouter_model_sync_providers gauge\n");
+        out.push_str(&format!(
+            "rrouter_model_sync_providers {}\n",
+            MODEL_SYNC_PROVIDERS.load(Ordering::Relaxed)
+        ));
+
         out.push_str("# HELP rrouter_cache_hits_total Non-streaming requests served from the exact-match cache.\n");
         out.push_str("# TYPE rrouter_cache_hits_total counter\n");
         out.push_str(&format!("rrouter_cache_hits_total {}\n", reg.cache_hits));

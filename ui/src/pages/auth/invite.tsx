@@ -1,8 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { safeNext } from "./sign-in";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiCode, inviteMeta, signUp } from "../../lib/auth";
+import { qk } from "../../lib/queries";
 import {
   AuthActions,
   AuthCard,
@@ -27,6 +28,7 @@ const ROLE_LEAD: Record<string, string> = {
 export default function Invite() {
   const { token = "" } = useParams();
   const navigate = useNavigate();
+  const client = useQueryClient();
   const [params] = useSearchParams();
   const meta = useQuery({
     queryKey: ["auth", "invite", token],
@@ -92,7 +94,15 @@ export default function Invite() {
     setBusy(true);
     setFailure(null);
     signUp({ token, name: name.trim(), password })
-      .then((result) => setCodes(result.recovery_codes))
+      .then((result) => {
+        client.setQueryData(qk.authState, {
+          initialized: true,
+          setup_code_required: false,
+          signup: "invite_only",
+          user: result.user,
+        });
+        setCodes(result.recovery_codes);
+      })
       .catch((error: unknown) => {
         const kind = apiCode(error);
         setFailure(

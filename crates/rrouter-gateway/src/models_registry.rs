@@ -611,6 +611,46 @@ pub async fn item(state: &AppState, provider: &str, id: &str) -> Result<Option<M
     Ok(Some(item))
 }
 
+/// Reject a models.dev document the registry cannot use.
+///
+/// A truncated or rearranged catalog still parses as JSON, and [`parse_models_dev`] would
+/// answer an empty row list — which [`sync`] would then store, wiping every `synced` row.
+/// This gate runs before the parse so an unusable document is a failed refresh
+/// ([`Error::Transport`], rendered as `502`), not a silent wipe. Pure: the tests feed
+/// fixtures here and [`download_models_dev`] checks the live body.
+pub fn validate_models_dev(document: &Value) -> Result<(), String> {
+    let Some(providers) = document.as_object() else {
+        return Err("document is not a JSON object".to_string());
+    };
+    if providers.is_empty() {
+        return Err("document lists no providers".to_string());
+    }
+    let mut models = 0usize;
+    for (provider_id, provider) in providers {
+        if provider_id.is_empty() {
+            return Err("a provider has an empty id".to_string());
+        }
+        let Some(list) = provider.get("models").and_then(Value::as_object) else {
+            return Err(format!("provider `{provider_id}` has no models object"));
+        };
+        for (model_id, entry) in list {
+            if model_id.is_empty() {
+                return Err(format!("provider `{provider_id}` has an empty model id"));
+            }
+            if !entry.is_object() {
+                return Err(format!(
+                    "provider `{provider_id}` model `{model_id}` is not an object"
+                ));
+            }
+        }
+        models += list.len();
+    }
+    if models == 0 {
+        return Err("document lists no models".to_string());
+    }
+    Ok(())
+}
+
 /// Download models.dev and return the parsed rows. Network failures are
 /// [`Error::Transport`] so the route answers `502` and no row is touched.
 pub async fn download_models_dev(state: &AppState) -> Result<Vec<ModelRow>> {
@@ -631,6 +671,7 @@ pub async fn download_models_dev(state: &AppState) -> Result<Vec<ModelRow>> {
         .json()
         .await
         .map_err(|e| Error::Transport(format!("models.dev body: {e}")))?;
+    validate_models_dev(&value).map_err(|e| Error::Transport(format!("models.dev: {e}")))?;
     Ok(parse_models_dev(&value))
 }
 
@@ -989,7 +1030,26 @@ pub fn can_list(provider: &str) -> bool {
 ///
 /// The download and parse happen before the delete, so a failed refresh leaves the
 /// existing rows untouched.
+///
+/// Every attempt — the daily loop and `POST /api/models/sync` — passes through here, so
+/// the `rrouter_model_sync_*` metrics are recorded exactly once per attempt: a success
+/// moves the timestamp and gauges, a failure only the counter.
 pub async fn sync(state: &AppState) -> Result<(usize, usize, i64)> {
+    match replace_synced_rows(state).await {
+        Ok((models, providers, at)) => {
+            crate::metrics::model_sync_ok(models, providers);
+            Ok((models, providers, at))
+        }
+        Err(error) => {
+            crate::metrics::model_sync_error();
+            Err(error)
+        }
+    }
+}
+
+/// The refresh without its observability, split so success and failure are recorded in
+/// one place and a failed attempt can never also bump the success gauges.
+async fn replace_synced_rows(state: &AppState) -> Result<(usize, usize, i64)> {
     let rows = download_models_dev(state).await?;
     let store: &Store = state.store.as_ref();
     store.clear_models_by_source(SOURCE_SYNCED).await?;
@@ -1102,6 +1162,45 @@ mod tests {
             models_url("https://api.groq.com/openai/v1"),
             "https://api.groq.com/openai/v1/models"
         );
+    }
+
+    /// A truncated or rearranged models.dev body must fail the refresh instead of
+    /// validating as "no models" and wiping every `synced` row.
+    #[test]
+    fn models_dev_document_must_carry_models() {
+        let empty = json!({});
+        assert!(validate_models_dev(&empty)
+            .expect_err("no providers")
+            .contains("no providers"));
+
+        let without_models = json!({"openai": {"id": "openai", "name": "OpenAI"}});
+        assert!(validate_models_dev(&without_models)
+            .expect_err("provider without models")
+            .contains("no models object"));
+
+        let all_empty_ids = json!({"openai": {"models": {"": {"name": "ghost"}}}});
+        assert!(validate_models_dev(&all_empty_ids)
+            .expect_err("empty model id")
+            .contains("empty model id"));
+
+        let not_an_object = json!({"openai": {"models": {"gpt-5": "gpt-5"}}});
+        assert!(validate_models_dev(&not_an_object)
+            .expect_err("model entry is a string")
+            .contains("is not an object"));
+
+        let not_a_document = json!([{"models": {}}]);
+        assert!(validate_models_dev(&not_a_document).is_err());
+    }
+
+    /// The shape a real sync consumes, including providers the gateway does not route:
+    /// the validator only checks the document, leaving the routing filter to the parse.
+    #[test]
+    fn models_dev_document_with_providers_and_models_validates() {
+        let document = json!({
+            "openai": {"id": "openai", "models": {"gpt-5": {"name": "GPT-5"}}},
+            "unrouted-vendor": {"id": "unrouted-vendor", "models": {"m": {}}}
+        });
+        assert_eq!(validate_models_dev(&document), Ok(()));
     }
 
     #[test]

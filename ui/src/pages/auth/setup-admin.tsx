@@ -4,7 +4,7 @@ import { Navigate, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../lib/api";
 import { apiCode, setupAdmin } from "../../lib/auth";
-import { useAuthState } from "../../lib/queries";
+import { qk, useAuthState } from "../../lib/queries";
 import {
   AuthActions,
   AuthCard,
@@ -45,7 +45,13 @@ export default function SetupAdmin() {
     setFailure(null);
     setupAdmin({ setup_code: code.trim(), name: name.trim(), email: email.trim(), password })
       .then(async (result) => {
-        await client.invalidateQueries({ queryKey: ["auth", "state"] });
+        client.setQueryData(qk.authState, {
+          initialized: true,
+          setup_code_required: false,
+          signup: "invite_only",
+          user: result.user,
+        });
+        await client.invalidateQueries({ queryKey: qk.authState });
         setCodes(result.recovery_codes);
       })
       .catch((error: unknown) => {

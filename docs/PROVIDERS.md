@@ -230,3 +230,48 @@ Client credentials and endpoints are overridable without a rebuild:
 | `RROUTER_OAUTH_OVERRIDE_<PROVIDER>_AUTHORIZE` / `_TOKEN` / `_DEVICE` | Sign-in endpoints (HTTPS only; loopback HTTP needs `RROUTER_ALLOW_INSECURE_OAUTH=1`). |
 | `RROUTER_ANTIGRAVITY_DAILY_HOST` / `RROUTER_ANTIGRAVITY_PROD_HOST` | CCA daily and fallback origins; also used for project discovery. |
 | `RROUTER_PUBLIC_URL` | Public dashboard origin used by the OAuth callback pages' "Return to dashboard" link; unset omits the link. |
+
+## Automated upstream validation
+
+Two upstream inputs move without a commit here: the models.dev catalog and the reviewed
+manifests. Both are checked on a schedule, so a provider that moves an endpoint or a
+catalog that changes shape is reported instead of discovered by a failing client.
+
+| Input | Checked when | By |
+| --- | --- | --- |
+| `https://models.dev/api.json` | Daily in the running gateway (one minute after start, then every 24 h); `POST /api/models/sync` does the same on demand | `models_registry::sync` |
+| `providers/community/*.json` | Every build, and daily in CI | `crates/rrouter-auth/build.rs`, `.github/workflows/upstream-sync.yml` |
+
+A download is validated before anything is deleted: `validate_models_dev` rejects a
+document that is not an object, lists no providers, has a provider without a `models`
+object, has an empty model id, or lists no models at all. A rejected catalog is a
+`Transport` error (502 on the manual route) and leaves the existing `synced` rows in place.
+
+`.github/workflows/upstream-sync.yml` runs daily and on `workflow_dispatch`:
+
+1. `python3 scripts/validate-upstreams.py` fetches models.dev and validates every manifest
+   against `providers/schema.json`: required and unknown keys, the id slug, https
+   endpoints, the auth/dialect enums, duplicate ids, and any credential-shaped key. It
+   prints one line per problem and exits non-zero (`--offline` skips the fetch).
+2. `cargo test -p rrouter-auth --test manifests`, `cargo test -p rrouter-auth
+   registry::tests` and `cargo test -p rrouter-router catalog::tests` check that the
+   compiled provider table and the protocol adapters still agree with those manifests.
+
+A failing run opens **one** issue titled `Upstream validation failed`, carrying the run URL,
+and updates that issue on later failures; the next green run closes it. The workflow only
+reports: it never edits, merges or deploys. OAuth flows, new credential material and
+protocol/dialect changes still need a reviewed pull request — see
+[Adding a provider](#adding-a-provider).
+
+The sync's state is on `/metrics`:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `rrouter_model_sync_last_success_timestamp_seconds` | gauge | Unix seconds of the last successful sync; `0` means none since start |
+| `rrouter_model_sync_failures_total` | counter | Failed syncs, from the daily loop and the manual route |
+| `rrouter_model_sync_models` | gauge | `synced` rows stored by the last success |
+| `rrouter_model_sync_providers` | gauge | Distinct providers in the last success |
+
+Alert on `time() - rrouter_model_sync_last_success_timestamp_seconds > 172800` (no success
+in two days) and on `increase(rrouter_model_sync_failures_total[1h])`: together they catch a
+stalled loop and a catalog the gateway keeps refusing.

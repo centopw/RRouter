@@ -257,7 +257,12 @@ export function TrafficChart({
   height?: number;
   labelEvery?: number;
 }) {
-  const max = niceMax(Math.max(0, ...buckets.map((b) => b.total)));
+  // The chart draws one line per model, not stacked totals, so the y-scale must follow
+  // the largest single series. Scaling by the bucket total would flatten every line into
+  // the bottom of the plot when a gateway serves several models.
+  const max = niceMax(
+    Math.max(0, ...buckets.flatMap((bucket) => bucket.parts.map((part) => part.value))),
+  );
   const ticks = [1, 0.5, 0];
   const labelIdx = new Set(xLabelIndices(buckets.length, labelEvery ?? Math.ceil(buckets.length / 6)));
   const count = buckets.length;

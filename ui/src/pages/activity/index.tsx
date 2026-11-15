@@ -663,6 +663,7 @@ export default function Activity() {
                 row={selectedRow}
                 baseUrl={baseUrl}
                 keyNames={keyNames}
+                providerName={providerOf(selectedRow)}
                 onClose={() => setSelectedId(null)}
               />
             ) : null}
