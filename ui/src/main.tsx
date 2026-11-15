@@ -6,6 +6,7 @@ import {
   isRouteErrorResponse,
   Navigate,
   RouterProvider,
+  useLocation,
   useRouteError,
 } from "react-router-dom";
 import "./index.css";
@@ -60,6 +61,7 @@ const Combos = page(() => import("./pages/combos"));
 const Templates = page(() => import("./pages/templates"));
 const Evals = page(() => import("./pages/evals"));
 const Models = page(() => import("./pages/models"));
+const Presets = page(() => import("./pages/presets"));
 const Playground = page(() => import("./pages/playground"));
 const Settings = page(() => import("./pages/settings"));
 const Providers = page(() => import("./pages/providers"));
@@ -79,6 +81,27 @@ const Invite = page(() => import("./pages/auth/invite"));
 /** An admin page: hidden from a reader's nav, and redirected here on a typed URL. */
 function AdminPage({ children }: { children: ReactNode }) {
   return <RequireAdmin>{children}</RequireAdmin>;
+}
+
+/**
+ * Old URLs keep working, query string included: a bookmark or a palette hit carries
+ * filter state a bare `<Navigate>` would drop. `map` rewrites params the new surface
+ * spells differently, so a stale link still lands on the intended filter.
+ */
+function Legacy({ to, map }: { to: string; map?: (params: URLSearchParams) => void }) {
+  const { search } = useLocation();
+  const next = new URLSearchParams(search);
+  map?.(next);
+  return <Navigate to={{ pathname: to, search: next.toString() }} replace />;
+}
+
+/** `/routing/providers?custom=openai` predates the custom-endpoint form's own params. */
+function customEndpointParams(params: URLSearchParams) {
+  const protocol = params.get("custom");
+  if (protocol !== "openai" && protocol !== "anthropic") return;
+  params.delete("custom");
+  params.set("add", "custom");
+  params.set("protocol", protocol);
 }
 
 /**
@@ -173,12 +196,21 @@ const router = createBrowserRouter(
               ],
             },
             {
+              path: "models",
+              element: <SectionLayout section="models" />,
+              children: [{ index: true, element: <Models /> }],
+            },
+            {
+              path: "providers",
+              element: <SectionLayout section="providers" />,
+              children: [{ index: true, element: <Providers /> }],
+            },
+            {
               path: "routing",
               element: <SectionLayout section="routing" />,
               children: [
                 { index: true, element: <SectionIndex section="routing" /> },
-                { path: "models", element: <Models /> },
-                { path: "providers", element: <Providers /> },
+                { path: "presets", element: <AdminPage><Presets /></AdminPage> },
                 { path: "aliases", element: <AdminPage><Aliases /></AdminPage> },
                 { path: "combos", element: <AdminPage><Combos /></AdminPage> },
               ],
@@ -205,16 +237,20 @@ const router = createBrowserRouter(
               ],
             },
             { path: "account", element: <Account /> },
-            // Legacy URLs keep working; the section tabs are the canonical paths.
+            // Legacy URLs keep working, filters included; `/models` and `/providers` are
+            // canonical, so only the old surfaces redirect.
             { path: "logs", element: <Navigate to="/activity/logs" replace /> },
             { path: "audit", element: <Navigate to="/activity/audit" replace /> },
             { path: "templates", element: <Navigate to="/playground/templates" replace /> },
             { path: "evals", element: <Navigate to="/playground/evals" replace /> },
-            { path: "models", element: <Navigate to="/routing/models" replace /> },
-            { path: "providers", element: <Navigate to="/routing/providers" replace /> },
-            { path: "connections", element: <Navigate to="/routing/providers" replace /> },
-            { path: "aliases", element: <Navigate to="/routing/aliases" replace /> },
-            { path: "combos", element: <Navigate to="/routing/combos" replace /> },
+            { path: "routing/models", element: <Legacy to="/models" /> },
+            {
+              path: "routing/providers",
+              element: <Legacy to="/providers" map={customEndpointParams} />,
+            },
+            { path: "connections", element: <Legacy to="/providers" /> },
+            { path: "aliases", element: <Legacy to="/routing/aliases" /> },
+            { path: "combos", element: <Legacy to="/routing/combos" /> },
             { path: "keys", element: <Navigate to="/access/keys" replace /> },
             { path: "teams", element: <Navigate to="/access/teams" replace /> },
             { path: "users", element: <Navigate to="/access/users" replace /> },

@@ -290,8 +290,8 @@ export default function Setup() {
                   account={account}
                   onActivity={() => finish("/activity")}
                   onProviders={() => navigate("/providers")}
-                   onCombos={() => navigate("/combos")}
-                  onAliases={() => navigate("/aliases")}
+                  onCombos={() => navigate("/routing/combos")}
+                  onAliases={() => navigate("/routing/aliases")}
                 />
               ) : null}
             </div>

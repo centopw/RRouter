@@ -12,6 +12,8 @@ checklist at the end.
 >
 > **Status:** the Activity page was implemented in commit `5877d33`, and the backend gaps listed in section 6 were closed in that commit
 > (per-model series, 5m buckets, `hours=` scoping, request ids). Treat section 6 as history. First-run setup is specified separately in [ONBOARDING.md](./ONBOARDING.md).
+>
+> **Models/Providers/Routing:** the navigation split, unified Models page and preset lifecycle are specified in [ROUTING.md](../../design/ROUTING.md). The Models/Providers/Keys/Aliases/Combos exclusion in §1 rule 4 and §12 is historical for those surfaces.
 
 ## 1. Rules for anyone implementing this
 

@@ -1,6 +1,7 @@
 import { useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { CircleNotch, DotsThree, Play, Star } from "@phosphor-icons/react";
+import { Link } from "react-router-dom";
 import { Badge, Button, Card, CopyIconButton, cx } from "../../components/ui";
 import { Heading, IconButton, Toggle } from "../../components/atoms";
 import { CapabilityChips } from "../../components/capability-chips";
@@ -191,65 +192,7 @@ export function RowMenu({
   );
 }
 
-/** Below `sm` a row becomes a card: four table columns at 390 would scroll sideways. */
-export function ModelCards({
-  rows,
-  isAdmin,
-  testTarget,
-  toggleTarget,
-  removeTarget,
-  onTest,
-  onToggle,
-  onEdit,
-  onDelete,
-  coverageFor,
-  displayOfProvider,
-  onPickProvider,
-  onPreferPreference,
-}: {
-  rows: Model[];
-  isAdmin: boolean;
-  testTarget: string | null;
-  toggleTarget: string | null;
-  removeTarget: string | null;
-  onTest: (model: Model) => void;
-  onToggle: (model: Model) => void;
-  onEdit: (model: Model) => void;
-  onDelete: (model: Model) => void;
-  coverageFor: (id: string) => Model[];
-  displayOfProvider: (id: string) => string;
-  onPickProvider: (id: string) => void;
-  onPreferPreference: (model: Model, provider: string | null) => void;
-}) {
-  return (
-    <ul aria-label="Models registry" className="flex flex-col">
-      {rows.map((m) => (
-        <li
-          key={m.ref}
-          className="border-b border-[var(--color-rule)] px-4 py-3 last:border-b-0"
-        >
-          <ModelCardBody
-            model={m}
-            isAdmin={isAdmin}
-            testTarget={testTarget}
-            toggleTarget={toggleTarget}
-            removeTarget={removeTarget}
-            onTest={onTest}
-            onToggle={onToggle}
-            onEdit={onEdit}
-            onDelete={onDelete}
-            coverageFor={coverageFor}
-            displayOfProvider={displayOfProvider}
-            onPickProvider={onPickProvider}
-            onPreferPreference={onPreferPreference}
-          />
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-/** One model as a phone card. Shared by the registry and the sortable active list. */
+/** One model as a phone card. Shared by the board and every filtered row set. */
 export function ModelCardBody({
   model: m,
   isAdmin,
@@ -390,39 +333,45 @@ export function groupModelRef(
   const group = groups?.find((candidate) => candidate.id === groupId);
   return group && !group.provider ? `${group.name}/${model.id}` : model.ref;
 }
-export const rowKey = (model: Model) => model.ref;
-
 /** Nothing here means nothing is connected: models come from providers, not catalogs. */
 export function EmptyRegistry({
   onSync,
   syncing,
   canAdmin,
+  onAddCustom,
 }: {
   onSync: () => void;
   syncing: boolean;
   canAdmin: boolean;
+  /** The second way out of an empty registry: a row no provider lists. */
+  onAddCustom?: () => void;
 }) {
   return (
     <Card className="px-6 py-12 text-center">
       <Heading level={2} className="text-heading font-medium">No models yet</Heading>
       <p className="mx-auto mt-1.5 max-w-[440px] text-body text-muted">
         Models are listed from the providers you connected — add one under{" "}
-        <a href="/app/providers" className="underline underline-offset-2">
+        <Link to="/providers" className="underline underline-offset-2">
           Providers
-        </a>
+        </Link>
         . Metadata such as context window, capabilities, and price is filled in from models.dev when you sync.
       </p>
       {canAdmin ? (
-        <div className="mt-5 flex justify-center gap-2">
+        <div className="mt-5 flex flex-wrap justify-center gap-2">
           <Button variant="primary" onClick={onSync} disabled={syncing}>
             {syncing ? "syncing…" : "sync metadata"}
           </Button>
-          <a
-            href="/app/providers"
+          {onAddCustom ? (
+            <Button variant="ghost" onClick={onAddCustom}>
+              add a custom model
+            </Button>
+          ) : null}
+          <Link
+            to="/providers"
             className="inline-flex h-8 items-center rounded-lg border border-line-strong bg-surface-2 px-3 text-body text-fg hover:border-[var(--color-line-strong)]"
           >
-            go to providers
-          </a>
+            add a provider
+          </Link>
         </div>
       ) : null}
     </Card>

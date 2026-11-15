@@ -6,17 +6,20 @@ export function IconButton({
   label,
   children,
   className,
+  disabled,
   ...rest
 }: {
   label: string;
   children: ReactNode;
   className?: string;
+  disabled?: boolean;
 } & HTMLAttributes<HTMLButtonElement>) {
   return (
     <button
       type="button"
       aria-label={label}
       title={label}
+      disabled={disabled}
       className={cx(
         "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-faint transition-colors",
         "hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2",

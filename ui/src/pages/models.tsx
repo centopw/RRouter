@@ -1,67 +1,89 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
-import { PageHeader, TabPanel, TabStrip } from "../components/ui";
-import { useLayoutDraft } from "../lib/layout-draft";
+import {
+  AlertBanner,
+  Button,
+  Card,
+  ConfirmDialog,
+  EmptyState,
+  ErrorNote,
+  PageHeader,
+} from "../components/ui";
+import { DataTable, PaginationBar } from "../components/table";
+import { effectiveGroups, groupForEntry, layoutFor, useLayoutDraft } from "../lib/layout-draft";
+import { usePhone, useReducedMotion } from "../lib/media";
+import { compareModels } from "../lib/models";
 import {
   qk,
+  useActivatePreset,
   useAliases,
   useCombos,
+  useCreatePreset,
   useIsAdmin,
+  useModelProviders,
+  useModels,
   usePresetIndex,
   usePresetLayout,
 } from "../lib/queries";
-import { ActiveView } from "./models/active";
-import { NamesView } from "./models/names";
-import { RegistryView } from "./models/registry";
-import { ALL, DEFAULT_SIZE, VIEWS, type ModelView } from "./models/params";
+import type { Model } from "../lib/api";
+import { useModelActions } from "./models/actions";
+import { useUnifiedColumns } from "./models/columns-unified";
+import { CustomModelModal } from "./models/custom-model";
+import { ModelFilters } from "./models/filters";
+import { GroupManager, type GroupCandidate } from "./models/groups";
+import {
+  ALL,
+  DEFAULT_SIZE,
+  STATUSES,
+  STATUS_LABELS,
+  mapLegacyView,
+  pageOf,
+  sizeOf,
+  statusParam,
+  statusesOf,
+  type StatusKey,
+} from "./models/params";
+import { AddMenu, PresetControls, SaveAsNewDialog } from "./models/preset-header";
+import { EmptyRegistry } from "./models/rows";
+import {
+  BoardSection,
+  UnifiedCards,
+  type LayoutControls,
+  type ModelActions,
+} from "./models/table-unified";
+import {
+  matchesSearch,
+  statusOfModel,
+  statusOfName,
+  type ModelRow,
+  type UnifiedRow,
+} from "./models/unified-rows";
 
 /**
- * Routing → Models, in three addressable views.
+ * Models: one page, one table.
  *
- * One page used to stack five jobs in a single scroll: the preset bar, the board, the
- * hidden list, the whole registry and the alias/combo rows. Operators could not tell which
- * table they were looking at. The views split by job, not by data:
- *
- *   active   — the preset this caller routes through: order, groups, enable, hide.
- *   registry — every model the gateway knows: filters, prices, capabilities, custom rows.
- *   names    — aliases and combos as routable names: group and /v1/models visibility.
- *
- * `?view=` carries the choice, so reload, back/forward and a shared link all land on the
- * same view; every other parameter (preset, filters, pages) is preserved when switching.
+ * The table has three row kinds (registry model, alias, combo), one toolbar and one
+ * pagination cursor. `Status`, `Names`, `Custom`, `Provider` and `q` narrow the same row
+ * set; none of them swaps the surface. The preset header edits the draft that group and
+ * `/v1` controls write to, and it is shared by every filter, so a save that is still
+ * debouncing survives a switch between routed, hidden and named rows.
  */
-
-const OPTIONS = [
-  { id: "active", label: "Active" },
-  { id: "registry", label: "Registry" },
-  { id: "names", label: "Names" },
-] as const satisfies ReadonlyArray<{ id: ModelView; label: string }>;
-
-const SUBTITLES: Record<ModelView, string> = {
-  active: "The preset this gateway routes through: its order, groups, and what is hidden.",
-  registry: "Every model this gateway can route, with its limits, price, and capabilities.",
-  names: "Aliases and combos as routable names: their group and /v1/models visibility.",
-};
-
 export default function Models() {
   const isAdmin = useIsAdmin();
   const [params, setParams] = useSearchParams();
   const client = useQueryClient();
+  const phone = usePhone();
+  const reduceMotion = useReducedMotion();
 
-  // Presets and the alias list are admin reads; a member only ever sees the registry.
-  // A link that carries registry filters (`?q=`, `?provider=`, `?shared=1`) opens the
-  // view those filters belong to instead of a board that would silently ignore them.
-  const requested = params.get("view");
-  const hasFilters = params.has("q") || params.has("provider") || params.has("shared");
-  const view: ModelView = isAdmin
-    ? (VIEWS as readonly string[]).includes(requested ?? "")
-      ? (requested as ModelView)
-      : hasFilters
-        ? "registry"
-        : "active"
-    : "registry";
+  // ---- URL -------------------------------------------------------------------------
+  // A pre-unification bookmark (`?view=`, `?ipage=`, `?dpage=`) is rewritten once into the
+  // filter vocabulary instead of keeping two view states that must be reconciled.
+  useEffect(() => {
+    const next = new URLSearchParams(params);
+    if (mapLegacyView(next)) setParams(next, { replace: true });
+  }, [params, setParams]);
 
-  /** Write parameters to the URL, dropping defaults so a clean view has a clean link. */
   const setFilters = useCallback(
     (patch: Record<string, string | null>, replace = false) => {
       const next = new URLSearchParams(params);
@@ -70,10 +92,12 @@ export default function Models() {
           value === null ||
           value === "" ||
           (key === "provider" && value === ALL) ||
+          (key === "status" && value === "routed") ||
           (key === "size" && Number(value) === DEFAULT_SIZE) ||
           (key === "page" && Number(value) === 1) ||
-          (key === "ipage" && Number(value) === 1) ||
-          (key === "dpage" && Number(value) === 1);
+          (key === "names" && value === "0") ||
+          (key === "custom" && value === "0") ||
+          (key === "shared" && value === "0");
         if (defaulted) next.delete(key);
         else next.set(key, value);
       }
@@ -82,82 +106,894 @@ export default function Models() {
     [params, setParams],
   );
 
-  /** The chosen view is always spelled out, so it wins over the filter default above. */
-  const selectView = (next: ModelView) => setFilters({ view: next });
-
-  // A `?q=` link opens the registry; spell that out once, so clearing the last filter
-  // does not fall back to the default view and move the operator off the table.
+  const urlQuery = params.get("q") ?? "";
+  const [draft, setDraft] = useState(urlQuery);
+  useEffect(() => setDraft(urlQuery), [urlQuery]);
+  // One history entry per pause, not per keystroke: typing replaces, navigation pushes.
   useEffect(() => {
-    if (isAdmin && requested === null && hasFilters) setFilters({ view: "registry" }, true);
-  }, [isAdmin, requested, hasFilters, setFilters]);
+    if (draft === urlQuery) return;
+    const timer = window.setTimeout(() => setFilters({ q: draft, page: "1" }, true), 200);
+    return () => window.clearTimeout(timer);
+  }, [draft, urlQuery, setFilters]);
+  const appliedQuery = useDeferredValue(urlQuery).trim().toLowerCase();
 
-  // ---- preset layout ---------------------------------------------------------------
-  // Shared by ACTIVE and NAMES: the board edits the list, the names view edits the group
-  // and `/v1/models` flag of one entry, and both are the same draft. Keeping it here means
-  // switching views cannot drop a save that is still debouncing.
-  // The registry view shows no preset and no layout, so it must not fetch them.
-  const presetReads = isAdmin && view !== "registry";
-  const presets = usePresetIndex(presetReads);
-  // `?preset=` is the addressable layout; without it the server's active preset applies.
-  const presetId =
-    params.get("preset") ??
-    presets.data?.active_id ??
-    presets.data?.default_id ??
-    presets.data?.data[0]?.id ??
-    null;
-  const layout = usePresetLayout(presetId, presetReads);
-  const layoutDraft = useLayoutDraft(layout.data, () =>
+  const requestedProvider = params.get("provider") ?? ALL;
+  const namesOn = isAdmin && params.get("names") === "1";
+  const customOnly = params.get("custom") === "1";
+  const sharedOnly = params.get("shared") === "1";
+  const requestedStatus = useMemo(() => statusesOf(params), [params]);
+  const size = sizeOf(params);
+
+  // ---- data ------------------------------------------------------------------------
+  const models = useModels();
+  const providers = useModelProviders();
+  const presets = usePresetIndex(isAdmin);
+  const presetId = isAdmin
+    ? (params.get("preset") ||
+      presets.data?.active_id ||
+      presets.data?.default_id ||
+      presets.data?.data[0]?.id ||
+      null)
+    : null;
+  const layout = usePresetLayout(presetId, isAdmin);
+  const invalidatePresetList = useCallback(
     // Only the list: refreshing the open document would reset the saved-at indicator.
-    void client.invalidateQueries({ queryKey: qk.modelPresets, exact: true }),
+    () => void client.invalidateQueries({ queryKey: qk.modelPresets, exact: true }),
+    [client],
   );
-  // Alias and combo names are routable entries of the layout; the registry never needs them.
-  const namesVisible = isAdmin && view !== "registry";
-  const aliases = useAliases(namesVisible);
-  const combos = useCombos(namesVisible);
+  const layoutDraft = useLayoutDraft(layout.data, invalidatePresetList);
+  const aliases = useAliases(isAdmin);
+  const combos = useCombos(isAdmin);
+  const actions = useModelActions();
+  const activatePreset = useActivatePreset();
+  const createPreset = useCreatePreset();
+
+  const selectPreset = useCallback(
+    (id: string) => {
+      setFilters({ preset: id, page: "1" });
+      activatePreset.mutate(id);
+    },
+    [setFilters, activatePreset],
+  );
+
+  const [copyOpen, setCopyOpen] = useState(false);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [editing, setEditing] = useState<Model | null>(null);
+  const [deleting, setDeleting] = useState<Model | null>(null);
+  const [groupsOpen, setGroupsOpen] = useState(false);
+  const [undo, setUndo] = useState<{ ref: string } | null>(null);
+
+  // ---- derived rows ----------------------------------------------------------------
+  const all = useMemo(
+    () =>
+      [...(models.data ?? [])].sort(
+        (a, b) => a.provider.localeCompare(b.provider) || compareModels(a, b),
+      ),
+    [models.data],
+  );
+  const coverage = useMemo(() => {
+    const map = new Map<string, Model[]>();
+    for (const model of all) {
+      const peers = map.get(model.id);
+      if (peers) peers.push(model);
+      else map.set(model.id, [model]);
+    }
+    return map;
+  }, [all]);
+  const providerDisplay = useMemo(
+    () => new Map((providers.data ?? []).map((p) => [p.id, p.display] as const)),
+    [providers.data],
+  );
+  const displayOf = useCallback(
+    (id: string) => providerDisplay.get(id) ?? id,
+    [providerDisplay],
+  );
+  const connected = useMemo(
+    () => (providers.data ?? []).filter((p) => p.has_connection),
+    [providers.data],
+  );
+  // A stale `?provider=` (disconnected since the link was copied) falls back to the list.
+  const effectiveProvider =
+    requestedProvider === ALL || providers.data?.some((p) => p.id === requestedProvider)
+      ? requestedProvider
+      : ALL;
+
+  const hasPreset = isAdmin && presetId !== null && layout.data !== undefined;
+  const presetAware = hasPreset;
+  const editable = hasPreset && layoutDraft.state !== "conflict";
+  // The draft seeds from the document in an effect, one render after the query resolves.
+  // Nothing may read or write it before that render, or it would overwrite the stored order.
+  const draftReady =
+    !hasPreset ||
+    layoutDraft.entries.length > 0 ||
+    (layout.data?.layout.items.length ?? 0) === 0;
+
+  const entryByRef = useMemo(
+    () => new Map(layoutDraft.entries.map((entry) => [entry.ref, entry] as const)),
+    [layoutDraft.entries],
+  );
+  const aliasList = useMemo(() => aliases.data ?? [], [aliases.data]);
+  const comboList = useMemo(() => combos.data ?? [], [combos.data]);
+
+  const modelRows = useMemo<ModelRow[]>(
+    () =>
+      all.map((model) => {
+        const entry = entryByRef.get(model.ref);
+        return {
+          kind: "model",
+          ref: model.ref,
+          model,
+          entry,
+          status: statusOfModel(model, entry, presetAware),
+        };
+      }),
+    [all, entryByRef, presetAware],
+  );
+
+  const nameRows = useMemo<UnifiedRow[]>(
+    () => [
+      ...aliasList.map((alias) => {
+        const ref = `rrouter/${alias.alias}`;
+        const entry = entryByRef.get(ref);
+        return {
+          kind: "alias" as const,
+          ref,
+          name: alias.alias,
+          alias,
+          entry,
+          status: statusOfName(entry, presetAware, layoutDraft.autoInclude),
+        };
+      }),
+      ...comboList.map((combo) => {
+        const ref = `rrouter/${combo.name}`;
+        const entry = entryByRef.get(ref);
+        return {
+          kind: "combo" as const,
+          ref,
+          name: combo.name,
+          combo,
+          entry,
+          status: statusOfName(entry, presetAware, layoutDraft.autoInclude),
+        };
+      }),
+    ],
+    [aliasList, comboList, entryByRef, presetAware, layoutDraft.autoInclude],
+  );
+
+  // A preset entry whose provider stopped listing it stays on the board, badged. A name
+  // ref waits for the alias/combo lists, so it is not mistaken for a stale model mid-load.
+  const staleRows = useMemo<UnifiedRow[]>(() => {
+    if (!hasPreset) return [];
+    const namesLoaded = aliases.isSuccess && combos.isSuccess;
+    const known = new Set([
+      ...all.map((model) => model.ref),
+      ...aliasList.map((alias) => `rrouter/${alias.alias}`),
+      ...comboList.map((combo) => `rrouter/${combo.name}`),
+    ]);
+    return layoutDraft.entries
+      .filter(
+        (entry) =>
+          !known.has(entry.ref) && (namesLoaded || !entry.ref.startsWith("rrouter/")),
+      )
+      .map<ModelRow>((entry) => ({
+        kind: "model",
+        ref: entry.ref,
+        model: null,
+        entry,
+        status: entry.visible ? "routed" : "hidden",
+      }));
+  }, [
+    hasPreset,
+    all,
+    aliasList,
+    comboList,
+    layoutDraft.entries,
+    aliases.isSuccess,
+    combos.isSuccess,
+  ]);
+
+  const groupChoices = useMemo(() => {
+    const knownProviders = new Set(all.map((model) => model.provider));
+    if (aliasList.length > 0 || comboList.length > 0) knownProviders.add("rrouter");
+    // Every stored entry contributes its bucket: an entry whose provider stopped listing
+    // the model still needs a section to render in, badged `unavailable`.
+    return effectiveGroups(
+      layoutDraft.entries,
+      layoutDraft.groups.filter((group) => !group.provider || knownProviders.has(group.provider)),
+      displayOf,
+    );
+  }, [layoutDraft.entries, layoutDraft.groups, all, aliasList.length, comboList.length, displayOf]);
+  const groupIndex = useMemo(
+    () => new Map(groupChoices.map((group, index) => [group.id, index] as const)),
+    [groupChoices],
+  );
+  const groupOf = useCallback(
+    (ref: string) => groupForEntry(entryByRef.get(ref), groupChoices),
+    [entryByRef, groupChoices],
+  );
+
+  const filteredRows = useMemo(() => {
+    const candidates: UnifiedRow[] = [...modelRows, ...(namesOn ? nameRows : []), ...staleRows];
+    return candidates.filter((row) => {
+      if (row.kind === "model") {
+        if (effectiveProvider !== ALL && row.model?.provider !== effectiveProvider) return false;
+        if (sharedOnly && (!row.model || (coverage.get(row.model.id)?.length ?? 0) < 2)) {
+          return false;
+        }
+      } else if (effectiveProvider !== ALL || sharedOnly) {
+        return false;
+      }
+      if (customOnly && !(row.kind === "model" && row.model?.source === "custom")) return false;
+      return matchesSearch(row, appliedQuery, displayOf);
+    });
+  }, [
+    modelRows,
+    nameRows,
+    staleRows,
+    namesOn,
+    effectiveProvider,
+    sharedOnly,
+    customOnly,
+    appliedQuery,
+    coverage,
+    displayOf,
+  ]);
+
+  const statusAware = isAdmin && hasPreset;
+  // `status` is a model filter. A name row has no enable flag and no price, and the old
+  // Names view listed every alias/combo; so names obey the filter only when the operator
+  // spelled one out. The default state shows them all, badged with their own status.
+  const statusExplicit = params.has("status");
+  const statusRows = useMemo(
+    () =>
+      statusAware
+        ? filteredRows.filter(
+            (row) =>
+              (row.kind !== "model" && !statusExplicit) ||
+              requestedStatus.has(row.status as StatusKey),
+          )
+        : filteredRows,
+    [filteredRows, statusAware, statusExplicit, requestedStatus],
+  );
+
+  const counts = useMemo(() => {
+    const result: Record<StatusKey, number> = { routed: 0, hidden: 0, disabled: 0, unrouted: 0 };
+    for (const row of filteredRows) {
+      if (row.kind !== "model") continue;
+      const status = row.status;
+      if (status !== "catalog") result[status] += 1;
+    }
+    return result;
+  }, [filteredRows]);
+
+  const namedCount = aliasList.length + comboList.length;
+  const routedTotal = modelRows.filter((row) => row.status === "routed").length;
+
+  const outside =
+    statusAware && appliedQuery !== ""
+      ? filteredRows.filter(
+          (row) => row.kind === "model" && !requestedStatus.has(row.status as StatusKey),
+        ).length
+      : 0;
+
+  const boardMode =
+    statusAware && !namesOn && requestedStatus.size === 1 && requestedStatus.has("routed");
+  const dragEnabled =
+    boardMode &&
+    editable &&
+    !customOnly &&
+    !sharedOnly &&
+    appliedQuery === "" &&
+    effectiveProvider === ALL;
+
+  const entryPosition = useMemo(
+    () => new Map(layoutDraft.entries.map((entry, index) => [entry.ref, index] as const)),
+    [layoutDraft.entries],
+  );
+
+  const boardRows = useMemo(() => {
+    if (!boardMode) return [];
+    const rank = (ref: string) => groupIndex.get(groupOf(ref)) ?? Number.MAX_SAFE_INTEGER;
+    return [...statusRows].sort(
+      (a, b) =>
+        rank(a.ref) - rank(b.ref) ||
+        (entryPosition.get(a.ref) ?? Number.MAX_SAFE_INTEGER) -
+          (entryPosition.get(b.ref) ?? Number.MAX_SAFE_INTEGER),
+    );
+  }, [boardMode, statusRows, groupIndex, groupOf, entryPosition]);
+
+  const flatRows = useMemo(() => {
+    if (boardMode) return [];
+    return [...statusRows].sort((a, b) => {
+      const ap = entryPosition.get(a.ref);
+      const bp = entryPosition.get(b.ref);
+      if (ap !== undefined && bp !== undefined) return ap - bp;
+      if (ap !== undefined) return -1;
+      if (bp !== undefined) return 1;
+      if (a.kind === "model" && b.kind === "model" && a.model && b.model) {
+        return (
+          displayOf(a.model.provider).localeCompare(displayOf(b.model.provider)) ||
+          compareModels(a.model, b.model)
+        );
+      }
+      if (a.kind === "model" && b.kind !== "model") return -1;
+      if (a.kind !== "model" && b.kind === "model") return 1;
+      return a.ref.localeCompare(b.ref);
+    });
+  }, [boardMode, statusRows, entryPosition, displayOf]);
+
+  const total = boardMode ? boardRows.length : flatRows.length;
+  const page = pageOf(params, "page", total, size);
+  const pageSlice = useMemo(
+    () => (boardMode ? boardRows : flatRows).slice((page - 1) * size, page * size),
+    [boardMode, boardRows, flatRows, page, size],
+  );
+  const boardGroups = useMemo(() => {
+    const byGroup = new Map<string, UnifiedRow[]>();
+    for (const row of pageSlice) {
+      const id = groupOf(row.ref);
+      const list = byGroup.get(id);
+      if (list) list.push(row);
+      else byGroup.set(id, [row]);
+    }
+    return groupChoices
+      .filter((group) => byGroup.has(group.id))
+      .map((group) => ({ group, rows: byGroup.get(group.id) ?? [] }));
+  }, [pageSlice, groupChoices, groupOf]);
+  const groupCounts = useMemo(() => {
+    const result = new Map<string, number>();
+    for (const row of boardRows) {
+      const id = groupOf(row.ref);
+      result.set(id, (result.get(id) ?? 0) + 1);
+    }
+    return result;
+  }, [boardRows, groupOf]);
+
+  // ---- draft behaviour -------------------------------------------------------------
+  const newRefKey = useMemo(
+    () =>
+      all
+        .filter((model) => !entryByRef.has(model.ref))
+        .map((model) => model.ref)
+        .join("|"),
+    [all, entryByRef],
+  );
+  // Auto-include is a policy, not a button: an opted-in preset adopts every registry model
+  // it never stored, and the debounced save persists them.
+  useEffect(() => {
+    if (!draftReady || !isAdmin || !hasPreset || !layoutDraft.autoInclude || newRefKey === "") {
+      return;
+    }
+    layoutDraft.adopt(newRefKey.split("|"));
+    // `adopt` is stable in spirit; rerunning it for the same refs is a no-op.
+  }, [draftReady, isAdmin, hasPreset, layoutDraft.autoInclude, newRefKey]);
+
+  // Undo is local: hiding is a layout change, so after the debounced save there is nothing
+  // on the server to undo, and a toast surviving a reload would lie.
+  useEffect(() => {
+    if (!undo) return;
+    const timer = window.setTimeout(() => setUndo(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [undo]);
+
+  const hideRow = useRef<(ref: string) => void>(() => {});
+  hideRow.current = (ref) => {
+    layoutDraft.hide(ref);
+    setUndo({ ref });
+  };
+
+  const groupCandidates = useMemo<GroupCandidate[]>(
+    () => [
+      ...all.map((model) => ({
+        ref: model.ref,
+        label: model.id,
+        provider: model.provider,
+        kind: "model" as const,
+      })),
+      ...aliasList.map((alias) => ({
+        ref: `rrouter/${alias.alias}`,
+        label: `${alias.alias} → ${alias.target}`,
+        provider: "rrouter",
+        kind: "alias" as const,
+      })),
+      ...comboList.map((combo) => ({
+        ref: `rrouter/${combo.name}`,
+        label: `${combo.name} · ${combo.models.length} models`,
+        provider: "rrouter",
+        kind: "combo" as const,
+      })),
+    ],
+    [all, aliasList, comboList],
+  );
+
+  const openGroups = () => {
+    layoutDraft.ensureProviderGroups(
+      groupChoices
+        .filter((group) => group.provider)
+        .map((group) => ({ provider: group.provider as string, name: group.name })),
+    );
+    setGroupsOpen(true);
+  };
+
+  // ---- columns and row controls ----------------------------------------------------
+  const columns = useUnifiedColumns({
+    model: {
+      isAdmin,
+      coverage,
+      providerDisplay,
+      testTarget: actions.testTarget,
+      toggleTarget: actions.toggleTarget,
+      removeTarget: actions.removeTarget,
+      onTest: actions.onTest,
+      onToggle: actions.onToggle,
+      onEdit: setEditing,
+      onDelete: setDeleting,
+      onPrefer: actions.onPrefer,
+      onPickProvider: (id) => setFilters({ provider: id, page: "1" }),
+      hide: editable ? hideRow.current : undefined,
+      hideFor: (ref) => entryByRef.has(ref),
+      groups: isAdmin && hasPreset ? groupChoices : undefined,
+      groupOf,
+      onMoveGroup: (ref, group) => layoutDraft.assignGroup(ref, group),
+    },
+    isAdmin,
+    editable,
+    presetScoped: hasPreset,
+    groups: groupChoices,
+    groupOf,
+    onAssignGroup: (ref, group) => layoutDraft.assignGroup(ref, group),
+    onVisible: (ref, visible) => layoutDraft.setVisible(ref, visible),
+    onHide: (ref) => hideRow.current(ref),
+  });
+
+  const rowActions: ModelActions = {
+    isAdmin,
+    testTarget: actions.testTarget,
+    toggleTarget: actions.toggleTarget,
+    removeTarget: actions.removeTarget,
+    onTest: actions.onTest,
+    onToggle: actions.onToggle,
+    onEdit: setEditing,
+    onDelete: setDeleting,
+    coverageFor: (id) => coverage.get(id) ?? [],
+    displayOfProvider: displayOf,
+    onPickProvider: (id) => setFilters({ provider: id, page: "1" }),
+    onPrefer: actions.onPrefer,
+    onHide: (ref) => hideRow.current(ref),
+  };
+
+  const controls: LayoutControls | undefined = hasPreset
+    ? {
+        editable,
+        groups: groupChoices,
+        groupOf,
+        onAssignGroup: (ref, group) => layoutDraft.assignGroup(ref, group),
+        onVisible: (ref, visible) => layoutDraft.setVisible(ref, visible),
+      }
+    : undefined;
+
+  // ---- states ----------------------------------------------------------------------
+  const loading =
+    !draftReady ||
+    models.isLoading ||
+    (isAdmin && (presets.isLoading || (presetId !== null && layout.isLoading)));
+  const presetName =
+    presets.data?.data.find((preset) => preset.id === presetId)?.name ?? "this preset";
+  const statusCaption = STATUSES.filter((status) => requestedStatus.has(status))
+    .map((status) => STATUS_LABELS[status])
+    .join(", ");
+  const caption = statusAware
+    ? namesOn
+      ? `${statusCaption} models and named routes in ${presetName}`
+      : `${statusCaption} rows in ${presetName}`
+    : "Every model this gateway can serve";
+  const subtitle = hasPreset
+    ? `Every model this gateway can serve. ${routedTotal.toLocaleString()} routed · ${all.length.toLocaleString()} known${
+        namedCount > 0 ? ` · ${namedCount.toLocaleString()} named routes` : ""
+      }`
+    : "Every model this gateway can serve.";
+
+  const rowsNothing = total === 0;
+  const hasRowFilters =
+    appliedQuery !== "" ||
+    effectiveProvider !== ALL ||
+    customOnly ||
+    sharedOnly ||
+    namesOn ||
+    (statusAware && statusParam(requestedStatus) !== null);
+  const clearFilters = () => {
+    setDraft("");
+    setFilters({
+      q: null,
+      provider: null,
+      status: null,
+      names: null,
+      custom: null,
+      shared: null,
+      page: null,
+    });
+  };
+  const showStatus = (status: StatusKey) =>
+    setFilters({ status: statusParam(new Set<StatusKey>([status])), page: "1" });
+  const canClear =
+    urlQuery !== "" ||
+    params.has("provider") ||
+    params.has("status") ||
+    params.has("names") ||
+    params.has("custom") ||
+    params.has("shared");
+
+  const emptyState =
+    appliedQuery !== "" || effectiveProvider !== ALL || customOnly || sharedOnly ? (
+      <div className="flex flex-col items-center gap-2">
+        <p>No rows match these filters.</p>
+        <Button variant="ghost" onClick={clearFilters}>
+          Clear filters
+        </Button>
+      </div>
+    ) : statusAware && requestedStatus.size === 1 && requestedStatus.has("routed") ? (
+      layoutDraft.entries.length === 0 ? (
+        <div className="flex flex-col items-center gap-2">
+          <p>This preset has no models.</p>
+          <Button variant="ghost" onClick={() => showStatus("unrouted")}>
+            Show not-in-preset models
+          </Button>
+        </div>
+      ) : counts.disabled > 0 ? (
+        <div className="flex flex-col items-center gap-2">
+          <p>Every model in this preset is disabled.</p>
+          <Button variant="ghost" onClick={() => showStatus("disabled")}>
+            Show disabled models
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-col items-center gap-2">
+          <p>No model is visible in this preset.</p>
+          <Button variant="ghost" onClick={() => showStatus("hidden")}>
+            Show hidden models
+          </Button>
+        </div>
+      )
+    ) : statusAware && requestedStatus.size === 1 && requestedStatus.has("hidden") ? (
+      <p>Nothing is hidden from this preset. Rows you hide appear here.</p>
+    ) : statusAware && requestedStatus.size === 1 && requestedStatus.has("disabled") ? (
+      <p>No model is disabled. The gateway refuses a disabled id on every endpoint.</p>
+    ) : statusAware && requestedStatus.size === 1 && requestedStatus.has("unrouted") ? (
+      <p>Every model this gateway knows is already in this preset.</p>
+    ) : rowsNothing && hasRowFilters ? (
+      <div className="flex flex-col items-center gap-2">
+        <p>No rows match these filters.</p>
+        <Button variant="ghost" onClick={clearFilters}>
+          Clear filters
+        </Button>
+      </div>
+    ) : (
+      "no rows here yet"
+    );
+
+  const pagination = {
+    page,
+    size,
+    total,
+    // Names are rows too; "models" would undercount what the footer paginates.
+    label: "rows",
+    onPage: (next: number) => setFilters({ page: String(next) }),
+    onSize: (next: number) => setFilters({ size: String(next), page: "1" }),
+  };
 
   return (
     <>
-      <PageHeader title="Models" subtitle={SUBTITLES[view]} />
-      {isAdmin ? (
-        <TabStrip
-          options={OPTIONS}
-          value={view}
-          onChange={selectView}
-          ariaLabel="model view"
-          className="mb-4"
+      <PageHeader
+        title="Models"
+        subtitle={subtitle}
+        actions={
+          isAdmin ? (
+            <>
+              {presets.data && presetId && !layout.isError ? (
+                <PresetControls
+                  presets={presets.data.data}
+                  presetId={presetId}
+                  defaultId={presets.data.default_id ?? ""}
+                  draft={layoutDraft}
+                  busy={activatePreset.isPending || createPreset.isPending}
+                  onSelect={selectPreset}
+                  onSaveAsNew={() => setCopyOpen(true)}
+                />
+              ) : null}
+              <AddMenu onAddCustom={() => setCustomOpen(true)} />
+            </>
+          ) : undefined
+        }
+      />
+
+      {presets.isError ? (
+        <AlertBanner
+          title="Presets could not be loaded"
+          actions={
+            <Button variant="ghost" onClick={() => void presets.refetch()}>
+              retry
+            </Button>
+          }
         >
-          <TabPanel value="active">
-            <ActiveView
-              isAdmin={isAdmin}
-              params={params}
-              setFilters={setFilters}
-              presets={presets}
-              presetId={presetId}
-              layout={layout}
-              layoutDraft={layoutDraft}
-              aliases={aliases}
-              combos={combos}
-            />
-          </TabPanel>
-          <TabPanel value="registry">
-            <RegistryView isAdmin={isAdmin} params={params} setFilters={setFilters} />
-          </TabPanel>
-          <TabPanel value="names">
-            <NamesView
-              isAdmin={isAdmin}
-              aliases={aliases}
-              combos={combos}
-              groups={layoutDraft.groups}
-              entries={layoutDraft.entries}
-              presetId={presetId}
-              onAssign={(ref, group) => layoutDraft.assignGroup(ref, group)}
-              onVisible={(ref, visible) => layoutDraft.setVisible(ref, visible)}
-            />
-          </TabPanel>
-        </TabStrip>
+          The table still lists every model; preset order, groups and named routes are
+          unavailable until the library answers.
+        </AlertBanner>
+      ) : null}
+      {layout.isError && presetId ? (
+        <div className="mb-4">
+          <ErrorNote error={layout.error} onRetry={() => void layout.refetch()} />
+        </div>
+      ) : null}
+      {models.isError ? (
+        <div className="mb-4">
+          <ErrorNote error={models.error} onRetry={() => void models.refetch()} />
+        </div>
+      ) : null}
+      {providers.isError ? (
+        <div className="mb-4">
+          <ErrorNote error={providers.error} onRetry={() => void providers.refetch()} />
+        </div>
+      ) : null}
+      {actions.sync.isError || actions.toggle.isError || actions.remove.isError ? (
+        <div className="mb-4">
+          <ErrorNote error={actions.sync.error ?? actions.toggle.error ?? actions.remove.error} />
+        </div>
+      ) : null}
+      {layoutDraft.error ? (
+        <AlertBanner
+          title="Could not save this layout"
+          actions={
+            <Button variant="ghost" onClick={layoutDraft.discard}>
+              Discard changes
+            </Button>
+          }
+        >
+          {layoutDraft.error}. The previous order was restored; the rows below show what the
+          gateway last accepted.
+        </AlertBanner>
+      ) : null}
+      {layoutDraft.conflict ? (
+        <div
+          role="alert"
+          className="mb-4 rounded-[var(--radius-card)] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-5 py-3 text-small text-fg"
+        >
+          <span className="font-medium">Another tab saved a newer revision.</span>{" "}
+          <span className="text-muted">
+            Your draft is kept here. Load the stored layout, or save your draft as a new preset.
+          </span>
+          <span className="mt-2 flex flex-wrap gap-1.5">
+            <Button variant="ghost" onClick={layoutDraft.loadLatest}>
+              Load latest
+            </Button>
+            <Button variant="primary" onClick={() => setCopyOpen(true)}>
+              Save as new
+            </Button>
+          </span>
+        </div>
+      ) : null}
+      {undo ? (
+        <div
+          role="status"
+          className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-[8px] border border-line bg-surface px-4 py-2 text-small text-fg"
+        >
+          <span>
+            <span className="font-mono">{undo.ref}</span> hidden from this preset and
+            /v1/models. It still routes when named explicitly.
+          </span>
+          <span className="flex gap-1.5">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                layoutDraft.restore(undo.ref);
+                setUndo(null);
+              }}
+            >
+              Undo
+            </Button>
+            <Button variant="quiet" onClick={() => setUndo(null)}>
+              dismiss
+            </Button>
+          </span>
+        </div>
+      ) : null}
+
+      {!models.isLoading && all.length === 0 ? (
+        <EmptyRegistry
+          onSync={actions.onSync}
+          syncing={actions.sync.isPending}
+          canAdmin={isAdmin}
+          onAddCustom={isAdmin ? () => setCustomOpen(true) : undefined}
+        />
       ) : (
-        <RegistryView isAdmin={isAdmin} params={params} setFilters={setFilters} />
+        <Card>
+          <ModelFilters
+            query={draft}
+            onQuery={setDraft}
+            providers={connected}
+            provider={effectiveProvider}
+            onProvider={(next) => setFilters({ provider: next, page: "1" })}
+            statuses={requestedStatus}
+            counts={counts}
+            showStatus={statusAware}
+            onStatus={(next) => setFilters({ status: statusParam(next), page: "1" })}
+            showNames={isAdmin}
+            names={namesOn}
+            onNames={() => setFilters({ names: namesOn ? null : "1", page: "1" })}
+            custom={customOnly}
+            onCustom={() => setFilters({ custom: customOnly ? null : "1", page: "1" })}
+            shared={sharedOnly}
+            onShared={() => setFilters({ shared: sharedOnly ? null : "1", page: "1" })}
+            extra={
+              hasPreset ? (
+                <Button variant="quiet" onClick={openGroups}>
+                  groups
+                </Button>
+              ) : undefined
+            }
+            outside={outside}
+            onShowOutside={() =>
+              setFilters({ status: STATUSES.join(","), page: "1" })
+            }
+            canClear={canClear}
+            onClear={clearFilters}
+          />
+
+          {loading ? (
+            <div
+              aria-busy="true"
+              className="min-h-[240px] px-5 py-12 text-center text-body text-faint"
+            >
+              loading models…
+            </div>
+          ) : boardMode ? (
+            boardGroups.length === 0 ? (
+              <EmptyState>{emptyState}</EmptyState>
+            ) : (
+              boardGroups.map(({ group, rows }, index) => (
+                <BoardSection
+                  key={group.id}
+                  group={group}
+                  count={groupCounts.get(group.id) ?? rows.length}
+                  rows={rows}
+                  columns={columns}
+                  actions={rowActions}
+                  controls={controls}
+                  phone={phone}
+                  drag={!phone && dragEnabled}
+                  reducedMotion={reduceMotion}
+                  onReorder={layoutDraft.reorder}
+                  onHide={(ref) => hideRow.current(ref)}
+                  showHeader={index === 0}
+                  onMove={(ref, delta) => {
+                    const index = rows.findIndex((row) => row.ref === ref);
+                    const target = rows[index + delta];
+                    if (target) layoutDraft.reorder(ref, target.ref);
+                  }}
+                />
+              ))
+            )
+          ) : phone ? (
+            pageSlice.length === 0 ? (
+              <EmptyState>{emptyState}</EmptyState>
+            ) : (
+              <UnifiedCards
+                rows={pageSlice}
+                actions={rowActions}
+                controls={controls}
+                onHide={(ref) => hideRow.current(ref)}
+              />
+            )
+          ) : (
+            <DataTable
+              columns={columns}
+              rows={loading ? undefined : pageSlice}
+              rowKey={(row) => row.ref}
+              loading={loading}
+              stickyRight="actions"
+              rowHeaderKey="model"
+              tableLayout="fixed"
+              scrollLabel="Models"
+              caption={caption}
+              empty={emptyState}
+              pagination={pagination}
+            />
+          )}
+
+          {boardMode && !loading && boardRows.length > 0 ? (
+            <PaginationBar pagination={pagination} />
+          ) : null}
+        </Card>
       )}
+
+      {copyOpen ? (
+        <SaveAsNewDialog
+          onClose={() => {
+            createPreset.reset();
+            setCopyOpen(false);
+          }}
+          onSubmit={(name) =>
+            createPreset.mutate(
+              {
+                name,
+                layout: layoutFor(
+                  layoutDraft.entries,
+                  layoutDraft.groups,
+                  layoutDraft.autoInclude,
+                ),
+              },
+              {
+                onSuccess: (created) => {
+                  setCopyOpen(false);
+                  selectPreset(created.id);
+                },
+              },
+            )
+          }
+          busy={createPreset.isPending}
+          error={createPreset.error}
+        />
+      ) : null}
+
+      {customOpen ? (
+        <CustomModelModal
+          providers={connected}
+          defaultProvider={effectiveProvider !== ALL ? effectiveProvider : ""}
+          onClose={() => setCustomOpen(false)}
+          onSaved={actions.invalidateRegistry}
+        />
+      ) : null}
+
+      {editing ? (
+        <CustomModelModal
+          providers={connected}
+          defaultProvider={editing.provider}
+          initial={editing}
+          onClose={() => setEditing(null)}
+          onSaved={actions.invalidateRegistry}
+        />
+      ) : null}
+
+      <ConfirmDialog
+        open={deleting !== null}
+        title="Delete custom model"
+        message={
+          <>
+            Remove <span className="font-mono">{deleting?.ref}</span> from this gateway's
+            registry? Requests naming it fail until it is listed again.
+          </>
+        }
+        confirmLabel="Delete model"
+        busy={actions.remove.isPending}
+        error={actions.remove.error}
+        onConfirm={() => {
+          if (deleting) {
+            actions.remove.mutate(deleting, { onSuccess: () => setDeleting(null) });
+          }
+        }}
+        onClose={() => {
+          if (!actions.remove.isPending) {
+            actions.remove.reset();
+            setDeleting(null);
+          }
+        }}
+      />
+
+      <GroupManager
+        open={groupsOpen}
+        groups={groupChoices}
+        onClose={() => setGroupsOpen(false)}
+        onCreate={(name) => {
+          layoutDraft.createGroup(name);
+        }}
+        onRename={(id, name) => layoutDraft.renameGroup(id, name)}
+        onReorder={(from, to) => layoutDraft.reorderGroup(from, to)}
+        onDelete={(id) => layoutDraft.deleteGroup(id)}
+        entries={layoutDraft.entries}
+        candidates={groupCandidates}
+        onAssign={(ref, group) => layoutDraft.assignGroup(ref, group)}
+        onSetVisible={(id, visible) => layoutDraft.setGroupVisible(id, visible)}
+        isDefault={presetId === presets.data?.default_id}
+      />
     </>
   );
 }

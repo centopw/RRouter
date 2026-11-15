@@ -28,6 +28,8 @@ export type ModelColumnsOptions = {
   onPickProvider: (provider: string) => void;
   /** Only the board has a preset and a layout; the registry passes none. */
   hide?: (ref: string) => void;
+  /** Whether this row can be hidden: an entry must exist in the preset. */
+  hideFor?: (ref: string) => boolean;
   groups?: Array<DraftGroup & { implicit?: boolean }>;
   groupOf?: (ref: string) => string | undefined;
   onMoveGroup?: (ref: string, group: string | null) => void;
@@ -47,6 +49,7 @@ export function useModelColumns({
   onPrefer,
   onPickProvider,
   hide,
+  hideFor,
   groups,
   groupOf,
   onMoveGroup,
@@ -87,20 +90,33 @@ export function useModelColumns({
                 onPrefer={(provider: string | null) => onPrefer(m.id, provider)}
               />
               {m.preferred_provider === m.provider ? (
-                <Badge tone="accent" title={`preferred provider for ${m.id}`}>
-                  preferred
-                </Badge>
+                <span className="shrink-0">
+                  <Badge tone="accent" title={`preferred provider for ${m.id}`}>
+                    preferred
+                  </Badge>
+                </span>
               ) : null}
               {m.source === "custom" ? (
-                <Badge tone="accent" title="added by an operator, not synced from the provider">
-                  custom
-                </Badge>
+                <span className="shrink-0">
+                  <Badge tone="accent" title="added by an operator, not synced from the provider">
+                    custom
+                  </Badge>
+                </span>
               ) : null}
               {m.deprecated ? (
-                <Badge tone="warn" title="this family is retired by its provider">
-                  deprecated
-                </Badge>
+                <span className="shrink-0">
+                  <Badge tone="warn" title="this family is retired by its provider">
+                    deprecated
+                  </Badge>
+                </span>
               ) : null}
+              {m.enabled ? null : (
+                <span className="shrink-0">
+                  <Badge tone="neutral" title="the gateway refuses this id on every endpoint">
+                    disabled
+                  </Badge>
+                </span>
+              )}
             </div>
             {m.display && m.display !== m.id ? (
               <div className="mt-0.5 min-w-0 truncate text-caption text-faint">{m.display}</div>
@@ -196,7 +212,7 @@ export function useModelColumns({
               pendingDelete={removeTarget === m.ref}
               onEdit={() => onEdit(m)}
               onDelete={() => onDelete(m)}
-              onHide={hide ? () => hide(m.ref) : undefined}
+              onHide={hide && (!hideFor || hideFor(m.ref)) ? () => hide(m.ref) : undefined}
               groups={movable}
               currentGroup={groupOf?.(m.ref)}
               onMoveGroup={
@@ -223,6 +239,7 @@ export function useModelColumns({
     onPrefer,
     onPickProvider,
     hide,
+    hideFor,
     groups,
     groupOf,
     onMoveGroup,

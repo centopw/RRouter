@@ -7,8 +7,10 @@ import {
   GearSix,
   Key,
   MagnifyingGlass,
+  Plugs,
   SidebarSimple,
   SignOut,
+  SquaresFour,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
@@ -34,7 +36,14 @@ type NavTab = {
   adminOnly?: boolean;
 };
 
-type SectionId = "activity" | "playground" | "routing" | "access" | "system";
+type SectionId =
+  | "activity"
+  | "playground"
+  | "models"
+  | "providers"
+  | "routing"
+  | "access"
+  | "system";
 
 type NavSection = {
   id: SectionId;
@@ -57,8 +66,9 @@ type Brand = {
 const DEFAULT_NAME = "RRouter";
 
 /**
- * Five surfaces, each with tabs. The sidebar shows the surface; the tab strip shows the
- * pages. Daily pages are the first tab, rare configuration stays under System.
+ * The surfaces, each with tabs. The sidebar shows the surface; the tab strip shows the
+ * pages. Models and Providers are standalone: one page, so no strip. Daily pages come
+ * first, rare configuration stays under System.
  */
 const SECTIONS: NavSection[] = [
   {
@@ -84,13 +94,26 @@ const SECTIONS: NavSection[] = [
     ],
   },
   {
+    id: "models",
+    to: "/models",
+    label: "Models",
+    icon: glyph(SquaresFour),
+    tabs: [{ to: "/models", label: "Models", end: true }],
+  },
+  {
+    id: "providers",
+    to: "/providers",
+    label: "Providers",
+    icon: glyph(Plugs),
+    tabs: [{ to: "/providers", label: "Providers", end: true }],
+  },
+  {
     id: "routing",
     to: "/routing",
     label: "Routing",
     icon: glyph(ArrowsLeftRight),
     tabs: [
-      { to: "/routing/models", label: "Models" },
-      { to: "/routing/providers", label: "Providers" },
+      { to: "/routing/presets", label: "Presets", adminOnly: true },
       { to: "/routing/aliases", label: "Aliases", adminOnly: true },
       { to: "/routing/combos", label: "Combos", adminOnly: true },
     ],
@@ -124,8 +147,9 @@ function visibleTabs(section: NavSection, isAdmin: boolean) {
   return section.tabs.filter((tab) => isAdmin || !tab.adminOnly);
 }
 
+/** Never the section root: a role with no visible tab would redirect to itself. */
 function sectionDefault(section: NavSection, isAdmin: boolean) {
-  return visibleTabs(section, isAdmin)[0]?.to ?? section.to;
+  return visibleTabs(section, isAdmin)[0]?.to ?? "/models";
 }
 
 /** A first run (no accounts, no keys) lands on the wizard once; the flag is set by the
@@ -670,7 +694,10 @@ export function SectionIndex({ section: id }: { section: SectionId }) {
   const isAdmin = useIsAdmin();
   const section = SECTIONS.find((candidate) => candidate.id === id);
   if (!section) return <Navigate to="/activity" replace />;
-  return <Navigate to={sectionDefault(section, isAdmin)} replace />;
+  const tabs = visibleTabs(section, isAdmin);
+  // No tab for this role: land somewhere real. Redirecting to the section root loops.
+  if (tabs.length === 0) return <Navigate to="/models" replace />;
+  return <Navigate to={tabs[0]?.to ?? "/models"} replace />;
 }
 
 export function SectionLayout({ section: id }: { section: SectionId }) {
@@ -678,6 +705,8 @@ export function SectionLayout({ section: id }: { section: SectionId }) {
   const section = SECTIONS.find((candidate) => candidate.id === id);
   if (!section) return <Outlet />;
   const tabs = visibleTabs(section, isAdmin);
+  // Standalone pages (Models, Providers) get no one-item tab strip.
+  if (tabs.length <= 1) return <Outlet />;
   return (
     <>
       <nav
@@ -728,7 +757,9 @@ function CommandPalette({ open, onClose, nav }: { open: boolean; onClose: () => 
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const pages = nav.filter((n) => !q || n.label.toLowerCase().includes(q)).slice(0, 6);
+    // Enough rows that the standalone Models and Providers pages are reachable without
+    // typing, not buried behind seven admin-only tabs.
+    const pages = nav.filter((n) => !q || n.label.toLowerCase().includes(q)).slice(0, 8);
     const modelHits = (models.data ?? [])
       .filter((m) => q && m.ref.toLowerCase().includes(q))
       .slice(0, 6);

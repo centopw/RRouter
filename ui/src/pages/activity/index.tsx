@@ -272,7 +272,7 @@ export default function Activity() {
                 View failing requests
               </Button>
               {providerKnown ? (
-                <Button variant="quiet" onClick={() => navigate("/routing/providers")}>
+                <Button variant="quiet" onClick={() => navigate("/providers")}>
                   Open providers
                 </Button>
               ) : null}

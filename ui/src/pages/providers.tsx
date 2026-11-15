@@ -98,7 +98,17 @@ export default function Providers() {
   const pings = useQuotaPings();
 
   const accounts = connections.data ?? [];
-  const connectedIds = useMemo(() => new Set(accounts.map((a) => a.provider)), [accounts]);
+  // A custom endpoint is one operator-visible source even though it borrows a protocol
+  // id; count it by its name so the header matches the table beneath it.
+  const endpointCount = useMemo(
+    () =>
+      new Set(
+        accounts.map((a) =>
+          isCustomConnection(a) ? `custom:${a.name ?? a.id}` : a.provider,
+        ),
+      ).size,
+    [accounts],
+  );
   const oauthIds = useMemo(() => new Set((oauth.data ?? []).map((p) => p.id)), [oauth.data]);
 
   const displayOf = (id: string) =>
@@ -197,20 +207,26 @@ export default function Providers() {
     setNotice(null);
   };
 
-  // Sidebar shortcuts land here with `?custom=openai|anthropic`. A reader cannot add a
-  // connection, so the deep link is dropped rather than opening a form that would 403.
+  // Deep links land here as `?add=custom&protocol=openai|anthropic`; the older
+  // `?custom=openai|anthropic` spelling stays accepted. A reader cannot add a connection,
+  // so the link is dropped rather than opening a form that would 403.
   useEffect(() => {
-    const custom = params.get("custom");
+    const legacy = params.get("custom");
+    const custom = params.get("add") === "custom" ? params.get("protocol") : legacy;
     if (custom !== "openai" && custom !== "anthropic") return;
     if (!isAdmin) {
       const next = new URLSearchParams(params);
       next.delete("custom");
+      next.delete("add");
+      next.delete("protocol");
       setParams(next, { replace: true });
       return;
     }
     startCustom(custom);
     const next = new URLSearchParams(params);
     next.delete("custom");
+    next.delete("add");
+    next.delete("protocol");
     setParams(next, { replace: true });
     // `startCustom` is stable for this effect's purpose: it only sets local state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -233,16 +249,35 @@ export default function Providers() {
     {
       key: "account",
       title: "account",
-      render: (r) => (
-        <span className="flex min-w-0 flex-wrap items-center gap-2">
-          <Dot tone={r.exhausted ? "neg" : r.is_active ? "pos" : "muted"} />
-          <ProviderIcon provider={r.provider} size={17} />
-          <span className="font-medium">{displayOf(r.provider)}</span>
-          <span className="truncate text-muted">{r.name ?? <span className="text-faint">unnamed</span>}</span>
-          <span className="text-caption text-faint md:hidden">{WINDOW_LABEL[r.window]}</span>
-          {r.exhausted ? <Badge tone="neg">over quota</Badge> : null}
-        </span>
-      ),
+      render: (r) => {
+        // The quota row carries no base URL, so look up its connection to tell a custom
+        // endpoint from the provider it borrows a protocol from.
+        const connection = accounts.find((row) => row.id === r.connection_id);
+        const custom = connection ? isCustomConnection(connection) : false;
+        const label = custom
+          ? (r.name ?? `${displayOf(r.provider)} (custom URL)`)
+          : displayOf(r.provider);
+        return (
+          <span className="flex min-w-0 flex-wrap items-center gap-2">
+            <Dot tone={r.exhausted ? "neg" : r.is_active ? "pos" : "muted"} />
+            <ProviderIcon provider={r.provider} size={17} />
+            <span className="font-medium">{label}</span>
+            {custom ? (
+              <span className="shrink-0">
+                <Badge tone="neutral" title="keyed account pointing at a custom base URL">
+                  custom
+                </Badge>
+              </span>
+            ) : (
+              <span className="truncate text-muted">
+                {r.name ?? <span className="text-faint">unnamed</span>}
+              </span>
+            )}
+            <span className="text-caption text-faint md:hidden">{WINDOW_LABEL[r.window]}</span>
+            {r.exhausted ? <Badge tone="neg">over quota</Badge> : null}
+          </span>
+        );
+      },
     },
     {
       key: "window",
@@ -274,17 +309,41 @@ export default function Providers() {
     {
       key: "provider",
       title: "provider",
-      render: (r) => (
-        <span className="flex min-w-0 items-center gap-2" title={displayOf(r.provider)}>
-          <Dot tone={!r.is_active ? "muted" : r.backoff_level > 0 ? "warn" : "pos"} />
-          <ProviderIcon provider={r.provider} size={17} />
-          {/* Phones have no room for a 24-character provider name on one line; it wraps
-              there and truncates only once the column is wide enough to ellipsize. */}
-          <span className="min-w-0 break-words font-medium sm:truncate">
-            {displayOf(r.provider)}
+      render: (r) => {
+        const custom = isCustomConnection(r);
+        // A custom endpoint is not OpenAI, so an unnamed one says so instead of claiming
+        // the built-in provider; the operator's name replaces both once it exists.
+        const display = displayOf(r.provider);
+        const label = custom ? (r.name ?? `${display} (custom URL)`) : display;
+        const protocol = custom ? protocolLabel(r.provider) : null;
+        const title = [label, protocol, r.base_url_override].filter(Boolean).join(" · ");
+        return (
+          <span className="flex min-w-0 items-center gap-2" title={title}>
+            <Dot tone={!r.is_active ? "muted" : r.backoff_level > 0 ? "warn" : "pos"} />
+            <ProviderIcon provider={r.provider} size={17} />
+            <span className="flex min-w-0 flex-col">
+              <span className="flex min-w-0 items-center gap-1.5">
+                {/* Phones have no room for a 24-character provider name on one line; it
+                    wraps there and truncates only once the column is wide enough. */}
+                <span className="min-w-0 break-words font-medium sm:truncate">{label}</span>
+                {custom ? (
+                  <span className="shrink-0">
+                    <Badge
+                      tone="neutral"
+                      title="keyed account pointing at a custom base URL, not the provider's own API"
+                    >
+                      custom
+                    </Badge>
+                  </span>
+                ) : null}
+              </span>
+              {protocol ? (
+                <span className="truncate text-caption text-faint">{protocol}</span>
+              ) : null}
+            </span>
           </span>
-        </span>
-      ),
+        );
+      },
     },
     {
       key: "owner",
@@ -310,7 +369,13 @@ export default function Providers() {
     {
       key: "account",
       title: "account",
-      render: (r) => <AccountCell connection={r} display={displayOf(r.provider)} />,
+      render: (r) => (
+        <AccountCell
+          connection={r}
+          display={displayOf(r.provider)}
+          custom={isCustomConnection(r)}
+        />
+      ),
     },
     {
       key: "auth",
@@ -528,7 +593,7 @@ export default function Providers() {
             title="Connected"
             action={
               <span className="text-caption text-faint">
-                {connectedIds.size} provider{connectedIds.size === 1 ? "" : "s"} · {accounts.length} account
+                {endpointCount} endpoint{endpointCount === 1 ? "" : "s"} · {accounts.length} account
                 {accounts.length === 1 ? "" : "s"}
               </span>
             }
@@ -739,16 +804,29 @@ function derivedIdentifiers(connection: Connection, display: string): Array<{ te
  * The account column: the operator's name first, then the identifiers that name the
  * upstream account itself. Clearing the name leaves those lines alone, so a row is never
  * blank: the first identifier becomes the primary line.
+ *
+ * A custom endpoint's name is the provider's name, already on screen in its own cell, so
+ * repeating it here would print the same text twice; the host names the account instead.
  */
-function AccountCell({ connection, display }: { connection: Connection; display: string }) {
+function AccountCell({
+  connection,
+  display,
+  custom,
+}: {
+  connection: Connection;
+  display: string;
+  custom: boolean;
+}) {
   const derived = derivedIdentifiers(connection, display);
-  const primary = connection.name ?? derived[0]?.text ?? null;
+  const host = connection.base_url_override ? hostOf(connection.base_url_override) : null;
+  const name = custom ? null : connection.name;
+  const primary = name ?? host ?? derived[0]?.text ?? null;
   const secondary = derived.filter((part) => part.text !== primary);
   const title = [primary, ...secondary.map((part) => part.text)].filter(Boolean).join(" · ");
   return (
     <div className="min-w-0">
       <span
-        className={cx("block min-w-0 truncate", connection.name ? "text-fg" : "text-muted")}
+        className={cx("block min-w-0 truncate", name ? "text-fg" : "text-muted")}
         title={title || undefined}
       >
         {primary ?? <span className="text-faint">unnamed</span>}
@@ -762,12 +840,12 @@ function AccountCell({ connection, display }: { connection: Connection; display:
           {part.text}
         </div>
       ))}
-      {connection.base_url_override ? (
+      {host !== null && host !== primary ? (
         <div
           className="truncate font-mono text-caption text-faint"
-          title={connection.base_url_override}
+          title={connection.base_url_override ?? undefined}
         >
-          {hostOf(connection.base_url_override)}
+          {host}
         </div>
       ) : null}
     </div>
@@ -781,6 +859,24 @@ function hostOf(url: string): string {
     .replace(/[/?#].*$/, "")
     .replace(/^[^@]*@/, "")
     .replace(/:\d+$/, "");
+}
+
+/**
+ * A keyed OpenAI/Anthropic account pointed at an operator-supplied origin. Until an
+ * endpoint carries its own identity, this pairing is the only thing that separates it
+ * from the real provider, so every surface that names the provider checks it.
+ */
+function isCustomConnection(connection: Connection): boolean {
+  return (
+    connection.auth_type === "api_key" &&
+    connection.base_url_override !== null &&
+    (connection.provider === "openai" || connection.provider === "anthropic")
+  );
+}
+
+/** The wire shape a protocol id speaks, as the table names it. */
+function protocolLabel(protocol: string): string {
+  return protocol === "anthropic" ? "Anthropic Messages" : "OpenAI-compatible";
 }
 
 const PLACEHOLDER_LABELS = /^(resource|your-resource|placeholder)$/i;
@@ -1304,11 +1400,9 @@ function AddProviderFlow({
             ? "Add OpenCode"
             : kind === "subscription"
               ? "Sign in with a subscription"
-              : customProtocol === "openai"
-                ? "Custom OpenAI-compatible endpoint"
-                : customProtocol === "anthropic"
-                  ? "Custom Anthropic endpoint"
-                  : "Add an API key"
+              : customProtocol !== null
+                ? "Add a custom endpoint"
+                : "Add an API key"
       }
       open={open}
       onClose={onClose}
@@ -1371,8 +1465,8 @@ function AddProviderFlow({
                 usefulness. */}
             <div className="grid gap-2 sm:grid-cols-2">
               {([
-                { protocol: "openai", title: "Custom OpenAI", body: "Any OpenAI-compatible chat API" },
-                { protocol: "anthropic", title: "Custom Anthropic", body: "Any Anthropic Messages API" },
+                { protocol: "openai", title: "Custom endpoint", body: "OpenAI-compatible · any chat API" },
+                { protocol: "anthropic", title: "Custom endpoint", body: "Anthropic Messages · any messages API" },
               ] as const).map((item) => {
                 const brand = providerBrand(item.protocol);
                 return (
@@ -1714,14 +1808,20 @@ function ApiKeyForm({
   const requiresBaseUrl = selected?.requires_base_url_override === true;
   const example = selected?.base_url_example ?? "https://<resource>.openai.azure.com";
   const baseProblem = baseUrlProblem(baseUrl, requiresBaseUrl);
-  const needsBaseUrl = customProtocol !== null && baseUrl.trim() === "";
+  const isCustom = customProtocol !== null;
+  const protocol = customProtocol === null ? null : protocolLabel(customProtocol);
+  // The name is the provider's identity in every list, so a custom endpoint has no
+  // default to fall back on and cannot be saved without one.
+  const providerName = name.trim();
+  const needsName = isCustom && providerName === "";
+  const needsBaseUrl = isCustom && baseUrl.trim() === "";
 
   const save = useMutation({
     mutationFn: () =>
       api.post<Connection>("/api/connections", {
         provider,
         auth_type: "api_key",
-        name: name || null,
+        name: isCustom ? providerName : name || null,
         // `null` is the shared pool: instance-wide keys route here, team keys do not.
         team_id: team === "" ? null : team,
         credentials: {
@@ -1734,26 +1834,34 @@ function ApiKeyForm({
       void client.invalidateQueries({ queryKey: qk.models });
       void client.invalidateQueries({ queryKey: qk.modelProviders });
       setKey("");
-      onConnected(conn.name ?? conn.provider, null);
+      onConnected(conn.name ?? protocol ?? conn.provider, null);
     },
     onError: setError,
   });
   const ready =
-    provider !== "" && key !== "" && !needsBaseUrl && baseProblem === null && !save.isPending;
+    provider !== "" &&
+    key !== "" &&
+    !needsName &&
+    !needsBaseUrl &&
+    baseProblem === null &&
+    !save.isPending;
 
   return (
     <form
       className="flex flex-col gap-3"
       onSubmit={(e) => {
         e.preventDefault();
+        // Enter inside a field submits even when the button is disabled; the name and
+        // base URL are required here, so the guard lives with the form, not the button.
+        if (!ready) return;
         save.mutate();
       }}
     >
       <Field
-        label="provider"
+        label={isCustom ? "protocol" : "provider"}
         hint={
-          customProtocol
-            ? `Talks the ${customProtocol === "openai" ? "OpenAI chat" : "Anthropic messages"} protocol; models are added on the Models page.`
+          isCustom
+            ? `${protocol} wire shape; models are added on the Models page.`
             : fixedProvider === "opencode"
               ? "OpenCode Console key — Free, pay-as-you-go and Go keys all work."
               : undefined
@@ -1762,7 +1870,7 @@ function ApiKeyForm({
         {fixedProvider ? (
           <div className="flex h-9 items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 text-body text-muted">
             <ProviderIcon provider={fixedProvider} size={16} />
-            {fixedDisplay ?? fixedProvider}
+            {isCustom ? protocol : (fixedDisplay ?? fixedProvider)}
           </div>
         ) : (
           <Select value={provider} onChange={setProvider} ariaLabel="api key provider">
@@ -1774,8 +1882,20 @@ function ApiKeyForm({
           </Select>
         )}
       </Field>
-      <Field label="label" hint="how this account appears in the table">
-        <Input value={name} onChange={setName} placeholder="production-key" ariaLabel="account label" />
+      <Field
+        label={isCustom ? "provider name (required)" : "label"}
+        hint={
+          isCustom
+            ? `shown in Providers and Models; the protocol stays ${protocol}`
+            : "how this account appears in the table"
+        }
+      >
+        <Input
+          value={name}
+          onChange={setName}
+          placeholder={isCustom ? "Acme Gateway" : "production-key"}
+          ariaLabel={isCustom ? "provider name" : "account label"}
+        />
       </Field>
       <Field
         label="owner"
@@ -1794,11 +1914,17 @@ function ApiKeyForm({
         <Input value={key} onChange={setKey} type="password" placeholder="sk-…" ariaLabel="api key" />
       </Field>
       <Field
-        label={requiresBaseUrl ? "resource base URL (required)" : "base url"}
+        label={
+          requiresBaseUrl
+            ? "resource base URL (required)"
+            : isCustom
+              ? "base url (required)"
+              : "base url"
+        }
         hint={
           requiresBaseUrl
             ? `Your deployment's endpoint, for example ${example}. The gateway keeps the provider's API path.`
-            : customProtocol
+            : isCustom
               ? "required; the endpoint root that serves this protocol"
               : "optional, for a self-hosted or proxy endpoint"
         }
@@ -1806,13 +1932,7 @@ function ApiKeyForm({
         <Input
           value={baseUrl}
           onChange={setBaseUrl}
-          placeholder={
-            requiresBaseUrl
-              ? example
-              : customProtocol === "anthropic"
-                ? "https://api.example.com/v1"
-                : "https://api.example.com/v1"
-          }
+          placeholder={requiresBaseUrl ? example : "https://api.example.com/v1"}
           ariaLabel="base url override"
         />
       </Field>
@@ -1822,9 +1942,15 @@ function ApiKeyForm({
         </span>
       ) : null}
       {error ? <ErrorNote error={error} /> : null}
+      {isCustom ? (
+        <p className="text-caption leading-relaxed text-faint">
+          Model refs stay protocol-based for now ({customProtocol}/…), so the name changes
+          how the source reads, not how models are addressed.
+        </p>
+      ) : null}
       <div className="flex justify-end">
         <Button type="submit" variant="primary" disabled={!ready}>
-          save provider
+          {isCustom ? "add endpoint" : "save provider"}
         </Button>
       </div>
     </form>
