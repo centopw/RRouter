@@ -672,7 +672,15 @@ pub async fn download_models_dev(state: &AppState) -> Result<Vec<ModelRow>> {
         .await
         .map_err(|e| Error::Transport(format!("models.dev body: {e}")))?;
     validate_models_dev(&value).map_err(|e| Error::Transport(format!("models.dev: {e}")))?;
-    Ok(parse_models_dev(&value))
+    let rows = parse_models_dev(&value);
+    // The document can be well-formed but name only providers this build cannot route;
+    // storing that empty set would wipe the last good catalog. Treat it as a failed refresh.
+    if rows.is_empty() {
+        return Err(Error::Transport(
+            "models.dev: document has no model rows this build can route".to_string(),
+        ));
+    }
+    Ok(rows)
 }
 
 /// Parse a models.dev document into `synced` rows.
