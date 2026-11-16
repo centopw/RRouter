@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.21.2 — 2026-11-16
+
+### Bug Fixes
+
+- fix(ui): prefer an OpenAI GPT model in OpenAI guides ([`4224162`](https://github.com/centopw/RRouter/commit/422416294ed83c49f4d385933b12081fe740cae1))
+
 ## 0.21.1 — 2026-11-16
 
 ### Bug Fixes
