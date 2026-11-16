@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.23.3 — 2026-11-16
+
+### Features
+
+- feat(proxy): preserve Remote Compaction V2 opaque items ([`288cd9e`](https://github.com/centopw/RRouter/commit/288cd9e0ac4960ff328e073d9d384e15a1580fa3))
+
 ## 0.23.2 — 2026-11-16
 
 ### Bug Fixes
