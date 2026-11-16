@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.19.0 — 2026-11-16
+
+### Features
+
+- feat(scripts): choose releases by bump type from the latest tag ([`aee8ad2`](https://github.com/centopw/RRouter/commit/aee8ad24c79f60f02ad877a2c4af785f601db4dd))
+
 ## 0.18.2 — 2026-11-16
 
 ### Bug Fixes
