@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.23.1 — 2026-11-16
+
+### Bug Fixes
+
+- fix(ui): configure API keys in the quick-start drawer ([`fc82bfe`](https://github.com/centopw/RRouter/commit/fc82bfeed1a3186accd92ed4e7e32305c20efb44))
+
 ## 0.23.0 — 2026-11-16
 
 ### Features
