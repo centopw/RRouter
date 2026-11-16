@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.18.0 — 2026-11-16
+
+### Features
+
+- feat(ui): make live routing interactive and polish keys ([`d11c1a2`](https://github.com/centopw/RRouter/commit/d11c1a27b22ee25fd205c6831665633b890c548c))
+
 ## 0.17.0 — 2026-11-16
 
 ### Features
