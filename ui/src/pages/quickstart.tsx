@@ -1,17 +1,21 @@
 import { useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight } from "@phosphor-icons/react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Badge,
   Button,
   Card,
   CopyButton,
   CopyChip,
+  ErrorNote,
+  Input,
   PageHeader,
   cx,
 } from "../components/ui";
 import { ConnectionCard } from "../components/connection-card";
-import { useIsAdmin, useModels } from "../lib/queries";
+import { api, type NewKey } from "../lib/api";
+import { qk, useIsAdmin, useModels } from "../lib/queries";
 
 type Protocol = "openai" | "anthropic";
 type OS = "macos" | "linux" | "windows";
@@ -494,13 +498,28 @@ function Step({
 export default function QuickStart() {
   const isAdmin = useIsAdmin();
   const navigate = useNavigate();
+  const client = useQueryClient();
   const models = useModels();
   const [params, setParams] = useSearchParams();
   const detailRef = useRef<HTMLDivElement | null>(null);
+  const keyRef = useRef<HTMLDivElement | null>(null);
   const [initialOs] = useState(defaultOs);
+  const [apiKey, setApiKey] = useState("");
+  const [minted, setMinted] = useState<string | null>(null);
   const origin = window.location.origin;
   const openai = `${origin}/v1`;
-  const key = "sk-rr-...";
+  const key = apiKey.trim() || "sk-rr-...";
+
+  const createKey = useMutation({
+    mutationFn: () =>
+      api.post<NewKey>("/api/keys", { name: "quickstart", team_id: null }),
+    onSuccess: (created) => {
+      setApiKey(created.key);
+      setMinted(created.key);
+      void client.invalidateQueries({ queryKey: qk.keys });
+      void client.invalidateQueries({ queryKey: qk.system });
+    },
+  });
 
   const requestedTool = params.get("tool");
   const guide = RECIPES.find((recipe) => recipe.id === requestedTool) ?? RECIPES[0]!;
@@ -556,7 +575,12 @@ export default function QuickStart() {
         subtitle="Create a key, pick a model, then open the guide for the tool you actually use."
         actions={
           isAdmin ? (
-            <Button variant="primary" onClick={() => navigate("/access/keys")}>
+            <Button
+              variant="primary"
+              onClick={() =>
+                keyRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
+              }
+            >
               create API key
             </Button>
           ) : (
@@ -565,13 +589,71 @@ export default function QuickStart() {
         }
       />
 
+      <Card className="scroll-mt-20">
+        <div ref={keyRef} className="px-5 py-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lead font-semibold">Your API key</h2>
+                {minted !== null && minted === apiKey ? <Badge tone="pos">created</Badge> : null}
+              </div>
+              <p className="mt-0.5 text-small text-muted">
+                Create one here, or paste an existing key. Every guide below fills it in.
+              </p>
+            </div>
+            <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 sm:flex-none">
+              <Input
+                value={apiKey}
+                onChange={(value) => {
+                  setApiKey(value);
+                  setMinted(null);
+                }}
+                placeholder="sk-rr-... (paste an existing key)"
+                ariaLabel="API key"
+                className="w-full font-mono sm:w-[21rem]"
+              />
+              {apiKey.trim() ? <CopyButton value={apiKey.trim()} label="Copy key" /> : null}
+              {isAdmin ? (
+                <Button
+                  variant="primary"
+                  onClick={() => createKey.mutate()}
+                  disabled={createKey.isPending}
+                >
+                  {createKey.isPending
+                    ? "creating…"
+                    : apiKey.trim()
+                      ? "create another"
+                      : "create key"}
+                </Button>
+              ) : (
+                <Badge>ask an administrator for a key</Badge>
+              )}
+            </div>
+          </div>
+          {createKey.error ? (
+            <div className="mt-3">
+              <ErrorNote error={createKey.error} onRetry={() => createKey.mutate()} />
+            </div>
+          ) : null}
+          <p className="mt-2 text-caption leading-relaxed text-faint">
+            {minted !== null && minted === apiKey
+              ? "Copy it now: the plaintext is shown only on this page. It has no limits; manage limits on the API keys page."
+              : apiKey.trim()
+                ? "This key is used in every config below. Make sure it has access to the model you chose."
+                : "Until you create or paste a key, the configs show sk-rr-... as a placeholder."}
+          </p>
+        </div>
+      </Card>
+
       <div className="grid gap-3 sm:grid-cols-3">
         <Step
           number={1}
           title="Create an API key"
           body="The plaintext is shown once. Store it in the tool's secret field, not in a repository."
-          action="Open API keys"
-          onClick={() => navigate(isAdmin ? "/access/keys" : "/account")}
+          action={isAdmin ? "Create below" : "Paste your key"}
+          onClick={() =>
+            keyRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
+          }
         />
         <Step
           number={2}
