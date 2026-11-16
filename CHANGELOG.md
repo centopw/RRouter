@@ -2,6 +2,16 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.21.0 — 2026-11-16
+
+### Features
+
+- feat(ui): turn quick start into a platform-driven setup guide ([`8798e7f`](https://github.com/centopw/RRouter/commit/8798e7f7126f789bfae528b6dc762f5bf2e554f4))
+
+### Other Changes
+
+- chore(ui): wire quick start route and rebuild dashboard assets ([`f4a7afb`](https://github.com/centopw/RRouter/commit/f4a7afb91807d02d285788a4e7d13f6022301f04))
+
 ## 0.20.0 — 2026-11-16
 
 ### Features
