@@ -283,7 +283,12 @@ pub fn merge(
             item.available = true;
             item.deprecated =
                 item.deprecated || rrouter_router::catalog::is_retired(&item.provider, &item.id);
+            // A published effort range is proof the model reasons, even when an upstream
+            // account row carried no capability object at all (common for Claude models).
             item.reasoning = reasoning_support(&item);
+            if item.reasoning.is_some() {
+                item.capabilities.reasoning = true;
+            }
             item
         })
         .collect();
@@ -359,6 +364,20 @@ fn efforts_for_format(format: &str) -> &'static [&'static str] {
     }
 }
 
+/// Claude 4/5 (and 3.7) families reason even when an OAuth account's model list omits
+/// capabilities. Older 3.x families do not get an invented control.
+fn claude_reasoning_family(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix("claude-") else {
+        return false;
+    };
+    let numbers: Vec<u32> = rest
+        .split('-')
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect();
+    matches!(numbers.as_slice(), [major, ..] if *major >= 4)
+        || matches!(numbers.as_slice(), [3, minor, ..] if *minor >= 7)
+}
+
 fn reasoning_support(item: &ModelItem) -> Option<ReasoningSupport> {
     let native_levels: Vec<String> = item
         .effort
@@ -374,7 +393,10 @@ fn reasoning_support(item: &ModelItem) -> Option<ReasoningSupport> {
                 .collect()
         })
         .unwrap_or_default();
-    if !item.capabilities.reasoning && native_levels.is_empty() {
+    let inferred_claude = matches!(item.provider.as_str(), "anthropic" | "claude")
+        && !item.deprecated
+        && claude_reasoning_family(&item.id);
+    if !item.capabilities.reasoning && native_levels.is_empty() && !inferred_claude {
         return None;
     }
     let levels = if native_levels.is_empty() {
@@ -1146,6 +1168,26 @@ mod tests {
         );
         assert!(items.last().expect("row").deprecated);
         assert!(!items[0].deprecated);
+    }
+
+    #[test]
+    fn claude_upstream_models_infer_thinking_levels() {
+        let model = ModelItem::new("claude", "claude-haiku-5-5", SOURCE_UPSTREAM);
+        let support = reasoning_support(&model).expect("Claude 5 levels");
+        assert_eq!(
+            support.supported_efforts,
+            Some(vec![
+                "high".to_string(),
+                "medium".to_string(),
+                "low".to_string()
+            ])
+        );
+        assert_eq!(support.default_effort.as_deref(), Some("medium"));
+        assert!(support.supports_max_tokens);
+
+        // A pre-thinking family keeps its honest "no reasoning" answer.
+        let old = ModelItem::new("claude", "claude-3-5-sonnet", SOURCE_UPSTREAM);
+        assert!(reasoning_support(&old).is_none());
     }
 
     #[test]

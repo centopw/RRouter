@@ -196,11 +196,11 @@ export function Readout({
   delta?: { up: boolean; text: string } | null;
 }) {
   return (
-    <div className="px-6 py-5">
+    <div className="min-w-0 px-4 py-4 sm:px-6 sm:py-5">
       <div className="text-body text-muted">{label}</div>
       <div
         className={cx(
-          "mt-2 font-mono text-display font-medium leading-none tracking-[-0.02em] tnum",
+          "mt-2 min-w-0 break-words font-mono text-[clamp(1.5rem,2vw,2rem)] font-medium leading-none tracking-[-0.02em] tnum",
           tone === "neg" ? "text-neg" : "text-fg",
         )}
       >

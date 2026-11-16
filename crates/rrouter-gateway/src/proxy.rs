@@ -2129,7 +2129,25 @@ fn affinity_of(req: &ChatRequest) -> u64 {
 /// ChatGPT-backed account rejects `temperature`/`top_p` outright instead of ignoring
 /// them ("Unsupported parameter: temperature"), which failed every Playground turn.
 fn drop_unsupported_sampling(provider: &str, body: &mut Value) {
-    if provider != "codex" {
+    // Claude's extended thinking rejects sampling controls; any request that still
+    // carries them (an older client, or a translation path) must not fail upstream.
+    let thinking = body
+        .get("thinking")
+        .and_then(Value::as_object)
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "disabled");
+    let effort = body
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .is_some_and(|effort| effort != "none")
+        || body
+            .get("output_config")
+            .and_then(Value::as_object)
+            .and_then(|config| config.get("effort"))
+            .is_some();
+    let claude_thinking = matches!(provider, "anthropic" | "claude") && (thinking || effort);
+    if provider != "codex" && !claude_thinking {
         return;
     }
     if let Some(obj) = body.as_object_mut() {
@@ -4644,6 +4662,32 @@ mod tests {
             login: None,
             stream_only: false,
         }
+    }
+
+    #[test]
+    fn claude_thinking_drops_sampling_controls() {
+        let mut body = serde_json::json!({
+            "thinking": {"type": "enabled"},
+            "temperature": 0.2,
+            "top_p": 0.9,
+        });
+        drop_unsupported_sampling("claude", &mut body);
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+
+        let mut disabled = serde_json::json!({
+            "thinking": {"type": "disabled"},
+            "temperature": 0.2,
+        });
+        drop_unsupported_sampling("claude", &mut disabled);
+        assert_eq!(disabled["temperature"], 0.2);
+
+        let mut effort = serde_json::json!({
+            "output_config": {"effort": "high"},
+            "temperature": 0.2,
+        });
+        drop_unsupported_sampling("claude", &mut effort);
+        assert!(effort.get("temperature").is_none());
     }
 
     /// A terminal stream failure must be visible to the usage row, not recorded as a

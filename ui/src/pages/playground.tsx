@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ArrowUp, MagicWand, SlidersHorizontal, Square } from "@phosphor-icons/react";
 import { useSearchParams } from "react-router-dom";
+import { EffortPicker } from "../components/effort-picker";
 import { ModelSelect } from "../components/model-select";
 import {
   Button,
@@ -39,6 +40,7 @@ const ENDPOINTS: Record<Dialect, string> = {
 
 /** Anthropic requires `max_tokens`; the playground keeps one generous, fixed cap. */
 const MAX_OUTPUT_TOKENS = 2048;
+const NO_LEVELS: string[] = [];
 
 type TurnStatus = "streaming" | "done" | "stopped" | "error";
 
@@ -67,6 +69,7 @@ export default function Playground() {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [temp, setTemp] = useState("1");
+  const [effort, setEffort] = useState("");
   const [draft, setDraft] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   // The gateway's own key for this page: minted on first use, never pasted by hand.
@@ -89,6 +92,7 @@ export default function Playground() {
   const nextId = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const enhanceAbortRef = useRef<AbortController | null>(null);
+  const effortFor = useRef<string | null>(null);
   const streaming = turns.some((turn) => turn.status === "streaming");
   const needsKey = system.data?.require_api_key === true;
   // Sending without a key is a 401 when enforcement is on, so the composer waits for ours.
@@ -104,6 +108,54 @@ export default function Playground() {
       usable.find((m) => m.source === "upstream") ?? usable[0] ?? models.data[0];
     if (pick) setModel(pick.ref);
   }, [model, models.data]);
+
+  const selected = models.data?.find((entry) => entry.ref === model);
+  const levels = selected?.reasoning?.supported_efforts ?? NO_LEVELS;
+  const mandatory = selected?.reasoning?.mandatory ?? false;
+  const reasoningOn = effort !== "" && effort !== "none";
+  const claudeProvider = selected?.provider === "claude" || selected?.provider === "anthropic";
+  const temperatureMax = claudeProvider || dialect === "messages" ? 1 : 2;
+  const temperatureSupported =
+    selected !== undefined &&
+    selected.provider !== "codex" &&
+    !(claudeProvider && reasoningOn);
+  const temperatureHint = !selected
+    ? "Choose a model first."
+    : selected.provider === "codex"
+      ? "Codex rejects sampling controls; the gateway omits temperature."
+      : claudeProvider && reasoningOn
+        ? "Claude omits temperature while thinking is on."
+        : dialect === "messages"
+          ? "Messages accepts 0–1."
+          : undefined;
+
+  // The model owns the valid levels. Keep a deliberate "Off" across refetches, but
+  // otherwise follow the model's default when the selection changes.
+  useEffect(() => {
+    const support = selected?.reasoning;
+    if (!support || levels.length === 0) {
+      effortFor.current = model;
+      setEffort("");
+      return;
+    }
+    const initial = support.default_enabled === false
+      ? "none"
+      : (support.default_effort ?? levels[0] ?? "");
+    if (effortFor.current !== model) {
+      effortFor.current = model;
+      setEffort(initial);
+      return;
+    }
+    setEffort((current) => {
+      if (current === "none" && !support.mandatory) return current;
+      if (current !== "" && levels.includes(current)) return current;
+      return initial;
+    });
+  }, [levels, model, selected]);
+
+  useEffect(() => {
+    if (Number.parseFloat(temp) > temperatureMax) setTemp(String(temperatureMax));
+  }, [temp, temperatureMax]);
 
   // Escape stops a stream even when focus left the composer.
   useEffect(() => {
@@ -181,7 +233,7 @@ export default function Playground() {
     const assistantId = nextId.current++;
     const startedAt = performance.now();
     const endpoint = ENDPOINTS[dialect];
-    const temperature = parseTemperature(temp);
+    const temperature = parseTemperature(temp, temperatureMax);
     const systemText = systemPrompt.trim();
     const key = apiKey.trim();
 
@@ -192,7 +244,19 @@ export default function Playground() {
       .map((turn) => ({ role: turn.role, content: turn.text }));
     const messages = [...history, { role: "user" as const, content: text }];
 
-    const wire: Record<string, unknown> = { model, stream: true, temperature };
+    const wire: Record<string, unknown> = { model, stream: true };
+    if (temperatureSupported) wire.temperature = temperature;
+    if (effort !== "") {
+      if (dialect === "chat") {
+        wire.reasoning_effort = effort;
+      } else if (effort === "none") {
+        wire.thinking = { type: "disabled" };
+      } else {
+        // Messages has no top-level effort field; the gateway's Anthropic parser accepts
+        // `output_config.effort` and turns it into the native thinking budget.
+        wire.output_config = { effort };
+      }
+    }
     if (dialect === "chat") {
       wire.messages = systemText ? [{ role: "system", content: systemText }, ...messages] : messages;
     } else {
@@ -468,11 +532,21 @@ export default function Playground() {
           />
           <div className="flex flex-wrap items-center gap-2 px-3 pb-2.5 pt-1">
             <div className="min-w-[160px] max-w-[240px] flex-1">
-              <ModelSelect value={model} onChange={setModel} ariaLabel="model" plain />
+              <ModelSelect
+                value={model}
+                onChange={setModel}
+                ariaLabel="model"
+                plain
+                footer={
+                  <EffortPicker
+                    levels={levels}
+                    value={effort}
+                    onChange={setEffort}
+                    mandatory={mandatory}
+                  />
+                }
+              />
             </div>
-            <span className="hidden text-caption text-faint min-[560px]:inline">
-              {temp === "1" ? "temperature 1" : `temperature ${temp}`}
-            </span>
             <span className="ml-auto hidden items-center gap-1 text-caption text-faint min-[820px]:flex">
               <kbd className={kbdClass}>⌘↵</kbd> send · <kbd className={kbdClass}>Esc</kbd> stop
             </span>
@@ -548,21 +622,34 @@ export default function Playground() {
           <div className="flex flex-wrap items-end gap-3">
             <div className="min-w-[220px] flex-1">
               <Field label="Model" hint={modelHint}>
-                <ModelSelect value={model} onChange={setModel} ariaLabel="model" />
+                <ModelSelect
+                  value={model}
+                  onChange={setModel}
+                  ariaLabel="model"
+                  footer={
+                    <EffortPicker
+                      levels={levels}
+                      value={effort}
+                      onChange={setEffort}
+                      mandatory={mandatory}
+                    />
+                  }
+                />
               </Field>
             </div>
             <div className="w-[150px]">
-              <Field label="Temperature" hint={dialect === "messages" ? "Anthropic accepts 0–1" : undefined}>
+              <Field label="Temperature" hint={temperatureHint}>
                 <input
                   type="number"
                   min={0}
-                  max={2}
+                  max={temperatureMax}
                   step={0.1}
                   value={temp}
                   aria-label="temperature"
+                  disabled={!temperatureSupported}
                   onChange={(event) => setTemp(event.target.value)}
-                  onBlur={() => setTemp(String(parseTemperature(temp)))}
-                  className={inputClass}
+                  onBlur={() => setTemp(String(parseTemperature(temp, temperatureMax)))}
+                  className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`}
                 />
               </Field>
             </div>
@@ -968,10 +1055,10 @@ function httpErrorMessage(body: string, status: number): string {
   return `${status} ${statusText(status)} · ${short}`;
 }
 
-function parseTemperature(value: string): number {
+function parseTemperature(value: string, max = 2): number {
   const parsed = Number.parseFloat(value);
-  if (!Number.isFinite(parsed)) return 1;
-  return Math.min(2, Math.max(0, parsed));
+  if (!Number.isFinite(parsed)) return Math.min(1, max);
+  return Math.min(max, Math.max(0, parsed));
 }
 
 const STATUS_LABEL: Record<TurnStatus, string> = {

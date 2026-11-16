@@ -1,4 +1,12 @@
-import { Children, isValidElement, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  Children,
+  isValidElement,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { cx } from "../../lib/cx";
 import { CaretDown, Check, MagnifyingGlass, X } from "@phosphor-icons/react";
@@ -38,6 +46,7 @@ export function Select({
   disabled,
   className,
   plain = false,
+  footer,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -47,6 +56,8 @@ export function Select({
   className?: string;
   /** Borderless trigger for a composer: the menu still has the full popover. */
   plain?: boolean;
+  /** Persistent controls under the option list, outside its scroll area. */
+  footer?: ReactNode;
 }) {
   const options = useMemo(() => readOptions(children), [children]);
   const selected = options.find((option) => option.value === value);
@@ -70,6 +81,24 @@ export function Select({
         (option.group?.toLowerCase().includes(needle) ?? false),
     );
   }, [options, query]);
+
+  /**
+   * Group consecutive options so the popover reads as provider sections rather than a
+   * flat list with a repeated right-hand badge. Filtering keeps each option's index in
+   * `filtered`, which is also the keyboard cursor.
+   */
+  const groups = useMemo(() => {
+    const out: Array<{ label?: string; items: Array<{ option: Option; index: number }> }> = [];
+    filtered.forEach((option, index) => {
+      const last = out[out.length - 1];
+      if (last && last.label === option.group) {
+        last.items.push({ option, index });
+      } else {
+        out.push({ label: option.group, items: [{ option, index }] });
+      }
+    });
+    return out;
+  }, [filtered]);
 
   const close = () => setOpen(false);
 
@@ -124,6 +153,9 @@ export function Select({
           type="button"
           disabled={disabled}
           aria-label={ariaLabel}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-controls={open ? listId : undefined}
           onKeyDown={onKeyDown}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
@@ -165,62 +197,81 @@ export function Select({
           className="z-[70] max-w-[min(360px,calc(100vw-24px))] overflow-hidden rounded-[10px] border border-line-strong bg-surface shadow-[0_16px_40px_rgba(16,18,20,0.18)] focus:outline-none"
           style={{ width: "min(360px, max(220px, var(--radix-popover-trigger-width)))" }}
         >
+          {options.length > 4 ? (
+            <div className="flex items-center gap-2 border-b border-line bg-surface px-2.5 py-2 focus-within:border-accent-text focus-within:ring-2 focus-within:ring-[var(--color-accent-text)]/20">
+              <MagnifyingGlass size={14} aria-hidden className="text-faint" />
+              <input
+                autoFocus
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setActive(0);
+                }}
+                onKeyDown={onKeyDown}
+                placeholder="filter…"
+                aria-label={`filter ${ariaLabel}`}
+                aria-controls={listId}
+                className="h-6 w-full bg-transparent text-small text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none! outline-0!"
+              />
+              <X
+                size={13}
+                aria-hidden
+                className="shrink-0 cursor-pointer text-faint hover:text-fg"
+                onClick={() => setQuery("")}
+              />
+            </div>
+          ) : null}
           <div id={listId} role="listbox" aria-label={ariaLabel}>
-            {options.length > 4 ? (
-              <div className="flex items-center gap-2 border-b border-line bg-surface px-2.5 py-2 focus-within:border-accent-text focus-within:ring-2 focus-within:ring-[var(--color-accent-text)]/20">
-                <MagnifyingGlass size={14} aria-hidden className="text-faint" />
-                <input
-                  autoFocus
-                  value={query}
-                  onChange={(event) => {
-                    setQuery(event.target.value);
-                    setActive(0);
-                  }}
-                  onKeyDown={onKeyDown}
-                  placeholder="filter…"
-                  aria-label={`filter ${ariaLabel}`}
-                  className="h-6 w-full bg-transparent text-small text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none! outline-0!"
-                />
-                <X
-                  size={13}
-                  aria-hidden
-                  className="shrink-0 cursor-pointer text-faint hover:text-fg"
-                  onClick={() => setQuery("")}
-                />
-              </div>
-            ) : null}
             <div className="max-h-[264px] overflow-auto py-1">
               {filtered.length === 0 ? (
                 <div className="px-3 py-2 text-small text-faint">no match</div>
               ) : (
-                filtered.map((option, index) => (
-                  <button
-                    key={`${option.group ?? ""}:${option.value}`}
-                    type="button"
-                    role="option"
-                    aria-selected={option.value === value}
-                    disabled={option.disabled}
-                    onMouseEnter={() => setActive(index)}
-                    onClick={() => choose(option)}
-                    className={cx(
-                      "flex w-full items-center gap-2 px-3 py-1.5 text-left text-small focus-visible:outline-none! outline-0!",
-                      index === active && "bg-[var(--color-selected)]",
-                      option.value === value ? "font-medium text-fg" : "text-fg",
-                      option.disabled && "cursor-not-allowed text-faint",
-                    )}
+                groups.map((group, groupIndex) => (
+                  <div
+                    key={`${group.label ?? ""}:${groupIndex}`}
+                    role={group.label ? "group" : undefined}
+                    aria-label={group.label}
                   >
-                    <span className="w-3 shrink-0">
-                      {option.value === value ? <Check size={12} weight="bold" aria-hidden /> : null}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate">{option.label}</span>
-                    {option.group ? (
-                      <span className="shrink-0 text-caption text-faint">{option.group}</span>
+                    {group.label ? (
+                      <div
+                        aria-hidden
+                        className="px-3 pb-1 pt-2 text-caption font-medium tracking-wide text-faint"
+                      >
+                        {group.label}
+                      </div>
                     ) : null}
-                  </button>
+                    {group.items.map(({ option, index }) => (
+                      <button
+                        key={`${option.group ?? ""}:${option.value}`}
+                        type="button"
+                        role="option"
+                        aria-selected={option.value === value}
+                        disabled={option.disabled}
+                        onMouseEnter={() => setActive(index)}
+                        onClick={() => choose(option)}
+                        className={cx(
+                          "flex w-full items-center gap-2 px-3 py-1.5 text-left text-small focus-visible:outline-none! outline-0!",
+                          index === active && "bg-[var(--color-selected)]",
+                          option.value === value ? "font-medium text-fg" : "text-fg",
+                          option.disabled && "cursor-not-allowed text-faint",
+                        )}
+                      >
+                        <span className="w-3 shrink-0">
+                          {option.value === value ? (
+                            <Check size={12} weight="bold" aria-hidden />
+                          ) : null}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                      </button>
+                    ))}
+                  </div>
                 ))
               )}
             </div>
           </div>
+          {footer ? (
+            <div className="border-t border-line bg-surface px-2.5 py-2">{footer}</div>
+          ) : null}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>

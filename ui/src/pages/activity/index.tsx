@@ -240,6 +240,7 @@ export default function Activity() {
   const hasOlderTraffic = currentBuckets.some((b) => b.start < now - 3600 && b.requests > 0);
   const onlyLastHour = rangeId !== "1h" && cur.requests > 0 && !hasOlderTraffic;
   const cacheNote = cur.cacheRead === 0;
+  const secondaryCount = Number(cur.cost > 0) + Number(cur.cacheRead > 0);
 
   const onboard = ever.isSuccess && (ever.data?.length ?? 0) === 0;
   const showPanels = !onboard;
@@ -318,106 +319,120 @@ export default function Activity() {
           ) : (
             <>
               {series.isLoading && !series.data ? (
-                <div
-                  className="grid gap-px bg-[var(--color-line)]"
-                  style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}
-                >
-                  {Array.from({ length: 4 }, (_, i) => (
-                    <div key={i} className="bg-surface">
-                      <ReadoutSkeleton />
-                    </div>
-                  ))}
-                </div>
+                <>
+                  <div className="grid gap-px overflow-hidden rounded-t-[var(--radius-card)] bg-[var(--color-line)] sm:grid-cols-2 xl:grid-cols-4">
+                    {Array.from({ length: 4 }, (_, i) => (
+                      <div key={i} className="bg-surface">
+                        <ReadoutSkeleton />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="grid gap-px border-t border-[var(--color-line)] bg-[var(--color-line)] sm:grid-cols-2">
+                    {Array.from({ length: 2 }, (_, i) => (
+                      <div key={i} className="bg-surface">
+                        <ReadoutSkeleton />
+                      </div>
+                    ))}
+                  </div>
+                </>
               ) : (
-                <div
-                  className="grid gap-px overflow-hidden rounded-t-[var(--radius-card)] bg-[var(--color-line)]"
-                  style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}
-                >
-                  <div className="bg-surface">
-                    <Readout
-                      label="Requests"
-                      value={compact(cur.requests)}
-                      note={
-                        cur.errors > 0
-                          ? `${compact(cur.requests - cur.errors)} succeeded · ${compact(cur.errors)} failed`
-                          : "All succeeded"
-                      }
-                      delta={deltaLabel(cur.requests, prev.requests)}
-                    />
-                  </div>
-                  <div className="bg-surface">
-                    <Readout
-                      label="Tokens"
-                      value={compact(cur.tokens)}
-                      note={
-                        cur.requests > 0
-                          ? `~${compact(Math.round(cur.tokens / cur.requests))} per request`
-                          : "No tokens yet"
-                      }
-                      delta={deltaLabel(cur.tokens, prev.tokens)}
-                    />
-                  </div>
-                  <div className="bg-surface">
-                    <Readout
-                      label="Avg latency"
-                      value={cur.requests > 0 ? `${(cur.latency / 1000).toFixed(2)}s` : "—"}
-                      note={
-                        slowest ? (
-                          <>
-                            <span>
-                              Slowest: {slowest.model} {ms(slowest.avg_latency_ms)}
-                            </span>
-                            {latencyDelta ? (
-                              <span className={latencyDelta.up ? "text-warn" : "text-muted"}>
-                                {latencyDelta.text}
-                              </span>
-                            ) : null}
-                          </>
-                        ) : (
-                          "No timed requests"
-                        )
-                      }
-                    />
-                  </div>
-                  <div className="bg-surface">
-                    <Readout
-                      label="Error rate"
-                      value={cur.requests > 0 ? pct(errorRate) : "—"}
-                      tone={cur.errors > 0 ? "neg" : "fg"}
-                      dot={cur.errors > 0 ? "neg" : "pos"}
-                      note={
-                        cur.errors > 0
-                          ? `${compact(cur.errors)} of ${compact(cur.requests)} failed`
-                          : "No failures"
-                      }
-                      delta={deltaLabel(errorRate, prevErrorRate)}
-                    />
-                  </div>
-                  {cur.cost > 0 ? (
+                <>
+                  <div className="grid gap-px overflow-hidden rounded-t-[var(--radius-card)] bg-[var(--color-line)] sm:grid-cols-2 xl:grid-cols-4">
                     <div className="bg-surface">
                       <Readout
-                        label="Spend"
-                        value={usd(cur.cost)}
+                        label="Requests"
+                        value={compact(cur.requests)}
+                        note={
+                          cur.errors > 0
+                            ? `${compact(cur.requests - cur.errors)} succeeded · ${compact(cur.errors)} failed`
+                            : "All succeeded"
+                        }
+                        delta={deltaLabel(cur.requests, prev.requests)}
+                      />
+                    </div>
+                    <div className="bg-surface">
+                      <Readout
+                        label="Tokens"
+                        value={compact(cur.tokens)}
                         note={
                           cur.requests > 0
-                            ? `~${usd(cur.cost / cur.requests)} per request`
-                            : "Priced requests only"
+                            ? `~${compact(Math.round(cur.tokens / cur.requests))} per request`
+                            : "No tokens yet"
                         }
-                        delta={deltaLabel(cur.cost, prev.cost)}
+                        delta={deltaLabel(cur.tokens, prev.tokens)}
                       />
                     </div>
-                  ) : null}
-                  {cur.cacheRead > 0 ? (
                     <div className="bg-surface">
                       <Readout
-                        label="Cache hit"
-                        value={pct(hitRate(cur))}
-                        note={`${compact(cur.cacheRead)} read · ${compact(cur.cacheWrite)} write`}
-                        delta={deltaLabel(hitRate(cur), hitRate(prev))}
+                        label="Avg latency"
+                        value={cur.requests > 0 ? `${(cur.latency / 1000).toFixed(2)}s` : "—"}
+                        note={
+                          slowest ? (
+                            <>
+                              <span>
+                                Slowest: {slowest.model} {ms(slowest.avg_latency_ms)}
+                              </span>
+                              {latencyDelta ? (
+                                <span className={latencyDelta.up ? "text-warn" : "text-muted"}>
+                                  {latencyDelta.text}
+                                </span>
+                              ) : null}
+                            </>
+                          ) : (
+                            "No timed requests"
+                          )
+                        }
                       />
                     </div>
+                    <div className="bg-surface">
+                      <Readout
+                        label="Error rate"
+                        value={cur.requests > 0 ? pct(errorRate) : "—"}
+                        tone={cur.errors > 0 ? "neg" : "fg"}
+                        dot={cur.errors > 0 ? "neg" : "pos"}
+                        note={
+                          cur.errors > 0
+                            ? `${compact(cur.errors)} of ${compact(cur.requests)} failed`
+                            : "No failures"
+                        }
+                        delta={deltaLabel(errorRate, prevErrorRate)}
+                      />
+                    </div>
+                  </div>
+                  {secondaryCount > 0 ? (
+                    <div
+                      className={cx(
+                        "grid gap-px border-t border-[var(--color-line)] bg-[var(--color-line)]",
+                        secondaryCount === 1 ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2",
+                      )}
+                    >
+                      {cur.cost > 0 ? (
+                        <div className="bg-surface">
+                          <Readout
+                            label="Spend"
+                            value={usd(cur.cost)}
+                            note={
+                              cur.requests > 0
+                                ? `~${usd(cur.cost / cur.requests)} per request`
+                                : "Priced requests only"
+                            }
+                            delta={deltaLabel(cur.cost, prev.cost)}
+                          />
+                        </div>
+                      ) : null}
+                      {cur.cacheRead > 0 ? (
+                        <div className="bg-surface">
+                          <Readout
+                            label="Cache hit"
+                            value={pct(hitRate(cur))}
+                            note={`${compact(cur.cacheRead)} read · ${compact(cur.cacheWrite)} write`}
+                            delta={deltaLabel(hitRate(cur), hitRate(prev))}
+                          />
+                        </div>
+                      ) : null}
+                    </div>
                   ) : null}
-                </div>
+                </>
               )}
 
               {showPanels ? (

@@ -241,6 +241,10 @@ pub fn build_request(req: &ChatRequest, stream: bool, wire: &WireProfile) -> Res
     // 4096, silently truncating every translated request that named no cap; the provider's
     // configured default (32k for Claude) now applies first.
     let mut max_tokens = wire.max_tokens(req.max_tokens);
+    let thinking_enabled = req
+        .reasoning
+        .as_ref()
+        .is_some_and(super::reasoning::is_enabled);
     if let Some(reasoning) = &req.reasoning {
         if !super::reasoning::is_enabled(reasoning) {
             body.insert("thinking".into(), json!({"type": "disabled"}));
@@ -285,11 +289,15 @@ pub fn build_request(req: &ChatRequest, stream: bool, wire: &WireProfile) -> Res
     if let Some(choice) = &req.tool_choice {
         body.insert("tool_choice".into(), tool_choice_out(choice));
     }
-    if let Some(t) = req.temperature {
-        body.insert("temperature".into(), Value::from(t));
-    }
-    if let Some(p) = req.top_p {
-        body.insert("top_p".into(), Value::from(p));
+    // Anthropic rejects sampling controls while extended thinking is enabled (temperature
+    // must be 1, and top_p is unsupported). Omitting both is the only valid request.
+    if !thinking_enabled {
+        if let Some(t) = req.temperature {
+            body.insert("temperature".into(), Value::from(t));
+        }
+        if let Some(p) = req.top_p {
+            body.insert("top_p".into(), Value::from(p));
+        }
     }
     if !req.stop.is_empty() {
         body.insert("stop_sequences".into(), Value::from(req.stop.clone()));
@@ -857,6 +865,23 @@ mod tests {
                 == Some(1),
             "a server tool must not be smuggled into another dialect: {chat}"
         );
+    }
+
+    #[test]
+    fn thinking_omits_anthropic_sampling_controls() {
+        let body = json!({
+            "model": "claude-sonnet-4",
+            "max_tokens": 8192,
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let req = super::parse_request(&body).expect("request");
+        let out = super::build_request(&req, false, &WireProfile::default()).expect("body");
+        assert!(out.get("temperature").is_none(), "{out}");
+        assert!(out.get("top_p").is_none(), "{out}");
+        assert_eq!(out["thinking"]["type"], "enabled");
     }
 
     fn sse(event: &str, data: Value) -> String {

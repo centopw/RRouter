@@ -764,6 +764,18 @@ export type ModelCost = {
   cache_write?: number;
 };
 
+/** Thinking controls the provider publishes for this model, in OpenRouter's shape. */
+export type ReasoningSupport = {
+  /** Accepted effort values, highest first. Absent when only on/off is known. */
+  supported_efforts?: string[];
+  default_effort?: string;
+  default_enabled: boolean;
+  /** The model accepts a reasoning token budget. */
+  supports_max_tokens: boolean;
+  /** Thinking cannot be turned off. */
+  mandatory: boolean;
+};
+
 export type Model = {
   ref: string;
   provider: string;
@@ -772,6 +784,8 @@ export type Model = {
   context: number | null;
   max_output: number | null;
   capabilities: Capabilities;
+  /** Thinking levels the provider publishes; absent when the model does not reason. */
+  reasoning?: ReasoningSupport | null;
   /** USD per million tokens, from models.dev. Absent when no catalog covers the model. */
   cost: ModelCost | null;
   source: "catalog" | "upstream" | "custom" | "synced";

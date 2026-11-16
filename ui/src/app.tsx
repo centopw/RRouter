@@ -927,10 +927,29 @@ function RouteLoading() {
     return () => window.clearTimeout(timer);
   }, []);
   return (
-    <div className="flex flex-col items-start gap-2 text-body text-faint" role="status">
-      <span>loading…</span>
+    <div className="mx-auto w-full max-w-[1160px]" role="status" aria-live="polite">
+      <span className="sr-only">Loading page…</span>
+      <div aria-hidden className="animate-pulse space-y-5">
+        <div>
+          <div className="h-8 w-44 rounded-md bg-[var(--color-surface-3)]" />
+          <div className="mt-3 h-4 w-80 max-w-full rounded bg-[var(--color-surface-3)]" />
+        </div>
+        <div className="grid gap-px overflow-hidden rounded-[var(--radius-card)] border border-line bg-[var(--color-line)] sm:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }, (_, index) => (
+            <div key={index} className="bg-surface px-4 py-4 sm:px-6 sm:py-5">
+              <div className="h-3 w-20 rounded bg-[var(--color-surface-3)]" />
+              <div className="mt-3 h-8 w-28 rounded bg-[var(--color-surface-3)]" />
+              <div className="mt-3 h-3 w-32 rounded bg-[var(--color-surface-3)]" />
+            </div>
+          ))}
+        </div>
+        <div className="rounded-[var(--radius-card)] border border-line bg-surface p-4 sm:p-5">
+          <div className="h-4 w-32 rounded bg-[var(--color-surface-3)]" />
+          <div className="mt-4 h-[220px] rounded bg-[var(--color-surface-3)]" />
+        </div>
+      </div>
       {slow ? (
-        <span className="text-small">
+        <p className="mt-4 text-small text-faint">
           This is taking longer than expected.{" "}
           <button
             type="button"
@@ -940,7 +959,7 @@ function RouteLoading() {
             Reload the dashboard
           </button>
           .
-        </span>
+        </p>
       ) : null}
     </div>
   );

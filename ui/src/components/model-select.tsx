@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import type { Model } from "../lib/api";
-import { useModels } from "../lib/queries";
+import { useModelProviders, useModels } from "../lib/queries";
 import { Select, cx } from "./ui";
 
 /**
@@ -19,6 +19,8 @@ export type ModelSelectProps = {
   className?: string;
   /** Borderless trigger for the composer. */
   plain?: boolean;
+  /** Persistent controls under the option list. */
+  footer?: ReactNode;
 };
 
 export function ModelSelect({
@@ -30,9 +32,15 @@ export function ModelSelect({
   disabled,
   className,
   plain,
+  footer,
 }: ModelSelectProps) {
   const models = useModels();
-  const groups = useGroups(models.data, provider);
+  const providers = useModelProviders();
+  const display = useMemo(
+    () => new Map((providers.data ?? []).map((entry) => [entry.id, entry.display])),
+    [providers.data],
+  );
+  const groups = useGroups(models.data, provider, display);
   const known = useMemo(() => (models.data ?? []).some((m) => m.ref === value), [models.data, value]);
   const missing = value !== "" && !known;
 
@@ -44,6 +52,7 @@ export function ModelSelect({
       onChange={onChange}
       className={className}
       plain={plain}
+      footer={footer}
     >
       {allowEmpty !== undefined ? <option value="">{allowEmpty}</option> : null}
       {missing ? <option value={value}>{value} (missing)</option> : null}
@@ -62,7 +71,11 @@ export function ModelSelect({
   );
 }
 
-function useGroups(models: Model[] | undefined, provider: string | null | undefined) {
+function useGroups(
+  models: Model[] | undefined,
+  provider: string | null | undefined,
+  display: Map<string, string>,
+) {
   return useMemo(() => {
     const map = new Map<string, Model[]>();
     for (const m of models ?? []) {
@@ -71,8 +84,10 @@ function useGroups(models: Model[] | undefined, provider: string | null | undefi
       if (bucket) bucket.push(m);
       else map.set(m.provider, [m]);
     }
-    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [models, provider]);
+    return [...map.entries()]
+      .map(([id, items]) => [display.get(id) ?? id, items] as const)
+      .sort(([a], [b]) => a.localeCompare(b));
+  }, [display, models, provider]);
 }
 
 /** Ordered list editor used by combos: each step is a model select. */
