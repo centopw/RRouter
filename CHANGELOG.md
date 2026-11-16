@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.18.2 — 2026-11-16
+
+### Bug Fixes
+
+- fix(ui): keep narrow routing cards inside the canvas ([`672e087`](https://github.com/centopw/RRouter/commit/672e0873f4e8783256fbb06248660caeb6ae2c20))
+
 ## 0.18.1 — 2026-11-16
 
 ### Bug Fixes
