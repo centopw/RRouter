@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.23.2 — 2026-11-16
+
+### Bug Fixes
+
+- fix(ui): space quick-start cards and pad the steps ([`e85200a`](https://github.com/centopw/RRouter/commit/e85200a60f034708c310ead9b36791499588934c))
+
 ## 0.23.1 — 2026-11-16
 
 ### Bug Fixes
