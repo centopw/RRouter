@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Button, cx } from "./ui";
+import { BrandMark } from "./brand-mark";
 import { passwordStrength, MIN_PASSWORD } from "../lib/auth";
 
 /**
@@ -19,13 +20,7 @@ export function AuthShell({
   return (
     <div className="flex min-h-full flex-col bg-bg text-fg">
       <header className="flex h-16 shrink-0 items-center gap-3 border-b border-line px-4 min-[820px]:px-7">
-        <img
-          src={`${import.meta.env.BASE_URL}logo-light.png`}
-          alt=""
-          width={26}
-          height={26}
-          className="h-[28px] w-auto shrink-0 select-none object-contain"
-        />
+        <BrandMark decorative className="h-[28px] w-[46px] shrink-0 select-none" />
         <span className="text-lead font-semibold tracking-[-0.01em]">RRouter</span>
       </header>
       <main className="flex flex-1 justify-center px-4 py-10 min-[560px]:py-16">

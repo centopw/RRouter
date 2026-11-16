@@ -17,6 +17,7 @@ import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from "react
 import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
 import { useAuthState, useHealth, useIsAdmin, useModels, useSignOut, useSystem, useUpdateStatus } from "./lib/queries";
 import { Button, CopyChip, Dot, cx } from "./components/ui";
+import { BrandMark } from "./components/brand-mark";
 import { uptime } from "./lib/format";
 
 type NavItem = {
@@ -324,13 +325,20 @@ export function Shell() {
               title="expand sidebar"
               className="group relative flex h-10 w-10 shrink-0 items-center justify-center rounded-lg hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
             >
-              <img
-                src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-light.png`}
-                alt=""
-                width={30}
-                height={30}
-                className="h-[30px] w-auto max-w-[36px] select-none object-contain transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
-              />
+              {logoOk ? (
+                <img
+                  src={logo}
+                  alt=""
+                  width={30}
+                  height={30}
+                  className="h-[30px] w-auto max-w-[36px] select-none object-contain transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
+                />
+              ) : (
+                <BrandMark
+                  decorative
+                  className="h-[30px] w-[49px] select-none transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
+                />
+              )}
               <SidebarSimple
                 size={17}
                 aria-hidden
@@ -339,13 +347,17 @@ export function Shell() {
             </button>
           ) : (
             <>
-              <img
-                src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-light.png`}
-                alt=""
-                width={30}
-                height={30}
-                className="h-[30px] w-auto max-w-[52px] shrink-0 select-none object-contain"
-              />
+              {logoOk ? (
+                <img
+                  src={logo}
+                  alt=""
+                  width={30}
+                  height={30}
+                  className="h-[30px] w-auto max-w-[52px] shrink-0 select-none object-contain"
+                />
+              ) : (
+                <BrandMark decorative className="h-[30px] w-[49px] shrink-0 select-none" />
+              )}
               <span className="min-w-0 flex-1 truncate text-lead font-semibold tracking-[-0.01em] text-fg">
                 {name}
               </span>
@@ -403,13 +415,17 @@ export function Shell() {
 
       <header className="shrink-0 border-b border-line bg-surface min-[820px]:hidden">
         <div className="flex h-14 items-center gap-3 px-3">
-          <img
-            src={logoOk ? logo : `${import.meta.env.BASE_URL}logo-light.png`}
-            alt=""
-            width={24}
-            height={24}
-            className="h-6 w-6 shrink-0 select-none object-contain"
-          />
+          {logoOk ? (
+            <img
+              src={logo}
+              alt=""
+              width={24}
+              height={24}
+              className="h-6 w-6 shrink-0 select-none object-contain"
+            />
+          ) : (
+            <BrandMark decorative className="h-6 w-10 shrink-0 select-none" />
+          )}
           <span className="text-body font-semibold text-fg">{name}</span>
           <span className="flex items-center gap-1.5">
             <RunningDot running={running} />

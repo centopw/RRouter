@@ -1,10 +1,24 @@
-import { useMemo } from "react";
-import { Card, cx } from "./ui";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import { ArrowCounterClockwise, DotsSixVertical } from "@phosphor-icons/react";
+import { Button, Card, cx } from "./ui";
+import { BrandMark, type BrandMarkState } from "./brand-mark";
+import { ProviderIcon, providerBrand } from "./provider-icon";
 import { ago } from "../lib/format";
 import type { UsageEvent } from "../lib/api";
 
 const LIVE_WINDOW_SECS = 15 * 60;
 const ACTIVE_WINDOW_SECS = 90;
+const POSITION_KEY = "rrouter.live-routing.positions.v1";
+const NARROW_POSITION_KEY = `${POSITION_KEY}:narrow`;
 
 const NAMES: Record<string, string> = {
   anthropic: "Anthropic",
@@ -21,28 +35,123 @@ const NAMES: Record<string, string> = {
   cerebras: "Cerebras",
   ollama: "Ollama",
   github: "GitHub",
+  opencode: "OpenCode",
+  "opencode-go": "OpenCode",
+  qoder: "Qoder",
+  "google-antigravity": "Antigravity",
+  antigravity: "Antigravity",
 };
+
+type Point = { x: number; y: number };
 
 type Node = {
   provider: string;
   requests: number;
   errors: number;
   lastTs: number;
+  lastError: boolean;
 };
 
-/** Nodes sit on an ellipse around the gateway; two providers get the horizontal axis,
- *  three form a triangle, and larger sets walk the ring so cards never cover the centre. */
-function position(index: number, count: number): { x: number; y: number } {
-  if (count === 1) return { x: 78, y: 50 };
-  if (count === 2) return { x: index === 0 ? 18 : 82, y: 50 };
-  const angle = -Math.PI / 2 + (index * 2 * Math.PI) / count;
-  return { x: 50 + Math.cos(angle) * 37, y: 50 + Math.sin(angle) * 34 };
+const clamp = (value: number, low: number, high: number) =>
+  Math.min(high, Math.max(low, value));
+
+/**
+ * Initial positions avoid one big ring: small sets orbit the hub, larger sets sit in
+ * two rails so a provider card never lands on top of its neighbour. The operator can
+ * move every card afterwards; a stored position wins over this layout.
+ */
+function initialLayout(providers: string[], width: number): Record<string, Point> {
+  const result: Record<string, Point> = {};
+  const count = providers.length;
+  const [first, second] = providers;
+  if (count === 1 && first) {
+    result[first] = { x: width > 0 && width < 640 ? 70 : 78, y: width > 0 && width < 640 ? 64 : 50 };
+    return result;
+  }
+  if (count === 2 && first && second) {
+    const edge = width > 0 && width < 640 ? 28 : 16;
+    result[first] = { x: edge, y: 50 };
+    result[second] = { x: 100 - edge, y: 50 };
+    return result;
+  }
+  if (width > 0 && width < 640) {
+    // Phones put the hub at the top and fan two rails below it; a ring at this width
+    // would push cards off the canvas and overlap the centre.
+    const split = Math.ceil(count / 2);
+    providers.forEach((provider, index) => {
+      const left = index < split;
+      const sideIndex = left ? index : index - split;
+      const sideCount = left ? split : count - split;
+      result[provider] = {
+        x: left ? 28 : 72,
+        y: sideCount === 1 ? 62 : 35 + (sideIndex / (sideCount - 1)) * 55,
+      };
+    });
+    return result;
+  }
+  if (count <= 6) {
+    providers.forEach((provider, index) => {
+      const angle = -Math.PI / 2 + (index * 2 * Math.PI) / count;
+      result[provider] = {
+        x: 50 + Math.cos(angle) * 37,
+        y: 50 + Math.sin(angle) * 34,
+      };
+    });
+    return result;
+  }
+  const split = Math.ceil(count / 2);
+  providers.forEach((provider, index) => {
+    const left = index < split;
+    const sideIndex = left ? index : index - split;
+    const sideCount = left ? split : count - split;
+    result[provider] = {
+      x: left ? 14 : 86,
+      y: sideCount === 1 ? 50 : 16 + (sideIndex / (sideCount - 1)) * 68,
+    };
+  });
+  return result;
+}
+
+function loadStoredPositions(key: string): Record<string, Point> {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "{}");
+    if (!parsed || typeof parsed !== "object") return {};
+    const result: Record<string, Point> = {};
+    for (const [provider, point] of Object.entries(parsed)) {
+      if (
+        typeof point === "object" &&
+        point !== null &&
+        typeof (point as Point).x === "number" &&
+        typeof (point as Point).y === "number"
+      ) {
+        result[provider] = {
+          x: clamp((point as Point).x, 4, 96),
+          y: clamp((point as Point).y, 6, 94),
+        };
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function useReducedMotion(): boolean {
+  const [reduce, setReduce] = useState(false);
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReduce(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return reduce;
 }
 
 /**
- * The routing map: one gateway node and one node per provider seen in the window.
- * Edges animate while a provider served a request in the last minute; this is a live
- * readout, not a topology editor.
+ * The routing map is a real, persistent canvas: every provider card can be dragged or
+ * nudged with the keyboard, and the layout is saved per browser. Edges are drawn from
+ * the live event stream, so a quiet provider stays visible without pretending it moved.
  */
 export function LiveRoutingCard({
   events,
@@ -54,41 +163,242 @@ export function LiveRoutingCard({
   providers: string[];
   loading?: boolean;
 }) {
-  const now = Math.floor(Date.now() / 1000);
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  const [stored, setStored] = useState<Record<string, Point>>(() =>
+    loadStoredPositions(
+      window.matchMedia("(max-width: 700px)").matches ? NARROW_POSITION_KEY : POSITION_KEY,
+    ),
+  );
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{
+    provider: string;
+    pointerId: number;
+    dx: number;
+    dy: number;
+  } | null>(null);
+  const reduceMotion = useReducedMotion();
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Math.floor(Date.now() / 1000)), 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const nodes = useMemo(() => {
-    const recent = events.filter((e) => now - e.ts <= LIVE_WINDOW_SECS);
     const byProvider = new Map<string, Node>();
     for (const provider of providers) {
-      byProvider.set(provider, { provider, requests: 0, errors: 0, lastTs: 0 });
+      if (provider) {
+        byProvider.set(provider, {
+          provider,
+          requests: 0,
+          errors: 0,
+          lastTs: 0,
+          lastError: false,
+        });
+      }
     }
-    for (const event of recent) {
+    for (const event of events) {
+      if (now - event.ts > LIVE_WINDOW_SECS) continue;
       const node = byProvider.get(event.provider) ?? {
         provider: event.provider,
         requests: 0,
         errors: 0,
         lastTs: 0,
+        lastError: false,
       };
       node.requests += 1;
-      if (event.status >= 400 || event.error !== null) node.errors += 1;
-      node.lastTs = Math.max(node.lastTs, event.ts);
+      const failed = event.status >= 400 || event.error !== null;
+      if (failed) node.errors += 1;
+      if (event.ts >= node.lastTs) {
+        node.lastTs = event.ts;
+        node.lastError = failed;
+      }
       byProvider.set(event.provider, node);
     }
     return [...byProvider.values()]
       .filter((node) => node.requests > 0 || providers.includes(node.provider))
-      .sort((a, b) => a.provider.localeCompare(b.provider))
-      .slice(0, 6);
+      .sort((a, b) => a.provider.localeCompare(b.provider));
   }, [events, providers, now]);
 
-  const requests = nodes.reduce((n, node) => n + node.requests, 0);
-  const errors = nodes.reduce((n, node) => n + node.errors, 0);
-  const latest = nodes.reduce((n, node) => Math.max(n, node.lastTs), 0);
-  const active = latest > 0 && now - latest <= ACTIVE_WINDOW_SECS;
+  const providersKey = useMemo(() => nodes.map((node) => node.provider).join("|"), [nodes]);
+  const initial = useMemo(
+    () => initialLayout(providersKey ? providersKey.split("|") : [], canvasSize.width),
+    [providersKey, canvasSize.width],
+  );
+
+  const pointOf = useCallback(
+    (provider: string): Point => stored[provider] ?? initial[provider] ?? { x: 50, y: 50 },
+    [stored, initial],
+  );
+
+  const latestEvent = useMemo(
+    () =>
+      events.reduce<UsageEvent | null>(
+        (latest, event) => (latest === null || event.ts > latest.ts ? event : latest),
+        null,
+      ),
+    [events],
+  );
+  const liveEvent =
+    latestEvent !== null && now - latestEvent.ts <= ACTIVE_WINDOW_SECS ? latestEvent : null;
+  const latestProvider = liveEvent?.provider ?? null;
+  const latestPoint = latestProvider ? pointOf(latestProvider) : null;
+  const latestFailed = liveEvent !== null && (liveEvent.status >= 400 || liveEvent.error !== null);
+  const narrow = canvasSize.width > 0 && canvasSize.width < 640;
+  const hubPoint = narrow ? { x: 50, y: 18 } : { x: 50, y: 50 };
+  const storageKey = narrow ? NARROW_POSITION_KEY : POSITION_KEY;
+  useEffect(() => {
+    setStored(loadStoredPositions(storageKey));
+  }, [storageKey]);
+
+  const [brandState, setBrandState] = useState<BrandMarkState>("idle");
+  const eventKey =
+    liveEvent === null
+      ? "idle"
+      : `${liveEvent.ts}:${liveEvent.provider}:${liveEvent.status}:${liveEvent.error ?? ""}`;
+  useEffect(() => {
+    if (liveEvent === null) {
+      setBrandState("idle");
+      return;
+    }
+    setBrandState(latestFailed ? "failover" : "dispatch");
+    const timer = window.setTimeout(() => setBrandState("idle"), 1_100);
+    return () => window.clearTimeout(timer);
+    // eventKey changes for a new event; liveEvent/latestFailed are derived from it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eventKey]);
+
+  const brandAngle = useMemo(() => {
+    if (!latestPoint || canvasSize.width === 0 || canvasSize.height === 0) return 0;
+    const dx = (latestPoint.x / 100) * canvasSize.width - (hubPoint.x / 100) * canvasSize.width;
+    const dy = (latestPoint.y / 100) * canvasSize.height - (hubPoint.y / 100) * canvasSize.height;
+    return (Math.atan2(dy, dx) * 180) / Math.PI;
+  }, [latestPoint, canvasSize, hubPoint]);
+
+  const totalRequests = nodes.reduce((sum, node) => sum + node.requests, 0);
+  const totalErrors = nodes.reduce((sum, node) => sum + node.errors, 0);
+  const activeCount = nodes.filter(
+    (node) => node.lastTs > 0 && now - node.lastTs <= ACTIVE_WINDOW_SECS,
+  ).length;
+  const latestTs = nodes.reduce((latest, node) => Math.max(latest, node.lastTs), 0);
+  const active = activeCount > 0;
+
+  useLayoutEffect(() => {
+    if (nodes.length === 0) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const measure = () => {
+      const rect = canvas.getBoundingClientRect();
+      setCanvasSize({ width: rect.width, height: rect.height });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(canvas);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [nodes.length, loading]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const keep: Record<string, Point> = {};
+      for (const provider of providersKey ? providersKey.split("|") : []) {
+        if (stored[provider]) keep[provider] = stored[provider];
+      }
+      try {
+        if (Object.keys(keep).length === 0) localStorage.removeItem(storageKey);
+        else localStorage.setItem(storageKey, JSON.stringify(keep));
+      } catch {
+        // Private mode or a full quota: dragging still works for this visit.
+      }
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [stored, providersKey, storageKey]);
+
+  const resetLayout = () => {
+    setStored({});
+    setAnnouncement("Provider layout reset to the automatic arrangement.");
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      // Storage is optional; the in-memory state is enough.
+    }
+  };
+
+  const beginDrag = (event: ReactPointerEvent<HTMLElement>, provider: string) => {
+    if (event.button !== 0) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const point = pointOf(provider);
+    dragRef.current = {
+      provider,
+      pointerId: event.pointerId,
+      dx: (point.x / 100) * rect.width - event.clientX,
+      dy: (point.y / 100) * rect.height - event.clientY,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging(provider);
+    event.preventDefault();
+  };
+
+  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = dragRef.current;
+    const canvas = canvasRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const halfWidth = Math.min(44, (84 / rect.width) * 100);
+    const halfHeight = Math.min(36, (37 / rect.height) * 100);
+    const x = ((event.clientX + drag.dx) / rect.width) * 100;
+    const y = ((event.clientY + drag.dy) / rect.height) * 100;
+    setStored((previous) => ({
+      ...previous,
+      [drag.provider]: {
+        x: clamp(x, halfWidth + 1, 99 - halfWidth),
+        y: clamp(y, halfHeight + 1, 99 - halfHeight),
+      },
+    }));
+  };
+
+  const endDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    dragRef.current = null;
+    setDragging(null);
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // The pointer already left the element; nothing to release.
+    }
+  };
+
+  const nudge = (event: ReactKeyboardEvent<HTMLElement>, provider: string) => {
+    const step = event.shiftKey ? 5 : 1;
+    let dx = 0;
+    let dy = 0;
+    if (event.key === "ArrowLeft") dx = -step;
+    else if (event.key === "ArrowRight") dx = step;
+    else if (event.key === "ArrowUp") dy = -step;
+    else if (event.key === "ArrowDown") dy = step;
+    else return;
+    event.preventDefault();
+    const current = pointOf(provider);
+    const next = { x: clamp(current.x + dx, 8, 92), y: clamp(current.y + dy, 8, 92) };
+    setStored((previous) => ({ ...previous, [provider]: next }));
+    setAnnouncement(
+      `${NAMES[provider] ?? provider} moved to ${Math.round(next.x)}% across and ${Math.round(next.y)}% down.`,
+    );
+  };
 
   return (
     <Card>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-6 py-4">
-        <div>
-          <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line px-5 py-4">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-lead font-semibold">Live routing</h2>
             <span
               className={cx(
@@ -105,108 +415,158 @@ export function LiveRoutingCard({
                   active ? "live-dot bg-[var(--color-pos)]" : "bg-[var(--color-faint)]",
                 )}
               />
-              {active ? "routing" : "idle"}
+              {active ? `${activeCount} ${activeCount === 1 ? "provider" : "providers"} active` : "idle"}
             </span>
           </div>
-          <p className="mt-0.5 text-small text-muted">
-            Providers serving traffic in the last 15 minutes. The map refreshes every 5 seconds.
+          <p className="mt-0.5 max-w-[60ch] text-small text-muted">
+            Drag a provider to arrange the canvas. The map reads the last 15 minutes and
+            refreshes every 5 seconds.
           </p>
         </div>
-        <div className="flex items-center gap-4 text-small text-muted">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-small text-muted">
           <span>
-            <span className="font-mono text-fg tnum">{requests}</span> requests
+            <span className="font-mono text-fg tnum">{totalRequests}</span> requests
           </span>
-          <span className={errors > 0 ? "text-neg" : "text-faint"}>
-            <span className="font-mono tnum">{errors}</span> errors
+          <span className={totalErrors > 0 ? "text-neg" : "text-faint"}>
+            <span className="font-mono tnum">{totalErrors}</span> errors
           </span>
-          <span className="text-faint">{latest > 0 ? `last ${ago(latest)}` : "no traffic yet"}</span>
+          <span className="text-faint">{latestTs > 0 ? `last ${ago(latestTs)}` : "no traffic yet"}</span>
+          <Button variant="quiet" onClick={resetLayout} className="h-8">
+            <ArrowCounterClockwise size={13} aria-hidden />
+            Auto arrange
+          </Button>
         </div>
       </div>
 
       {loading && events.length === 0 ? (
-        <div aria-hidden className="h-[300px] animate-pulse bg-[var(--color-surface-2)]/40" />
+        <div aria-hidden className="h-[380px] animate-pulse bg-[var(--color-surface-2)]/40 max-[700px]:h-[440px]" />
       ) : nodes.length === 0 ? (
         <div className="px-6 py-12 text-center text-body text-faint">
           No provider traffic yet. The map fills in as requests arrive.
         </div>
       ) : (
-        <div className="relative h-[300px] overflow-hidden max-[700px]:h-[250px]">
+        <div
+          ref={canvasRef}
+          role="region"
+          aria-label="Live routing canvas. Drag provider cards to arrange them."
+          aria-describedby="live-routing-help"
+          className="route-canvas relative h-[380px] touch-none overflow-hidden max-[700px]:h-[440px]"
+        >
           <div aria-hidden className="route-grid absolute inset-0" />
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-surface/80 to-transparent"
+          />
           <svg
             aria-hidden
             viewBox="0 0 100 100"
             preserveAspectRatio="none"
             className="absolute inset-0 h-full w-full overflow-visible"
           >
-            {nodes.map((node, i) => {
-              const p = position(i, nodes.length);
+            {nodes.map((node) => {
+              const point = pointOf(node.provider);
               const flowing = node.lastTs > 0 && now - node.lastTs <= ACTIVE_WINDOW_SECS;
+              const failed = flowing && node.lastError;
+              const stroke = failed
+                ? "var(--color-neg)"
+                : flowing
+                  ? providerBrand(node.provider).color
+                  : "var(--color-line-strong)";
               return (
                 <g key={node.provider}>
                   <line
-                    x1="50"
-                    y1="50"
-                    x2={p.x}
-                    y2={p.y}
-                    stroke={node.errors > 0 ? "var(--color-neg-line)" : "var(--color-line-strong)"}
-                    strokeWidth="1"
+                    x1={hubPoint.x}
+                    y1={hubPoint.y}
+                    x2={point.x}
+                    y2={point.y}
+                    stroke={stroke}
+                    strokeWidth={flowing ? 1.35 : 1}
+                    strokeOpacity={flowing ? 0.9 : 0.45}
+                    strokeLinecap="round"
                     vectorEffect="non-scaling-stroke"
+                    className={flowing && !reduceMotion ? "route-edge" : undefined}
                   />
-                  {flowing ? (
-                    <line
-                      x1="50"
-                      y1="50"
-                      x2={p.x}
-                      y2={p.y}
-                      stroke={node.errors > 0 ? "var(--color-neg)" : "var(--color-accent)"}
-                      strokeWidth="1.5"
-                      vectorEffect="non-scaling-stroke"
-                      className="route-edge"
-                    />
+                  {flowing && latestProvider === node.provider && !reduceMotion ? (
+                    <circle r="1.35" fill={failed ? "var(--color-neg)" : providerBrand(node.provider).color}>
+                      <animateMotion
+                        dur="1.25s"
+                        repeatCount="indefinite"
+                        path={`M${hubPoint.x} ${hubPoint.y} L${point.x} ${point.y}`}
+                      />
+                    </circle>
                   ) : null}
                 </g>
               );
             })}
           </svg>
 
-          <div className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2">
-            <div className="flex w-[150px] flex-col items-center rounded-xl border border-[var(--color-accent)]/45 bg-surface px-3 py-2.5 text-center shadow-[0_4px_14px_rgba(16,18,20,0.08)]">
-              <img
-                src={`${import.meta.env.BASE_URL}logo-mark-light.svg`}
-                alt=""
-                className="h-8 w-8 object-contain"
+          <div
+            className="absolute left-1/2 z-20 -translate-x-1/2 -translate-y-1/2"
+            style={{ top: `${hubPoint.y}%` }}
+          >
+            <div className="flex w-[152px] flex-col items-center rounded-2xl border border-[var(--color-line-strong)] bg-surface/95 px-3 py-2.5 text-center shadow-[0_8px_24px_-12px_rgba(28,43,66,0.35)] backdrop-blur">
+              <BrandMark
+                state={brandState}
+                angleDeg={brandAngle}
+                color={latestFailed ? "#EF4444" : latestProvider ? providerBrand(latestProvider).color : undefined}
+                surface="light"
+                decorative
+                className="h-11 w-[72px]"
               />
               <span className="mt-1 text-body font-semibold text-fg">RRouter</span>
-              <span className="text-caption text-faint tnum">{requests} in window</span>
+              <span className="text-caption text-faint tnum">
+                {totalRequests} in window
+              </span>
             </div>
           </div>
 
-          {nodes.map((node, i) => {
-            const p = position(i, nodes.length);
+          {nodes.map((node) => {
+            const point = pointOf(node.provider);
             const flowing = node.lastTs > 0 && now - node.lastTs <= ACTIVE_WINDOW_SECS;
-            const tone = `var(--color-series-${(i % 6) + 1})`;
+            const brand = providerBrand(node.provider);
+            const name = NAMES[node.provider] ?? node.provider;
+            const isDragging = dragging === node.provider;
             return (
-              <div
+              <article
                 key={node.provider}
-                className="absolute z-10 -translate-x-1/2 -translate-y-1/2"
-                style={{ left: `${p.x}%`, top: `${p.y}%` }}
+                tabIndex={0}
+                aria-label={`${name}: ${node.requests} requests, ${node.errors} errors, ${
+                  flowing ? "active" : "idle"
+                }. Drag or use the arrow keys to move.`}
+                title={`${name} · ${node.requests} requests · ${node.errors} errors${
+                  node.lastTs > 0 ? ` · last ${ago(node.lastTs)}` : ""
+                }`}
+                onPointerDown={(event) => beginDrag(event, node.provider)}
+                onPointerMove={moveDrag}
+                onPointerUp={endDrag}
+                onPointerCancel={endDrag}
+                onKeyDown={(event) => nudge(event, node.provider)}
+                className={cx(
+                  "absolute z-10 w-[168px] -translate-x-1/2 -translate-y-1/2 select-none rounded-xl border bg-surface shadow-[0_2px_10px_rgba(28,43,66,0.08)] outline-none transition-[box-shadow,border-color] focus-visible:ring-2 focus-visible:ring-accent-text/40",
+                  flowing ? "border-[var(--color-line-strong)]" : "border-line",
+                  node.errors > 0 && "border-[var(--color-neg-line)]",
+                  isDragging ? "cursor-grabbing shadow-[0_12px_28px_-14px_rgba(28,43,66,0.45)]" : "cursor-grab",
+                )}
+                style={{
+                  left: `${point.x}%`,
+                  top: `${point.y}%`,
+                  transition: isDragging ? "none" : "left 180ms ease, top 180ms ease, box-shadow 120ms",
+                }}
               >
-                <div
-                  className={cx(
-                    "flex w-[150px] items-center gap-2 rounded-xl border bg-surface px-3 py-2 shadow-[0_2px_8px_rgba(16,18,20,0.06)] transition-colors",
-                    flowing
-                      ? "border-[var(--color-line-strong)]"
-                      : "border-line",
-                  )}
-                >
-                  <span
-                    aria-hidden
-                    className="h-2 w-2 shrink-0 rounded-full"
-                    style={{ backgroundColor: tone }}
-                  />
+                <div className="flex items-center gap-2 px-2.5 py-2">
+                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-line bg-surface-2">
+                    <ProviderIcon provider={node.provider} size={15} />
+                  </span>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-small font-medium text-fg">
-                      {NAMES[node.provider] ?? node.provider}
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate text-small font-semibold text-fg">{name}</span>
+                      <span
+                        className={cx(
+                          "h-1.5 w-1.5 shrink-0 rounded-full",
+                          flowing ? "live-dot bg-[var(--color-pos)]" : "bg-[var(--color-line-strong)]",
+                        )}
+                        aria-hidden
+                      />
                     </div>
                     <div className="truncate text-caption text-faint tnum">
                       {node.requests} req
@@ -214,22 +574,42 @@ export function LiveRoutingCard({
                       {node.lastTs > 0 ? ` · ${ago(node.lastTs)}` : " · idle"}
                     </div>
                   </div>
+                  <DotsSixVertical size={14} aria-hidden className="shrink-0 text-faint/70" />
+                </div>
+                <div aria-hidden className="h-0.5 overflow-hidden bg-[var(--color-rule)]">
                   <span
-                    aria-label={flowing ? "served recently" : "idle"}
-                    className={cx(
-                      "h-1.5 w-1.5 shrink-0 rounded-full",
-                      flowing ? "live-dot bg-[var(--color-pos)]" : "bg-[var(--color-line-strong)]",
-                    )}
+                    className="block h-full rounded-full"
+                    style={{
+                      width: `${node.requests > 0 ? Math.max(6, Math.min(100, (node.requests / Math.max(1, totalRequests)) * 100)) : 0}%`,
+                      background: brand.color,
+                    }}
                   />
                 </div>
-              </div>
+              </article>
             );
           })}
+
+          <div
+            id="live-routing-help"
+            className="pointer-events-none absolute bottom-2 left-3 right-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-caption text-faint"
+          >
+            <span>Drag to arrange · arrow keys nudge · shift+arrow moves 5%</span>
+            <span className="ml-auto">layout saved on this device</span>
+          </div>
+          <p className="sr-only" aria-live="polite">{announcement}</p>
         </div>
       )}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-6 py-2.5 text-caption text-faint">
-        <span>animated edge = provider served a request in the last 90 seconds</span>
-        <span className="ml-auto">5s refresh</span>
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-5 py-2.5 text-caption text-faint">
+        <span className="flex items-center gap-1.5">
+          <span aria-hidden className="h-1.5 w-5 rounded-full bg-[var(--color-accent)]" />
+          traffic in the last 90 seconds
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span aria-hidden className="h-1.5 w-5 rounded-full bg-[var(--color-neg)]" />
+          latest event failed
+        </span>
+        <span className="ml-auto">5s refresh · 15m window</span>
       </div>
     </Card>
   );

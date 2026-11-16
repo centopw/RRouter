@@ -1,10 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Badge,
   Button,
   Card,
-  CardHeader,
   CopyChip,
   Dot,
   ErrorNote,
@@ -20,7 +26,7 @@ import {
 import { DataTable, type Column } from "../components/table";
 import { ModelPicker } from "../components/model-picker";
 import { Checkbox, IconButton } from "../components/atoms";
-import { Key as KeyIcon, PencilSimple, Trash } from "@phosphor-icons/react";
+import { Key as KeyIcon, MagnifyingGlass, PencilSimple, Trash } from "@phosphor-icons/react";
 import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
 import {
   qk,
@@ -50,17 +56,49 @@ export default function Keys() {
   const system = useSystem();
   // Team names for the badge; the picker inside the dialogs reads the same list.
   const teams = useTeams();
-  const teamName = (id: string | null | undefined) =>
-    id === null || id === undefined
-      ? null
-      : (teams.data?.find((team) => team.id === id)?.name ?? id.slice(0, 8));
+  const teamName = useCallback(
+    (id: string | null | undefined) =>
+      id === null || id === undefined
+        ? null
+        : (teams.data?.find((team) => team.id === id)?.name ?? id.slice(0, 8)),
+    [teams.data],
+  );
   const client = useQueryClient();
   const [editing, setEditing] = useState<KeyResult | null>(null);
   const [creating, setCreating] = useState(false);
   const [revoking, setRevoking] = useState<KeyResult | null>(null);
   const [revealing, setRevealing] = useState(false);
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "disabled">("all");
   // The playground key is the gateway's own: it is listed here, but not an operator key.
-  const configured = (keys.data ?? []).filter((row) => row.kind !== "playground").length;
+  const allRows = useMemo(() => keys.data ?? [], [keys.data]);
+  const visibleRows = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return allRows.filter((row) => {
+      if (statusFilter === "active" && !row.is_active) return false;
+      if (statusFilter === "disabled" && row.is_active) return false;
+      if (!needle) return true;
+      const haystack = [
+        row.name ?? "",
+        row.id,
+        row.kind,
+        row.scope,
+        teamName(row.team_id) ?? "",
+        modelScopeLabel(row),
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [allRows, query, statusFilter, teamName]);
+  const configured = allRows.filter((row) => row.kind !== "playground").length;
+  const activeCount = allRows.filter((row) => statusOf(row).label === "active").length;
+  const totalSpent = allRows.reduce((sum, row) => sum + row.spent_micros, 0);
+  const filtering = query.trim().length > 0 || statusFilter !== "all";
+  const clearFilters = () => {
+    setQuery("");
+    setStatusFilter("all");
+  };
 
   // The Modal re-focuses itself whenever `onClose` changes identity; keep it stable.
   const closeEdit = useCallback(() => setEditing(null), []);
@@ -74,59 +112,78 @@ export default function Keys() {
     },
   });
 
+  const actionsFor = (r: KeyResult) => (
+    <span className="flex justify-end gap-0.5">
+      {r.kind === "playground" ? (
+        <IconButton label="Show the playground key" onClick={() => setRevealing(true)}>
+          <KeyIcon size={15} aria-hidden />
+        </IconButton>
+      ) : null}
+      <IconButton
+        label={`Edit key settings for ${r.name ?? r.id}`}
+        onClick={() => setEditing(r)}
+      >
+        <PencilSimple size={15} aria-hidden />
+      </IconButton>
+      <IconButton
+        label={`Delete key ${r.name ?? r.id}`}
+        onClick={() => setRevoking(r)}
+        className="hover:bg-[var(--color-neg-tint)] hover:text-[var(--color-neg-ink)]"
+      >
+        <Trash size={15} aria-hidden />
+      </IconButton>
+    </span>
+  );
+
   const columns: Array<Column<KeyResult>> = [
     {
       key: "key",
       title: "Key",
-      width: "42%",
-      className: "min-w-0",
+      width: "36%",
+      className: "min-w-0 py-3",
       render: (r) => <KeyCell row={r} team={teamName(r.team_id)} />,
     },
     {
       key: "limits",
-      title: "Limits",
-      className: "min-w-0",
+      title: "Access & limits",
+      className: "min-w-0 py-3",
       render: (r) => <Limits row={r} />,
     },
     {
       key: "spend",
       title: "Spend",
-      width: "9.5rem",
-      className: "hidden md:table-cell",
+      width: "10rem",
+      className: "hidden md:table-cell py-3",
       render: (r) => <Spend row={r} />,
     },
     {
       key: "actions",
       title: "Actions",
       align: "right",
-      width: "5rem",
-      render: (r) => (
-        <span className="flex justify-end gap-0.5">
-          {r.kind === "playground" ? (
-            <IconButton
-              label="Show the playground key"
-              onClick={() => setRevealing(true)}
-            >
-              <KeyIcon size={15} aria-hidden />
-            </IconButton>
-          ) : null}
-          <IconButton
-            label={`Edit key settings for ${r.name ?? r.id}`}
-            onClick={() => setEditing(r)}
-          >
-            <PencilSimple size={15} aria-hidden />
-          </IconButton>
-          <IconButton
-            label={`Delete key ${r.name ?? r.id}`}
-            onClick={() => setRevoking(r)}
-            className="hover:bg-[var(--color-neg-tint)] hover:text-[var(--color-neg-ink)]"
-          >
-            <Trash size={15} aria-hidden />
-          </IconButton>
-        </span>
-      ),
+      width: "6rem",
+      className: "py-3",
+      render: (r) => actionsFor(r),
     },
   ];
+
+  const emptyState = (
+    <div className="flex flex-col items-center gap-2">
+      <span>
+        {query.trim()
+          ? `No keys match “${query.trim()}”.`
+          : statusFilter === "active"
+            ? "No active keys."
+            : statusFilter === "disabled"
+              ? "No disabled keys."
+              : "No keys yet. Create one above to require authentication on /v1."}
+      </span>
+      {filtering ? (
+        <Button variant="quiet" onClick={clearFilters}>
+          Clear filters
+        </Button>
+      ) : null}
+    </div>
+  );
 
   return (
     <>
@@ -151,7 +208,7 @@ export default function Keys() {
       />
 
       <PageHeader
-        title="API Keys"
+        title="API keys"
         subtitle="Clients authenticate with these against /v1. Keys are stored hashed; the plaintext is shown once."
         actions={
           <Button variant="primary" onClick={() => setCreating(true)}>
@@ -167,24 +224,95 @@ export default function Keys() {
       ) : null}
 
       <Card>
-        <CardHeader
-          title="Keys"
-          action={
-            <span className="text-caption text-faint">{configured} configured</span>
-          }
-        />
-        <DataTable
-          columns={columns}
-          rows={keys.data}
-          rowKey={(r) => r.id}
-          loading={keys.isLoading}
-          empty="No keys yet. Create one above to require authentication on /v1."
-          tableLayout="fixed"
-          rowHeaderKey="key"
-          stickyRight="actions"
-          scrollLabel="API keys"
-        />
-        <div className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-3 text-caption text-faint">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-line px-5 py-4">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <h2 className="text-lead font-semibold">Keys</h2>
+              <span className="text-caption text-faint">
+                {filtering ? `${visibleRows.length} of ${allRows.length}` : `${allRows.length} total`}
+              </span>
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-small text-muted">
+              <span>
+                <span className="font-medium text-fg tnum">{activeCount}</span> active
+              </span>
+              <span>
+                <span className="font-medium text-fg tnum">{usd(totalSpent)}</span> spent
+              </span>
+              <span>
+                <span className="font-medium text-fg tnum">{configured}</span> operator{" "}
+                {configured === 1 ? "key" : "keys"}
+              </span>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative w-[210px] max-[640px]:w-full">
+              <MagnifyingGlass
+                size={14}
+                aria-hidden
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
+              />
+              <Input
+                value={query}
+                onChange={setQuery}
+                placeholder="Search keys"
+                ariaLabel="Search keys"
+                className="pl-8"
+              />
+            </div>
+            <Segmented
+              options={[
+                { id: "all", label: "All" },
+                { id: "active", label: "Active" },
+                { id: "disabled", label: "Disabled" },
+              ]}
+              value={statusFilter}
+              onChange={setStatusFilter}
+              ariaLabel="Filter keys by status"
+            />
+          </div>
+        </div>
+        <div className="hidden lg:block">
+          <DataTable
+            columns={columns}
+            rows={visibleRows}
+            rowKey={(r) => r.id}
+            loading={keys.isLoading}
+            empty={emptyState}
+            tableLayout="fixed"
+            rowHeaderKey="key"
+            stickyRight="actions"
+            scrollLabel="API keys"
+          />
+        </div>
+        <div className="lg:hidden">
+          {keys.isLoading && visibleRows.length === 0 ? (
+            <div className="px-5 py-10 text-center text-body text-faint">loading…</div>
+          ) : visibleRows.length === 0 ? (
+            <div className="px-5 py-10 text-center text-body text-faint">{emptyState}</div>
+          ) : (
+            <div className="divide-y divide-[var(--color-rule)]">
+              {visibleRows.map((row) => (
+                <article key={row.id} className="px-4 py-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <KeyCell row={row} team={teamName(row.team_id)} />
+                    </div>
+                    {actionsFor(row)}
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-start justify-between gap-3 border-t border-[var(--color-rule)] pt-3">
+                    <Limits row={row} />
+                    <div className="text-right">
+                      <div className="text-caption text-faint">spent</div>
+                      <Spend row={row} />
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2 border-t border-line bg-[var(--color-surface-2)]/45 px-5 py-3 text-caption text-faint">
           <span>endpoint</span>
           <CopyChip value={`${window.location.origin}/v1`} label="endpoint" />
           <span className="ml-auto flex items-center gap-1.5">
@@ -267,46 +395,60 @@ function Status({ row }: { row: KeyResult }) {
 /** One key's identity: name, live status, tenancy/scope badges, and where it sits. */
 function KeyCell({ row, team }: { row: KeyResult; team: string | null }) {
   const scope = modelScopeLabel(row);
+  const initial = (row.name ?? "?").trim().slice(0, 1).toUpperCase() || "?";
+  const playground = row.kind === "playground";
   return (
-    <div className="flex min-w-0 flex-col gap-1">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
-        <span
-          className="min-w-0 basis-full truncate text-body font-semibold text-fg min-[520px]:basis-auto"
-          title={rowSummary(row, team)}
-        >
-          {row.name ?? <span className="font-normal text-faint">unnamed</span>}
-        </span>
-        <Status row={row} />
-      </div>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-caption text-faint">
-        {row.kind === "playground" ? (
-          <Badge
-            tone="accent"
-            title="issued by the gateway; /v1 accepts it only from the dashboard playground"
-          >
-            playground
-          </Badge>
-        ) : null}
-        {row.scope === "admin" ? (
-          <Badge tone="accent" title="manages the gateway; cannot call /v1 or spend tokens">
-            admin
-          </Badge>
-        ) : null}
-        {team === null ? (
-          <Badge tone="neutral" title="not assigned to a team; serves instance-wide keys">
-            shared
-          </Badge>
-        ) : (
-          <Badge tone="neutral" title="keys assigned to this team">
-            {team}
-          </Badge>
+    <div className="flex min-w-0 items-start gap-3">
+      <span
+        aria-hidden
+        className={cx(
+          "grid h-8 w-8 shrink-0 place-items-center rounded-lg border text-caption font-semibold",
+          playground
+            ? "border-[var(--color-accent)]/25 bg-[var(--color-accent)]/10 text-[var(--color-accent-text)]"
+            : "border-line bg-[var(--color-surface-2)] text-muted",
         )}
-        <span
-          className="min-w-0 flex-1 basis-40 break-words"
-          title={`created ${when(row.created_at)} · ${scope}`}
-        >
-          created {createdDay(row.created_at)} · {scope}
-        </span>
+      >
+        {playground ? <KeyIcon size={14} /> : initial}
+      </span>
+      <div className="min-w-0">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+          <span
+            className="min-w-0 max-w-full truncate text-body font-semibold text-fg"
+            title={rowSummary(row, team)}
+          >
+            {row.name ?? <span className="font-normal text-faint">unnamed</span>}
+          </span>
+          <Status row={row} />
+        </div>
+        <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-caption text-faint">
+          {playground ? (
+            <Badge
+              tone="accent"
+              title="issued by the gateway; /v1 accepts it only from the dashboard playground"
+            >
+              playground
+            </Badge>
+          ) : null}
+          {row.scope === "admin" ? (
+            <Badge tone="accent" title="manages the gateway; cannot call /v1 or spend tokens">
+              admin
+            </Badge>
+          ) : null}
+          <span
+            className={cx("min-w-0 truncate", team !== null && "font-medium text-muted")}
+            title={team === null ? "not assigned to a team; serves instance-wide keys" : "team"}
+          >
+            {team ?? "Shared"}
+          </span>
+          <span aria-hidden>·</span>
+          <span className="shrink-0" title={`created ${when(row.created_at)}`}>
+            {createdDay(row.created_at)}
+          </span>
+          <span aria-hidden>·</span>
+          <span className="min-w-0 truncate" title={scope}>
+            {scope}
+          </span>
+        </div>
       </div>
     </div>
   );
@@ -335,46 +477,47 @@ function Limits({ row }: { row: KeyResult }) {
     [row.tpm, "tpm"],
     [row.budget_tokens, "tokens"],
   ];
+  const limited = parts.filter(([value]) => value > 0);
+  const hasBudget = row.budget_micros > 0;
+  const resetWindow =
+    (hasBudget || row.budget_tokens > 0) && row.budget_window !== "total"
+      ? row.budget_window
+      : null;
   const summary = [
     ...parts.map(([value, unit]) => (value > 0 ? `${compact(value)} ${unit}` : `unlimited ${unit}`)),
-    row.budget_micros > 0 ? usd(row.budget_micros) : null,
-    (row.budget_micros > 0 || row.budget_tokens > 0) && row.budget_window !== "total"
-      ? row.budget_window
-      : null,
+    hasBudget ? `${usd(row.budget_micros)} USD budget` : null,
+    resetWindow ? `resets ${resetWindow}` : null,
     row.guardrails ? "guarded" : null,
   ]
     .filter((part): part is string => part !== null)
     .join(" · ");
   return (
-    <span className="block min-w-0 text-small leading-snug" title={summary}>
-      {parts.map(([value, unit], i) => (
-        <span key={unit}>
-          {i > 0 ? <span className="text-faint"> · </span> : null}
-          {value > 0 ? (
-            <span className="text-muted tnum">{`${compact(value)} ${unit}`}</span>
-          ) : (
-            <span className="text-faint">{`unlimited ${unit}`}</span>
-          )}
-        </span>
-      ))}
-      {row.budget_micros > 0 ? (
-        <span title="USD budget">
-          <span className="text-faint"> · </span>
-          <span className="text-muted tnum">{usd(row.budget_micros)}</span>
-        </span>
-      ) : null}
-      {(row.budget_micros > 0 || row.budget_tokens > 0) && row.budget_window !== "total" ? (
-        <span title="budget reset window">
-          <span className="text-faint"> · </span>
-          <span className="text-muted">{row.budget_window}</span>
-        </span>
-      ) : null}
-      {row.guardrails ? (
-        <span>
-          <span className="text-faint"> · </span>
-          <Guarded guardrails={row.guardrails} />
-        </span>
-      ) : null}
+    <div className="flex min-w-0 flex-col gap-1" title={summary}>
+      <div className="flex flex-wrap items-center gap-1">
+        {limited.length === 0 && !hasBudget ? (
+          <span className="text-caption text-faint">No per-key limits</span>
+        ) : null}
+        {limited.map(([value, unit]) => (
+          <LimitChip key={unit} title={summary}>
+            {compact(value)} {unit}
+          </LimitChip>
+        ))}
+        {hasBudget ? <LimitChip title={summary}>{usd(row.budget_micros)} budget</LimitChip> : null}
+        {resetWindow ? <LimitChip title="budget reset window">{resetWindow}</LimitChip> : null}
+        {row.guardrails ? <Guarded guardrails={row.guardrails} /> : null}
+      </div>
+    </div>
+  );
+}
+
+/** Dense semantic chips keep repeated limits scannable without a wall of separators. */
+function LimitChip({ children, title }: { children: ReactNode; title?: string }) {
+  return (
+    <span
+      title={title}
+      className="inline-flex items-center rounded-md border border-line bg-[var(--color-surface-2)] px-1.5 py-0.5 text-caption leading-4 text-muted tnum"
+    >
+      {children}
     </span>
   );
 }
@@ -428,22 +571,22 @@ function Spend({ row }: { row: KeyResult }) {
   const budget = row.budget_micros;
   if (!(budget > 0)) {
     return (
-      <span className="font-mono text-small text-muted tnum" title={title}>
-        {usd(row.spent_micros)}
-        {now ? <span className="ml-1 text-caption text-faint">{now}</span> : null}
-      </span>
+      <div className="min-w-0" title={title}>
+        <div className="text-body font-semibold text-fg tnum">{usd(row.spent_micros)}</div>
+      </div>
     );
   }
   const reached = row.spent_micros >= budget;
   const share = Math.min(100, (row.spent_micros / budget) * 100);
   return (
     <div className="min-w-0" title={title}>
-      <div className="flex flex-wrap items-baseline gap-1 font-mono text-small tnum">
-        <span className={reached ? "text-neg" : "text-fg"}>{usd(row.spent_micros)}</span>
-        <span className="text-faint">/ {usd(budget)}</span>
-        {now ? <span className="text-caption text-faint">{now}</span> : null}
+      <div className="flex flex-wrap items-baseline gap-1 tnum">
+        <span className={cx("text-body font-semibold", reached ? "text-neg" : "text-fg")}>
+          {usd(row.spent_micros)}
+        </span>
+        <span className="text-caption text-faint">/ {usd(budget)}</span>
       </div>
-      <span className="mt-1 block h-1.5 w-full overflow-hidden rounded-full bg-[var(--color-rule)]">
+      <span className="mt-1.5 block h-1 w-full overflow-hidden rounded-full bg-[var(--color-rule)]">
         <span
           className="block h-full rounded-full"
           style={{
@@ -452,7 +595,10 @@ function Spend({ row }: { row: KeyResult }) {
           }}
         />
       </span>
-      {reached ? <span className="mt-1 block text-caption text-neg">budget reached</span> : null}
+      <div className="mt-1 flex items-center justify-between gap-2 text-caption">
+        <span className="text-faint">{now ?? "total"}</span>
+        {reached ? <span className="text-neg">budget reached</span> : null}
+      </div>
     </div>
   );
 }

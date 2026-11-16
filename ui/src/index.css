@@ -159,6 +159,10 @@ button:disabled,
   mask-image: radial-gradient(ellipse at center, black 35%, transparent 80%);
 }
 
+.route-canvas {
+  background: radial-gradient(circle at 50% 45%, var(--color-surface) 0%, var(--color-surface-2) 100%);
+}
+
 @keyframes route-flow {
   to {
     stroke-dashoffset: -20;

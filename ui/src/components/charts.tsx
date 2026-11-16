@@ -241,8 +241,9 @@ function amount(value: number, unit: TrafficUnit, round: boolean): string {
 }
 
 /**
- * Traffic trend: one line per model across the buckets, an error lane under the
- * plot, and a CSS-only tooltip (hover/focus). No chart library, no JS hover state.
+ * Traffic trend: one stacked bar per bucket, with the model split inside the bar, an
+ * error lane under the plot, and a CSS-only tooltip (hover/focus). No chart library,
+ * no JS hover state.
  */
 export function TrafficChart({
   buckets,
@@ -257,30 +258,10 @@ export function TrafficChart({
   height?: number;
   labelEvery?: number;
 }) {
-  // The chart draws one line per model, not stacked totals, so the y-scale must follow
-  // the largest single series. Scaling by the bucket total would flatten every line into
-  // the bottom of the plot when a gateway serves several models.
-  const max = niceMax(
-    Math.max(0, ...buckets.flatMap((bucket) => bucket.parts.map((part) => part.value))),
-  );
+  // Stacked bars are scaled by the bucket total, so the tallest stack fills the plot.
+  const max = niceMax(Math.max(0, ...buckets.map((bucket) => bucket.total)));
   const ticks = [1, 0.5, 0];
   const labelIdx = new Set(xLabelIndices(buckets.length, labelEvery ?? Math.ceil(buckets.length / 6)));
-  const count = buckets.length;
-  const series = [...new Set(buckets.flatMap((b) => b.parts.map((p) => p.id)))].map((id) => ({
-    id,
-    d: buckets
-      .map((b, i) => {
-        const value = b.parts.find((p) => p.id === id)?.value ?? 0;
-        // Series are drawn in one 0–100 viewBox and stretched to the panel, so x stays
-        // on bucket centres and a non-scaling stroke keeps the line weight honest.
-        const x = ((i + 0.5) / count) * 100;
-        const y = 100 - (max > 0 ? value / max : 0) * 100;
-        return `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
-      })
-      .join(" "),
-  }));
-  // A marker per point turns into noise past a couple of dozen buckets.
-  const showDots = count > 0 && count <= 24;
 
   return (
     <div className="traffic px-6 pb-4">
@@ -305,26 +286,7 @@ export function TrafficChart({
               style={{ top: `${(1 - t) * 100}%` }}
             />
           ))}
-          <svg
-            aria-hidden
-            className="absolute inset-0 h-full w-full overflow-visible"
-            viewBox="0 0 100 100"
-            preserveAspectRatio="none"
-          >
-            {series.map((s) => (
-              <path
-                key={s.id}
-                d={s.d}
-                fill="none"
-                stroke={colorOf(s.id)}
-                strokeWidth="1.75"
-                strokeLinejoin="round"
-                strokeLinecap="round"
-                vectorEffect="non-scaling-stroke"
-              />
-            ))}
-          </svg>
-          <div className="absolute inset-0 flex items-stretch">
+          <div className="absolute inset-0 flex items-stretch gap-[2px]">
             {buckets.map((b, i) => {
               const left = i < buckets.length / 2;
               const aria = `${b.full}: ${amount(b.total, unit, false)} ${unit}${b.errors ? `, ${b.errors} failed` : ""}`;
@@ -335,30 +297,32 @@ export function TrafficChart({
                   tabIndex={0}
                   role="img"
                   aria-label={aria}
-                  className="group relative flex h-full min-w-0 flex-1 items-stretch justify-center focus-visible:outline-none"
+                  className="group relative flex min-w-0 flex-1 items-end justify-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-accent)]"
                 >
                   <span
                     aria-hidden
-                    className="pointer-events-none absolute inset-y-0 left-1/2 hidden w-px -translate-x-1/2 bg-[var(--color-line)] group-hover:block group-focus-within:block"
+                    className="pointer-events-none absolute inset-y-0 inset-x-0 hidden bg-[var(--color-row-hover)] group-hover:block group-focus-within:block"
                   />
-                  {showDots
-                    ? b.parts.map((part) => (
-                        <span
-                          key={part.id}
-                          aria-hidden
-                          className="pointer-events-none absolute left-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full"
-                          style={{
-                            top: `${100 - (part.value / max) * 100}%`,
-                            background: colorOf(part.id),
-                            boxShadow: "0 0 0 1px var(--color-surface)",
-                          }}
-                        />
-                      ))
-                    : null}
                   <span
                     aria-hidden
-                    className="pointer-events-none absolute inset-0 rounded-sm outline-none group-focus-visible:ring-2 group-focus-visible:ring-inset group-focus-visible:ring-[var(--color-accent)]"
-                  />
+                    className="relative w-full max-w-[54px] overflow-hidden rounded-t-[3px]"
+                    style={{ height: `${b.total > 0 ? Math.max(2, (b.total / max) * 100) : 2}%` }}
+                  >
+                    {b.total > 0
+                      ? b.parts
+                          .filter((part) => part.value > 0)
+                          .map((part) => (
+                            <span
+                              key={part.id}
+                              className="block w-full"
+                              style={{
+                                height: `${(part.value / b.total) * 100}%`,
+                                background: colorOf(part.id),
+                              }}
+                            />
+                          ))
+                      : null}
+                  </span>
                   <div
                     className="pointer-events-none absolute top-1/2 z-20 hidden w-[208px] -translate-y-1/2 group-hover:block group-focus-within:block"
                     style={left ? { left: "calc(100% + 8px)" } : { right: "calc(100% + 8px)" }}
@@ -377,7 +341,7 @@ export function TrafficChart({
         <div className="shrink-0 text-caption leading-4 text-faint" style={{ width: AXIS_WIDTH }}>
           Errors
         </div>
-        <div className="flex min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 gap-[2px]">
           {buckets.map((b, i) => (
             <div
               key={`err-${i}`}
@@ -386,7 +350,7 @@ export function TrafficChart({
               aria-label={b.errors > 0 ? `${b.full}: ${b.errors} failed` : undefined}
               aria-hidden={b.errors === 0 ? true : undefined}
               className={cx(
-                "h-1.5 min-w-0 flex-1 border-r border-[var(--color-surface)] last:border-r-0",
+                "h-1.5 min-w-0 flex-1",
                 b.errors > 0 ? "bg-[var(--color-neg)]" : "bg-[var(--color-rule)]",
               )}
             />
@@ -396,7 +360,7 @@ export function TrafficChart({
 
       <div className="mt-2 flex">
         <div className="shrink-0" style={{ width: AXIS_WIDTH }} />
-        <div className="flex min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 gap-[2px]">
           {buckets.map((b, i) => (
             <div key={`x-${i}`} className="min-w-0 flex-1 text-center">
               {labelIdx.has(i) ? (
