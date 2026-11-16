@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.21.1 — 2026-11-16
+
+### Bug Fixes
+
+- fix(ui): choose a model that matches the selected wire format ([`32e2966`](https://github.com/centopw/RRouter/commit/32e29666c605c9f807627d7426edf2ff3c3c773e))
+
 ## 0.21.0 — 2026-11-16
 
 ### Features
