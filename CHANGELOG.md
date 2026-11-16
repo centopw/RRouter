@@ -2,6 +2,16 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.23.0 — 2026-11-16
+
+### Features
+
+- feat(auth): add OpenRouter OAuth PKCE sign-in ([`9cfd0de`](https://github.com/centopw/RRouter/commit/9cfd0dec743871df61e46a57710287097e05be08))
+
+### Other Changes
+
+- test(gateway): cover OpenRouter OAuth start ([`650c7d7`](https://github.com/centopw/RRouter/commit/650c7d78b6253fdf91c2568d6caed0fac7b55231))
+
 ## 0.22.0 — 2026-11-16
 
 ### Features
