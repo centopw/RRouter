@@ -480,7 +480,7 @@ function Step({
     <button
       type="button"
       onClick={onClick}
-      className="group flex h-full flex-col rounded-[var(--radius-card)] border border-line bg-surface p-4 text-left transition-colors hover:border-line-strong hover:bg-[var(--color-selected)]"
+      className="group flex h-full flex-col rounded-[var(--radius-card)] border border-line bg-surface p-5 text-left transition-colors hover:border-line-strong hover:bg-[var(--color-selected)]"
     >
       <span className="flex h-7 w-7 items-center justify-center rounded-full border border-line-strong bg-surface-2 text-caption font-semibold text-fg tnum">
         {number}
@@ -634,7 +634,7 @@ export default function QuickStart() {
         />
       ) : null}
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="mt-4 grid gap-4 sm:grid-cols-3">
         <Step
           number={1}
           title="Create an API key"
@@ -660,7 +660,9 @@ export default function QuickStart() {
         />
       </div>
 
-      <ConnectionCard showQuickStartLink={false} />
+      <div className="mt-4">
+        <ConnectionCard showQuickStartLink={false} />
+      </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <Card className="overflow-hidden">
