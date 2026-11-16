@@ -1,20 +1,19 @@
 import { useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight } from "@phosphor-icons/react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Badge,
   Button,
   Card,
   CopyButton,
   CopyChip,
-  ErrorNote,
   Input,
   PageHeader,
   cx,
 } from "../components/ui";
 import { ConnectionCard } from "../components/connection-card";
-import { api, type NewKey } from "../lib/api";
+import { CreateKeyModal } from "../components/create-key-modal";
 import { qk, useIsAdmin, useModels } from "../lib/queries";
 
 type Protocol = "openai" | "anthropic";
@@ -506,20 +505,10 @@ export default function QuickStart() {
   const [initialOs] = useState(defaultOs);
   const [apiKey, setApiKey] = useState("");
   const [minted, setMinted] = useState<string | null>(null);
+  const [creatingKey, setCreatingKey] = useState(false);
   const origin = window.location.origin;
   const openai = `${origin}/v1`;
   const key = apiKey.trim() || "sk-rr-...";
-
-  const createKey = useMutation({
-    mutationFn: () =>
-      api.post<NewKey>("/api/keys", { name: "quickstart", team_id: null }),
-    onSuccess: (created) => {
-      setApiKey(created.key);
-      setMinted(created.key);
-      void client.invalidateQueries({ queryKey: qk.keys });
-      void client.invalidateQueries({ queryKey: qk.system });
-    },
-  });
 
   const requestedTool = params.get("tool");
   const guide = RECIPES.find((recipe) => recipe.id === requestedTool) ?? RECIPES[0]!;
@@ -614,36 +603,36 @@ export default function QuickStart() {
               />
               {apiKey.trim() ? <CopyButton value={apiKey.trim()} label="Copy key" /> : null}
               {isAdmin ? (
-                <Button
-                  variant="primary"
-                  onClick={() => createKey.mutate()}
-                  disabled={createKey.isPending}
-                >
-                  {createKey.isPending
-                    ? "creating…"
-                    : apiKey.trim()
-                      ? "create another"
-                      : "create key"}
+                <Button variant="primary" onClick={() => setCreatingKey(true)}>
+                  {apiKey.trim() ? "create another" : "create key"}
                 </Button>
               ) : (
                 <Badge>ask an administrator for a key</Badge>
               )}
             </div>
           </div>
-          {createKey.error ? (
-            <div className="mt-3">
-              <ErrorNote error={createKey.error} onRetry={() => createKey.mutate()} />
-            </div>
-          ) : null}
           <p className="mt-2 text-caption leading-relaxed text-faint">
             {minted !== null && minted === apiKey
-              ? "Copy it now: the plaintext is shown only on this page. It has no limits; manage limits on the API keys page."
+              ? "Copy it now: the plaintext is shown only on this page. Configure limits and models in the create dialog."
               : apiKey.trim()
                 ? "This key is used in every config below. Make sure it has access to the model you chose."
                 : "Until you create or paste a key, the configs show sk-rr-... as a placeholder."}
           </p>
         </div>
       </Card>
+
+      {creatingKey ? (
+        <CreateKeyModal
+          onClose={() => setCreatingKey(false)}
+          onCreated={(created) => {
+            setApiKey(created.key);
+            setMinted(created.key);
+            setCreatingKey(false);
+            void client.invalidateQueries({ queryKey: qk.keys });
+            void client.invalidateQueries({ queryKey: qk.system });
+          }}
+        />
+      ) : null}
 
       <div className="grid gap-3 sm:grid-cols-3">
         <Step
