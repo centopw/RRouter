@@ -65,11 +65,11 @@ function initialLayout(providers: string[], width: number): Record<string, Point
   const count = providers.length;
   const [first, second] = providers;
   if (count === 1 && first) {
-    result[first] = { x: width > 0 && width < 640 ? 70 : 78, y: width > 0 && width < 640 ? 64 : 50 };
+    result[first] = { x: width > 0 && width < 640 ? 68 : 78, y: width > 0 && width < 640 ? 64 : 50 };
     return result;
   }
   if (count === 2 && first && second) {
-    const edge = width > 0 && width < 640 ? 28 : 16;
+    const edge = width > 0 && width < 640 ? 26 : 16;
     result[first] = { x: edge, y: 50 };
     result[second] = { x: 100 - edge, y: 50 };
     return result;
@@ -83,8 +83,8 @@ function initialLayout(providers: string[], width: number): Record<string, Point
       const sideIndex = left ? index : index - split;
       const sideCount = left ? split : count - split;
       result[provider] = {
-        x: left ? 28 : 72,
-        y: sideCount === 1 ? 62 : 35 + (sideIndex / (sideCount - 1)) * 55,
+        x: left ? 26 : 74,
+        y: sideCount === 1 ? 64 : 38 + (sideIndex / (sideCount - 1)) * 52,
       };
     });
     return result;
@@ -351,8 +351,9 @@ export function LiveRoutingCard({
     const canvas = canvasRef.current;
     if (!drag || drag.pointerId !== event.pointerId || !canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const halfWidth = Math.min(44, (84 / rect.width) * 100);
-    const halfHeight = Math.min(36, (37 / rect.height) * 100);
+    const narrowCanvas = canvasSize.width > 0 && canvasSize.width < 640;
+    const halfWidth = Math.min(44, ((narrowCanvas ? 80 : 84) / rect.width) * 100);
+    const halfHeight = Math.min(36, (28 / rect.height) * 100);
     const x = ((event.clientX + drag.dx) / rect.width) * 100;
     const y = ((event.clientY + drag.dy) / rect.height) * 100;
     setStored((previous) => ({
@@ -387,7 +388,8 @@ export function LiveRoutingCard({
     else return;
     event.preventDefault();
     const current = pointOf(provider);
-    const next = { x: clamp(current.x + dx, 8, 92), y: clamp(current.y + dy, 8, 92) };
+    const marginX = canvasSize.width > 0 && canvasSize.width < 640 ? 22 : 8;
+    const next = { x: clamp(current.x + dx, marginX, 100 - marginX), y: clamp(current.y + dy, 8, 92) };
     setStored((previous) => ({ ...previous, [provider]: next }));
     setAnnouncement(
       `${NAMES[provider] ?? provider} moved to ${Math.round(next.x)}% across and ${Math.round(next.y)}% down.`,
@@ -542,7 +544,7 @@ export function LiveRoutingCard({
                 onPointerCancel={endDrag}
                 onKeyDown={(event) => nudge(event, node.provider)}
                 className={cx(
-                  "absolute z-10 w-[168px] -translate-x-1/2 -translate-y-1/2 select-none rounded-xl border bg-surface shadow-[0_2px_10px_rgba(28,43,66,0.08)] outline-none transition-[box-shadow,border-color] focus-visible:ring-2 focus-visible:ring-accent-text/40",
+                  "absolute z-10 w-[168px] max-[760px]:w-[160px] -translate-x-1/2 -translate-y-1/2 select-none rounded-xl border bg-surface shadow-[0_2px_10px_rgba(28,43,66,0.08)] outline-none transition-[box-shadow,border-color] focus-visible:ring-2 focus-visible:ring-accent-text/40",
                   flowing ? "border-[var(--color-line-strong)]" : "border-line",
                   node.errors > 0 && "border-[var(--color-neg-line)]",
                   isDragging ? "cursor-grabbing shadow-[0_12px_28px_-14px_rgba(28,43,66,0.45)]" : "cursor-grab",
