@@ -2,6 +2,16 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.24.1 — 2026-11-16
+
+### Bug Fixes
+
+- fix(ui): replace the live-routing status dot and inset the usage bar ([`1bed177`](https://github.com/centopw/RRouter/commit/1bed1778891cc7a9b751f3695f609f4237163c79))
+
+### Other Changes
+
+- chore(ui): rebuild dashboard bundle ([`f8b52a2`](https://github.com/centopw/RRouter/commit/f8b52a20406d060d28b7f6ac0beb1ddae4507081))
+
 ## 0.24.0 — 2026-11-16
 
 ### Features
