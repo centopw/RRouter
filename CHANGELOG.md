@@ -2,6 +2,16 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.17.0 — 2026-11-16
+
+### Features
+
+- feat(ui): group models and add thinking controls ([`7970422`](https://github.com/centopw/RRouter/commit/7970422fee088633b3b6a005f8f9b651082fdeaa))
+
+### Bug Fixes
+
+- fix(models): keep explicit reasoning flags and combo levels conservative ([`8ce09b2`](https://github.com/centopw/RRouter/commit/8ce09b2d7d3127fdc09ff0222f7de47943ece2d6))
+
 ## 0.16.1 — 2026-11-16
 
 ### Bug Fixes
