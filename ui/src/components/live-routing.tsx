@@ -353,7 +353,8 @@ export function LiveRoutingCard({
     const rect = canvas.getBoundingClientRect();
     const narrowCanvas = canvasSize.width > 0 && canvasSize.width < 640;
     const halfWidth = Math.min(44, ((narrowCanvas ? 80 : 84) / rect.width) * 100);
-    const halfHeight = Math.min(36, (28 / rect.height) * 100);
+    // 63px is the card's rendered height: the usage track added a row below the text.
+    const halfHeight = Math.min(36, (32 / rect.height) * 100);
     const x = ((event.clientX + drag.dx) / rect.width) * 100;
     const y = ((event.clientY + drag.dy) / rect.height) * 100;
     setStored((previous) => ({
@@ -555,21 +556,28 @@ export function LiveRoutingCard({
                   transition: isDragging ? "none" : "left 180ms ease, top 180ms ease, box-shadow 120ms",
                 }}
               >
-                <div className="flex items-center gap-2 px-2.5 py-2">
-                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-line bg-surface-2">
+                <div className="flex items-center gap-2 px-2.5 pt-2">
+                  {/* Active providers read from the tile itself: the mark sits on a
+                      tinted, outlined chip instead of a detached status dot. */}
+                  <span
+                    className={cx(
+                      "grid h-7 w-7 shrink-0 place-items-center rounded-lg border",
+                      flowing ? "border-transparent" : "border-line bg-surface-2",
+                    )}
+                    style={
+                      flowing
+                        ? {
+                            background: `color-mix(in srgb, ${brand.color} 12%, var(--color-surface-2))`,
+                            borderColor: `color-mix(in srgb, ${brand.color} 45%, transparent)`,
+                            boxShadow: `0 0 0 3px color-mix(in srgb, ${brand.color} 10%, transparent)`,
+                          }
+                        : undefined
+                    }
+                  >
                     <ProviderIcon provider={node.provider} size={15} />
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center gap-1.5">
-                      <span className="truncate text-small font-semibold text-fg">{name}</span>
-                      <span
-                        className={cx(
-                          "h-1.5 w-1.5 shrink-0 rounded-full",
-                          flowing ? "live-dot bg-[var(--color-pos)]" : "bg-[var(--color-line-strong)]",
-                        )}
-                        aria-hidden
-                      />
-                    </div>
+                    <div className="truncate text-small font-semibold text-fg">{name}</div>
                     <div className="truncate text-caption text-faint tnum">
                       {node.requests} req
                       {node.errors > 0 ? ` · ${node.errors} err` : ""}
@@ -578,14 +586,16 @@ export function LiveRoutingCard({
                   </div>
                   <DotsSixVertical size={14} aria-hidden className="shrink-0 text-faint/70" />
                 </div>
-                <div aria-hidden className="h-0.5 overflow-hidden bg-[var(--color-rule)]">
-                  <span
-                    className="block h-full rounded-full"
-                    style={{
-                      width: `${node.requests > 0 ? Math.max(6, Math.min(100, (node.requests / Math.max(1, totalRequests)) * 100)) : 0}%`,
-                      background: brand.color,
-                    }}
-                  />
+                <div aria-hidden className="flex items-center px-2.5 pb-2 pt-2">
+                  <span className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-[var(--color-rule)]">
+                    <span
+                      className="block h-full rounded-full"
+                      style={{
+                        width: `${node.requests > 0 ? Math.max(6, Math.min(100, (node.requests / Math.max(1, totalRequests)) * 100)) : 0}%`,
+                        background: brand.color,
+                      }}
+                    />
+                  </span>
                 </div>
               </article>
             );
