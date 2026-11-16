@@ -91,7 +91,7 @@ async fn providers_lists_only_registered_login_flows() {
         .to_bytes();
     let value: Value = serde_json::from_slice(&body).expect("json");
     let providers = value["data"].as_array().expect("provider list");
-    assert_eq!(providers.len(), 4);
+    assert_eq!(providers.len(), 5);
 
     let flow = |id: &str| {
         providers
@@ -105,6 +105,7 @@ async fn providers_lists_only_registered_login_flows() {
     assert_eq!(flow("codex"), "pkce");
     assert_eq!(flow("github"), "device_code");
     assert_eq!(flow("google-antigravity"), "pkce");
+    assert_eq!(flow("openrouter"), "pkce");
 
     let manual = |id: &str| {
         providers
@@ -117,6 +118,44 @@ async fn providers_lists_only_registered_login_flows() {
     assert!(manual("claude"), "manual uses the stable fallback port");
     assert!(manual("codex"));
     assert!(manual("google-antigravity"));
+    assert!(manual("openrouter"));
     assert!(!manual("github"), "device flow has no redirect");
     assert!(!providers.iter().any(|provider| provider["id"] == "openai"));
+}
+
+#[tokio::test]
+async fn openrouter_start_returns_its_callback_url_challenge() {
+    let response = app(test_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/oauth/openrouter/start")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"manual":true}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let value: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(value["provider"], "openrouter");
+    assert_eq!(value["flow"], "pkce");
+    let challenge = &value["challenge"];
+    assert_eq!(challenge["kind"], "pkce");
+    assert_eq!(challenge["manual"], true);
+    assert_eq!(
+        challenge["redirect_uri"],
+        "http://localhost:54545/callback"
+    );
+    let authorize = challenge["authorize_url"].as_str().expect("url");
+    assert!(authorize.contains("callback_url="), "{authorize}");
+    assert!(!authorize.contains("redirect_uri="), "{authorize}");
+    assert!(!authorize.contains("client_id="), "{authorize}");
+    assert!(authorize.contains("code_challenge_method=S256"));
 }
