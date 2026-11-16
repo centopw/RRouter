@@ -283,12 +283,15 @@ pub fn merge(
             item.available = true;
             item.deprecated =
                 item.deprecated || rrouter_router::catalog::is_retired(&item.provider, &item.id);
-            // A published effort range is proof the model reasons, even when an upstream
-            // account row carried no capability object at all (common for Claude models).
-            item.reasoning = reasoning_support(&item);
-            if item.reasoning.is_some() {
+            // Claude 4/5 account rows can omit the whole capability object. Mark only that
+            // inferred case; an explicit `reasoning:false` from any other row stays false.
+            if matches!(item.provider.as_str(), "anthropic" | "claude")
+                && !item.deprecated
+                && claude_reasoning_family(&item.id)
+            {
                 item.capabilities.reasoning = true;
             }
+            item.reasoning = reasoning_support(&item);
             item
         })
         .collect();

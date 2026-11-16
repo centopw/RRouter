@@ -179,6 +179,12 @@ fn intersect_meta(
     left.context = min_limit(left.context, right.context);
     left.max_output = min_limit(left.max_output, right.max_output);
     left.capabilities = left.capabilities.intersect(right.capabilities);
+    // Reasoning support is derived, not intersected like a flag. Keep it only when both
+    // members advertise the same levels; otherwise the first member's levels would leak
+    // into a combo that cannot promise them.
+    if left.reasoning != right.reasoning {
+        left.reasoning = None;
+    }
     left.capabilities_extra = if left.capabilities_extra == right.capabilities_extra {
         left.capabilities_extra
     } else {
