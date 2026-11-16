@@ -8,6 +8,7 @@ import {
   Key,
   MagnifyingGlass,
   Plugs,
+  RocketLaunch,
   SidebarSimple,
   SignOut,
   SquaresFour,
@@ -42,6 +43,7 @@ type SectionId =
   | "playground"
   | "models"
   | "providers"
+  | "quickstart"
   | "routing"
   | "access"
   | "system";
@@ -68,7 +70,7 @@ const DEFAULT_NAME = "RRouter";
 
 /**
  * The surfaces, each with tabs. The sidebar shows the surface; the tab strip shows the
- * pages. Models and Providers are standalone: one page, so no strip. Daily pages come
+ * pages. Models, Providers and Quick start are standalone: one page, so no strip. Daily pages come
  * first, rare configuration stays under System.
  */
 const SECTIONS: NavSection[] = [
@@ -109,6 +111,13 @@ const SECTIONS: NavSection[] = [
     tabs: [{ to: "/providers", label: "Providers", end: true }],
   },
   {
+    id: "quickstart",
+    to: "/quickstart",
+    label: "Quick start",
+    icon: glyph(RocketLaunch),
+    tabs: [{ to: "/quickstart", label: "Quick start", end: true }],
+  },
+  {
     id: "routing",
     to: "/routing",
     label: "Routing",
@@ -126,7 +135,6 @@ const SECTIONS: NavSection[] = [
     icon: glyph(Key),
     tabs: [
       { to: "/access/keys", label: "API Keys", adminOnly: true },
-      { to: "/access/quickstart", label: "Quick start" },
       { to: "/access/teams", label: "Teams" },
       { to: "/access/users", label: "Users", adminOnly: true },
     ],
@@ -669,7 +677,7 @@ function NavSectionLink({
       className={cx(
         "relative flex items-center text-body transition-colors",
         variant === "tab"
-          ? "h-14 min-w-0 flex-1 flex-col justify-center gap-0.5 rounded-lg px-1 text-caption"
+          ? "h-14 shrink-0 flex-col justify-center gap-0.5 rounded-lg px-2 text-caption"
           : collapsed
             ? "justify-center rounded-[8px] px-0 py-2"
             : "gap-2.5 rounded-[8px] px-2.5 py-2",
@@ -697,7 +705,7 @@ function NavSectionLink({
       ) : null}
       <span className="shrink-0">{section.icon}</span>
       {collapsed ? null : (
-        <span className={variant === "tab" ? "max-w-full truncate" : undefined}>
+        <span className={variant === "tab" ? "whitespace-nowrap" : undefined}>
           {section.label}
         </span>
       )}
