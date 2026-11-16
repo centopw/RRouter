@@ -75,8 +75,9 @@ export default function Keys() {
   const visibleRows = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return allRows.filter((row) => {
-      if (statusFilter === "active" && !row.is_active) return false;
-      if (statusFilter === "disabled" && row.is_active) return false;
+      const status = statusOf(row).label;
+      if (statusFilter === "active" && status !== "active") return false;
+      if (statusFilter === "disabled" && status !== "disabled") return false;
       if (!needle) return true;
       const haystack = [
         row.name ?? "",
