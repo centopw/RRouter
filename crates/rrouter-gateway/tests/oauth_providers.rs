@@ -149,10 +149,7 @@ async fn openrouter_start_returns_its_callback_url_challenge() {
     let challenge = &value["challenge"];
     assert_eq!(challenge["kind"], "pkce");
     assert_eq!(challenge["manual"], true);
-    assert_eq!(
-        challenge["redirect_uri"],
-        "http://localhost:54545/callback"
-    );
+    assert_eq!(challenge["redirect_uri"], "http://localhost:54545/callback");
     let authorize = challenge["authorize_url"].as_str().expect("url");
     assert!(authorize.contains("callback_url="), "{authorize}");
     assert!(!authorize.contains("redirect_uri="), "{authorize}");

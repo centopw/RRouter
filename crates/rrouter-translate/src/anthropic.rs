@@ -732,6 +732,8 @@ impl AnthropicEncoder {
                 });
                 out.push_str(&render_anthropic("content_block_delta", &data.to_string()));
             }
+            // Anthropic has no envelope for a Responses-only opaque item.
+            StreamEvent::OpaqueItem(_) => {}
             StreamEvent::Done { reason, usage } => {
                 self.close_all(&mut out);
                 let mut delta = json!({

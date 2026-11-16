@@ -169,6 +169,12 @@ pub enum StreamEvent {
         index: u32,
         partial_json: String,
     },
+    /// A provider output item the canonical model cannot interpret.
+    ///
+    /// Responses remote compaction returns an opaque `compaction` item whose
+    /// `encrypted_content` is the state the next turn must send back. It is carried
+    /// verbatim rather than rebuilt, so a proxy hop does not destroy it.
+    OpaqueItem(Value),
     /// Terminal signal; `reason` is the canonical reason (see [`FinishReason`]).
     Done {
         reason: FinishReason,

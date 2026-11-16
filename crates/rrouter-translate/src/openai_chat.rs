@@ -821,6 +821,8 @@ impl OpenAiChatEncoder {
                     }]}),
                 );
             }
+            // Chat has no envelope for a Responses-only opaque item.
+            StreamEvent::OpaqueItem(_) => {}
             StreamEvent::Done { reason, usage } => {
                 self.done = true;
                 let mut chunk = self.envelope();

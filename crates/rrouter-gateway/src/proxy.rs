@@ -2035,6 +2035,9 @@ async fn reassemble(open: &StreamRoute, bytes: ByteStream) -> Result<rrouter_cor
                         slot.3.push_str(&partial_json);
                     }
                 }
+                // A non-streaming client has no envelope for an opaque output item;
+                // remote compaction is streaming-only, so this path drops it.
+                StreamEvent::OpaqueItem(_) => {}
                 StreamEvent::Done { reason, usage: u } => {
                     *finish = reason;
                     if let Some(u) = u {

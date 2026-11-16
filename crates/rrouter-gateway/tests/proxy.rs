@@ -1701,6 +1701,67 @@ async fn compact_is_forwarded_to_a_responses_provider() {
     assert_eq!(mock.seen()[0]["model"], "gpt-5.6-luna");
 }
 
+/// Remote Compaction V2 rides the normal `/v1/responses` stream. The beta header and
+/// the opaque compaction item must survive the proxy; rebuilding either one makes the
+/// client fall back to local compaction.
+#[tokio::test]
+async fn codex_remote_compaction_v2_preserves_header_body_and_opaque_item() {
+    let wire = concat!(
+        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_c\",\"model\":\"gpt-5.6-luna\"}}\n\n",
+        "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"cmp_1\",\"type\":\"compaction\",\"encrypted_content\":\"opaque-state\"}}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_c\",\"usage\":{\"input_tokens\":12,\"output_tokens\":3}}}\n\n",
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire: wire.to_string(),
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    h.connect("codex", &mock).await;
+
+    let body = json!({
+        "model": "codex/gpt-5.6-luna",
+        "input": [
+            {"type": "message", "role": "user", "content": "compact this"},
+            {"type": "compaction_trigger"}
+        ],
+        "stream": true,
+        "store": false,
+        "prompt_cache_key": "conv-compact"
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("content-type", "application/json")
+        .header("x-codex-beta-features", "remote_compaction_v2")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    let res = h.router.clone().oneshot(req).await.expect("oneshot");
+    let status = res.status();
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert_eq!(status, StatusCode::OK, "body: {text}");
+    assert!(
+        text.contains("\"type\":\"compaction\""),
+        "compaction item lost: {text}"
+    );
+    assert!(
+        text.contains("\"encrypted_content\":\"opaque-state\""),
+        "opaque state lost: {text}"
+    );
+
+    let sent = &mock.seen()[0];
+    assert_eq!(sent["input"][1]["type"], "compaction_trigger");
+    assert_eq!(sent["prompt_cache_key"], "conv-compact");
+    let headers = mock.headers(0).expect("headers");
+    assert!(
+        headers.iter().any(|(name, value)| {
+            name == "x-codex-beta-features" && value == "remote_compaction_v2"
+        }),
+        "beta header was not forwarded: {headers:?}"
+    );
+}
+
 /// A provider without the endpoint answers 501 instead of receiving a body it cannot
 /// parse; the client can fall back to its own counter.
 #[tokio::test]

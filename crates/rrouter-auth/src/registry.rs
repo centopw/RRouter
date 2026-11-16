@@ -422,7 +422,9 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         auth_header: "",
         query: &[],
         max_tokens_key: MaxTokensKey::MaxCompletionTokens,
-        passthrough_headers: &["openai-beta"],
+        // Codex remote compaction V2 is negotiated by a beta header on the normal
+        // Responses stream; the body itself already round-trips unchanged.
+        passthrough_headers: &["openai-beta", "x-codex-beta-features"],
         default_max_tokens: None,
         refresh: Some(CODEX_REFRESH),
         login: Some(CODEX_LOGIN),
@@ -551,7 +553,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         query: &[],
         // OpenAI's own surface: current gpt-5/o-series models reject `max_tokens`.
         max_tokens_key: MaxTokensKey::MaxCompletionTokens,
-        passthrough_headers: &["openai-beta"],
+        passthrough_headers: &["openai-beta", "x-codex-beta-features"],
         default_max_tokens: None,
         refresh: None,
         login: None,
@@ -1282,7 +1284,10 @@ mod tests {
             // never name a credential or hop-by-hop header.
             for name in spec.passthrough_headers {
                 assert!(
-                    matches!(*name, "anthropic-beta" | "openai-beta"),
+                    matches!(
+                        *name,
+                        "anthropic-beta" | "openai-beta" | "x-codex-beta-features"
+                    ),
                     "{} would forward {name}",
                     spec.id
                 );
@@ -1320,7 +1325,11 @@ mod tests {
         );
         assert_eq!(
             get("openai").expect("openai").passthrough_headers,
-            &["openai-beta"]
+            &["openai-beta", "x-codex-beta-features"]
+        );
+        assert_eq!(
+            get("codex").expect("codex").passthrough_headers,
+            &["openai-beta", "x-codex-beta-features"]
         );
         assert!(get("mistral")
             .expect("mistral")

@@ -158,6 +158,10 @@ fn parse_input(body: &Value) -> Result<Vec<Message>> {
                             out.push(Message { role, parts });
                         }
                     }
+                    // Remote Compaction V2's trigger has no canonical content. The
+                    // same-dialect body keeps it for the upstream; parsing only needs
+                    // to accept it so routing and guardrails can run.
+                    "compaction_trigger" => {}
                     other => {
                         return Err(parse_err(
                             D,
@@ -625,6 +629,9 @@ pub struct ResponsesDecoder {
     tool_count: u32,
     usage: Option<Usage>,
     finish: Option<FinishReason>,
+    /// Remote Compaction V2 carries an opaque `compaction` item that the canonical
+    /// model cannot express. Forward it once, exactly as the provider sent it.
+    compaction_emitted: bool,
 }
 
 impl ResponsesDecoder {
@@ -703,6 +710,14 @@ impl ResponsesDecoder {
                 }
             }
             "response.output_item.done" => {
+                if let Some(item) = v.get("item") {
+                    if item.get("type").and_then(Value::as_str) == Some("compaction")
+                        && !self.compaction_emitted
+                    {
+                        out.push(StreamEvent::OpaqueItem(item.clone()));
+                        self.compaction_emitted = true;
+                    }
+                }
                 if let Some(slot) = self.slot(&v) {
                     self.ensure_started(slot, out);
                 }
@@ -721,6 +736,24 @@ impl ResponsesDecoder {
             }
             "response.completed" => {
                 let inner = v.get("response").unwrap_or(&v);
+                // Some upstreams include the compaction item only in the terminal
+                // response object. Emit it before Done so the client sees exactly one
+                // `response.output_item.done` compaction event.
+                if !self.compaction_emitted {
+                    if let Some(item) =
+                        inner
+                            .get("output")
+                            .and_then(Value::as_array)
+                            .and_then(|items| {
+                                items.iter().find(|item| {
+                                    item.get("type").and_then(Value::as_str) == Some("compaction")
+                                })
+                            })
+                    {
+                        out.push(StreamEvent::OpaqueItem(item.clone()));
+                        self.compaction_emitted = true;
+                    }
+                }
                 if let Some(u) = inner.get("usage").filter(|u| u.is_object()) {
                     self.usage = Some(usage_from_responses(Some(u)));
                 }
@@ -942,6 +975,21 @@ impl ResponsesEncoder {
                 out.push_str(&render_openai(
                     &frame.to_string(),
                     Some("response.function_call_arguments.delta"),
+                ));
+            }
+            StreamEvent::OpaqueItem(item) => {
+                self.close_item(&mut out);
+                let output_index = self.next_output_index;
+                self.next_output_index += 1;
+                let frame = self.envelope(
+                    "response.output_item.done",
+                    self.seq,
+                    json!({"output_index": output_index, "item": item}),
+                );
+                self.seq += 1;
+                out.push_str(&render_openai(
+                    &frame.to_string(),
+                    Some("response.output_item.done"),
                 ));
             }
             StreamEvent::Done { reason, usage } => {
@@ -1405,5 +1453,36 @@ mod tests {
         assert_eq!(wire.matches("event: response.completed").count(), 1);
         assert!(wire.contains("\"usage\":{\"input_tokens\":2"));
         assert!(wire.contains("\"output_tokens\":3"));
+    }
+
+    #[test]
+    fn opaque_compaction_item_round_trips() {
+        let item = json!({
+            "id": "cmp_1",
+            "type": "compaction",
+            "encrypted_content": "opaque-state",
+        });
+        let mut enc = StreamEncoder::new(D, "");
+        let bytes = enc
+            .encode(&StreamEvent::OpaqueItem(item.clone()))
+            .expect("encode");
+        let wire = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(
+            wire.contains("event: response.output_item.done"),
+            "missing done event:\n{wire}"
+        );
+        assert!(wire.contains("\"type\":\"compaction\""), "{wire}");
+        assert!(
+            wire.contains("\"encrypted_content\":\"opaque-state\""),
+            "{wire}"
+        );
+
+        let mut dec = ResponsesDecoder::new("");
+        let mut events = Vec::new();
+        dec.push(wire.as_bytes(), &mut events).expect("decode");
+        assert!(
+            events.contains(&StreamEvent::OpaqueItem(item)),
+            "opaque item lost: {events:?}"
+        );
     }
 }

@@ -33,6 +33,10 @@ an OpenAI API-key connection does.
 Provider-native **server compaction** works on both native surfaces:
 
 - `POST /v1/responses/compact` forwards OpenAI's compaction body and response.
+- `POST /v1/responses` with a trailing `compaction_trigger` input item and
+  `x-codex-beta-features: remote_compaction_v2` (Remote Compaction V2) forwards the opaque
+  `compaction` output item byte-for-byte. The stream is still decoded for usage and
+  guardrails, but the encrypted item is re-emitted verbatim rather than rebuilt.
 - `POST /v1/messages` forwards Anthropic's compaction beta fields unchanged:
   `context_management.edits[].type = "compact_20260112"` (threshold) or the top-level
   `compaction` parameter with beta `compact-2026-09-04` (on-demand). The client's
