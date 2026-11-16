@@ -1,9 +1,10 @@
 //! Subscription usage windows, read from the provider that owns the account.
 //!
 //! These are the limits a plan already has (Claude's 5-hour and weekly windows, Codex's
-//! primary/secondary windows). They are **not** operator quotas: RRouter only displays
-//! them and caches the answer briefly, because every provider endpoint here is shared
-//! with the vendor's own client and is cheap to hammer.
+//! primary/secondary windows, OpenCode Go's rolling/weekly/monthly meters). They are
+//! **not** operator quotas: RRouter only displays them and caches the answer briefly,
+//! because every provider endpoint here is shared with the vendor's own client and is
+//! cheap to hammer.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -58,7 +59,7 @@ static CACHE: LazyLock<Mutex<HashMap<Uuid, Cached>>> = LazyLock::new(|| Mutex::n
 
 /// Providers whose plan limits this module knows how to read.
 pub fn supports(provider: &str) -> bool {
-    matches!(provider, "claude" | "codex" | "github")
+    matches!(provider, "claude" | "codex" | "github" | "opencode-go")
 }
 
 /// Fetch one account's subscription windows, with a short success cache and a longer
@@ -182,7 +183,12 @@ pub fn spawn_refresh(state: std::sync::Arc<AppState>) {
 async fn refresh_once(state: &AppState) -> Result<()> {
     let connections = state.store.list_connections(None).await?;
     for conn in connections {
-        if !conn.is_active || conn.auth_type != "oauth" || !supports(&conn.provider) {
+        if !conn.is_active || !supports(&conn.provider) {
+            continue;
+        }
+        // OpenCode Go reports its plan through the connection's API key; every other
+        // provider here is a subscription sign-in.
+        if conn.auth_type != "oauth" && conn.provider != "opencode-go" {
             continue;
         }
         // `account` caches its own answer; a cached entry costs no network I/O.
@@ -240,6 +246,18 @@ async fn fetch(state: &AppState, conn: &Connection) -> Result<Windows> {
             conn.provider
         )));
     };
+    // OpenCode Go meters its plan against the connection's API key. The key is stored
+    // whole (an sk- key or a copied Go access token); asking the OAuth refresher would
+    // only fail.
+    if conn.provider == "opencode-go" {
+        let key = conn
+            .credentials
+            .api_key
+            .as_deref()
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| Error::Unauthorized("this account has no API key".into()))?;
+        return opencode_go(state, key).await;
+    }
     // An API key has no plan: asking the OAuth usage endpoint would only produce a 401
     // that reads like a broken account.
     if conn.auth_type != "oauth" {
@@ -264,6 +282,87 @@ async fn fetch(state: &AppState, conn: &Connection) -> Result<Windows> {
             "{provider} does not expose subscription usage"
         ))),
     }
+}
+
+/// OpenCode Go's official usage endpoint, authenticated with the connection's API key.
+/// The JSON is `{"usage": {"rolling" | "weekly" | "monthly": {"percent", "resetsAt"}}}`;
+/// a meter whose `status` is not `ok` (OpenCode's `rate-limited`) is spent even when its
+/// percentage is below 100.
+async fn opencode_go(state: &AppState, key: &str) -> Result<Windows> {
+    let response = state
+        .http
+        .get("https://opencode.ai/zen/go/v1/usage")
+        .header("authorization", format!("Bearer {key}"))
+        .header("accept", "application/json")
+        .header("user-agent", "rrouter")
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| Error::Transport(format!("opencode go usage: {e}")))?;
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        let body: String = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(256)
+            .collect();
+        return Err(Error::Upstream {
+            provider: "opencode-go".into(),
+            status,
+            body,
+            payload: None,
+        });
+    }
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Transport(format!("opencode go usage body: {e}")))?;
+    opencode_go_windows(&body)
+}
+
+/// Pure parser for OpenCode Go's usage payload.
+fn opencode_go_windows(body: &Value) -> Result<Windows> {
+    let usage = body
+        .get("usage")
+        .and_then(Value::as_object)
+        .ok_or_else(|| Error::Store("opencode go usage has no usage object".into()))?;
+    let mut windows = Vec::new();
+    for (key, label, seconds) in [
+        ("rolling", "5 hour", 5 * 3600),
+        ("weekly", "Weekly", 7 * 24 * 3600),
+        ("monthly", "Monthly", 30 * 24 * 3600),
+    ] {
+        let Some(meter) = usage.get(key).filter(|v| v.is_object()) else {
+            continue;
+        };
+        let Some(percent) = meter.get("percent").and_then(Value::as_f64) else {
+            continue;
+        };
+        let rate_limited = meter
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "ok");
+        windows.push(UsageWindow {
+            id: key.to_string(),
+            label: label.to_string(),
+            used_percent: if rate_limited {
+                100.0
+            } else {
+                percent.clamp(0.0, 100.0)
+            },
+            window_seconds: Some(seconds),
+            resets_at: reset_at(meter),
+        });
+    }
+    if windows.is_empty() {
+        return Err(Error::Store("opencode go returned no usage windows".into()));
+    }
+    Ok(Windows {
+        plan: body.get("plan").and_then(Value::as_str).map(str::to_string),
+        windows,
+    })
 }
 
 /// Claude Code's own `/usage` endpoint. `utilization` is the consumed percentage; buckets
@@ -736,6 +835,34 @@ mod tests {
         assert_eq!(windows.windows[0].used_percent, 25.0);
         assert_eq!(windows.windows[1].used_percent, 0.0);
         assert!(windows.windows[0].resets_at.is_some());
+    }
+
+    #[test]
+    fn opencode_go_parses_meters_and_treats_rate_limited_as_spent() {
+        let body = json!({
+            "plan": "go",
+            "usage": {
+                "rolling": {"percent": 12.5, "resetsAt": "2026-11-16T12:00:00Z"},
+                "weekly": {"percent": 47, "status": "ok", "resetsAt": "2026-11-20T00:00:00Z"},
+                "monthly": {"percent": 10, "status": "rate-limited", "resetsAt": "2026-12-01T00:00:00Z"}
+            }
+        });
+        let windows = opencode_go_windows(&body).expect("windows");
+        assert_eq!(windows.plan.as_deref(), Some("go"));
+        let ids: Vec<&str> = windows.windows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, vec!["rolling", "weekly", "monthly"]);
+        assert_eq!(windows.windows[0].used_percent, 12.5);
+        assert_eq!(windows.windows[0].window_seconds, Some(5 * 3600));
+        assert_eq!(windows.windows[1].used_percent, 47.0);
+        assert_eq!(windows.windows[2].used_percent, 100.0);
+        assert_eq!(windows.windows[2].window_seconds, Some(30 * 24 * 3600));
+        assert!(windows.windows[0].resets_at.is_some());
+    }
+
+    #[test]
+    fn opencode_go_rejects_a_payload_with_no_meters() {
+        assert!(opencode_go_windows(&json!({"usage": {}})).is_err());
+        assert!(opencode_go_windows(&json!({"plan": "go"})).is_err());
     }
 
     #[test]

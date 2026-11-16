@@ -641,8 +641,9 @@ export default function Providers() {
               <p className="px-5 pb-4 text-small text-faint">reading plan limits…</p>
             ) : (subscriptions.data ?? []).length === 0 ? (
               <p className="px-5 pb-4 text-small text-muted">
-                No subscription limits to show. Claude and Codex sign-ins report their plan windows;
-                API-key accounts have none.
+                No subscription limits to show. Claude, Codex and Copilot sign-ins report their
+                plan windows; OpenCode Go API keys report their rolling, weekly and monthly
+                allowance.
               </p>
             ) : (
               <div>
@@ -2088,7 +2089,11 @@ function providerLabel(provider: string): string {
       ? "Codex"
       : provider === "github"
         ? "GitHub Copilot"
-        : provider;
+        : provider === "opencode-go"
+          ? "OpenCode Go"
+          : provider === "opencode"
+            ? "OpenCode"
+            : provider;
 }
 
 function pingBadgeText(ping: QuotaPingRow): string {
