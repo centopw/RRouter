@@ -511,10 +511,13 @@ export default function QuickStart() {
   const requestedOs = params.get("os") as OS | null;
   const os = requestedOs && OSES.includes(requestedOs) ? requestedOs : initialOs;
 
-  const preferred = protocol === "anthropic" ? "claude" : "openai";
+  const preferred =
+    protocol === "anthropic"
+      ? (ref: string) => ref.toLowerCase().includes("claude")
+      : (ref: string) => /^openai\//i.test(ref) && /gpt|codex/i.test(ref);
   const example =
     models.data?.find(
-      (model) => model.enabled && model.available && model.ref.includes(preferred),
+      (model) => model.enabled && model.available && preferred(model.ref),
     ) ?? models.data?.find((model) => model.enabled && model.available);
   const modelRef = example?.ref ?? "provider/model";
   const content = guide.build({ origin, openai, key, model: modelRef });
