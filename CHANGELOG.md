@@ -2,6 +2,16 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.20.0 — 2026-11-16
+
+### Features
+
+- feat(ui): add connection guides and provider compaction metadata ([`f4f5307`](https://github.com/centopw/RRouter/commit/f4f53070cc9d851e4ef93909a88be89e39af86b8))
+
+### Documentation
+
+- docs(providers): note server compaction pass-through ([`84ef22f`](https://github.com/centopw/RRouter/commit/84ef22fe609a53fc9c088fa6b19c61f4d02e0f9b))
+
 ## 0.19.0 — 2026-11-16
 
 ### Features
