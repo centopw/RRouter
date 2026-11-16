@@ -207,6 +207,11 @@ const router = createBrowserRouter(
               children: [{ index: true, element: <Providers /> }],
             },
             {
+              path: "quickstart",
+              element: <SectionLayout section="quickstart" />,
+              children: [{ index: true, element: <QuickStart /> }],
+            },
+            {
               path: "routing",
               element: <SectionLayout section="routing" />,
               children: [
@@ -222,7 +227,7 @@ const router = createBrowserRouter(
               children: [
                 { index: true, element: <SectionIndex section="access" /> },
                 { path: "keys", element: <AdminPage><Keys /></AdminPage> },
-                { path: "quickstart", element: <QuickStart /> },
+                { path: "quickstart", element: <Navigate to="/quickstart" replace /> },
                 { path: "teams", element: <Teams /> },
                 { path: "users", element: <AdminPage><Users /></AdminPage> },
               ],

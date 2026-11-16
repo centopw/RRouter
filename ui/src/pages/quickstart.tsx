@@ -389,6 +389,26 @@ function defaultOs(): OS {
   return "linux";
 }
 
+/** Preserve inline code in guide steps instead of showing literal backticks. */
+function InlineCode({ text }: { text: string }) {
+  return (
+    <>
+      {text.split(/(`[^`]+`)/g).map((part, index) =>
+        part.startsWith("`") && part.endsWith("`") ? (
+          <code
+            key={index}
+            className="rounded bg-surface-3 px-1 py-0.5 font-mono text-[0.95em] text-fg"
+          >
+            {part.slice(1, -1)}
+          </code>
+        ) : (
+          <span key={index}>{part}</span>
+        ),
+      )}
+    </>
+  );
+}
+
 function Sample({ code, label }: { code: string; label: string }) {
   return (
     <div className="rounded-lg border border-line bg-[var(--color-surface-2)]">

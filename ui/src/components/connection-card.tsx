@@ -20,7 +20,7 @@ export function ConnectionCard({ showQuickStartLink = true }: { showQuickStartLi
         </div>
         {showQuickStartLink ? (
           <Link
-            to="/access/quickstart"
+            to="/quickstart"
             className="shrink-0 text-small font-medium text-[var(--color-accent-text)] hover:underline"
           >
             Quick start →
