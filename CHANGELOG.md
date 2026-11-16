@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.18.1 — 2026-11-16
+
+### Bug Fixes
+
+- fix(ui): match the keys status filter to the visible badge ([`e7a4c56`](https://github.com/centopw/RRouter/commit/e7a4c560c21e09ea6d988906711bd70adfb3f225))
+
 ## 0.18.0 — 2026-11-16
 
 ### Features
