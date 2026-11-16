@@ -5,6 +5,7 @@
 #   ./scripts/verify.sh --quick         # skip the release build and the live smokes
 #   ./scripts/verify.sh --no-ui         # skip the dashboard (only with a known-good ui/dist)
 #   ./scripts/verify.sh --serve         # full gate, then leave an instance on :20128
+#   ./scripts/verify.sh --clean         # cargo clean first; from-scratch Rust build
 #
 # Every step prints PASS/FAIL; the script stops at the first failure and exits non-zero,
 # so it is safe to run as a single CI/pre-merge gate. A missing tool is a failure, not a
@@ -15,13 +16,15 @@ cd "$(dirname "$0")/.."
 QUICK=0
 NO_UI=0
 SERVE=0
+CLEAN=0
 for arg in "$@"; do
   case "$arg" in
     --quick) QUICK=1 ;;
     --no-ui) NO_UI=1 ;;
     --serve) SERVE=1 ;;
+    --clean) CLEAN=1 ;;
     -h | --help)
-      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -58,6 +61,15 @@ need() {
 
 need cargo
 need python3
+
+if [ "$CLEAN" -eq 1 ] && [ "$QUICK" -eq 1 ]; then
+  fail "--clean cannot be combined with --quick (the binary is removed)"
+fi
+if [ "$CLEAN" -eq 1 ]; then
+  step "0/8 clean build output"
+  run "cargo clean" cargo clean
+  pass "target/ removed"
+fi
 
 step "1/8 formatting"
 run "rustfmt check" cargo fmt --all --check

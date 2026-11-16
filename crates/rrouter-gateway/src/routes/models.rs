@@ -991,6 +991,17 @@ pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -
                     "none"
                 },
                 "listed": models_registry::can_list(spec.id),
+                // The wire the provider speaks natively. The picker shows this instead
+                // of repeating "lists its models" for every API-key provider.
+                "dialect": spec.default_dialect.as_str(),
+                // Provider-native server compaction. Anthropic exposes it inside
+                // `/v1/messages` (beta header + context_management/compaction); OpenAI
+                // exposes `/responses/compact`. Codex's subscription backend does not.
+                "compaction": match spec.id {
+                    "openai" => Some("openai_responses"),
+                    "anthropic" | "claude" => Some("anthropic_messages"),
+                    _ => None,
+                },
                 // A provider whose manifest host is a placeholder (Azure OpenAI's
                 // `RESOURCE.openai.azure.com`) cannot route until the connection supplies
                 // its own resource URL, so the dashboard must ask for one.

@@ -56,6 +56,7 @@ const Health = page(() => import("./pages/health"));
 const SystemLogs = page(() => import("./pages/system-logs"));
 const Webhooks = page(() => import("./pages/webhooks"));
 const Keys = page(() => import("./pages/keys"));
+const QuickStart = page(() => import("./pages/quickstart"));
 const Aliases = page(() => import("./pages/aliases"));
 const Combos = page(() => import("./pages/combos"));
 const Templates = page(() => import("./pages/templates"));
@@ -221,6 +222,7 @@ const router = createBrowserRouter(
               children: [
                 { index: true, element: <SectionIndex section="access" /> },
                 { path: "keys", element: <AdminPage><Keys /></AdminPage> },
+                { path: "quickstart", element: <QuickStart /> },
                 { path: "teams", element: <Teams /> },
                 { path: "users", element: <AdminPage><Users /></AdminPage> },
               ],

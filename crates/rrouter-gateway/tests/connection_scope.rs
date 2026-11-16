@@ -312,6 +312,16 @@ async fn a_member_sees_its_own_team_rows_and_never_a_shared_row() {
         .expect("openai row");
     assert_eq!(openai["has_connection"], json!(true));
     assert_eq!(openai["scope"], json!("team"));
+    assert_eq!(openai["dialect"], json!("openai_chat"));
+    assert_eq!(openai["compaction"], json!("openai_responses"));
+    let anthropic = providers["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|row| row["id"] == json!("anthropic"))
+        .expect("anthropic row");
+    assert_eq!(anthropic["dialect"], json!("anthropic_messages"));
+    assert_eq!(anthropic["compaction"], json!("anthropic_messages"));
 }
 
 #[tokio::test]

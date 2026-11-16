@@ -11,6 +11,7 @@ import {
   PageHeader,
 } from "../components/ui";
 import { DataTable, PaginationBar } from "../components/table";
+import { ConnectionCard } from "../components/connection-card";
 import { effectiveGroups, groupForEntry, layoutFor, useLayoutDraft } from "../lib/layout-draft";
 import { usePhone, useReducedMotion } from "../lib/media";
 import { compareModels } from "../lib/models";
@@ -647,6 +648,8 @@ export default function Models() {
           ) : undefined
         }
       />
+
+      <ConnectionCard />
 
       {presets.isError ? (
         <AlertBanner

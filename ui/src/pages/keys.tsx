@@ -24,6 +24,7 @@ import {
   cx,
 } from "../components/ui";
 import { DataTable, type Column } from "../components/table";
+import { ConnectionCard } from "../components/connection-card";
 import { ModelPicker } from "../components/model-picker";
 import { Checkbox, IconButton } from "../components/atoms";
 import { Key as KeyIcon, MagnifyingGlass, PencilSimple, Trash } from "@phosphor-icons/react";
@@ -218,6 +219,8 @@ export default function Keys() {
         }
       />
 
+      <ConnectionCard />
+
       {keys.isError ? (
         <div className="mb-4">
           <ErrorNote error={keys.error} onRetry={() => void keys.refetch()} />
@@ -314,8 +317,6 @@ export default function Keys() {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2 border-t border-line bg-[var(--color-surface-2)]/45 px-5 py-3 text-caption text-faint">
-          <span>endpoint</span>
-          <CopyChip value={`${window.location.origin}/v1`} label="endpoint" />
           <span className="ml-auto flex items-center gap-1.5">
             {system.data?.require_api_key ? (
               <>

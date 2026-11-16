@@ -36,6 +36,23 @@ python3 scripts/load_test.py --requests 20 --concurrency 5
 ./scripts/backup.sh /var/backups/rrouter
 ```
 
+## Reclaim disk
+
+`target/` accumulates every profile and target combination; a long-lived checkout can
+reach tens of gigabytes. Check it first, then clean Rust output when you do not need an
+incremental build:
+
+```sh
+./scripts/clean.sh --dry-run          # show target/, ui/node_modules and ui/dist sizes
+./scripts/clean.sh                    # cargo clean; keeps source and tracked ui/dist
+./scripts/clean.sh --ui               # also remove ui/node_modules
+./scripts/verify.sh --clean           # full gate with a from-scratch Rust build
+```
+
+`ui/dist` is committed and embedded by `cargo build`; leave it alone unless you intend
+to rebuild the dashboard before committing. A clean is a rebuild cost, not data loss:
+application state lives in `RROUTER_DATA_DIR`, not `target/`.
+
 Coverage includes fallback on 401/429 without losing the client request, first SSE frame
 before upstream completion, Anthropic clients receiving Anthropic shapes from an
 OpenAI-speaking provider, tool calls/results crossing dialects, strict schemas and native

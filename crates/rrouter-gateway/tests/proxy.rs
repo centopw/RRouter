@@ -6462,7 +6462,10 @@ async fn client_beta_headers_are_forwarded_only_where_the_provider_allows_them()
     h.connect("openai", &mock).await;
 
     let client_flags = [
-        ("anthropic-beta", "client-flag-2025-01-01"),
+        (
+            "anthropic-beta",
+            "client-flag-2025-01-01,compact-2026-01-12",
+        ),
         ("openai-beta", "assistants=v2"),
         ("authorization", "Bearer CLIENT-SECRET"),
     ];
@@ -6473,7 +6476,10 @@ async fn client_beta_headers_are_forwarded_only_where_the_provider_allows_them()
             json!({
                 "model": "claude/claude-sonnet-4-5",
                 "max_tokens": 16,
-                "messages": [{"role": "user", "content": "hi"}]
+                "messages": [{"role": "user", "content": "hi"}],
+                "context_management": {
+                    "edits": [{"type": "compact_20260112"}]
+                }
             }),
             &client_flags,
         )
@@ -6486,8 +6492,17 @@ async fn client_beta_headers_are_forwarded_only_where_the_provider_allows_them()
         "claude declares anthropic-beta, so the client's flag travels: {beta:?}"
     );
     assert!(
+        beta.contains("compact-2026-01-12"),
+        "Anthropic server compaction's beta flag must travel: {beta:?}"
+    );
+    assert!(
         beta.contains("oauth-2025-04-20"),
         "the gateway's own beta flag must survive the union: {beta:?}"
+    );
+    assert_eq!(
+        mock.seen()[0]["context_management"]["edits"][0]["type"],
+        "compact_20260112",
+        "the provider-native compaction body must not be rebuilt away"
     );
     assert!(
         !header_value(&headers, "openai-beta").contains("assistants"),

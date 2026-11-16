@@ -30,6 +30,16 @@ canonical request cannot represent. A provider without the endpoint answers `501
 dialect's error envelope. Codex's subscription backend does not serve `/responses/compact`;
 an OpenAI API-key connection does.
 
+Provider-native **server compaction** works on both native surfaces:
+
+- `POST /v1/responses/compact` forwards OpenAI's compaction body and response.
+- `POST /v1/messages` forwards Anthropic's compaction beta fields unchanged:
+  `context_management.edits[].type = "compact_20260112"` (threshold) or the top-level
+  `compaction` parameter with beta `compact-2026-09-04` (on-demand). The client's
+  `anthropic-beta` header is merged with the gateway's own flags; the request body is not
+  rebuilt, so the signed compaction block survives round trips. These are not local
+  summarization: the provider writes the summary and bills its extra sampling step.
+
 `GET /v1/models` lists only enabled models from connected providers. A disabled model is
 absent; re-enabling restores it. `/v1/models/{id}` returns 404 for a disabled or unroutable
 model.

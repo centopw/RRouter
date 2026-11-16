@@ -126,6 +126,7 @@ const SECTIONS: NavSection[] = [
     icon: glyph(Key),
     tabs: [
       { to: "/access/keys", label: "API Keys", adminOnly: true },
+      { to: "/access/quickstart", label: "Quick start" },
       { to: "/access/teams", label: "Teams" },
       { to: "/access/users", label: "Users", adminOnly: true },
     ],

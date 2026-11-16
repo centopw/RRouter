@@ -812,6 +812,10 @@ export type ModelProvider = {
    */
   scope: "global" | "team" | "none";
   listed: boolean;
+  /** Native wire shape; the picker uses this instead of a generic model-list line. */
+  dialect?: string;
+  /** Provider-native server compaction surface, when the provider has one. */
+  compaction?: "openai_responses" | "anthropic_messages" | null;
   /**
    * The manifest host is a placeholder (Azure's `RESOURCE.openai.azure.com`), so every
    * connection must supply its own base URL before it can route.

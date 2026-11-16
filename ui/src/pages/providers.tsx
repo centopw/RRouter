@@ -1435,11 +1435,21 @@ function AddProviderFlow({
           items={subscriptionProviders.map((p) => ({
             id: p.id,
             title: p.display,
-            meta: isAntigravity(p.id)
-              ? "Google Cloud Code Assist · browser sign-in"
-              : p.flow === "device_code"
-                ? "device code"
-                : "browser sign-in",
+            meta: [
+              isAntigravity(p.id)
+                ? "Google Cloud Code Assist · browser sign-in"
+                : p.flow === "device_code"
+                  ? "device code"
+                  : "browser sign-in",
+              (() => {
+                const row = providers.find((item) => item.id === p.id);
+                if (row?.compaction === "anthropic_messages") return "compaction beta";
+                if (row?.compaction === "openai_responses") return "server compact";
+                return null;
+              })(),
+            ]
+              .filter((part): part is string => part !== null)
+              .join(" · "),
             scope: providers.find((row) => row.id === p.id)?.scope ?? "none",
             onClick: () => onChooseOAuth(p),
           }))}
@@ -1561,9 +1571,7 @@ function AddProviderFlow({
                       ? signIn.flow === "device_code"
                         ? "device code sign-in"
                         : "browser sign-in"
-                      : p.listed
-                        ? "lists its models"
-                        : "add models manually",
+                      : providerMeta(p),
                     scope: p.scope,
                     onClick: () => (signIn ? onChooseOAuth(signIn) : onChooseKey(p.id)),
                   };
@@ -1644,6 +1652,35 @@ const PROVIDER_ALIASES: Record<string, string[]> = {
   ollama: ["local"],
   jina: ["rerank"],
 };
+
+const DIALECT_LABELS: Record<string, string> = {
+  openai_chat: "Chat",
+  openai_responses: "Responses",
+  anthropic_messages: "Messages",
+  openai_embeddings: "Embeddings",
+  google_code_assist: "Google Code Assist",
+  qoder_agent: "Qoder agent",
+};
+
+/** The protocol and native surface, not a line every API-key provider shares. */
+function providerMeta(provider: ModelProvider): string {
+  const parts: string[] = [];
+  const dialect =
+    provider.compaction === "openai_responses"
+      ? "Responses"
+      : provider.compaction === "anthropic_messages"
+        ? "Messages"
+        : provider.dialect
+          ? (DIALECT_LABELS[provider.dialect] ?? provider.dialect)
+          : "API key";
+  parts.push(dialect);
+  if (provider.kind === "local") parts.push("local");
+  if (provider.compaction === "openai_responses") parts.push("server compact");
+  else if (provider.compaction === "anthropic_messages") parts.push("compaction beta");
+  if (provider.requires_base_url_override) parts.push("custom URL required");
+  if (!provider.listed) parts.push("manual models");
+  return parts.join(" · ");
+}
 
 /** Does a provider answer to this search? Display, id and aliases, prefix-matched. */
 function matchesProvider(
