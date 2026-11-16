@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.24.0 — 2026-11-16
+
+### Features
+
+- feat(quota): read OpenCode Go plan usage ([`fec496e`](https://github.com/centopw/RRouter/commit/fec496e))
+
 ## 0.23.3 — 2026-11-16
 
 ### Features
