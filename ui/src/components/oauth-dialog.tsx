@@ -23,6 +23,8 @@ const PROVIDER_NOTES: Record<string, string> = {
     "Sign in with the Google account that has Antigravity access. The gateway discovers your Cloud Code Assist project after approval and stores it on the connection; there is no project id to type, and the tokens stay on the server.",
   antigravity:
     "Sign in with the Google account that has Antigravity access. The gateway discovers your Cloud Code Assist project after approval and stores it on the connection; there is no project id to type, and the tokens stay on the server.",
+  openrouter:
+    "Sign in to OpenRouter to create an API key tied to that account. The key is stored as an API-key connection, so you can also add one manually under API key.",
 };
 
 /**

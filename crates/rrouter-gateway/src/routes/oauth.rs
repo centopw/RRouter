@@ -175,9 +175,12 @@ pub async fn complete(
         .account_label
         .clone()
         .unwrap_or_else(|| format!("{} (OAuth)", spec.display));
+    // OpenRouter's PKCE exchange returns a long-lived API key, so the connection must
+    // use the API-key auth type even though the human signed in through OAuth.
+    let auth_type = connection_auth_type(spec);
     match state
         .store
-        .create_connection(spec.id, "oauth", creds, Some(&name))
+        .create_connection(spec.id, auth_type, creds, Some(&name))
         .await
     {
         Ok(conn) => {
@@ -223,6 +226,16 @@ fn ensure_pending_provider(
         ))),
         // Unknown ids stay idempotent for status/cancel; complete reports NotFound itself.
         _ => Ok(()),
+    }
+}
+
+/// The connection auth type implied by the provider transport, not by the sign-in route.
+/// OpenRouter signs in through PKCE but stores an API key.
+fn connection_auth_type(spec: &rrouter_auth::ProviderSpec) -> &'static str {
+    match spec.kind {
+        rrouter_auth::ProviderKind::OAuth => "oauth",
+        rrouter_auth::ProviderKind::ApiKey => "api_key",
+        rrouter_auth::ProviderKind::Local => "none",
     }
 }
 
@@ -284,4 +297,21 @@ async fn derive_copilot(
         creds.copilot_expires_at = derived.copilot_expires_at;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openrouter_sign_in_stores_an_api_key_connection() {
+        let spec = rrouter_auth::get("openrouter").expect("openrouter");
+        assert_eq!(connection_auth_type(spec), "api_key");
+    }
+
+    #[test]
+    fn subscription_sign_in_stays_oauth() {
+        let spec = rrouter_auth::get("claude").expect("claude");
+        assert_eq!(connection_auth_type(spec), "oauth");
+    }
 }

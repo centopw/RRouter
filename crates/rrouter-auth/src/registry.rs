@@ -352,6 +352,27 @@ pub const GOOGLE_ANTIGRAVITY_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
     body: RefreshBody::Form,
 });
 
+/// OpenRouter OAuth PKCE: the exchange returns a long-lived API key, not an access
+/// token. The flow is deliberately wired on the API-key provider, so the connection is
+/// stored as an API key and carries no refresh recipe.
+///
+/// OpenRouter's authorize endpoint uses `callback_url` instead of the RFC 6749 fields;
+/// its exchange endpoint takes `{code, code_verifier, code_challenge_method}` and
+/// answers `{key}`. Both shapes are special-cased in the flow engine.
+pub const OPENROUTER_LOGIN: LoginFlow = LoginFlow::Pkce(PkceFlow {
+    client_id: "",
+    client_secret: None,
+    authorize_url: "https://openrouter.ai/auth",
+    token_url: "https://openrouter.ai/api/v1/auth/keys",
+    scope: "",
+    fixed_port: None,
+    redirect_host: "localhost",
+    callback_path: "/callback",
+    extra_params: &[("key_label", "RRouter")],
+    send_state: true,
+    body: RefreshBody::Json,
+});
+
 /// Every provider this build can route to.
 pub static PROVIDERS: &[ProviderSpec] = &[
     ProviderSpec {
@@ -722,7 +743,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         passthrough_headers: &[],
         default_max_tokens: None,
         refresh: None,
-        login: None,
+        login: Some(OPENROUTER_LOGIN),
         profile_url: None,
         stream_only: false,
     },

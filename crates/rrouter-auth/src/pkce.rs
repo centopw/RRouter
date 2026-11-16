@@ -30,6 +30,47 @@ pub fn generate_state() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// OpenRouter's authorize URL.
+///
+/// OpenRouter is PKCE-shaped but not RFC 6749-shaped: it takes `callback_url` instead
+/// of `redirect_uri`, has no client id or scope, and returns an API key rather than an
+/// access token. The verifier is still required, so a code shown on screen (headless
+/// mode) cannot be redeemed by anyone else.
+pub fn openrouter_authorize_url(
+    authorize_url: &str,
+    callback_url: &str,
+    state: &str,
+    challenge: &str,
+    extra_params: &[(&str, &str)],
+) -> String {
+    let reserved = [
+        "callback_url",
+        "code_challenge",
+        "code_challenge_method",
+        "state",
+    ];
+    let mut params: Vec<(&str, String)> = extra_params
+        .iter()
+        .filter(|(key, _)| !reserved.iter().any(|r| r.eq_ignore_ascii_case(key)))
+        .map(|(key, value)| (*key, (*value).to_string()))
+        .collect();
+    params.push(("callback_url", callback_url.to_string()));
+    params.push(("code_challenge", challenge.to_string()));
+    params.push(("code_challenge_method", "S256".to_string()));
+    params.push(("state", state.to_string()));
+    let query = params
+        .iter()
+        .map(|(key, value)| format!("{}={}", key, percent_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let sep = if authorize_url.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    format!("{authorize_url}{sep}{query}")
+}
+
 /// Build the provider's authorization URL.
 ///
 /// `extra_params` are filtered so a provider-specific parameter can never collide
@@ -180,5 +221,28 @@ mod tests {
             &[],
         );
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback"));
+    }
+
+    #[test]
+    fn openrouter_uses_callback_url_and_no_oauth_client_fields() {
+        let url = openrouter_authorize_url(
+            "https://openrouter.ai/auth",
+            "http://localhost:54545/callback",
+            "STATE",
+            "CHALLENGE",
+            &[("key_label", "RRouter")],
+        );
+        assert!(url.starts_with("https://openrouter.ai/auth?"), "{url}");
+        assert!(
+            url.contains("callback_url=http%3A%2F%2Flocalhost%3A54545%2Fcallback"),
+            "{url}"
+        );
+        assert!(url.contains("code_challenge=CHALLENGE"), "{url}");
+        assert!(url.contains("code_challenge_method=S256"), "{url}");
+        assert!(url.contains("state=STATE"), "{url}");
+        assert!(url.contains("key_label=RRouter"), "{url}");
+        for absent in ["client_id=", "response_type=", "redirect_uri=", "scope="] {
+            assert!(!url.contains(absent), "{absent} leaked into {url}");
+        }
     }
 }

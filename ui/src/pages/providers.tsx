@@ -109,8 +109,6 @@ export default function Providers() {
       ).size,
     [accounts],
   );
-  const oauthIds = useMemo(() => new Set((oauth.data ?? []).map((p) => p.id)), [oauth.data]);
-
   const displayOf = (id: string) =>
     providers.data?.find((p) => p.id === id)?.display ?? id;
 
@@ -239,7 +237,9 @@ export default function Providers() {
     setAdding(false);
   };
 
-  const keyProviders = (providers.data ?? []).filter((p) => !oauthIds.has(p.id));
+  // API-key providers stay in this list even when they also offer a sign-in. OpenRouter
+  // is both: an operator can paste a key, or use the OAuth flow under Sign in.
+  const keyProviders = (providers.data ?? []).filter((p) => p.kind !== "oauth");
   const subscriptionProviders = (oauth.data ?? []).map((p) => ({
     ...p,
     display: providers.data?.find((x) => x.id === p.id)?.display ?? p.display,
@@ -1372,9 +1372,8 @@ function AddProviderFlow({
   // providers, so filtering never hides them.
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
-  // An empty box lists what this step is for (API keys). A search answers the question
-  // the operator actually asked, so it also finds sign-in providers ("codex", "google"),
-  // whose row opens their own flow instead of the key form.
+  // An empty box lists what this step is for (API keys). A search also finds providers
+  // that only appear under Sign in, so the operator can get back to the other flow.
   const oauthById = new Map(subscriptionProviders.map((provider) => [provider.id, provider]));
   const directory = needle === "" ? keyProviders : providers;
   const matching = directory.filter((provider) => matchesProvider(needle, provider));
@@ -1399,7 +1398,7 @@ function AddProviderFlow({
           : step === "opencode"
             ? "Add OpenCode"
             : kind === "subscription"
-              ? "Sign in with a subscription"
+              ? "Sign in with an account"
               : customProtocol !== null
                 ? "Add a custom endpoint"
                 : "Add an API key"
@@ -1417,8 +1416,8 @@ function AddProviderFlow({
       {step === "kind" ? (
         <div className="grid gap-2 sm:grid-cols-2">
           <Choice
-            title="Subscription"
-            body="Use a Claude, ChatGPT, or GitHub Copilot plan you already pay for. RRouter keeps the session token fresh."
+            title="Sign in"
+            body="Use a Claude, ChatGPT, or Copilot plan, or connect OpenRouter to create an API key tied to your account."
             onClick={() => onChooseKind("subscription")}
           />
           <Choice
@@ -1431,16 +1430,18 @@ function AddProviderFlow({
 
       {step === "provider" && kind === "subscription" ? (
         <ProviderList
-          empty="No subscription sign-in is wired for this build."
+          empty="No account sign-in is wired for this build."
           items={subscriptionProviders.map((p) => ({
             id: p.id,
             title: p.display,
             meta: [
-              isAntigravity(p.id)
-                ? "Google Cloud Code Assist · browser sign-in"
-                : p.flow === "device_code"
-                  ? "device code"
-                  : "browser sign-in",
+              p.id === "openrouter"
+                ? "browser sign-in · creates an API key"
+                : isAntigravity(p.id)
+                  ? "Google Cloud Code Assist · browser sign-in"
+                  : p.flow === "device_code"
+                    ? "device code"
+                    : "browser sign-in",
               (() => {
                 const row = providers.find((item) => item.id === p.id);
                 if (row?.compaction === "anthropic_messages") return "compaction beta";
@@ -1568,12 +1569,19 @@ function AddProviderFlow({
                     id: p.id,
                     title: p.display,
                     meta: signIn
-                      ? signIn.flow === "device_code"
-                        ? "device code sign-in"
-                        : "browser sign-in"
-                      : providerMeta(p),
+                      ? p.id === "openrouter"
+                        ? "API key, or sign in under Sign in"
+                        : signIn.flow === "device_code"
+                          ? "device code sign-in"
+                          : "browser sign-in"
+                      : p.id === "openrouter"
+                        ? "API key · or sign in under Sign in"
+                        : providerMeta(p),
                     scope: p.scope,
-                    onClick: () => (signIn ? onChooseOAuth(signIn) : onChooseKey(p.id)),
+                    onClick: () =>
+                      p.kind === "oauth" && signIn
+                        ? onChooseOAuth(signIn)
+                        : onChooseKey(p.id),
                   };
                 })}
               />

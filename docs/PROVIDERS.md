@@ -18,7 +18,7 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 | `deepseek` | DeepSeek | API key | Chat | yes | |
 | `gemini` | Google Gemini | API key | Chat (OpenAI compatibility layer) | yes | Native search uses `generateContent` + `google_search`; auth is `x-goog-api-key` there. |
 | `groq` | Groq | API key | Chat | yes | Very fast small models; no Responses endpoint. |
-| `openrouter` | OpenRouter | API key | Chat | yes | Aggregator: the widest model catalog, priced per model. |
+| `openrouter` | OpenRouter | API key or OAuth PKCE (creates an API key) | Chat | yes | Aggregator: the widest model catalog, priced per model. OAuth sign-in uses OpenRouter's `callback_url` PKCE flow and stores the returned key as an API-key connection. |
 | `xai` | xAI | API key | Chat; Responses for search | yes | Native search uses `/v1/responses` + `web_search`. |
 | `mistral` | Mistral | API key | Chat | yes | |
 | `together` | Together AI | API key | Chat | yes | |
@@ -33,9 +33,10 @@ clients can call a Codex account, OpenAI clients get OpenAI-shaped streams back)
 callback on its own loopback. The sign-in dialog never opens a browser automatically:
 it shows the authorize URL, an **open** button and a **copy** button, and the operator
 pastes the final browser URL back. Every PKCE provider advertises this mode: Codex uses
-its fixed port 1455, Google Antigravity uses a dynamic loopback port, and Claude uses the stable manual
-callback `http://localhost:54545/callback`. Device-code sign-in (GitHub Copilot) needs no
-callback and works unchanged.
+its fixed port 1455, Google Antigravity uses a dynamic loopback port, Claude uses the stable manual
+callback `http://localhost:54545/callback`, and OpenRouter uses the same callback shape
+with `callback_url`. Device-code sign-in (GitHub Copilot) needs no callback and works
+unchanged.
 
 The last four are reviewed community manifests (`providers/community/*.json`) compiled into
 the binary at build time, so they appear here exactly as the built-in rows do. `derived` means

@@ -203,15 +203,25 @@ impl OAuthFlows {
         let verifier = pkce::generate_verifier();
         let challenge = pkce::challenge_for(&verifier);
         let state = pkce::generate_state();
-        let authorize_url = pkce::authorize_url(
-            p.authorize_url,
-            &client_id,
-            &redirect_uri,
-            p.scope,
-            &state,
-            &challenge,
-            p.extra_params,
-        );
+        let authorize_url = if spec.id == "openrouter" {
+            pkce::openrouter_authorize_url(
+                p.authorize_url,
+                &redirect_uri,
+                &state,
+                &challenge,
+                p.extra_params,
+            )
+        } else {
+            pkce::authorize_url(
+                p.authorize_url,
+                &client_id,
+                &redirect_uri,
+                p.scope,
+                &state,
+                &challenge,
+                p.extra_params,
+            )
+        };
         let id = uuid::Uuid::new_v4().to_string();
         let exchange = Arc::new(AsyncMutex::new(()));
 
@@ -607,6 +617,11 @@ impl OAuthFlows {
             verifier,
             state,
         } = e;
+        // OpenRouter exchanges a PKCE code for a long-lived API key, not an OAuth
+        // access token, and its request body is not RFC 6749.
+        if provider == "openrouter" {
+            return Self::exchange_openrouter(http, provider, p.token_url, code, verifier).await;
+        }
         let params = authorization_params(&p, provider, code, redirect_uri, verifier, state)?;
         let req = match p.body {
             RefreshBody::Json => {
@@ -674,6 +689,51 @@ impl OAuthFlows {
             provider: provider.to_string(),
             credentials,
             account_label,
+        })
+    }
+
+    /// OpenRouter PKCE exchange: `{code, code_verifier, code_challenge_method}` in,
+    /// `{key}` out. The key is stored as the connection's API key, so no refresh recipe
+    /// is needed and the transport can use it immediately.
+    async fn exchange_openrouter(
+        http: &reqwest::Client,
+        provider: &str,
+        token_url: &str,
+        code: &str,
+        verifier: &str,
+    ) -> Result<SignedIn> {
+        let resp = http
+            .post(token_url)
+            .header("accept", "application/json")
+            .json(&serde_json::json!({
+                "code": code,
+                "code_verifier": verifier,
+                "code_challenge_method": "S256",
+            }))
+            .send()
+            .await
+            .map_err(transport)?;
+        let status = resp.status();
+        let body = resp.text().await.map_err(transport)?;
+        if !status.is_success() {
+            return Err(Error::Unauthorized(format!(
+                "provider {provider} rejected the authorization code (HTTP {status}): {}",
+                truncate(&body)
+            )));
+        }
+        let key = openrouter_key(&body).map_err(|message| Error::Upstream {
+            provider: provider.to_string(),
+            status: status.as_u16(),
+            body: message,
+            payload: serde_json::from_str(&body).ok(),
+        })?;
+        Ok(SignedIn {
+            provider: provider.to_string(),
+            credentials: Credentials {
+                api_key: Some(key),
+                ..Credentials::default()
+            },
+            account_label: None,
         })
     }
 
@@ -837,6 +897,18 @@ fn authorization_params(
         params.push(("state", state.to_string()));
     }
     Ok(params)
+}
+
+/// Parse OpenRouter's `{key: "sk-or-v1-..."}` exchange response.
+fn openrouter_key(body: &str) -> std::result::Result<String, String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|e| format!("unparsable OpenRouter key response: {e}"))?;
+    value
+        .get("key")
+        .and_then(Value::as_str)
+        .filter(|key| !key.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "OpenRouter returned no API key".to_string())
 }
 
 /// Replay a stored outcome, keeping failure messages verbatim.
@@ -1732,6 +1804,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openrouter_manual_start_builds_callback_url_not_redirect_uri() {
+        let spec = crate::registry::get("openrouter").expect("openrouter");
+        let flows = OAuthFlows::new();
+        let http = reqwest::Client::new();
+        let (id, challenge) = flows.start_manual(&http, spec).await.expect("start");
+        let Challenge::Pkce {
+            authorize_url,
+            redirect_uri,
+            manual,
+        } = challenge
+        else {
+            panic!("expected PKCE");
+        };
+        assert!(manual);
+        assert_eq!(redirect_uri, "http://localhost:54545/callback");
+        assert!(authorize_url.contains("callback_url="), "{authorize_url}");
+        assert!(!authorize_url.contains("redirect_uri="), "{authorize_url}");
+        assert!(!authorize_url.contains("client_id="), "{authorize_url}");
+        assert!(authorize_url.contains("code_challenge_method=S256"));
+        flows.cancel(&id);
+    }
+
+    #[tokio::test]
     async fn unknown_login_id_is_not_found() {
         let flows = OAuthFlows::new();
         let http = reqwest::Client::new();
@@ -1767,5 +1862,17 @@ mod tests {
         assert_eq!(label_from_jwt("garbage"), None);
         assert_eq!(label_from_jwt("a.b.c"), None);
         assert_eq!(label_from_jwt(&fake_jwt("x@y.z")).as_deref(), Some("x@y.z"));
+    }
+
+    #[test]
+    fn openrouter_exchange_needs_a_nonempty_key() {
+        assert_eq!(
+            openrouter_key(r#"{"key":"sk-or-v1-abc"}"#).unwrap(),
+            "sk-or-v1-abc"
+        );
+        assert!(openrouter_key(r#"{"key":""}"#).is_err());
+        assert!(openrouter_key(r#"{"key":null}"#).is_err());
+        assert!(openrouter_key(r#"{"key":1}"#).is_err());
+        assert!(openrouter_key("not json").is_err());
     }
 }
