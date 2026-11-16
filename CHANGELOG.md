@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.22.0 — 2026-11-16
+
+### Features
+
+- feat(ui): create and paste API keys on quick start ([`a11592e`](https://github.com/centopw/RRouter/commit/a11592e858d37ab46b0e49cb216caa01f4f35303))
+
 ## 0.21.2 — 2026-11-16
 
 ### Bug Fixes
