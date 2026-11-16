@@ -186,10 +186,10 @@ grep -q '### Bug Fixes' "$RELROOT/CHANGELOG.md" || fail "fix group missing from 
 python3 scripts/release.py --root "$RELROOT" --check >/dev/null \
   || fail "consistent release metadata was rejected"
 if python3 scripts/release.py 0.10.1 --root "$RELROOT" >/dev/null 2>&1; then
-  fail "a patch version was accepted for feat commits"
+  fail "an explicit version argument was accepted"
 fi
-if python3 scripts/release.py --bump patch --root "$RELROOT" >/dev/null 2>&1; then
-  fail "an explicit patch bump was accepted for feat commits"
+if python3 scripts/release.py --patch --root "$RELROOT" >/dev/null 2>&1; then
+  fail "a patch re-prepare double-bumped an already prepared release"
 fi
 
 git -C "$RELROOT" add -A
@@ -203,15 +203,59 @@ python3 scripts/release.py --root "$RELROOT" >/dev/null \
 grep -q 'version = "1.0.0"' "$RELROOT/Cargo.toml" || fail "breaking commit did not bump major"
 grep -q '### Breaking Changes' "$RELROOT/CHANGELOG.md" || fail "breaking group missing"
 
+git -C "$RELROOT" add -A
+git -C "$RELROOT" commit -qm "chore(release): v1.0.0"
+git -C "$RELROOT" tag -a v1.0.0 -m v1.0.0
+printf 'd\n' >>"$RELROOT/a"
+git -C "$RELROOT" add a
+git -C "$RELROOT" commit -qm "fix(core): ordinary patch work"
+python3 scripts/release.py --minor --root "$RELROOT" >/dev/null \
+  || fail "explicit minor release failed"
+grep -q 'version = "1.1.0"' "$RELROOT/Cargo.toml" || fail "explicit minor did not bump 1.1.0"
+python3 scripts/release.py --check --root "$RELROOT" >/dev/null \
+  || fail "explicit minor metadata was rejected"
+
+git -C "$RELROOT" add -A
+git -C "$RELROOT" commit -qm "chore(release): v1.1.0"
+git -C "$RELROOT" tag -a v1.1.0 -m v1.1.0
+printf 'e\n' >>"$RELROOT/a"
+git -C "$RELROOT" add a
+git -C "$RELROOT" commit -qm "fix(core): another patch"
+python3 scripts/release.py --major --root "$RELROOT" >/dev/null \
+  || fail "explicit major release failed"
+grep -q 'version = "2.0.0"' "$RELROOT/Cargo.toml" || fail "explicit major did not bump 2.0.0"
+
+git -C "$RELROOT" add -A
+git -C "$RELROOT" commit -qm "chore(release): v2.0.0"
+git -C "$RELROOT" tag -a v2.0.0 -m v2.0.0
+printf 'f\n' >>"$RELROOT/a"
+git -C "$RELROOT" add a
+git -C "$RELROOT" commit -qm "fix(core): one more patch"
+python3 scripts/release.py --breaking --root "$RELROOT" >/dev/null \
+  || fail "--breaking alias failed"
+grep -q 'version = "3.0.0"' "$RELROOT/Cargo.toml" || fail "--breaking did not bump 3.0.0"
+
+git -C "$RELROOT" add -A
+git -C "$RELROOT" commit -qm "chore(release): v3.0.0"
+git -C "$RELROOT" tag -a v3.0.0 -m v3.0.0
+printf 'g\n' >>"$RELROOT/a"
+git -C "$RELROOT" add a
+git -C "$RELROOT" commit -qm "fix(core): final patch"
+python3 scripts/release.py --patch --root "$RELROOT" >/dev/null \
+  || fail "explicit patch release failed"
+grep -q 'version = "3.0.1"' "$RELROOT/Cargo.toml" || fail "explicit patch did not bump 3.0.1"
+python3 scripts/release.py --check --root "$RELROOT" >/dev/null \
+  || fail "explicit patch metadata was rejected"
+
 python3 - "$RELROOT/deploy/helm/rrouter/Chart.yaml" <<'PY'
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
-path.write_text(path.read_text(encoding="utf-8").replace('1.0.0', '0.9.9'), encoding="utf-8")
+path.write_text(path.read_text(encoding="utf-8").replace('3.0.1', '0.9.9'), encoding="utf-8")
 PY
-if python3 scripts/release.py 1.0.0 --root "$RELROOT" --check >/dev/null 2>&1; then
+if python3 scripts/release.py --check --root "$RELROOT" >/dev/null 2>&1; then
   fail "drifted Helm appVersion passed the check"
 fi
-pass "semver derived from commits, lockfile scoping, notes generation, drift detection"
+pass "type bump from latest tag, notes generation, lockfile scoping, drift detection"
 
 printf '\nrelease tooling: all checks passed\n'

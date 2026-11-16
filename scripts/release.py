@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """Prepare or publish a release from one version source.
 
-Cargo.toml is authoritative. This tool derives the next version from Conventional
-Commits since the last `v*` tag, writes every derived carrier (Cargo.lock, Helm
-appVersion, README, roadmap, Helm guide), and generates the CHANGELOG section. The
-version rules are strict:
+Cargo.toml is authoritative. The next version always comes from the newest `v*` tag
+on the current history; no version number is passed by hand. The release type is the
+only choice:
 
-  * `feat:`                         -> minor bump (X.Y.0)
-  * `fix:`/`perf:`/`docs:`/...      -> patch bump (X.Y.Z)
-  * `type!:`, `type(scope)!:` or a  -> major bump (X.0.0)
-    `BREAKING CHANGE:` footer
+  * no flag  -> derive the type from Conventional Commits since the last tag
+  * `--patch` -> X.Y.(Z+1)
+  * `--minor` -> X.(Y+1).0
+  * `--major` / `--breaking` -> (X+1).0.0
 
-A requested version that is not exactly that bump is refused.
+`--breaking` is an alias for `--major`: the version rule is the same, and the
+CHANGELOG still records which commits were breaking. An explicit type controls the
+version; commit messages still generate the notes. Every derived carrier
+(Cargo.lock, Helm appVersion, README, roadmap, Helm guide) is updated together.
 
 Usage:
-  python3 scripts/release.py                 # derive the bump from commits
-  python3 scripts/release.py --bump patch    # insist on the commit-derived kind
-  python3 scripts/release.py 0.10.0          # explicit; validated against commits
-  python3 scripts/release.py --check         # CI gate: carriers + bump + notes
-  python3 scripts/release.py --publish       # verify, commit, tag, push
+  python3 scripts/release.py --patch          # next patch from the latest tag
+  python3 scripts/release.py --minor          # next minor
+  python3 scripts/release.py --major          # next major
+  python3 scripts/release.py --breaking       # alias for --major
+  python3 scripts/release.py                  # derive the type from commits
+  python3 scripts/release.py --check          # CI gate: carriers + notes
+  python3 scripts/release.py --publish        # verify, commit, tag, push
+  python3 scripts/release.py --patch --publish
 
 `--publish` runs scripts/verify.sh first unless `--no-verify` is also passed.
 """
@@ -161,6 +166,13 @@ def bump_version(version: str, kind: str) -> str:
     if kind == "patch":
         return f"{major}.{minor}.{patch + 1}"
     raise ValueError(f"unknown bump kind {kind!r}")
+
+def newer_than(version: str, base: str) -> bool:
+    """A release may be any forward SemVer move from the last tag, not only the
+    commit-derived kind: the operator chooses the release type."""
+    return tuple(int(part) for part in version.split("-", 1)[0].split(".")) > tuple(
+        int(part) for part in base.split("-", 1)[0].split(".")
+    )
 
 
 def repo_url(root: Path) -> str:
@@ -394,22 +406,17 @@ def check(root: Path, version: str) -> list[str]:
             f"CHANGELOG '## {version}' section has no notes yet; add at least one line"
         )
     tag = last_tag(root)
-    if tag and version != tag[1]:
-        try:
-            kind = required_kind(commits_since(root, tag[0]))
-            if kind is None:
+    if tag:
+        if version == tag[1]:
+            if required_kind(commits_since(root, tag[0])) is not None:
                 problems.append(
-                    f"{version} is ahead of {tag[1]} but there are no releasable commits"
+                    f"Cargo.toml is still {tag[1]}; bump the release version before tagging"
                 )
-            else:
-                expected = bump_version(tag[1], kind)
-                if version != expected:
-                    problems.append(
-                        f"{version} is not a valid {kind} bump from {tag[1]}; "
-                        f"expected {expected} (breaking=major, feat=minor, else patch)"
-                    )
-        except ValueError as error:
-            problems.append(str(error))
+        elif not newer_than(version, tag[1]):
+            problems.append(
+                f"{version} is not newer than the last tag {tag[1]}; "
+                "choose the next forward SemVer version"
+            )
     return problems
 
 
@@ -468,75 +475,82 @@ def publish(root: Path, version: str, verify: bool) -> int:
 
 
 def resolve_target(
-    root: Path, raw_version: str | None, kind: str | None
-) -> tuple[str, list[dict[str, str]]]:
-    """The next version, derived from Conventional Commits since the last tag."""
+    root: Path, kind: str | None
+) -> tuple[str, list[dict[str, str]], str]:
+    """Return the next version, its commits, and the release type.
+
+    The latest `v*` tag is the version base. An explicit type always wins; without
+    one, Conventional Commits choose the type. A Cargo.toml that already holds the
+    expected next version is left as-is, so re-running a prepare is idempotent.
+    """
     tag = last_tag(root)
     current = read_version(root)
     commits = commits_since(root, tag[0]) if tag else commits_since(root, None)
-    required = required_kind(commits)
-    if raw_version:
-        version = normalize(raw_version)
-        if tag and version != tag[1]:
-            expected = bump_version(tag[1], required) if required else None
-            if expected is None:
-                raise ValueError(
-                    f"{version} is ahead of {tag[1]} but there are no releasable commits"
-                )
-            if version != expected:
-                raise ValueError(
-                    f"{version} is not a valid {required} bump from {tag[1]}; "
-                    f"expected {expected} (breaking=major, feat=minor, else patch)"
-                )
-        return version, commits
-    if kind:
-        if not tag:
-            return bump_version(current, kind), commits
-        if required is None:
-            raise ValueError("nothing to release: no conventional commits since the last tag")
-        if kind != required:
-            raise ValueError(
-                f"commits since {tag[0]} require a {required} bump, not {kind}"
-            )
-        return bump_version(tag[1], required), commits
-    if not tag:
-        raise ValueError("no previous v* tag; pass the first version explicitly")
-    if required is None:
+    inferred = required_kind(commits)
+    release_kind = kind or inferred
+
+    if inferred is None:
         raise ValueError("nothing to release: no conventional commits since the last tag")
-    expected = bump_version(tag[1], required)
-    if current == tag[1]:
-        return expected, commits
+    if release_kind is None:
+        raise ValueError(
+            "no previous v* tag; pass --patch, --minor, --major, or --breaking"
+        )
+
+    if not tag:
+        return bump_version(current, release_kind), commits, release_kind
+
+    base = tag[1]
+    if current == base:
+        return bump_version(base, release_kind), commits, release_kind
+    expected = bump_version(base, release_kind)
     if current == expected:
-        return current, commits
+        return current, commits, release_kind
     raise ValueError(
-        f"Cargo.toml is {current}; expected {tag[1]} (unreleased) or {expected} "
-        f"({required} bump from {tag[1]})"
+        f"Cargo.toml is {current}; expected {base} (unreleased) or {expected} "
+        f"({release_kind} bump from {base})"
     )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "version",
-        nargs="?",
-        help="release version, e.g. 0.10.0 or v0.10.0; omit to let commits decide",
+    bump = parser.add_mutually_exclusive_group()
+    bump.add_argument(
+        "--patch",
+        dest="kind",
+        action="store_const",
+        const="patch",
+        help="patch bump from the latest tag: X.Y.(Z+1)",
     )
-    parser.add_argument(
-        "--bump",
-        choices=["patch", "minor", "major"],
-        help="requested semver bump; must match the commits since the last tag",
+    bump.add_argument(
+        "--minor",
+        dest="kind",
+        action="store_const",
+        const="minor",
+        help="minor bump from the latest tag: X.(Y+1).0",
+    )
+    bump.add_argument(
+        "--major",
+        dest="kind",
+        action="store_const",
+        const="major",
+        help="major bump from the latest tag: (X+1).0.0",
+    )
+    bump.add_argument(
+        "--breaking",
+        dest="kind",
+        action="store_const",
+        const="major",
+        help="alias for --major; breaking commits are still marked in the CHANGELOG",
     )
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--check", action="store_true", help="validate only; write nothing")
     parser.add_argument("--publish", action="store_true", help="verify, commit, tag and push")
     parser.add_argument("--no-verify", action="store_true", help="skip scripts/verify.sh")
     args = parser.parse_args()
-    if args.version and args.bump:
-        parser.error("pass a version or --bump, not both")
     root = args.root.resolve()
     if args.check:
         try:
-            version = normalize(args.version) if args.version else read_version(root)
+            version = read_version(root)
         except ValueError as error:
             print(f"release: {error}", file=sys.stderr)
             return 1
@@ -545,12 +559,16 @@ def main() -> int:
             print("release: metadata is stale:", file=sys.stderr)
             for problem in problems:
                 print(f"  - {problem}", file=sys.stderr)
-            print("release: run ./scripts/release.py (or with --bump)", file=sys.stderr)
+            print(
+                "release: run ./scripts/release.py --patch|--minor|--major "
+                "(or --breaking)",
+                file=sys.stderr,
+            )
             return 1
         print(f"release: {version} metadata is consistent")
         return 0
     try:
-        version, commits = resolve_target(root, args.version, args.bump)
+        version, commits, kind = resolve_target(root, args.kind)
     except ValueError as error:
         print(f"release: {error}", file=sys.stderr)
         return 1
@@ -571,8 +589,8 @@ def main() -> int:
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         return 2
-    print(f"release: {version} metadata is ready; publish with:")
-    print(f"  ./scripts/release.py {version} --publish")
+    print(f"release: {version} ({kind}) metadata is ready; publish with:")
+    print(f"  ./scripts/release.py --{kind} --publish")
     return 0
 
 

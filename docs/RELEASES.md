@@ -7,20 +7,27 @@ proves, what the installer checks, and what a human still has to do.
 
 ## 0. Versioning and commit messages
 
-RRouter follows SemVer strictly; the release tool derives the bump from Conventional
-Commits since the last `v*` tag and refuses a mismatched version:
+RRouter follows SemVer. The release tool finds the newest `v*` tag, then bumps from that
+tag; you pass the release type, never a version number:
 
-| Commit since the last tag | Bump | Example |
+| Invocation | Version | Use |
 | --- | --- | --- |
-| `fix:`, `perf:`, `docs:`, `refactor:`, `ci:`, `chore:` | **patch** `X.Y.Z` | `fix(ui): keep the key field selectable` |
-| `feat:` | **minor** `X.Y.0` | `feat(api): add provider-qualified model ids` |
-| `type!:`, `type(scope)!:` or a `BREAKING CHANGE:` footer | **major** `X.0.0` | `refactor(core)!: remove the legacy path` |
+| `./scripts/release.py --patch` | `X.Y.(Z+1)` | fixes, docs, maintenance |
+| `./scripts/release.py --minor` | `X.(Y+1).0` | features |
+| `./scripts/release.py --major` | `(X+1).0.0` | breaking releases |
+| `./scripts/release.py --breaking` | same as `--major` | names the intent explicitly |
+| `./scripts/release.py` | commit-derived | no manual type; the conventional commits choose |
+
+An explicit type controls the version. Conventional Commits still generate the CHANGELOG,
+so `feat:`/`fix:`/`type!:` messages remain mandatory for useful release notes. The tool
+refuses a `Cargo.toml` that is neither the latest tag nor the requested bump, which makes a
+failed prepare safe to rerun.
 
 Release commits themselves use `chore(release): vX.Y.Z` and are ignored by the bump
 calculation. The CHANGELOG section is generated in the same conventional style
 (`### Features`, `### Bug Fixes`, `### Breaking Changes`, …) with commit links; it is not
-hand-invented. `scripts/release.py --check` runs in CI and fails when a carrier or the
-bump is wrong.
+hand-invented. `scripts/release.py --check` runs in CI and fails when a carrier drifts or
+the version is not newer than the latest tag.
 
 ## 1. What a release contains
 
@@ -185,10 +192,10 @@ Notes:
 
 1. **Write Conventional Commits, then cut the release.** `Cargo.toml` is the only version
    source. Commit your work with `feat:`/`fix:`/`type!:` messages, then run
-   `./scripts/release.py` (or `--bump patch|minor|major` to insist). It derives the SemVer
-   bump, updates `Cargo.lock`, the Helm `appVersion`, README, roadmap and Helm guide, and
-   generates the conventional CHANGELOG section. `--check` (also a CI gate) fails if any
-   carrier drifts or the bump is wrong. `./scripts/release.py --publish` runs
+   `./scripts/release.py --patch` (or `--minor` / `--major` / `--breaking`). It finds the
+   latest `v*` tag, updates `Cargo.lock`, the Helm `appVersion`, README, roadmap and Helm
+   guide, and generates the conventional CHANGELOG section. `--check` (also a CI gate)
+   fails if any carrier drifts. `./scripts/release.py --patch --publish` runs
    `./scripts/verify.sh`, commits, tags and pushes `main` and `vX.Y.Z`.
 2. **Read the release notes** the workflow generated and confirm all four tarballs, four
    checksums and four SBOMs are attached.
