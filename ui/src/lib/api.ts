@@ -793,6 +793,8 @@ export type ReasoningSupport = {
 export type Model = {
   ref: string;
   provider: string;
+  /** Provider shorthand used in client-facing refs (`group/code/model`). */
+  code: string;
   id: string;
   display: string | null;
   context: number | null;
@@ -812,6 +814,12 @@ export type Model = {
 export type ModelProvider = {
   id: string;
   display: string;
+  /** Shorthand used in model refs; editable, unique across providers. */
+  code: string;
+  /** Operator-defined endpoint rather than a compiled transport. */
+  custom?: boolean;
+  /** A custom provider's endpoint; `null` for compiled providers. */
+  base_url?: string | null;
   /** How the provider authenticates: a subscription sign-in, an API key, or local. */
   kind: "oauth" | "api_key" | "local";
   has_connection: boolean;

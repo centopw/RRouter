@@ -315,7 +315,9 @@ export function groupProviderRef(
   groups: Array<DraftGroup & { implicit?: boolean }> | undefined,
 ): string {
   const group = groups?.find((candidate) => candidate.id === groupId);
-  return group && !group.provider ? `${group.name}/${model.provider}/${model.id}` : model.ref;
+  const code = model.code || model.provider;
+  const pinned = `${code}/${model.id}`;
+  return group && !group.provider ? `${group.name}/${pinned}` : pinned;
 }
 /** Nothing here means nothing is connected: models come from providers, not catalogs. */
 export function EmptyRegistry({

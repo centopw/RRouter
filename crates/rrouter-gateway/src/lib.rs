@@ -16,6 +16,7 @@ pub mod events;
 pub mod headers;
 pub mod metrics;
 pub mod models_registry;
+pub mod provider_catalog;
 pub mod provider_usage;
 pub mod proxy;
 pub mod quota_ping;
@@ -190,6 +191,11 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/models/sync", post(routes::models::sync))
         .route("/models/fetch", post(routes::models::fetch))
+        .route("/models/providers", post(routes::providers::create))
+        .route(
+            "/models/providers/{id}",
+            patch(routes::providers::patch).delete(routes::providers::delete),
+        )
         .route(
             "/models/custom",
             post(routes::models::custom).delete(routes::models::delete_custom),

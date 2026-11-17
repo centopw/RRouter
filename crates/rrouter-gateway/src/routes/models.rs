@@ -74,7 +74,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
                 continue;
             }
             models.push(ListedModel {
-                meta: resolve_meta(&alias.target, &by_ref, &by_id).map(without_display),
+                meta: resolve_meta(&state, &alias.target, &by_ref, &by_id).map(without_display),
                 id: alias.alias,
                 provider: "rrouter".to_string(),
             });
@@ -86,7 +86,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
                 continue;
             }
             models.push(ListedModel {
-                meta: combo_meta(&combo.models, &by_ref, &by_id),
+                meta: combo_meta(&state, &combo.models, &by_ref, &by_id),
                 id: combo.name,
                 provider: "rrouter".to_string(),
             });
@@ -100,6 +100,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
 
 /// Resolve an alias target or combo member to its registry row.
 fn resolve_meta(
+    state: &AppState,
     reference: &str,
     by_ref: &HashMap<String, models_registry::ModelItem>,
     by_id: &HashMap<String, models_registry::ModelItem>,
@@ -110,7 +111,7 @@ fn resolve_meta(
         .or_else(|| {
             reference
                 .split_once('/')
-                .filter(|(provider, _)| rrouter_auth::registry::get(provider).is_some())
+                .filter(|(provider, _)| state.provider_by_ref(provider).is_some())
                 .and_then(|(_, id)| by_id.get(id).cloned())
         })
         .or_else(|| by_id.get(reference).cloned())
@@ -124,13 +125,14 @@ fn without_display(mut meta: models_registry::ModelItem) -> models_registry::Mod
 /// A combo can land on any member, so advertise only what every member supports and the
 /// smallest limits. Unknown members make the whole answer unknown.
 fn combo_meta(
+    state: &AppState,
     members: &[String],
     by_ref: &HashMap<String, models_registry::ModelItem>,
     by_id: &HashMap<String, models_registry::ModelItem>,
 ) -> Option<models_registry::ModelItem> {
     let mut out: Option<models_registry::ModelItem> = None;
     for member in members {
-        let meta = without_display(resolve_meta(member, by_ref, by_id)?);
+        let meta = without_display(resolve_meta(state, member, by_ref, by_id)?);
         out = Some(match out {
             None => meta,
             Some(current) => intersect_meta(current, meta),
@@ -369,13 +371,15 @@ async fn grouped_models(
                     .get(group.as_str())
                     .copied()
                     .unwrap_or((provider.as_str(), Some(provider.as_str())));
-                // A provider bucket keeps the stable provider id. A free-form group
-                // namespaces the ref but still pins the provider: `group/provider/model`
-                // leaves no ambiguity when several providers serve the same id.
+                // A provider bucket advertises the provider's shorthand. A free-form
+                // group namespaces the ref but still pins the provider:
+                // `group/code/model` leaves no ambiguity when several providers serve
+                // the same id.
+                let code = state.provider_code(&provider);
                 let qualifier = if source.is_some() {
-                    provider.clone()
+                    code
                 } else {
-                    format!("{name}/{provider}")
+                    format!("{name}/{code}")
                 };
                 (format!("{qualifier}/{id}"), Some(id.clone()))
             };
@@ -560,17 +564,19 @@ async fn routable_model(
     reference: &str,
     caller: &Caller,
 ) -> rrouter_core::Result<Option<RoutedModel>> {
-    // `provider/id` only splits when the prefix is a registry provider: ids such as
-    // `meta-llama/Llama-3-70B` carry a slash of their own.
+    // `provider/id` only splits when the prefix names a provider (id or shorthand): ids
+    // such as `meta-llama/Llama-3-70B` carry a slash of their own.
     let (provider, bare) = match reference.split_once('/') {
-        Some((prefix, rest)) if rrouter_auth::get(prefix).is_some() => (Some(prefix), rest),
+        Some((prefix, rest)) => match state.provider_by_ref(prefix) {
+            Some(provider) => (Some(provider), rest),
+            None => (None, reference),
+        },
         _ => (None, reference),
     };
     let items = models_registry::list(state).await?;
-    if let Some(item) = items
-        .iter()
-        .find(|item| item.enabled && item.id == bare && provider.is_none_or(|p| item.provider == p))
-    {
+    if let Some(item) = items.iter().find(|item| {
+        item.enabled && item.id == bare && provider.as_deref().is_none_or(|p| item.provider == p)
+    }) {
         return Ok(Some((
             item.provider.clone(),
             format!("{}/{}", item.provider, item.id),
@@ -580,32 +586,37 @@ async fn routable_model(
     }
 
     // A free-form group namespaces the ref: `group/provider/model`. The provider segment
-    // is required, so a group with members from several providers can never be ambiguous.
+    // is required (id or shorthand), so a group with members from several providers can
+    // never be ambiguous.
     if provider.is_none() {
         if let Some((head, rest)) = reference.split_once('/') {
-            if let Some((provider, id)) = rest.split_once('/') {
-                if !id.is_empty() && rrouter_auth::get(provider).is_some() {
-                    if let Some(preset) = state.store.default_model_preset().await? {
-                        if let Some(group) = preset.layout.group_by_name(head) {
-                            if !rrouter_store::LayoutDocument::allows(
-                                group,
-                                caller.key_id(),
-                                caller.team_id(),
-                                caller.owner_user_id(),
-                            ) {
-                                return Ok(None);
+            if let Some((segment, id)) = rest.split_once('/') {
+                if !id.is_empty() {
+                    if let Some(provider) = state.provider_by_ref(segment) {
+                        if let Some(preset) = state.store.default_model_preset().await? {
+                            if let Some(group) = preset.layout.group_by_name(head) {
+                                if !rrouter_store::LayoutDocument::allows(
+                                    group,
+                                    caller.key_id(),
+                                    caller.team_id(),
+                                    caller.owner_user_id(),
+                                ) {
+                                    return Ok(None);
+                                }
+                                return Ok(items
+                                    .iter()
+                                    .find(|item| {
+                                        item.enabled && item.provider == provider && item.id == id
+                                    })
+                                    .map(|item| {
+                                        (
+                                            item.provider.clone(),
+                                            reference.to_string(),
+                                            Some(id.to_string()),
+                                            Some(item.clone()),
+                                        )
+                                    }));
                             }
-                            if let Some(item) = items.iter().find(|item| {
-                                item.enabled && item.provider == provider && item.id == id
-                            }) {
-                                return Ok(Some((
-                                    item.provider.clone(),
-                                    reference.to_string(),
-                                    Some(id.to_string()),
-                                    Some(item.clone()),
-                                )));
-                            }
-                            return Ok(None);
                         }
                     }
                 }
@@ -633,7 +644,7 @@ async fn routable_model(
         .into_iter()
         .find(|alias| alias.alias == reference)
     {
-        let meta = resolve_meta(&alias.target, &by_ref, &by_id).map(without_display);
+        let meta = resolve_meta(state, &alias.target, &by_ref, &by_id).map(without_display);
         return Ok(Some((
             "rrouter".to_string(),
             reference.to_string(),
@@ -652,7 +663,7 @@ async fn routable_model(
             "rrouter".to_string(),
             reference.to_string(),
             None,
-            combo_meta(&combo.models, &by_ref, &by_id),
+            combo_meta(state, &combo.models, &by_ref, &by_id),
         )));
     }
     Ok(None)
@@ -672,10 +683,10 @@ pub async fn initial_fetch(state: Arc<AppState>, id: Uuid) {
     let Ok(Some(conn)) = state.store.get_connection(id).await else {
         return;
     };
-    let Some(spec) = rrouter_auth::get(&conn.provider) else {
+    let Some(spec) = state.provider_spec(&conn.provider) else {
         return;
     };
-    if !models_registry::can_list(spec.id) {
+    if !models_registry::can_list(&conn.provider) {
         return;
     }
     if let Err(e) = fetch_upstream(&state, spec, &conn).await {
@@ -873,6 +884,8 @@ pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -
                     "none"
                 },
                 "listed": models_registry::can_list(spec.id),
+                "code": state.provider_code(spec.id),
+                "custom": false,
                 // The wire the provider speaks natively. The picker shows this instead
                 // of repeating "lists its models" for every API-key provider.
                 "dialect": spec.default_dialect.as_str(),
@@ -892,6 +905,39 @@ pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -
             })
         })
         .collect();
+    // Operator-defined providers are part of the same catalog: same id namespace, same
+    // connection rules, same refs. They carry their own transport instead of a compiled
+    // one, which the dashboard shows as `custom`.
+    let customs: Vec<_> = state
+        .providers
+        .read()
+        .map(|catalog| catalog.customs().cloned().collect())
+        .unwrap_or_default();
+    for profile in customs {
+        let has_connection = active.contains(&profile.provider);
+        data.push(json!({
+            "id": profile.provider,
+            "display": profile.display,
+            "kind": "api_key",
+            "has_connection": has_connection,
+            "scope": if shared.contains(&profile.provider) {
+                "global"
+            } else if has_connection {
+                "team"
+            } else {
+                "none"
+            },
+            "listed": true,
+            "code": state.provider_code(&profile.provider),
+            "custom": true,
+            "dialect": profile.dialect,
+            "compaction": null,
+            // A custom provider's base URL is the provider's own; accounts inherit it.
+            "requires_base_url_override": false,
+            "base_url": profile.base_url,
+            "base_url_example": profile.base_url,
+        }));
+    }
     data.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     ok_json(json!({ "data": data }))
 }
@@ -927,17 +973,17 @@ pub async fn fetch(State(state): State<Arc<AppState>>, body: Body) -> Response {
         Ok(None) => return admin_error(&Error::NotFound(format!("connection {id}"))),
         Err(e) => return admin_error(&e),
     };
-    let Some(spec) = rrouter_auth::get(&conn.provider) else {
+    let Some(spec) = state.provider_spec(&conn.provider) else {
         return admin_error(&Error::BadRequest(format!(
             "unknown provider {}",
             conn.provider
         )));
     };
-    if !models_registry::can_list(spec.id) {
+    if !models_registry::can_list(&conn.provider) {
         // Contract: 400 plus an explanation the UI can show next to the disabled button.
         return admin_error(&Error::BadRequest(format!(
             "{} has no model list endpoint; add models with POST /api/models/custom",
-            spec.id
+            conn.provider
         )));
     }
     match fetch_upstream(&state, spec, &conn).await {

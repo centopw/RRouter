@@ -84,6 +84,7 @@ fn harness() -> H {
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
         envelope_drops: Default::default(),
+        providers: Default::default(),
         concurrency: std::sync::RwLock::new(None),
         auth: Auth::load(&data_dir, false),
     });

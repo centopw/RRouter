@@ -162,7 +162,7 @@ async fn tick(state: &AppState) -> rrouter_core::Result<()> {
         if !due {
             continue;
         }
-        let Some(spec) = rrouter_auth::get(&conn.provider) else {
+        let Some(spec) = state.provider_spec(&conn.provider) else {
             continue;
         };
         let result = async {

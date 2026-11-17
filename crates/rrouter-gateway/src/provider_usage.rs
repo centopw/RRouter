@@ -240,7 +240,7 @@ struct Windows {
 }
 
 async fn fetch(state: &AppState, conn: &Connection) -> Result<Windows> {
-    let Some(spec) = rrouter_auth::get(&conn.provider) else {
+    let Some(spec) = state.provider_spec(&conn.provider) else {
         return Err(Error::BadRequest(format!(
             "unknown provider {}",
             conn.provider

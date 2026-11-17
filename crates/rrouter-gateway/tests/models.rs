@@ -203,6 +203,7 @@ fn harness() -> Harness {
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
         envelope_drops: Default::default(),
+        providers: Default::default(),
         concurrency: std::sync::RwLock::new(None),
         auth: rrouter_gateway::auth::Auth::load(&config().data_dir, false),
     });
@@ -415,7 +416,7 @@ async fn shared_id_lists_one_v1_entry_per_provider() {
         .map(|row| row["id"].as_str().expect("id"))
         .collect();
     ids.sort_unstable();
-    assert_eq!(ids, vec!["github/shared-model", "openai/shared-model"]);
+    assert_eq!(ids, vec!["gh/shared-model", "oai/shared-model"]);
 
     // The removed admin surface is gone, not silently accepting writes.
     let (status, _) = h
@@ -474,20 +475,17 @@ async fn v1_models_carry_limits_capabilities_and_native_metadata() {
         .expect("second model");
     h.state
         .store
-        .upsert_alias("fast", "openai/rich-flash")
+        .upsert_alias("fast", "oai/rich-flash")
         .await
         .expect("alias");
     h.state
         .store
-        .upsert_combo(
-            "mix",
-            &["openai/rich-flash".into(), "openai/rich-pro".into()],
-        )
+        .upsert_combo("mix", &["oai/rich-flash".into(), "oai/rich-pro".into()])
         .await
         .expect("combo");
     h.state
         .store
-        .upsert_combo("partial", &["openai/rich-flash".into(), "missing/x".into()])
+        .upsert_combo("partial", &["oai/rich-flash".into(), "missing/x".into()])
         .await
         .expect("partial combo");
 
@@ -502,7 +500,7 @@ async fn v1_models_carry_limits_capabilities_and_native_metadata() {
             .unwrap_or_else(|| panic!("{id} missing: {body}"))
     };
 
-    let flash = find("openai/rich-flash");
+    let flash = find("oai/rich-flash");
     assert_eq!(flash["model"], "rich-flash");
     assert_eq!(flash["owned_by"], "openai");
     assert_eq!(flash["name"], "RICH-FLASH");
@@ -602,15 +600,15 @@ async fn free_form_group_name_is_a_routable_alias() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|model| model["id"] == "main/openai/gpt-4.1")
+        .find(|model| model["id"] == "main/oai/gpt-4.1")
         .unwrap_or_else(|| panic!("group-qualified id missing: {body}"));
     assert_eq!(listed["model"], "gpt-4.1");
     assert_eq!(listed["owned_by"], "openai");
     assert_eq!(listed["group"], "g-main");
 
-    let (status, body) = h.get("/v1/models/main/openai/gpt-4.1").await;
+    let (status, body) = h.get("/v1/models/main/oai/gpt-4.1").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["id"], "main/openai/gpt-4.1");
+    assert_eq!(body["id"], "main/oai/gpt-4.1");
     assert_eq!(body["model"], "gpt-4.1");
     assert_eq!(body["owned_by"], "openai");
 
@@ -618,7 +616,7 @@ async fn free_form_group_name_is_a_routable_alias() {
         .post(
             "/v1/chat/completions",
             json!({
-                "model": "main/openai/gpt-4.1",
+                "model": "main/oai/gpt-4.1",
                 "messages": [{"role": "user", "content": "ping"}],
             }),
         )
@@ -693,7 +691,7 @@ async fn group_access_scopes_discovery_lookup_and_routing() {
             .as_array()
             .expect("data")
             .iter()
-            .any(|model| model["id"] == "main/openai/gpt-4.1")
+            .any(|model| model["id"] == "main/oai/gpt-4.1")
     };
     let (_, anonymous) = h.get("/v1/models").await;
     assert!(!listed(&anonymous), "anonymous sees no restricted group");
@@ -703,17 +701,17 @@ async fn group_access_scopes_discovery_lookup_and_routing() {
     assert!(!listed(&denied), "ungranted key sees no restricted group");
 
     assert_eq!(
-        h.get("/v1/models/main/openai/gpt-4.1").await.0,
+        h.get("/v1/models/main/oai/gpt-4.1").await.0,
         StatusCode::NOT_FOUND
     );
     let (status, body) = h
-        .get_as("/v1/models/main/openai/gpt-4.1", &allowed_secret)
+        .get_as("/v1/models/main/oai/gpt-4.1", &allowed_secret)
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["id"], "main/openai/gpt-4.1");
+    assert_eq!(body["id"], "main/oai/gpt-4.1");
 
     let chat = json!({
-        "model": "main/openai/gpt-4.1",
+        "model": "main/oai/gpt-4.1",
         "messages": [{"role": "user", "content": "ping"}],
     });
     assert_eq!(
@@ -755,7 +753,7 @@ async fn v1_models_groups_follow_the_default_preset() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|model| model["id"] == "openai/gpt-4.1" && model["owned_by"] == "openai")
+        .find(|model| model["id"] == "oai/gpt-4.1" && model["owned_by"] == "openai")
         .expect("gpt-4.1");
     assert_eq!(gpt["group"], "provider:openai");
 
@@ -832,19 +830,17 @@ async fn v1_models_groups_follow_the_default_preset() {
     let data = body["data"].as_array().expect("data");
     let gpt = data
         .iter()
-        .find(|model| model["id"] == "Fast/openai/gpt-4.1" && model["owned_by"] == "openai")
+        .find(|model| model["id"] == "Fast/oai/gpt-4.1" && model["owned_by"] == "openai")
         .expect("gpt-4.1 after grouping");
     assert_eq!(gpt["group"], "g-fast");
     let claude = data
         .iter()
-        .find(|model| {
-            model["id"] == "anthropic/claude-sonnet-4-5" && model["owned_by"] == "anthropic"
-        })
+        .find(|model| model["id"] == "ant/claude-sonnet-4-5" && model["owned_by"] == "anthropic")
         .expect("claude after grouping");
     assert_eq!(claude["group"], "provider:anthropic");
     assert_eq!(
         data.first().map(|model| model["id"].clone()),
-        Some(Value::String("Fast/openai/gpt-4.1".into())),
+        Some(Value::String("Fast/oai/gpt-4.1".into())),
         "the custom group is first: {body}"
     );
     // Grouping does not hide models: every entry still reports a group.
@@ -959,17 +955,17 @@ async fn v1_models_groups_follow_the_default_preset() {
     let (_, body) = h.get("/v1/models").await;
     let data = body["data"].as_array().expect("data");
     assert!(
-        data.iter().all(|model| model["id"] != "openai/gpt-4.1"),
+        data.iter().all(|model| model["id"] != "oai/gpt-4.1"),
         "a hidden item is omitted: {body}"
     );
     assert!(
         data.iter()
-            .all(|model| model["id"] != "anthropic/claude-opus-4-1"),
+            .all(|model| model["id"] != "ant/claude-opus-4-1"),
         "a hidden group's models are omitted: {body}"
     );
     assert!(
         data.iter()
-            .any(|model| model["id"] == "anthropic/claude-sonnet-4-5"),
+            .any(|model| model["id"] == "ant/claude-sonnet-4-5"),
         "a visible item remains listed: {body}"
     );
     assert!(
@@ -1238,7 +1234,7 @@ async fn v1_models_omits_disabled_models_and_keeps_preferred_ownership() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|row| row["id"] == "github/shared-id")
+        .find(|row| row["id"] == "gh/shared-id")
         .expect("enabled shared id");
     assert_eq!(shared["owned_by"], "github", "preference still wins");
 
@@ -1265,7 +1261,7 @@ async fn v1_models_omits_disabled_models_and_keeps_preferred_ownership() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|row| row["id"] == "github/shared-id")
+        .find(|row| row["id"] == "gh/shared-id")
         .expect("re-enabled id returns");
     assert_eq!(shared["owned_by"], "github");
 
@@ -1288,7 +1284,7 @@ async fn v1_models_omits_disabled_models_and_keeps_preferred_ownership() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|row| row["id"] == "openai/shared-id")
+        .find(|row| row["id"] == "oai/shared-id")
         .expect("one enabled provider still lists the id");
     assert_eq!(shared["owned_by"], "openai");
 }
@@ -2047,7 +2043,7 @@ async fn connection_fetch_stores_and_lists_native_model_metadata() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|model| model["id"] == "openai/deepseek-flash")
+        .find(|model| model["id"] == "oai/deepseek-flash")
         .expect("listed model");
     assert_eq!(model["model"], "deepseek-flash");
     assert_eq!(model["name"], "DeepSeek-V4.1-Flash");
@@ -2144,4 +2140,89 @@ async fn a_timed_out_initial_fetch_is_detached_not_aborted() {
             .any(|row| row.provider == "openai" && row.model == "alpha"),
         "the detached task wrote its rows: {rows:?}"
     );
+}
+
+/// An operator-defined provider is a first-class route: its own id, its own shorthand,
+/// its own models, and a request that names either the code or the id reaches its
+/// endpoint. Built-in shorthands are curated, so two providers serving one model id can
+/// never share a ref.
+#[tokio::test]
+async fn custom_provider_routes_by_code() {
+    let h = harness();
+    let mock = start_mock().await;
+    let (status, created) = h
+        .post(
+            "/api/models/providers",
+            json!({
+                "name": "Acme Gateway",
+                "code": "acme",
+                "base_url": mock,
+                "dialect": "openai",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let id = created["id"].as_str().expect("provider id").to_string();
+    assert_eq!(id, "acme-gateway");
+    assert_eq!(created["code"], "acme");
+    assert_eq!(created["custom"], true);
+
+    h.connect(&id, &mock).await;
+    let (status, body) = h
+        .post(
+            "/api/models/custom",
+            json!({"provider": id, "id": "acme-1"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (_, models) = h.get("/v1/models").await;
+    assert!(
+        models["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .any(|model| model["id"] == "acme/acme-1"),
+        "the custom provider advertises its code: {models}"
+    );
+
+    let (status, body) = h
+        .post(
+            "/v1/chat/completions",
+            json!({
+                "model": "acme/acme-1",
+                "messages": [{"role": "user", "content": "ping"}],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The code is a label, not the identity: renaming it keeps the models and accounts.
+    let (status, body) = h
+        .send(
+            "PATCH",
+            &format!("/api/models/providers/{id}"),
+            json!({"code": "ac2"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, models) = h.get("/v1/models").await;
+    assert!(
+        models["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .any(|model| model["id"] == "ac2/acme-1"),
+        "the renamed code is advertised: {models}"
+    );
+
+    // A code that already names a compiled provider would make every ref ambiguous.
+    let (status, body) = h
+        .send(
+            "PATCH",
+            &format!("/api/models/providers/{id}"),
+            json!({"code": "oai"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }

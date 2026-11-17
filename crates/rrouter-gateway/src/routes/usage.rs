@@ -130,7 +130,7 @@ fn param<'a>(query: &'a [(String, String)], key: &str) -> Option<&'a str> {
 /// Parse the shared filter parameters. Filters are applied in SQL so a filtered walk
 /// pages through matching rows only. An empty value is the same as an absent one, so a
 /// select left on "all" is harmless.
-fn parse_filters(query: &[(String, String)]) -> Result<Filters, Error> {
+fn parse_filters(state: &AppState, query: &[(String, String)]) -> Result<Filters, Error> {
     let text = |key: &str| param(query, key).filter(|v| !v.is_empty());
     // The request log is scoped to the same window as the chart; `hours` is optional
     // so existing callers still get the latest rows.
@@ -166,7 +166,7 @@ fn parse_filters(query: &[(String, String)]) -> Result<Filters, Error> {
                 Some(p) => m.strip_prefix(p).and_then(|rest| rest.strip_prefix('/')),
                 None => m
                     .split_once('/')
-                    .filter(|(head, _)| rrouter_auth::get(head).is_some())
+                    .filter(|(head, _)| state.provider_by_ref(head).is_some())
                     .map(|(_, rest)| rest),
             }
             .map(str::to_string);
@@ -198,7 +198,7 @@ pub async fn list(
     // share a timestamp; `before` alone keeps only strictly older rows.
     let before_ts = param(&query, "before").and_then(|v| v.parse::<i64>().ok());
     let before_id = param(&query, "before_id").and_then(|v| v.parse::<i64>().ok());
-    let filters = match parse_filters(&query) {
+    let filters = match parse_filters(&state, &query) {
         Ok(filters) => filters,
         Err(e) => return admin_error(&e),
     };
@@ -240,7 +240,7 @@ pub async fn export_csv(
     headers: HeaderMap,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Response {
-    let filters = match parse_filters(&query) {
+    let filters = match parse_filters(&state, &query) {
         Ok(filters) => filters,
         Err(e) => return admin_error(&e),
     };

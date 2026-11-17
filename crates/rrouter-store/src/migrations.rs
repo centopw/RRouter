@@ -12,13 +12,36 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 38;
+pub const SCHEMA_VERSION: i64 = 39;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39,
 ];
+
+/// V39: provider shorthands and operator-defined providers.
+///
+/// Every provider gets a short `code` that model refs may use in place of its id
+/// (`main/ocg/deepseek-v4.1-flash`). The code stays editable and unique, which is what
+/// lets two custom endpoints coexist. Rows for the compiled providers are seeded by the
+/// binary at startup (`provider_catalog`), so the default table lives in one place and a
+/// newly compiled provider gets its code without a second migration.
+///
+/// A custom provider fills `display`, `dialect`, and `base_url`; built-in rows leave
+/// those NULL because the binary's transport table owns them. Custom ids are derived
+/// from the name and live in the same id namespace as built-ins: the routing tables,
+/// usage rows and model rows key on them exactly like a compiled provider.
+const V39: &str = r#"
+CREATE TABLE IF NOT EXISTS provider_profiles (
+    provider TEXT PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    display TEXT,
+    dialect TEXT,
+    base_url TEXT,
+    created_at INTEGER NOT NULL
+);
+"#;
 
 /// V38: drop the per-model preferred provider. Choosing a provider is now explicit in the
 /// ref (`group/provider/model`); combining providers is a combo's job, so an invisible

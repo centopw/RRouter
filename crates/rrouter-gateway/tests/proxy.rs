@@ -346,6 +346,7 @@ fn build_state(config: Config) -> AppState {
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
         envelope_drops: Default::default(),
+        providers: Default::default(),
         concurrency: std::sync::RwLock::new(concurrency),
         auth: rrouter_gateway::auth::Auth::load(&data_dir, false),
     }
@@ -664,7 +665,7 @@ async fn health_and_models() {
         .filter_map(|m| m["id"].as_str())
         .collect();
     // A connected provider contributes its catalog models.
-    assert!(ids.contains(&"openai/gpt-4.1"), "models: {ids:?}");
+    assert!(ids.contains(&"oai/gpt-4.1"), "models: {ids:?}");
     assert!(ids.len() > 5);
 }
 

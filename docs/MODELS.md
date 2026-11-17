@@ -14,14 +14,16 @@ call right now, from connected providers.
   restores them. A row hidden in the default preset also leaves `/v1/models` while remaining
   routable. Disabling is by canonical id, so a shared model is disabled on every provider.
 - **Provider coverage** — every provider row is its own entry, and `/v1/models` advertises
-  each one as `provider/model` (or `group/provider/model` inside a preset group), keeping
-  the bare id in `model`. A client pins the exact provider it discovered. Aliases and combos
+  each one as `code/model` (or `group/code/model` inside a preset group), keeping
+  the bare id in `model`. The code is the provider's editable shorthand (`oai`, `ocg`,
+  `gh`, …), unique across compiled and operator-defined providers. A client pins the
+  exact provider it discovered. Aliases and combos
   keep their bare names. A bare request still routes: an id with no exact catalog entry is
   tried against every active provider, never pinned to an unconnected family match.
 - **Groups** — the board is grouped by provider by default. A preset can create free-form
   groups, rename providers' buckets, reorder groups, add/remove models, and move a model to
   another group. A free-form group's name is a **namespace**: `/v1/models` advertises
-  `<group>/<provider>/<model>` (for example `main/opencode-go/deepseek-v4.1-flash`) and the
+  `<group>/<code>/<model>` (for example `main/ocg/deepseek-v4.1-flash`) and the
   planner routes exactly that provider row. A group or model can also be hidden
   from `/v1/models`; routing is unchanged for hidden names. Aliases and combos have their
   own card with the same group and visibility controls.

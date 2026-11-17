@@ -58,8 +58,11 @@ unaffected, so hidden models still work when a client names them explicitly. A c
 ignores `groups` still reads a normal OpenAI `data` list.
 
 Every entry is identified by the route a client should use: a free-form group's name plus
-the provider and model id (`main/opencode-go/deepseek-v4.1-flash`), the provider id for a
-provider bucket (`opencode-go/...`), or the bare alias/combo name. The provider segment pins
+the provider code and model id (`main/ocg/deepseek-v4.1-flash`), the provider code for a
+provider bucket (`ocg/...`), or the bare alias/combo name. The provider code is its
+editable shorthand (defaults: `oai`, `gh`, `ocg`, `ant`, …), unique across compiled and
+operator-defined providers; the long id also resolves in a request, so older refs keep
+working. The provider segment pins
 the row; combining providers is a combo's job. A shared id lists once per provider. Each
 provider entry also carries `model` with the bare id, so a client never has to split the id.
 
@@ -84,7 +87,7 @@ without a second lookup. Unknown fields are omitted, never invented:
 
 | Field | Meaning |
 | --- | --- |
-| `id` | `<group>/<provider>/<model>` for a free-form group, `<provider>/<model>` for a provider bucket, or the alias/combo name. |
+| `id` | `<group>/<code>/<model>` for a free-form group, `<code>/<model>` for a provider bucket, or the alias/combo name. |
 | `model` | Bare model id for provider entries (absent on aliases and combos). |
 | `name` | Operator/provider display name. |
 | `context_window`, `context_length` | Context window in tokens (both spellings). |
@@ -104,6 +107,21 @@ advertises the conservative intersection of its members (smallest context/output
 flags every member has) and omits metadata when a member cannot be resolved.
 
 `GET /v1/models/{id}` returns the same object for one routable id (with no `group`).
+
+## Provider codes and custom providers (admin)
+
+`GET /api/models/providers` lists every provider with its `code`, `custom` flag, dialect and
+(when operator-defined) `base_url`.
+
+| Endpoint | Body | Effect |
+| --- | --- | --- |
+| `PATCH /api/models/providers/{id}` | `{"code":"ocg"}` | Rename the shorthand. Codes are unique across compiled and custom providers and 1–16 characters of `a-z 0-9 - _ .`; `400` when taken. |
+| `POST /api/models/providers` | `{"name":"Acme","code":"acme","base_url":"https://api.acme/v1","dialect":"openai"}` | Create an operator-defined provider. `code` is optional (derived from the name); `dialect` is `openai` or `anthropic`. The id is a slug of `name`, de-duplicated. |
+| `DELETE /api/models/providers/{id}` | — | Delete an operator-defined provider. Refused while an account still uses it; its model rows are removed. |
+
+A new custom provider has no account yet: add one with `POST /api/connections` using its id.
+The account inherits the provider's base URL (the connection's own `base_url_override` still
+wins), and its models come from Fetch or `POST /api/models/custom`.
 
 ## Web search
 

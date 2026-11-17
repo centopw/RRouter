@@ -483,8 +483,12 @@ async fn serve(config: Config, log: LogReload) -> Result<(), String> {
     }
 
     let http = build_http_client(&config)?;
+    let store = Arc::new(store);
+    let providers = rrouter_gateway::provider_catalog::ProviderCatalog::load(&store)
+        .await
+        .map_err(|e| format!("load providers: {e}"))?;
     let state = Arc::new(AppState {
-        store: Arc::new(store),
+        store,
         catalog: Arc::new(Catalog::builtin()),
         refresher: Arc::new(rrouter_auth::Refresher::new(http.clone())),
         planner: rrouter_router::Planner::new(),
@@ -495,6 +499,7 @@ async fn serve(config: Config, log: LogReload) -> Result<(), String> {
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
         envelope_drops: Default::default(),
+        providers: std::sync::RwLock::new(providers),
         concurrency: std::sync::RwLock::new(concurrency_for(config.max_concurrency)),
         auth: rrouter_gateway::auth::Auth::load(&config.data_dir, users_exist),
     });

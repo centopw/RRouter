@@ -121,8 +121,9 @@ where it goes, not the protocol.
 - **Inference:** `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/embeddings`,
   `/v1/search`, token counting, images, audio, rerank, files and batches when the provider
   declares them.
-- **Model strings:** `provider/model`, aliases, `combo:<name>`; bare ids expand across
-  connected providers.
+- **Model strings:** `code/model` (`oai/gpt-4.1`) or `provider/model`; every provider has an
+  editable, unique shorthand, and operator-defined providers get their own id and code.
+  Aliases and `combo:<name>` also resolve; bare ids expand across connected providers.
 - **Strategies:** priority, weighted, least-latency and cheapest; canary and provider policy
   are request-scoped.
 - **Limits:** rpm, tpm, token/USD budgets, allowed models, expiry, team budgets, guardrails

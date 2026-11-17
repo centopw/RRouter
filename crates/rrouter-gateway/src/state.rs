@@ -88,6 +88,9 @@ pub struct AppState {
     /// Top-level upstream envelope fields a provider rejected, so later requests skip
     /// them instead of paying for the same 400 again.
     pub envelope_drops: EnvelopeDrops,
+    /// Compiled providers plus operator-defined ones, with their shorthand codes.
+    /// Rebuilt after a provider or code mutation; reads clone out a `&'static` transport.
+    pub providers: RwLock<crate::provider_catalog::ProviderCatalog>,
     /// Caps concurrent `/v1/*` proxy requests; `None` when `RROUTER_MAX_CONCURRENCY`
     /// is 0. One permit spans a whole request, streamed body included. Reloadable: the
     /// semaphore is swapped atomically, and in-flight requests keep the old permits.
@@ -477,7 +480,7 @@ impl AppState {
         // one alias hop first, or `fast -> main/gpt-4.1` would bypass the group check.
         let resolved = self.resolve_alias(model).await?;
         if let Some((head, _)) = resolved.split_once('/') {
-            if rrouter_auth::registry::get(head).is_none() {
+            if self.provider_by_ref(head).is_none() {
                 if let Some(preset) = self.store.default_model_preset().await? {
                     if let Some(group) = preset.layout.group_by_name(head) {
                         if !rrouter_store::LayoutDocument::allows(

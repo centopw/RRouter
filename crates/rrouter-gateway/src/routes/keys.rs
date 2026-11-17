@@ -459,7 +459,7 @@ pub async fn put_models(
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    let models = match models_from(&value) {
+    let models = match models_from(&state, &value) {
         Ok(models) => models,
         Err(e) => return admin_error(&e),
     };
@@ -471,7 +471,7 @@ pub async fn put_models(
 }
 
 /// Decode `{"models":[{"from","to"}]}` and reject anything that could not route.
-fn models_from(value: &Value) -> Result<Vec<KeyModel>, Error> {
+fn models_from(state: &AppState, value: &Value) -> Result<Vec<KeyModel>, Error> {
     let items = value
         .get("models")
         .and_then(Value::as_array)
@@ -492,17 +492,21 @@ fn models_from(value: &Value) -> Result<Vec<KeyModel>, Error> {
         let (provider, model) = to.split_once('/').ok_or_else(|| {
             Error::BadRequest(format!("\"to\" must be provider/model, got {to:?}"))
         })?;
-        if model.is_empty() || rrouter_auth::get(provider).is_none() {
-            return Err(Error::BadRequest(format!(
-                "\"to\" must name a registered provider and a model, got {to:?}"
-            )));
-        }
+        // The prefix may be a shorthand; store the id the router keys on either way.
+        let provider = match state.provider_by_ref(provider) {
+            Some(provider) if !model.is_empty() => provider,
+            _ => {
+                return Err(Error::BadRequest(format!(
+                    "\"to\" must name a registered provider and a model, got {to:?}"
+                )))
+            }
+        };
         if out.iter().any(|m| m.from == from) {
             return Err(Error::BadRequest(format!("duplicate mapping for {from:?}")));
         }
         out.push(KeyModel {
             from: from.to_string(),
-            to: to.to_string(),
+            to: format!("{provider}/{model}"),
         });
     }
     Ok(out)

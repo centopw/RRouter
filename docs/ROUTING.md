@@ -6,15 +6,30 @@ fallback and a per-account breaker.
 ## Model strings
 
 - **`provider/model`** — `openai/gpt-4.1`, `claude/sonnet-4-5`, `codex/gpt-5.6-luna`.
-- **`group/provider/model`** — a preset group namespaces the ref and still pins the
-  provider: `main/openai/gpt-4.1`. The provider segment is required, so a model id
+- **`code/model`** — the provider's shorthand: `oai/gpt-4.1`, `ocg/deepseek-v4.1-flash`.
+  Every provider has a short code (`oai`, `gh`, `ocg`, `ant`, …), editable in
+  **Providers → Provider codes**; it is unique across compiled and operator-defined
+  providers. The id and the code both resolve, so existing refs keep working.
+- **`group/code/model`** — a preset group namespaces the ref and still pins the
+  provider: `main/oai/gpt-4.1`. The provider segment is required, so a model id
   served by several providers is never ambiguous.
 - **Aliases** — a stable name (`prod-default`) mapped to one target.
 - **Combos** — `combo:<name>` or a bare combo name; strategies are `fallback`,
   `round_robin` and `smart`. Combining providers is a combo, not a model row.
 
 A bare model id expands to every connected provider that serves it. Explicit
-`provider/model` and `group/provider/model` never widen to another provider.
+`provider/model`, `code/model` and `group/code/model` never widen to another provider.
+
+## Custom providers
+
+A compiled provider is fixed; an operator-defined one adds the same three things:
+an id derived from its name, a code, and a base URL speaking OpenAI Chat or Anthropic
+Messages. Add it under **Providers → Provider codes → new provider**, then add an API-key
+account for it. Its models are the provider's own `/v1/models` (Fetch) or operator-defined
+rows, and requests route exactly like a compiled provider's. The provider's base URL is
+copied onto new accounts; connections cannot clear it.
+
+Deleting a custom provider is refused while an account still routes through it.
 
 ## Account order
 

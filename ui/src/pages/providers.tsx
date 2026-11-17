@@ -524,6 +524,8 @@ export default function Providers() {
         shared accounts serve instance-wide keys only.
       </p>
 
+      {isAdmin ? <ProviderCodesCard providers={providers.data ?? []} /> : null}
+
       <ConfirmDialog
         open={removing !== null}
         title="Remove provider account"
@@ -1922,7 +1924,7 @@ function ApiKeyForm({
           <Select value={provider} onChange={setProvider} ariaLabel="api key provider">
             {providers.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.display}
+                {p.display} · {p.code}
               </option>
             ))}
           </Select>
@@ -1990,8 +1992,8 @@ function ApiKeyForm({
       {error ? <ErrorNote error={error} /> : null}
       {isCustom ? (
         <p className="text-caption leading-relaxed text-faint">
-          Model refs stay protocol-based for now ({customProtocol}/…), so the name changes
-          how the source reads, not how models are addressed.
+          This account is added to the {customProtocol} provider. To give an endpoint its own
+          name and model ref code, add it under Provider codes first.
         </p>
       ) : null}
       <div className="flex justify-end">
@@ -2798,5 +2800,222 @@ function ConnectionMenu({
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
+  );
+}
+
+/**
+ * Every provider's shorthand, editable in place, plus operator-defined providers.
+ *
+ * A client-facing model ref is `group/code/model`; the code is what makes a ref short
+ * without making it ambiguous, so it is unique across compiled and custom providers.
+ */
+function ProviderCodesCard({ providers }: { providers: ModelProvider[] }) {
+  const client = useQueryClient();
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({
+    name: "",
+    code: "",
+    base_url: "",
+    dialect: "openai" as "openai" | "anthropic",
+  });
+  const invalidate = () => {
+    void client.invalidateQueries({ queryKey: qk.modelProviders });
+    void client.invalidateQueries({ queryKey: qk.models });
+    void client.invalidateQueries({ queryKey: qk.connections });
+  };
+  const save = useMutation({
+    mutationFn: (row: { id: string; code: string }) =>
+      api.patch(`/api/models/providers/${encodeURIComponent(row.id)}`, { code: row.code }),
+    onSuccess: () => {
+      setEditing(null);
+      setError(null);
+      invalidate();
+    },
+    onError: setError,
+  });
+  const create = useMutation({
+    mutationFn: () =>
+      api.post("/api/models/providers", {
+        name: form.name.trim(),
+        ...(form.code.trim() ? { code: form.code.trim() } : {}),
+        base_url: form.base_url.trim(),
+        dialect: form.dialect,
+      }),
+    onSuccess: () => {
+      setCreating(false);
+      setForm({ name: "", code: "", base_url: "", dialect: "openai" });
+      setError(null);
+      invalidate();
+    },
+    onError: setError,
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.del(`/api/models/providers/${encodeURIComponent(id)}`),
+    onSuccess: () => {
+      setError(null);
+      invalidate();
+    },
+    onError: setError,
+  });
+  const createReady = form.name.trim() !== "" && form.base_url.trim() !== "" && !create.isPending;
+
+  return (
+    <div className="mb-4">
+      <Card>
+        <CardHeader
+          title="Provider codes"
+          action={
+            <Button variant="quiet" onClick={() => setCreating((open) => !open)}>
+              {creating ? "cancel" : "new provider"}
+            </Button>
+          }
+        />
+        <div className="px-5 pb-4">
+          <p className="mb-3 text-small text-muted">
+            A model reference is <span className="font-mono">group/code/model</span>; the
+            code is unique across every provider, so two providers serving the same model id
+            can never be confused.
+          </p>
+          {error ? (
+            <div className="mb-3">
+              <ErrorNote error={error} />
+            </div>
+          ) : null}
+          {creating ? (
+            <form
+              className="mb-4 grid gap-3 rounded-[var(--radius-card)] border border-line bg-surface-2/60 p-3 sm:grid-cols-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (createReady) create.mutate();
+              }}
+            >
+              <Field label="name" hint="shown in every provider list">
+                <Input
+                  value={form.name}
+                  onChange={(name) => setForm((f) => ({ ...f, name }))}
+                  placeholder="Acme Gateway"
+                  ariaLabel="provider name"
+                />
+              </Field>
+              <Field label="code" hint="optional; derived from the name">
+                <Input
+                  value={form.code}
+                  onChange={(code) => setForm((f) => ({ ...f, code }))}
+                  placeholder="acme"
+                  ariaLabel="provider code"
+                />
+              </Field>
+              <Field label="base url" hint="origin or /v1 root of the chat API">
+                <Input
+                  value={form.base_url}
+                  onChange={(base_url) => setForm((f) => ({ ...f, base_url }))}
+                  placeholder="https://api.acme.example/v1"
+                  ariaLabel="provider base url"
+                />
+              </Field>
+              <Field label="protocol" hint="the wire shape the endpoint speaks">
+                <Select
+                  value={form.dialect}
+                  onChange={(dialect) =>
+                    setForm((f) => ({ ...f, dialect: dialect as "openai" | "anthropic" }))
+                  }
+                  ariaLabel="provider protocol"
+                >
+                  <option value="openai">OpenAI-compatible</option>
+                  <option value="anthropic">Anthropic Messages</option>
+                </Select>
+              </Field>
+              <div className="flex justify-end sm:col-span-2">
+                <Button type="submit" variant="primary" disabled={!createReady}>
+                  add provider
+                </Button>
+              </div>
+            </form>
+          ) : null}
+          <ul className="divide-y divide-line">
+            {providers.map((provider) => (
+              <li
+                key={provider.id}
+                className="flex flex-wrap items-center gap-2 py-2 first:pt-0 last:pb-0"
+              >
+                <ProviderIcon provider={provider.id} size={17} />
+                <span className="min-w-0 break-words font-medium">{provider.display}</span>
+                <span className="font-mono text-caption text-faint">{provider.id}</span>
+                {provider.custom ? (
+                  <Badge tone="accent" title="operator-defined endpoint">
+                    custom
+                  </Badge>
+                ) : null}
+                <span className="ml-auto flex items-center gap-2">
+                  {editing === provider.id ? (
+                    <>
+                      <Input
+                        value={draft}
+                        onChange={setDraft}
+                        ariaLabel={`Code for ${provider.display}`}
+                        className="w-28"
+                      />
+                      <button
+                        type="button"
+                        className="text-caption underline underline-offset-2 disabled:opacity-50"
+                        disabled={save.isPending || draft.trim() === ""}
+                        onClick={() => save.mutate({ id: provider.id, code: draft.trim() })}
+                      >
+                        save
+                      </button>
+                      <button
+                        type="button"
+                        className="text-caption text-muted underline underline-offset-2"
+                        onClick={() => setEditing(null)}
+                      >
+                        cancel
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <code className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-caption">
+                        {provider.code}
+                      </code>
+                      <button
+                        type="button"
+                        className="text-caption underline underline-offset-2"
+                        onClick={() => {
+                          setEditing(provider.id);
+                          setDraft(provider.code);
+                          setError(null);
+                        }}
+                      >
+                        edit
+                      </button>
+                      {provider.custom ? (
+                        <button
+                          type="button"
+                          className="text-caption text-neg underline underline-offset-2 disabled:opacity-50"
+                          disabled={remove.isPending}
+                          onClick={() => {
+                            if (confirming === provider.id) {
+                              setConfirming(null);
+                              remove.mutate(provider.id);
+                            } else {
+                              setConfirming(provider.id);
+                            }
+                          }}
+                        >
+                          {confirming === provider.id ? "confirm remove" : "remove"}
+                        </button>
+                      ) : null}
+                    </>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </Card>
+    </div>
   );
 }

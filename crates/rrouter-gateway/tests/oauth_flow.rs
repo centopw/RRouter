@@ -204,6 +204,7 @@ fn harness() -> Harness {
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
         envelope_drops: Default::default(),
+        providers: Default::default(),
         concurrency: std::sync::RwLock::new(None),
         auth: rrouter_gateway::auth::Auth::load(&std::env::temp_dir(), false),
     });

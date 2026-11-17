@@ -43,6 +43,7 @@ fn state(config: Config) -> Arc<AppState> {
         oauth: rrouter_auth::OAuthFlows::new(),
         counters: Default::default(),
         envelope_drops: Default::default(),
+        providers: Default::default(),
         concurrency: std::sync::RwLock::new(concurrency),
         auth: Auth::load(&data_dir, false),
     })

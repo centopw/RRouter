@@ -596,7 +596,11 @@ async fn special_inner(
     let candidates: Vec<Candidate> = plan
         .candidates
         .iter()
-        .filter(|c| rrouter_auth::get(&c.provider).is_some_and(|spec| kind.base(spec).is_some()))
+        .filter(|c| {
+            state
+                .provider_spec(&c.provider)
+                .is_some_and(|spec| kind.base(spec).is_some())
+        })
         .cloned()
         .collect();
     if candidates.is_empty() {
@@ -688,10 +692,12 @@ async fn send_special(
     candidate: Candidate,
     trace: std::sync::Arc<AttemptTrace>,
 ) -> Result<Value> {
-    let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
-        model: candidate.model.clone(),
-        detail: format!("unknown provider {}", candidate.provider),
-    })?;
+    let spec = state
+        .provider_spec(&candidate.provider)
+        .ok_or_else(|| Error::NoRoute {
+            model: candidate.model.clone(),
+            detail: format!("unknown provider {}", candidate.provider),
+        })?;
     let native = kind.base(spec).ok_or_else(|| Error::NoRoute {
         model: candidate.model.clone(),
         detail: format!("{} has no {}", candidate.provider, kind.unsupported()),
@@ -700,6 +706,12 @@ async fn send_special(
         .refresher
         .fresh(state.store.as_ref(), spec, candidate.connection)
         .await?;
+    if !custom_base_present(state, &candidate.provider, &creds) {
+        return Err(Error::Unauthorized(format!(
+            "provider {} needs an account base URL",
+            candidate.provider
+        )));
+    }
     let url = match creds.base_url_override.as_deref() {
         Some(base) => rewrite_base(&kind.url(native), base),
         None => kind.url(native),
@@ -982,16 +994,20 @@ async fn json_plan(
             },
         )
         .await?;
-    Ok(supported(plan, kind))
+    Ok(supported(state, plan, kind))
 }
 
 /// Drop the candidates whose provider does not have the endpoint. `None` means nobody
 /// does, so the route answers `501` and nothing is sent.
-fn supported(plan: Plan, kind: Pass) -> Option<Plan> {
+fn supported(state: &AppState, plan: Plan, kind: Pass) -> Option<Plan> {
     let candidates: Vec<Candidate> = plan
         .candidates
         .iter()
-        .filter(|c| rrouter_auth::get(&c.provider).is_some_and(|spec| kind.native(spec).is_some()))
+        .filter(|c| {
+            state
+                .provider_spec(&c.provider)
+                .is_some_and(|spec| kind.native(spec).is_some())
+        })
         .cloned()
         .collect();
     if candidates.is_empty() {
@@ -1023,10 +1039,12 @@ async fn prepare_pass(
     candidate: &Candidate,
     trace: &AttemptTrace,
 ) -> Result<(String, axum::http::HeaderMap)> {
-    let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
-        model: candidate.model.clone(),
-        detail: format!("unknown provider {}", candidate.provider),
-    })?;
+    let spec = state
+        .provider_spec(&candidate.provider)
+        .ok_or_else(|| Error::NoRoute {
+            model: candidate.model.clone(),
+            detail: format!("unknown provider {}", candidate.provider),
+        })?;
     let native = kind.native(spec).ok_or_else(|| Error::NoRoute {
         model: candidate.model.clone(),
         detail: format!("{} has no {}", candidate.provider, kind.unsupported()),
@@ -1035,6 +1053,12 @@ async fn prepare_pass(
         .refresher
         .fresh(state.store.as_ref(), spec, candidate.connection)
         .await?;
+    if !custom_base_present(state, &candidate.provider, &creds) {
+        return Err(Error::Unauthorized(format!(
+            "provider {} needs an account base URL",
+            candidate.provider
+        )));
+    }
     let url = match creds.base_url_override.as_deref() {
         Some(base) => rewrite_base(native, base),
         None => native.to_string(),
@@ -1226,7 +1250,7 @@ async fn transcriptions_inner(
             }
         }
     };
-    let Some(plan) = supported(plan, Pass::Transcriptions) else {
+    let Some(plan) = supported(state, plan, Pass::Transcriptions) else {
         return Ok(not_implemented(
             Pass::Transcriptions.dialect(),
             Pass::Transcriptions.unsupported(),
@@ -1310,7 +1334,7 @@ async fn hint_candidate(
         .into_iter()
         .filter(|c| c.is_active)
         .find_map(|c| {
-            let spec = rrouter_auth::get(&c.provider)?;
+            let spec = state.provider_spec(&c.provider)?;
             kind.native(spec)?;
             Some(Candidate {
                 provider: c.provider.clone(),
@@ -1485,7 +1509,7 @@ async fn handle(
     let client_stream = plan.stream || canonical.stream;
     // A stream-only upstream (codex) refuses every non-streaming request, so a
     // non-streaming client is served by streaming upstream and reassembling.
-    let upstream_stream = client_stream || plan.candidates.iter().any(stream_only);
+    let upstream_stream = client_stream || plan.candidates.iter().any(|c| stream_only(state, c));
 
     let attempt = Attempt {
         state,
@@ -1930,7 +1954,7 @@ async fn complete_traced(
         )
         .await?;
     let upstream_stream =
-        plan.stream || canonical.stream || plan.candidates.iter().any(stream_only);
+        plan.stream || canonical.stream || plan.candidates.iter().any(|c| stream_only(state, c));
     let attempt = Attempt {
         state,
         inbound,
@@ -2452,9 +2476,22 @@ fn json_response(status: StatusCode, body: Value) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
+/// `true` when this candidate may be dispatched. A custom provider's address lives on
+/// its accounts, so an account with no override would silently use the compiled
+/// protocol's own host.
+fn custom_base_present(
+    state: &AppState,
+    provider: &str,
+    creds: &rrouter_auth::Credentials,
+) -> bool {
+    !state.provider_is_custom(provider) || creds.base_url_override.is_some()
+}
+
 /// `true` when this candidate's provider cannot answer non-streaming requests.
-fn stream_only(candidate: &Candidate) -> bool {
-    rrouter_auth::get(&candidate.provider).is_some_and(|spec| spec.stream_only)
+fn stream_only(state: &AppState, candidate: &Candidate) -> bool {
+    state
+        .provider_spec(&candidate.provider)
+        .is_some_and(|spec| spec.stream_only)
 }
 
 /// One cache lookup: the hashed key plus the exact model id and wire dialect it was
@@ -2747,10 +2784,12 @@ impl Attempt<'_> {
     }
 
     fn provider(&self, candidate: &Candidate) -> Result<&'static ProviderSpec> {
-        rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
-            model: candidate.model.clone(),
-            detail: format!("unknown provider {}", candidate.provider),
-        })
+        self.state
+            .provider_spec(&candidate.provider)
+            .ok_or_else(|| Error::NoRoute {
+                model: candidate.model.clone(),
+                detail: format!("unknown provider {}", candidate.provider),
+            })
     }
 
     /// Dialect the upstream speaks for this candidate and inbound path.
@@ -2761,7 +2800,7 @@ impl Attempt<'_> {
         if is_qoder(&candidate.provider) {
             return Dialect::QoderAgent;
         }
-        match rrouter_auth::get(&candidate.provider) {
+        match self.state.provider_spec(&candidate.provider) {
             Some(spec) => endpoint(spec, None, self.inbound).1,
             None => candidate.dialect,
         }
@@ -2899,6 +2938,12 @@ impl Attempt<'_> {
             .refresher
             .fresh(self.state.store.as_ref(), spec, candidate.connection)
             .await?;
+        if !custom_base_present(self.state, &candidate.provider, &creds) {
+            return Err(Error::Unauthorized(format!(
+                "provider {} needs an account base URL",
+                candidate.provider
+            )));
+        }
         if is_google_cca(&candidate.provider) {
             let project = cca_project(&creds)?;
             // A credential override is a deployment/test statement about where this
@@ -4518,10 +4563,12 @@ async fn send_embedding_once(
     candidate: Candidate,
     text: &str,
 ) -> Result<Vec<f32>> {
-    let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
-        model: candidate.model.clone(),
-        detail: format!("unknown provider {}", candidate.provider),
-    })?;
+    let spec = state
+        .provider_spec(&candidate.provider)
+        .ok_or_else(|| Error::NoRoute {
+            model: candidate.model.clone(),
+            detail: format!("unknown provider {}", candidate.provider),
+        })?;
     if !matches!(
         spec.default_dialect,
         Dialect::OpenAiChat | Dialect::OpenAiEmbeddings
@@ -4535,6 +4582,12 @@ async fn send_embedding_once(
         .refresher
         .fresh(state.store.as_ref(), spec, candidate.connection)
         .await?;
+    if !custom_base_present(state, &candidate.provider, &creds) {
+        return Err(Error::Unauthorized(format!(
+            "provider {} needs an account base URL",
+            candidate.provider
+        )));
+    }
     let url = creds
         .base_url_override
         .clone()
@@ -4645,10 +4698,12 @@ async fn embeddings_inner(
             detail: "no candidates".into(),
         })?
         .clone();
-    let spec = rrouter_auth::get(&candidate.provider).ok_or_else(|| Error::NoRoute {
-        model: model.clone(),
-        detail: format!("unknown provider {}", candidate.provider),
-    })?;
+    let spec = state
+        .provider_spec(&candidate.provider)
+        .ok_or_else(|| Error::NoRoute {
+            model: model.clone(),
+            detail: format!("unknown provider {}", candidate.provider),
+        })?;
     if !matches!(
         spec.default_dialect,
         Dialect::OpenAiChat | Dialect::OpenAiEmbeddings
@@ -4662,6 +4717,12 @@ async fn embeddings_inner(
         .refresher
         .fresh(state.store.as_ref(), spec, candidate.connection)
         .await?;
+    if !custom_base_present(state, &candidate.provider, &creds) {
+        return Err(Error::Unauthorized(format!(
+            "provider {} needs an account base URL",
+            candidate.provider
+        )));
+    }
     let url = creds
         .base_url_override
         .clone()

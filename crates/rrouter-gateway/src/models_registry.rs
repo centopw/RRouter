@@ -146,6 +146,8 @@ pub struct ModelItem {
     #[serde(rename = "ref")]
     pub reference: String,
     pub provider: String,
+    /// Provider shorthand used in client-facing refs (`group/code/model`).
+    pub code: String,
     pub id: String,
     pub display: Option<String>,
     pub context: Option<u32>,
@@ -178,6 +180,7 @@ impl ModelItem {
         Self {
             reference: format!("{provider}/{id}"),
             provider: provider.to_string(),
+            code: provider.to_string(),
             id: id.to_string(),
             display: None,
             context: None,
@@ -571,7 +574,7 @@ pub async fn list(state: &AppState) -> Result<Vec<ModelItem>> {
         .list_models()
         .await?
         .into_iter()
-        .filter(|row| row.source == SOURCE_CUSTOM || rrouter_auth::get(&row.provider).is_some())
+        .filter(|row| row.source == SOURCE_CUSTOM || state.provider_spec(&row.provider).is_some())
         .collect();
     let disabled: BTreeSet<String> = store.disabled_models().await?.into_iter().collect();
     let active_providers: BTreeSet<String> = store
@@ -581,7 +584,10 @@ pub async fn list(state: &AppState) -> Result<Vec<ModelItem>> {
         .filter(|conn| conn.is_active)
         .map(|conn| conn.provider)
         .collect();
-    let items = merge(state.catalog.all(), &rows, &disabled, &active_providers);
+    let mut items = merge(state.catalog.all(), &rows, &disabled, &active_providers);
+    for item in &mut items {
+        item.code = state.provider_code(&item.provider);
+    }
     Ok(items)
 }
 
@@ -615,6 +621,7 @@ pub async fn item(state: &AppState, provider: &str, id: &str) -> Result<Option<M
         .iter()
         .any(|c| c.is_active && c.provider == provider);
     item.deprecated = item.deprecated || rrouter_router::catalog::is_retired(provider, id);
+    item.code = state.provider_code(provider);
     Ok(Some(item))
 }
 

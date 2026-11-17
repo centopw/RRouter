@@ -61,6 +61,60 @@ fn provider_dialect(provider: &str) -> Dialect {
     rrouter_auth::registry::get(provider).map_or(Dialect::OpenAiChat, |spec| spec.default_dialect)
 }
 
+/// Wire shape stored on an operator-defined provider (`provider_profiles.dialect`).
+fn stored_dialect(name: &str) -> Option<Dialect> {
+    match name {
+        "openai" | "openai_chat" => Some(Dialect::OpenAiChat),
+        "anthropic" | "anthropic_messages" => Some(Dialect::AnthropicMessages),
+        _ => None,
+    }
+}
+
+/// The provider namespace a plan resolves against: compiled ids, operator-defined ids,
+/// and every shorthand code. Built once per plan from the stored profiles, so a ref may
+/// name a provider by id or by code without a second query per entry.
+#[derive(Default)]
+struct RuntimeProviders {
+    /// provider id -> dialect, for operator-defined providers only.
+    dialects: HashMap<String, Dialect>,
+    /// shorthand -> provider id.
+    codes: HashMap<String, String>,
+    /// Operator-defined provider ids (not in the compiled registry).
+    custom: std::collections::HashSet<String>,
+}
+
+impl RuntimeProviders {
+    fn from_profiles(profiles: &[rrouter_store::ProviderProfile]) -> Self {
+        let mut out = Self::default();
+        for profile in profiles {
+            out.codes
+                .insert(profile.code.clone(), profile.provider.clone());
+            if profile.display.is_some() {
+                out.custom.insert(profile.provider.clone());
+                if let Some(dialect) = profile.dialect.as_deref().and_then(stored_dialect) {
+                    out.dialects.insert(profile.provider.clone(), dialect);
+                }
+            }
+        }
+        out
+    }
+
+    /// Provider id named by `segment`, with the compiled registry winning over a code.
+    fn id(&self, segment: &str) -> Option<String> {
+        if is_registered_provider(segment) || self.custom.contains(segment) {
+            return Some(segment.to_string());
+        }
+        self.codes.get(segment).cloned()
+    }
+
+    fn dialect(&self, provider: &str) -> Dialect {
+        self.dialects
+            .get(provider)
+            .copied()
+            .unwrap_or_else(|| provider_dialect(provider))
+    }
+}
+
 /// `true` when `head` is a provider the binary can route to, i.e. the prefix of a
 /// `provider/model` ref rather than a slash inside a model id
 /// (`meta-llama/Llama-3.3-70B`, `accounts/fireworks/models/<name>`).
@@ -323,6 +377,7 @@ impl Planner {
             .await?;
         let aliases = store.list_aliases().await?;
         let disabled: Vec<String> = store.disabled_models().await?;
+        let providers = RuntimeProviders::from_profiles(&store.list_provider_profiles().await?);
 
         // A team key is routed only to its own accounts, so a team with none can never be
         // served — say so by name instead of the generic "no connection declares this
@@ -341,7 +396,7 @@ impl Planner {
         }
 
         let targets = self
-            .targets(catalog, store, model, &aliases, req.combo_start)
+            .targets(catalog, store, model, &aliases, req.combo_start, &providers)
             .await?;
         if targets.is_empty() {
             return Err(Error::NoRoute {
@@ -477,7 +532,7 @@ impl Planner {
                     model: model_id.to_string(),
                     connection: conn.id,
                     priority: conn.priority,
-                    dialect: provider_dialect(provider),
+                    dialect: providers.dialect(provider),
                 });
             }
         }
@@ -640,6 +695,7 @@ impl Planner {
         model: &str,
         aliases: &[rrouter_store::ModelAlias],
         combo_start: Option<usize>,
+        providers: &RuntimeProviders,
     ) -> Result<Vec<(String, String, bool)>> {
         let mut current = model.to_string();
 
@@ -669,7 +725,10 @@ impl Planner {
                     .get(entry.as_str())
                     .copied()
                     .unwrap_or(entry.as_str());
-                out.extend(self.expand_entry_resolved(catalog, store, resolved).await?);
+                out.extend(
+                    self.expand_entry_resolved(catalog, store, resolved, providers)
+                        .await?,
+                );
             }
             return Ok(out);
         }
@@ -677,7 +736,8 @@ impl Planner {
             return Err(Error::NotFound(format!("combo {}", combo_name)));
         }
 
-        self.expand_entry_resolved(catalog, store, &current).await
+        self.expand_entry_resolved(catalog, store, &current, providers)
+            .await
     }
 
     /// Resolve a free-form group reference (`main/provider/model`) before falling back to
@@ -689,31 +749,46 @@ impl Planner {
         catalog: &Catalog,
         store: &Store,
         entry: &str,
+        providers: &RuntimeProviders,
     ) -> Result<Vec<(String, String, bool)>> {
         if let Some((head, rest)) = entry.split_once('/') {
-            if !rest.is_empty() && !is_registered_provider(head) {
-                if let Some((provider, id)) = rest.split_once('/') {
-                    if !id.is_empty() && is_registered_provider(provider) {
-                        if let Some(preset) = store.default_model_preset().await? {
-                            if preset.layout.group_by_name(head).is_some() {
-                                return Ok(vec![(provider.to_string(), id.to_string(), true)]);
+            if !rest.is_empty() && providers.id(head).is_none() {
+                if let Some((segment, id)) = rest.split_once('/') {
+                    if let Some(provider) = providers.id(segment) {
+                        if !id.is_empty() {
+                            if let Some(preset) = store.default_model_preset().await? {
+                                if preset.layout.group_by_name(head).is_some() {
+                                    return Ok(vec![(provider, id.to_string(), true)]);
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        Ok(self.expand_entry(catalog, entry))
+        Ok(self.expand_entry_with(catalog, entry, providers))
     }
 
     /// Expand one non-combo model string into `(provider, model, explicit)` targets.
+    #[cfg(test)]
     fn expand_entry(&self, catalog: &Catalog, entry: &str) -> Vec<(String, String, bool)> {
-        // 2. Explicit `provider/model` for a registered provider.
+        self.expand_entry_with(catalog, entry, &RuntimeProviders::default())
+    }
+
+    fn expand_entry_with(
+        &self,
+        catalog: &Catalog,
+        entry: &str,
+        providers: &RuntimeProviders,
+    ) -> Vec<(String, String, bool)> {
+        // 2. Explicit `provider/model` for a provider known by id or shorthand.
         if let Some((head, rest)) = entry.split_once('/') {
-            if !rest.is_empty() && is_registered_provider(head) {
-                // Trust the caller even when the catalog does not know the id:
-                // regional deployments and freshly published models are common.
-                return vec![(head.to_string(), rest.to_string(), true)];
+            if !rest.is_empty() {
+                if let Some(provider) = providers.id(head) {
+                    // Trust the caller even when the catalog does not know the id:
+                    // regional deployments and freshly published models are common.
+                    return vec![(provider, rest.to_string(), true)];
+                }
             }
         }
 
@@ -2070,5 +2145,27 @@ mod tests {
         };
         let plan = canary_plan(&store, &other, 42).await;
         assert_eq!(providers(&plan), ["openai"]);
+    }
+
+    /// A shorthand code is a first-class ref prefix: it resolves through the stored
+    /// profile table to exactly that provider, and a code never shadows a compiled id.
+    #[tokio::test]
+    async fn shorthand_codes_resolve_to_their_provider() {
+        let store = store_with(&[]).await;
+        store
+            .seed_provider_profile("opencode-go", "ocg")
+            .await
+            .expect("seed");
+        let profiles = store.list_provider_profiles().await.expect("profiles");
+        let providers = RuntimeProviders::from_profiles(&profiles);
+        assert_eq!(
+            Planner::new().expand_entry_with(&catalog(), "ocg/some-model", &providers),
+            vec![("opencode-go".to_string(), "some-model".to_string(), true)]
+        );
+        // The id still wins when a code and an id collide in spelling.
+        assert_eq!(
+            Planner::new().expand_entry_with(&catalog(), "openai/gpt-4.1", &providers),
+            vec![("openai".to_string(), "gpt-4.1".to_string(), true)]
+        );
     }
 }

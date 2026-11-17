@@ -257,19 +257,27 @@ pub async fn create(
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    let Some(provider) = super::models::str_field(&value, "provider") else {
+    let Some(segment) = super::models::str_field(&value, "provider") else {
         return admin_error(&Error::BadRequest("provider is required".into()));
     };
-    let Some(spec) = rrouter_auth::get(&provider) else {
+    let Some(provider) = state.provider_by_ref(&segment) else {
+        return admin_error(&Error::BadRequest(format!("unknown provider {segment}")));
+    };
+    let Some(spec) = state.provider_spec(&provider) else {
         return admin_error(&Error::BadRequest(format!("unknown provider {provider}")));
     };
     let auth_type = super::models::str_field(&value, "auth_type")
         .unwrap_or_else(|| default_auth_type(spec).to_string());
     let name = super::models::str_field(&value, "name");
-    let creds = match credentials_from(&value) {
+    let mut creds = match credentials_from(&value) {
         Ok(c) => c,
         Err(e) => return admin_error(&e),
     };
+    // A custom provider owns its endpoint; an account for it dispatches there unless the
+    // operator explicitly points this one elsewhere.
+    if creds.base_url_override.is_none() {
+        creds.base_url_override = state.custom_base_url(&provider);
+    }
     // A provider whose manifest host is a placeholder cannot be saved without a real
     // resource URL; the message names what to fix and never echoes the credential.
     if let Err(e) = check_override(
@@ -377,7 +385,14 @@ pub async fn update(
             .or(existing.credentials.base_url_override.as_deref());
         // A provider dropped from the registry has no rule to apply; the empty-value check
         // still runs, so a removed provider's account can be re-keyed but not broken.
-        let spec = rrouter_auth::get(&existing.provider);
+        let spec = state.provider_spec(&existing.provider);
+        // A custom provider's transport lives in the connection; clearing it would send
+        // the account to the compiled protocol's own host.
+        if state.provider_is_custom(&existing.provider) && effective.is_none() {
+            return admin_error(&Error::BadRequest(
+                "a custom provider connection cannot clear its base URL".into(),
+            ));
+        }
         if let Err(e) = check_override(spec, effective, Some(creds)) {
             return admin_error(&e);
         }
@@ -488,7 +503,7 @@ pub async fn test(
     if !in_scope(&conn, &scope) {
         return admin_error(&Error::NotFound(format!("connection {uuid}")));
     }
-    let Some(spec) = rrouter_auth::get(&conn.provider) else {
+    let Some(spec) = state.provider_spec(&conn.provider) else {
         return admin_error(&Error::BadRequest(format!(
             "unknown provider {}",
             conn.provider

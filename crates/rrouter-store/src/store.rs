@@ -730,6 +730,24 @@ pub struct ModelCost {
     pub source: String,
 }
 
+/// One provider's shorthand code and, for an operator-defined provider, its transport.
+///
+/// Built-in rows carry only `provider` and `code`: the binary's transport table owns
+/// everything else. A custom row fills `display`, `dialect`, and `base_url`, and its
+/// `provider` id lives in the same namespace as a compiled one, so routing, usage and
+/// model rows need no second key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderProfile {
+    pub provider: String,
+    pub code: String,
+    pub display: Option<String>,
+    /// `openai` (Chat Completions) or `anthropic` (Messages) for a custom provider.
+    pub dialect: Option<String>,
+    /// Chat endpoint origin or path for a custom provider.
+    pub base_url: Option<String>,
+    pub created_at: i64,
+}
+
 /// One completed request. Never contains prompt or response bodies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
@@ -2644,6 +2662,157 @@ impl Store {
             .execute("DELETE FROM models WHERE source = ?1", params![source])
             .map_err(migrations::db_err)?;
         Ok(n)
+    }
+
+    // ----- provider shorthands -----------------------------------------------------
+
+    /// Every provider profile, ordered by provider id.
+    pub async fn list_provider_profiles(&self) -> Result<Vec<ProviderProfile>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT provider, code, display, dialect, base_url, created_at \
+                 FROM provider_profiles ORDER BY provider ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ProviderProfile {
+                    provider: r.get(0)?,
+                    code: r.get(1)?,
+                    display: r.get(2)?,
+                    dialect: r.get(3)?,
+                    base_url: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    /// One provider profile, if the provider has ever been seeded or created.
+    pub async fn provider_profile(&self, provider: &str) -> Result<Option<ProviderProfile>> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT provider, code, display, dialect, base_url, created_at \
+             FROM provider_profiles WHERE provider = ?1",
+            params![provider],
+            |r| {
+                Ok(ProviderProfile {
+                    provider: r.get(0)?,
+                    code: r.get(1)?,
+                    display: r.get(2)?,
+                    dialect: r.get(3)?,
+                    base_url: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(migrations::db_err)
+    }
+
+    /// Change one provider's shorthand. Returns `false` when the provider has no row,
+    /// which is the route's cue for `404`.
+    ///
+    /// The unique index is the real guard; the caller checks first so a collision is a
+    /// readable `400` instead of a storage error.
+    pub async fn set_provider_code(&self, provider: &str, code: &str) -> Result<bool> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "UPDATE provider_profiles SET code = ?1 WHERE provider = ?2",
+                params![code, provider],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
+    }
+
+    /// Whether `code` already belongs to another provider.
+    pub async fn code_taken(&self, code: &str, except: Option<&str>) -> Result<bool> {
+        let conn = self.conn();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM provider_profiles WHERE code = ?1 AND provider <> ?2",
+                params![code, except.unwrap_or("")],
+                |r| r.get(0),
+            )
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
+    }
+
+    /// Insert an operator-defined provider, with its code and transport.
+    pub async fn create_custom_provider(&self, profile: &ProviderProfile) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO provider_profiles (provider, code, display, dialect, base_url, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                profile.provider,
+                profile.code,
+                profile.display,
+                profile.dialect,
+                profile.base_url,
+                profile.created_at
+            ],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Insert a compiled provider's seeded row, if it has none. Never overwrites an
+    /// operator-chosen code.
+    pub async fn seed_provider_profile(&self, provider: &str, code: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO provider_profiles (provider, code, created_at) \
+             VALUES (?1, ?2, ?3)",
+            params![provider, code, now()],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Rewrite an operator-defined provider's transport and shorthand. Built-in rows are
+    /// refused: their display, dialect and base URL come from the binary.
+    pub async fn update_custom_provider(&self, profile: &ProviderProfile) -> Result<bool> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "UPDATE provider_profiles SET code = ?1, display = ?2, dialect = ?3, base_url = ?4 \
+                 WHERE provider = ?5 AND display IS NOT NULL",
+                params![
+                    profile.code,
+                    profile.display,
+                    profile.dialect,
+                    profile.base_url,
+                    profile.provider
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
+    }
+
+    /// Delete an operator-defined provider and every model row it owned. Refuses built-ins.
+    /// The caller removes or refuses connections first; this never orphans one.
+    pub async fn delete_custom_provider(&self, provider: &str) -> Result<bool> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "DELETE FROM provider_profiles WHERE provider = ?1 AND display IS NOT NULL",
+                params![provider],
+            )
+            .map_err(migrations::db_err)?;
+        if n == 0 {
+            return Ok(false);
+        }
+        conn.execute("DELETE FROM models WHERE provider = ?1", params![provider])
+            .map_err(migrations::db_err)?;
+        Ok(true)
     }
 
     // ----- combos ------------------------------------------------------------------
