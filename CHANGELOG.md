@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.25.0 — 2026-11-17
+
+### Features
+
+- feat: request context in activity and provider-pinned model refs ([`e89ea7a`](https://github.com/centopw/RRouter/commit/e89ea7a1ceb42120a8afbbcb6fe8435e24a5cc28))
+
 ## 0.24.1 — 2026-11-16
 
 ### Bug Fixes
