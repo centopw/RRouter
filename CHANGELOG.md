@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.26.0 — 2026-11-17
+
+### Features
+
+- feat: provider shorthand codes and operator-defined providers ([`d7f871a`](https://github.com/centopw/RRouter/commit/d7f871a7e596769f651991e7a641573a38874474))
+
 ## 0.25.0 — 2026-11-17
 
 ### Features
