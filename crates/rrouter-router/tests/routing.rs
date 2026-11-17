@@ -15,7 +15,9 @@ use rrouter_router::stream_dispatch::{byte_stream, collect_stream};
 use rrouter_router::{
     Breaker, Candidate, Catalog, Dispatcher, Plan, PlanRequest, Planner, Strategy,
 };
-use rrouter_store::{ModelRow, Store};
+use rrouter_store::{
+    LayoutDocument, LayoutGroup, LayoutItem, ModelRow, Store, LAYOUT_SCHEMA_VERSION,
+};
 use uuid::Uuid;
 
 fn resp(model: &str) -> ChatResponse {
@@ -455,14 +457,53 @@ async fn combo_start_rotates_the_expanded_candidates() {
     assert_eq!(filtered.candidates[0].connection, openai);
 }
 
-/// A bare model id with a stored preference puts that provider first even when it is
-/// lower priority. Explicit provider refs and a missing/disabled preferred provider keep
-/// the normal order.
+/// A free-form group ref is `group/provider/model`: the provider segment pins the row, so
+/// a shared id never fans out to every provider. The old ambiguous `group/id` alias is
+/// gone; combining providers is a combo's job.
 #[tokio::test]
-async fn model_preference_wins_for_bare_ids_and_is_ignored_explicitly() {
+async fn group_ref_pins_the_provider_segment() {
     let store = Store::open_in_memory().unwrap();
     let openai = conn(&store, "openai", "gpt-4.1", 0).await;
     let github = conn(&store, "github", "gpt-4.1", 1).await;
+    let layout = LayoutDocument {
+        schema_version: LAYOUT_SCHEMA_VERSION,
+        auto_include_new: true,
+        groups: vec![LayoutGroup {
+            id: "g-main".into(),
+            name: "main".into(),
+            provider: None,
+            visible: true,
+            access: None,
+        }],
+        items: vec![
+            LayoutItem {
+                provider: "openai".into(),
+                id: "gpt-4.1".into(),
+                group: Some("g-main".into()),
+                position: 0,
+                visible: true,
+                last_visible_position: None,
+                hidden_at: None,
+            },
+            LayoutItem {
+                provider: "github".into(),
+                id: "gpt-4.1".into(),
+                group: Some("g-main".into()),
+                position: 1,
+                visible: true,
+                last_visible_position: None,
+                hidden_at: None,
+            },
+        ],
+    };
+    let preset = store
+        .create_model_preset("boards", None, &layout, "test")
+        .await
+        .expect("preset");
+    store
+        .set_default_model_preset(preset.id, "test")
+        .await
+        .expect("default");
     let planner = Planner::new();
     let request = |model: &'static str| PlanRequest {
         model,
@@ -477,67 +518,30 @@ async fn model_preference_wins_for_bare_ids_and_is_ignored_explicitly() {
         combo_start: None,
     };
 
-    let plain = planner
-        .plan(&Catalog::builtin(), &store, request("gpt-4.1"))
+    let pinned = planner
+        .plan(&Catalog::builtin(), &store, request("main/github/gpt-4.1"))
         .await
-        .expect("plain");
-    assert_eq!(plain.candidates[0].connection, openai, "priority order");
+        .expect("pinned");
+    assert_eq!(pinned.candidates.len(), 1);
+    assert_eq!(pinned.candidates[0].connection, github);
 
-    store
-        .set_model_preference("gpt-4.1", "github")
-        .await
-        .expect("preference");
-    let preferred = planner
-        .plan(&Catalog::builtin(), &store, request("gpt-4.1"))
-        .await
-        .expect("preferred");
-    assert_eq!(
-        preferred.candidates[0].connection, github,
-        "operator preference outranks priority"
+    // The group name is a namespace, not a fan-out alias over every member.
+    let legacy = planner
+        .plan(&Catalog::builtin(), &store, request("main/gpt-4.1"))
+        .await;
+    assert!(
+        legacy
+            .map(|plan| plan.candidates.iter().all(|c| c.model != "gpt-4.1"))
+            .unwrap_or(true),
+        "the legacy group/model alias must not fan out"
     );
-    assert_eq!(
-        preferred
-            .candidates
-            .iter()
-            .map(|c| c.connection)
-            .collect::<Vec<_>>(),
-        vec![github, openai],
-        "the rest stays as fallback"
-    );
-
-    let explicit = planner
-        .plan(&Catalog::builtin(), &store, request("openai/gpt-4.1"))
-        .await
-        .expect("explicit");
-    assert_eq!(explicit.candidates.len(), 1);
-    assert_eq!(explicit.candidates[0].connection, openai);
-
-    // A preference for a disconnected provider is a no-op, not a broken route.
-    store
-        .set_connection_active(github, false)
-        .await
-        .expect("disable");
-    let fallback = planner
+    // A two-provider bare id still fans out: explicit pinning is the caller's choice.
+    let bare = planner
         .plan(&Catalog::builtin(), &store, request("gpt-4.1"))
         .await
-        .expect("fallback");
-    assert_eq!(fallback.candidates[0].connection, openai);
-    assert!(fallback.candidates.iter().all(|c| c.connection != github));
-
-    // A preference naming a provider that does not serve the id is also a no-op.
-    store
-        .set_connection_active(github, true)
-        .await
-        .expect("enable");
-    store
-        .set_model_preference("gpt-4.1", "nowhere")
-        .await
-        .expect("absent provider");
-    let absent = planner
-        .plan(&Catalog::builtin(), &store, request("gpt-4.1"))
-        .await
-        .expect("absent");
-    assert_eq!(absent.candidates[0].connection, openai);
+        .expect("bare");
+    assert!(bare.candidates.len() >= 2);
+    let _ = openai;
 }
 
 #[tokio::test]

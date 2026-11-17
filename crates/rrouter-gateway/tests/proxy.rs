@@ -787,6 +787,56 @@ async fn openai_non_streaming_round_trip() {
     assert_eq!(seen[0]["messages"][1]["content"], "hello");
 }
 
+/// The usage row keeps the request's own context, not just what was spent: the model
+/// the client named, how the answer ended, how much of it was thinking, and which
+/// conversation it belonged to.
+#[tokio::test]
+async fn usage_row_records_request_context() {
+    let mock = Mock::start(vec![MockReply::Json(
+        200,
+        json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "mock-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 7,
+                "completion_tokens": 3,
+                "completion_tokens_details": {"reasoning_tokens": 2}
+            }
+        }),
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let mut body = openai_chat_body("gpt-4.1");
+    body["reasoning_effort"] = json!("minimal");
+    let (status, headers, _) = h
+        .post_headers(
+            "/v1/chat/completions",
+            body,
+            &[("x-session-id", "ses_abc123")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let row = h.usage_for(request_id_of(&headers)).await;
+    assert_eq!(row.requested_model.as_deref(), Some("gpt-4.1"));
+    assert_eq!(row.finish_reason.as_deref(), Some("tool_calls"));
+    assert_eq!(row.reasoning_effort.as_deref(), Some("minimal"));
+    assert_eq!(
+        row.reasoning_tokens, 2,
+        "thinking is split out, not invented"
+    );
+    assert_eq!(row.session_id.as_deref(), Some("ses_abc123"));
+}
+
 /// codex is the awkward provider: its base URL is a Responses endpoint, it rejects
 /// non-streaming requests, and it refuses `store`. A chat client must still work.
 ///
@@ -1838,6 +1888,16 @@ async fn streaming_records_time_to_first_output() {
     }
     let row = row.expect("usage row recorded");
     assert!(row.streamed);
+    assert_eq!(
+        row.requested_model.as_deref(),
+        Some("codex/gpt-5.6-luna"),
+        "the client's own model, not the resolved id"
+    );
+    assert_eq!(
+        row.finish_reason.as_deref(),
+        Some("stop"),
+        "taken from the terminal stream event"
+    );
     assert!(
         row.ttft_ms >= 40,
         "ttft {} should include the upstream pause",
@@ -2061,6 +2121,11 @@ async fn budget_exhausted_blocks_the_next_request() {
             status: 200,
             streamed: false,
             error: None,
+            requested_model: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
         })
         .await
         .expect("seed spend");
@@ -3827,6 +3892,11 @@ async fn passthrough_refuses_an_exhausted_key_before_the_upstream_call() {
             status: 200,
             streamed: false,
             error: None,
+            requested_model: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
         })
         .await
         .expect("seed spend");
@@ -4266,6 +4336,11 @@ async fn seed_usage(
             status: 200,
             streamed: false,
             error: None,
+            requested_model: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
         })
         .await
         .expect("seed usage");
@@ -4392,6 +4467,11 @@ async fn usage_api_pages_backwards_without_overlap() {
                 status: 200,
                 streamed: false,
                 error: None,
+                requested_model: None,
+                finish_reason: None,
+                reasoning_effort: None,
+                reasoning_tokens: 0,
+                session_id: None,
             })
             .await
             .expect("record usage");
@@ -4484,6 +4564,11 @@ async fn usage_api_filters_compose_with_the_cursor() {
                 status,
                 streamed: false,
                 error: error.map(str::to_string),
+                requested_model: None,
+                finish_reason: None,
+                reasoning_effort: None,
+                reasoning_tokens: 0,
+                session_id: None,
             })
             .await
             .expect("record usage");
@@ -4599,6 +4684,11 @@ fn export_row(ts: i64) -> UsageRecord {
         status: 200,
         streamed: false,
         error: None,
+        requested_model: None,
+        finish_reason: None,
+        reasoning_effort: None,
+        reasoning_tokens: 0,
+        session_id: None,
     }
 }
 
@@ -4708,6 +4798,13 @@ async fn usage_export_csv_has_the_contract_header_and_escapes_cells() {
             "streamed",
             "cost_micros",
             "cost_usd",
+            "requested_model",
+            "finish_reason",
+            "reasoning_effort",
+            "reasoning_tokens",
+            "session_id",
+            "method",
+            "protocol",
         ],
         "header is a contract"
     );
@@ -4735,6 +4832,13 @@ async fn usage_export_csv_has_the_contract_header_and_escapes_cells() {
             "false",
             "1234567",
             "1.234567",
+            "",
+            "",
+            "",
+            "0",
+            "",
+            "POST",
+            "openai_chat",
         ]
     );
     assert_eq!(
@@ -4758,6 +4862,13 @@ async fn usage_export_csv_has_the_contract_header_and_escapes_cells() {
             "true",
             "130",
             "0.000130",
+            "",
+            "",
+            "",
+            "0",
+            "",
+            "POST",
+            "openai_chat",
         ],
         "absent ids are empty cells, streamed is a boolean"
     );
@@ -5056,6 +5167,11 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
             status: 200,
             streamed: false,
             error: None,
+            requested_model: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
         })
         .await
         .expect("seed last month");
@@ -5096,6 +5212,11 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
             status: 200,
             streamed: false,
             error: None,
+            requested_model: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
         })
         .await
         .expect("seed this month");
@@ -6107,6 +6228,11 @@ fn quota_usage(connection: uuid::Uuid) -> UsageRecord {
         status: 200,
         streamed: false,
         error: None,
+        requested_model: None,
+        finish_reason: None,
+        reasoning_effort: None,
+        reasoning_tokens: 0,
+        session_id: None,
     }
 }
 
@@ -6980,6 +7106,11 @@ async fn seed_spend(store: &Store, key: uuid::Uuid, tokens: u32, cost_micros: u6
             status: 200,
             streamed: false,
             error: None,
+            requested_model: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
         })
         .await
         .expect("seed usage");

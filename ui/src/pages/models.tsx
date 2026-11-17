@@ -94,8 +94,7 @@ export default function Models() {
           (key === "status" && value === "routed") ||
           (key === "size" && Number(value) === DEFAULT_SIZE) ||
           (key === "page" && Number(value) === 1) ||
-          (key === "custom" && value === "0") ||
-          (key === "shared" && value === "0");
+          (key === "custom" && value === "0");
         if (defaulted) next.delete(key);
         else next.set(key, value);
       }
@@ -117,7 +116,6 @@ export default function Models() {
 
   const requestedProvider = params.get("provider") ?? ALL;
   const customOnly = params.get("custom") === "1";
-  const sharedOnly = params.get("shared") === "1";
   const requestedStatus = useMemo(() => statusesOf(params), [params]);
   const size = sizeOf(params);
 
@@ -168,15 +166,6 @@ export default function Models() {
       ),
     [models.data],
   );
-  const coverage = useMemo(() => {
-    const map = new Map<string, Model[]>();
-    for (const model of all) {
-      const peers = map.get(model.id);
-      if (peers) peers.push(model);
-      else map.set(model.id, [model]);
-    }
-    return map;
-  }, [all]);
   const providerDisplay = useMemo(
     () => new Map((providers.data ?? []).map((p) => [p.id, p.display] as const)),
     [providers.data],
@@ -283,9 +272,6 @@ export default function Models() {
     const candidates: ModelRow[] = [...modelRows, ...staleRows];
     return candidates.filter((row) => {
       if (effectiveProvider !== ALL && row.model?.provider !== effectiveProvider) return false;
-      if (sharedOnly && (!row.model || (coverage.get(row.model.id)?.length ?? 0) < 2)) {
-        return false;
-      }
       if (customOnly && row.model?.source !== "custom") return false;
       return matchesSearch(row, appliedQuery, displayOf);
     });
@@ -293,10 +279,8 @@ export default function Models() {
     modelRows,
     staleRows,
     effectiveProvider,
-    sharedOnly,
     customOnly,
     appliedQuery,
-    coverage,
     displayOf,
   ]);
 
@@ -333,7 +317,6 @@ export default function Models() {
     boardMode &&
     editable &&
     !customOnly &&
-    !sharedOnly &&
     appliedQuery === "" &&
     effectiveProvider === ALL;
 
@@ -470,8 +453,6 @@ export default function Models() {
   const columns = useUnifiedColumns({
     model: {
       isAdmin,
-      coverage,
-      providerDisplay,
       testTarget: actions.testTarget,
       toggleTarget: actions.toggleTarget,
       removeTarget: actions.removeTarget,
@@ -479,8 +460,6 @@ export default function Models() {
       onToggle: actions.onToggle,
       onEdit: setEditing,
       onDelete: setDeleting,
-      onPrefer: actions.onPrefer,
-      onPickProvider: (id) => setFilters({ provider: id, page: "1" }),
       hide: editable ? hideRow.current : undefined,
       hideFor: (ref) => entryByRef.has(ref),
       groups: isAdmin && hasPreset ? groupChoices : undefined,
@@ -506,10 +485,6 @@ export default function Models() {
     onToggle: actions.onToggle,
     onEdit: setEditing,
     onDelete: setDeleting,
-    coverageFor: (id) => coverage.get(id) ?? [],
-    displayOfProvider: displayOf,
-    onPickProvider: (id) => setFilters({ provider: id, page: "1" }),
-    onPrefer: actions.onPrefer,
     onHide: (ref) => hideRow.current(ref),
   };
 
@@ -545,7 +520,6 @@ export default function Models() {
     appliedQuery !== "" ||
     effectiveProvider !== ALL ||
     customOnly ||
-    sharedOnly ||
     (statusAware && statusParam(requestedStatus) !== null);
   const clearFilters = () => {
     setDraft("");
@@ -554,7 +528,6 @@ export default function Models() {
       provider: null,
       status: null,
       custom: null,
-      shared: null,
       page: null,
     });
   };
@@ -564,11 +537,10 @@ export default function Models() {
     urlQuery !== "" ||
     params.has("provider") ||
     params.has("status") ||
-    params.has("custom") ||
-    params.has("shared");
+    params.has("custom");
 
   const emptyState =
-    appliedQuery !== "" || effectiveProvider !== ALL || customOnly || sharedOnly ? (
+    appliedQuery !== "" || effectiveProvider !== ALL || customOnly ? (
       <div className="flex flex-col items-center gap-2">
         <p>No rows match these filters.</p>
         <Button variant="ghost" onClick={clearFilters}>
@@ -763,8 +735,6 @@ export default function Models() {
             onStatus={(next) => setFilters({ status: statusParam(next), page: "1" })}
             custom={customOnly}
             onCustom={() => setFilters({ custom: customOnly ? null : "1", page: "1" })}
-            shared={sharedOnly}
-            onShared={() => setFilters({ shared: sharedOnly ? null : "1", page: "1" })}
             extra={
               isAdmin ? (
                 <span className="flex items-center gap-2">

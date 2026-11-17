@@ -650,6 +650,7 @@ async fn record_usage(
                     output_tokens: usage.output_tokens,
                     cache_read_tokens: usage.cache_read_tokens,
                     cache_write_tokens: 0,
+                    reasoning_tokens: 0,
                 },
             )
             .await
@@ -679,6 +680,13 @@ async fn record_usage(
         status,
         streamed: false,
         error,
+        // Not a chat request: no thinking budget, and this route does not resolve an
+        // alias, so the client's model and the served model are the same string.
+        requested_model: None,
+        finish_reason: None,
+        reasoning_effort: None,
+        reasoning_tokens: 0,
+        session_id: None,
     };
     if let Err(e) = state.store.record_usage(&record).await {
         tracing::warn!(error = %e, "search usage row failed");

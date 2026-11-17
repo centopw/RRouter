@@ -30,7 +30,8 @@ const EXPORT_PAGE: usize = 1000;
 /// Exact column order of the export; clients parse this, so it is a contract.
 const CSV_HEADER: &str = "ts,iso_utc,provider,model,request_id,key_id,endpoint,\
 input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,latency_ms,ttft_ms,\
-upstream_ms,status,streamed,cost_micros,cost_usd\n";
+upstream_ms,status,streamed,cost_micros,cost_usd,requested_model,finish_reason,\
+reasoning_effort,reasoning_tokens,session_id,method,protocol\n";
 
 /// One usage row as the admin API exposes it. Shared by the list and the detail view so
 /// a client filtering by `request_id` sees exactly the row the attempt view links to.
@@ -55,6 +56,20 @@ fn row_json(r: &UsageRecord) -> Value {
         "status": r.status,
         "streamed": r.streamed,
         "error": r.error,
+        "requested_model": r.requested_model,
+        "finish_reason": r.finish_reason,
+        "reasoning_effort": r.reasoning_effort,
+        "reasoning_tokens": r.reasoning_tokens,
+        "session_id": r.session_id,
+        // Every route that writes a usage row is a `POST`; the method is a property of
+        // the log, not a stored column. `protocol` is the client dialect the endpoint
+        // names, `None` for a passthrough whose path is not a canonical dialect.
+        "method": "POST",
+        "protocol": r
+            .endpoint
+            .as_deref()
+            .and_then(rrouter_core::Dialect::from_path)
+            .map(|dialect| dialect.as_str()),
     })
 }
 
@@ -355,6 +370,29 @@ fn csv_row(out: &mut String, r: &UsageRecord) {
     out.push(',');
     // 6 decimals is the micro-USD unit itself: `$0.000130` for 130 µUSD.
     out.push_str(&format!("{:.6}", r.cost_micros as f64 / 1_000_000.0));
+    for cell in [
+        r.requested_model.as_deref(),
+        r.finish_reason.as_deref(),
+        r.reasoning_effort.as_deref(),
+    ] {
+        out.push(',');
+        push_cell(out, cell.unwrap_or_default());
+    }
+    out.push(',');
+    out.push_str(&r.reasoning_tokens.to_string());
+    out.push(',');
+    push_cell(out, r.session_id.as_deref().unwrap_or_default());
+    // Mirrors the API's `method`/`protocol`: every logged request is a POST and the
+    // dialect is what the endpoint names.
+    out.push_str(",POST,");
+    push_cell(
+        out,
+        r.endpoint
+            .as_deref()
+            .and_then(rrouter_core::Dialect::from_path)
+            .map(|dialect| dialect.as_str())
+            .unwrap_or_default(),
+    );
     out.push('\n');
 }
 

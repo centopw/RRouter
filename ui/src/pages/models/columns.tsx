@@ -7,7 +7,7 @@ import type { Column } from "../../components/table";
 import { compact } from "../../lib/format";
 import type { Model } from "../../lib/api";
 import type { DraftGroup } from "../../lib/layout-draft";
-import { CoveragePeers, RowMenu, TestButton, groupModelRef, priceLabel } from "./rows";
+import { RowMenu, TestButton, groupProviderRef, priceLabel } from "./rows";
 
 /**
  * The registry row, shared by the sortable board and the plain table: one definition, so a
@@ -15,9 +15,6 @@ import { CoveragePeers, RowMenu, TestButton, groupModelRef, priceLabel } from ".
  */
 export type ModelColumnsOptions = {
   isAdmin: boolean;
-  /** Every model, by canonical id, for the "served by N providers" chip. */
-  coverage: Map<string, Model[]>;
-  providerDisplay: Map<string, string>;
   testTarget: string | null;
   toggleTarget: string | null;
   removeTarget: string | null;
@@ -25,8 +22,6 @@ export type ModelColumnsOptions = {
   onToggle: (model: Model) => void;
   onEdit: (model: Model) => void;
   onDelete: (model: Model) => void;
-  onPrefer: (model: string, provider: string | null) => void;
-  onPickProvider: (provider: string) => void;
   /** Only the board has a preset and a layout; the registry passes none. */
   hide?: (ref: string) => void;
   /** Whether this row can be hidden: an entry must exist in the preset. */
@@ -38,8 +33,6 @@ export type ModelColumnsOptions = {
 
 export function useModelColumns({
   isAdmin,
-  coverage,
-  providerDisplay,
   testTarget,
   toggleTarget,
   removeTarget,
@@ -47,8 +40,6 @@ export function useModelColumns({
   onToggle,
   onEdit,
   onDelete,
-  onPrefer,
-  onPickProvider,
   hide,
   hideFor,
   groups,
@@ -61,9 +52,11 @@ export function useModelColumns({
       {
         key: "model",
         title: "model",
-        render: (m) => (
+        render: (m) => {
+          const reference = groupProviderRef(m, groupOf?.(m.ref), groups);
+          return (
           <div className="flex min-w-0 flex-col">
-            <div className="flex min-w-0 items-center gap-1.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               <span className="sr-only">Model </span>
               {/* The badge never shrinks: a truncated provider reads as a different one. */}
               <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.06em] text-muted">
@@ -72,32 +65,19 @@ export function useModelColumns({
               <span
                 title={m.ref}
                 className={cx(
-                  // `min-w-0` matters: a truncating flex item keeps its full intrinsic
-                  // width otherwise, and the table's auto layout would then scroll.
-                  "min-w-0 truncate font-mono text-small",
+                  // Break instead of truncating: long ids are the norm and a clipped
+                  // name reads as a different model. `min-w-0` lets the flex item wrap
+                  // inside the cell rather than widen the table.
+                  "min-w-0 break-all font-mono text-small",
                   m.enabled ? "text-fg" : "text-faint",
                 )}
               >
                 {m.id}
               </span>
               <CopyIconButton
-                value={groupModelRef(m, groupOf?.(m.ref), groups)}
-                label={`Copy model reference ${m.id}`}
+                value={reference}
+                label={`Copy model reference ${reference}`}
               />
-              <CoveragePeers
-                model={m}
-                peers={coverage.get(m.id) ?? []}
-                displayOf={(id: string) => providerDisplay.get(id) ?? id}
-                onPick={onPickProvider}
-                onPrefer={(provider: string | null) => onPrefer(m.id, provider)}
-              />
-              {m.preferred_provider === m.provider ? (
-                <span className="shrink-0">
-                  <Badge tone="accent" title={`preferred provider for ${m.id}`}>
-                    preferred
-                  </Badge>
-                </span>
-              ) : null}
               {m.source === "custom" ? (
                 <span className="shrink-0">
                   <Badge tone="accent" title="added by an operator, not synced from the provider">
@@ -123,6 +103,11 @@ export function useModelColumns({
             {m.display && m.display !== m.id ? (
               <div className="mt-0.5 min-w-0 truncate text-caption text-faint">{m.display}</div>
             ) : null}
+            {reference !== m.ref ? (
+              <div className="mt-0.5 min-w-0 break-all font-mono text-caption text-faint">
+                {reference}
+              </div>
+            ) : null}
             {/* The metadata rides here and nowhere else: the table has no separate
                 context, max-output, price or capability columns. */}
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption text-faint">
@@ -134,7 +119,8 @@ export function useModelColumns({
               <CapabilityChips capabilities={m.capabilities} max={2} subject={m.ref} />
             </div>
           </div>
-        ),
+          );
+        },
       },
       {
         key: "enabled",
@@ -200,8 +186,6 @@ export function useModelColumns({
     return isAdmin ? list : list.filter((column) => column.key !== "actions");
   }, [
     isAdmin,
-    coverage,
-    providerDisplay,
     testTarget,
     toggleTarget,
     removeTarget,
@@ -209,8 +193,6 @@ export function useModelColumns({
     onToggle,
     onEdit,
     onDelete,
-    onPrefer,
-    onPickProvider,
     hide,
     hideFor,
     groups,

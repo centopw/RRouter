@@ -20,7 +20,7 @@ RRouter is one Rust binary with embedded SQLite and a compiled-in dashboard. Sta
 | Guide | Use it for |
 | --- | --- |
 | [API](API.md) | Endpoints, dialects, usage queries |
-| [Routing](ROUTING.md) | Aliases, combos, strategies, breakers, preferred providers |
+| [Routing](ROUTING.md) | Aliases, combos, strategies, breakers, group refs |
 | [Models](MODELS.md) | Registry, custom models, disabled models, provider coverage |
 | [Model presets](MODEL_PRESETS.md) | Saved layouts, reorder/hide, revision conflicts |
 | [Keys and limits](KEYS.md) | Key limits, teams, guardrails, PII redaction |

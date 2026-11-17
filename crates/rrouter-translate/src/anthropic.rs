@@ -1013,7 +1013,8 @@ mod tests {
                 input_tokens: 9,
                 output_tokens: 4,
                 cache_read_tokens: 6,
-                cache_write_tokens: 2
+                cache_write_tokens: 2,
+                reasoning_tokens: 0,
             }
         );
         // Signature survives the way back out.
@@ -1121,7 +1122,8 @@ mod tests {
                     input_tokens: 12,
                     output_tokens: 15,
                     cache_read_tokens: 0,
-                    cache_write_tokens: 0
+                    cache_write_tokens: 0,
+                    reasoning_tokens: 0,
                 }),
             }
         );
@@ -1181,6 +1183,7 @@ mod tests {
                     output_tokens: 4,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
+                    reasoning_tokens: 0,
                 }),
             },
         ] {

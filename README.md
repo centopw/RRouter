@@ -20,7 +20,7 @@ encryption key material and the dashboard all live inside the binary and one dat
 - **Secrets stay secret.** Provider credentials are AES-256-GCM at rest; gateway keys are
   SHA-256 hashes and printed once.
 - **A real model registry.** Catalog, provider `/models`, models.dev metadata, custom rows,
-  provider coverage, disabled models, preferred providers and grouped model boards.
+  provider coverage, disabled models and grouped model boards.
 - **Native web search.** Route Anthropic, OpenAI/Codex, xAI or Gemini through their own
   hosted search tools and return one cited answer from `/v1/search`.
 - **Smart quota auto-ping.** Warm Claude/Codex subscription windows on reset, on a schedule,
@@ -104,8 +104,8 @@ where it goes, not the protocol.
 | --- | --- |
 | [Docs index](docs/README.md) | Everything below in one map |
 | [API](docs/API.md) | Endpoints, dialects, usage queries |
-| [Routing](docs/ROUTING.md) | Aliases, combos, strategies, breakers, preferred providers |
-| [Models](docs/MODELS.md) | Registry, disabled models, provider coverage, preferred provider |
+| [Routing](docs/ROUTING.md) | Aliases, combos, strategies, breakers, group refs |
+| [Models](docs/MODELS.md) | Registry, disabled models, provider coverage, group refs |
 | [Keys and limits](docs/KEYS.md) | Limits, teams, guardrails, PII redaction |
 | [Providers](docs/PROVIDERS.md) | OAuth/API-key support, endpoints, Antigravity |
 | [Caching](docs/CACHING.md) | Exact/semantic cache and prompt-cache preservation |

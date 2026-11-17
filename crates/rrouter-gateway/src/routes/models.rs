@@ -1,6 +1,6 @@
 //! `/v1/models`, the model registry admin routes, and the alias / disabled-model routes.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,34 +36,13 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
             return crate::error::error_response(Dialect::OpenAiChat, &e);
         }
     };
-    // One entry per id. A model row carries the operator's preferred provider for that
-    // bare id; use it for `owned_by` only when that provider actually serves the id.
+    // Every enabled provider row is advertised, so a caller can pin the exact provider.
+    // A bare id served by several providers appears once per provider, which is what the
+    // Models board shows too.
     let registry = match models_registry::list(&state).await {
         Ok(items) => items,
         Err(e) => return admin_error(&e),
     };
-    let mut entries: BTreeMap<String, (String, Option<String>, bool)> = BTreeMap::new();
-    for item in &registry {
-        // A disabled model is not callable and must not be advertised. Other
-        // enabled providers of the same id still list it below.
-        if !item.enabled {
-            continue;
-        }
-        let entry = entries.entry(item.id.clone()).or_insert((
-            item.provider.clone(),
-            item.preferred_provider.clone(),
-            false,
-        ));
-        if let Some(preferred) = &item.preferred_provider {
-            entry.1 = Some(preferred.clone());
-            if item.provider == *preferred {
-                entry.2 = true;
-            }
-        }
-    }
-
-    // Enrichment is resolved from the row that actually owns the id. A bare id served by
-    // several providers uses the same provider the client is routed to.
     let by_ref: HashMap<String, models_registry::ModelItem> = registry
         .iter()
         .filter(|item| item.enabled)
@@ -76,57 +55,45 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
             map.entry(item.id.clone()).or_insert_with(|| item.clone());
             map
         });
-    // Names the gateway owns are not registry rows. An explicit entry (even `None`)
-    // stops the generic lookup from borrowing an unrelated model's metadata.
-    let mut owned_meta: HashMap<String, Option<models_registry::ModelItem>> = HashMap::new();
+    let known_ids: BTreeSet<&str> = by_id.keys().map(String::as_str).collect();
+    let mut models: Vec<ListedModel> = registry
+        .iter()
+        .filter(|item| item.enabled)
+        .map(|item| ListedModel {
+            id: item.id.clone(),
+            provider: item.provider.clone(),
+            meta: Some(item.clone()),
+        })
+        .collect();
 
+    // Names the gateway owns are not registry rows. An alias or combo that collides with
+    // a real model id keeps the model's routing and metadata.
     if let Ok(aliases) = state.store.list_aliases().await {
         for alias in aliases {
-            let owned = entries
-                .entry(alias.alias.clone())
-                .or_insert_with(|| ("rrouter".to_string(), None, false));
-            // An alias that collides with a real model id keeps the model's routing and
-            // metadata; only the names the gateway owns borrow a target's metadata.
-            if owned.0 == "rrouter" {
-                let meta = resolve_meta(&alias.target, &by_ref, &by_id).map(without_display);
-                owned_meta.insert(alias.alias, meta);
+            if known_ids.contains(alias.alias.as_str()) {
+                continue;
             }
+            models.push(ListedModel {
+                meta: resolve_meta(&alias.target, &by_ref, &by_id).map(without_display),
+                id: alias.alias,
+                provider: "rrouter".to_string(),
+            });
         }
     }
     if let Ok(combos) = state.store.list_combos().await {
         for combo in combos {
-            let owned = entries
-                .entry(combo.name.clone())
-                .or_insert_with(|| ("rrouter".to_string(), None, false));
-            if owned.0 == "rrouter" {
-                owned_meta.insert(combo.name, combo_meta(&combo.models, &by_ref, &by_id));
+            if known_ids.contains(combo.name.as_str()) {
+                continue;
             }
+            models.push(ListedModel {
+                meta: combo_meta(&combo.models, &by_ref, &by_id),
+                id: combo.name,
+                provider: "rrouter".to_string(),
+            });
         }
     }
 
     let created = crate::now_unix();
-    let models: Vec<ListedModel> = entries
-        .into_iter()
-        .map(|(id, (fallback, preferred, preferred_serves))| {
-            let owned_by = if preferred_serves {
-                preferred.unwrap_or(fallback)
-            } else {
-                fallback
-            };
-            let meta = match owned_meta.remove(&id) {
-                Some(explicit) => explicit,
-                None => by_ref
-                    .get(&format!("{owned_by}/{id}"))
-                    .cloned()
-                    .or_else(|| by_id.get(&id).cloned()),
-            };
-            ListedModel {
-                id,
-                provider: owned_by,
-                meta,
-            }
-        })
-        .collect();
     let (data, groups) = grouped_models(&state, created, models, &caller).await;
     ok_json(json!({ "object": "list", "data": data, "groups": groups }))
 }
@@ -377,9 +344,16 @@ async fn grouped_models(
             })
         })
         .collect();
-    let meta_by_id: HashMap<&str, &models_registry::ModelItem> = models
+    // Keyed by provider too: the same id on two providers carries its own limits and
+    // capabilities, and the advertised ref is pinned to one of them.
+    let meta_by_ref: HashMap<(&str, &str), &models_registry::ModelItem> = models
         .iter()
-        .filter_map(|model| model.meta.as_ref().map(|meta| (model.id.as_str(), meta)))
+        .filter_map(|model| {
+            model
+                .meta
+                .as_ref()
+                .map(|meta| ((model.provider.as_str(), model.id.as_str()), meta))
+        })
         .collect();
     let group_meta: HashMap<&str, (&str, Option<&str>)> = group_order
         .iter()
@@ -395,12 +369,13 @@ async fn grouped_models(
                     .get(group.as_str())
                     .copied()
                     .unwrap_or((provider.as_str(), Some(provider.as_str())));
-                // A provider bucket keeps the stable provider id; a free-form group is
-                // addressed by its name, which is the alias the planner resolves.
+                // A provider bucket keeps the stable provider id. A free-form group
+                // namespaces the ref but still pins the provider: `group/provider/model`
+                // leaves no ambiguity when several providers serve the same id.
                 let qualifier = if source.is_some() {
-                    provider.as_str()
+                    provider.clone()
                 } else {
-                    name
+                    format!("{name}/{provider}")
                 };
                 (format!("{qualifier}/{id}"), Some(id.clone()))
             };
@@ -410,7 +385,7 @@ async fn grouped_models(
                 &provider,
                 created,
                 Some(&group),
-                meta_by_id.get(id.as_str()).copied(),
+                meta_by_ref.get(&(provider.as_str(), id.as_str())).copied(),
             )
         })
         .collect();
@@ -604,55 +579,35 @@ async fn routable_model(
         )));
     }
 
-    // A free-form group name is a routing alias. Resolve only when the prefix is not a
-    // registered provider, so provider ids never become ambiguous.
+    // A free-form group namespaces the ref: `group/provider/model`. The provider segment
+    // is required, so a group with members from several providers can never be ambiguous.
     if provider.is_none() {
         if let Some((head, rest)) = reference.split_once('/') {
-            if let Some(preset) = state.store.default_model_preset().await? {
-                if let Some(group) = preset.layout.group_by_name(head) {
-                    if !rrouter_store::LayoutDocument::allows(
-                        group,
-                        caller.key_id(),
-                        caller.team_id(),
-                        caller.owner_user_id(),
-                    ) {
-                        return Ok(None);
+            if let Some((provider, id)) = rest.split_once('/') {
+                if !id.is_empty() && rrouter_auth::get(provider).is_some() {
+                    if let Some(preset) = state.store.default_model_preset().await? {
+                        if let Some(group) = preset.layout.group_by_name(head) {
+                            if !rrouter_store::LayoutDocument::allows(
+                                group,
+                                caller.key_id(),
+                                caller.team_id(),
+                                caller.owner_user_id(),
+                            ) {
+                                return Ok(None);
+                            }
+                            if let Some(item) = items.iter().find(|item| {
+                                item.enabled && item.provider == provider && item.id == id
+                            }) {
+                                return Ok(Some((
+                                    item.provider.clone(),
+                                    reference.to_string(),
+                                    Some(id.to_string()),
+                                    Some(item.clone()),
+                                )));
+                            }
+                            return Ok(None);
+                        }
                     }
-                    let members = preset.layout.group_members(
-                        items
-                            .iter()
-                            .filter(|item| item.enabled)
-                            .map(|item| (item.provider.clone(), item.id.clone())),
-                        group,
-                        rest,
-                    );
-                    let preferred = items
-                        .iter()
-                        .find(|item| item.id == rest)
-                        .and_then(|item| item.preferred_provider.as_deref());
-                    let chosen = members
-                        .iter()
-                        .filter_map(|(provider, id)| {
-                            items.iter().find(|item| {
-                                item.enabled && &item.provider == provider && &item.id == id
-                            })
-                        })
-                        .find(|item| preferred == Some(item.provider.as_str()))
-                        .or_else(|| {
-                            members.iter().find_map(|(provider, id)| {
-                                items.iter().find(|item| {
-                                    item.enabled && &item.provider == provider && &item.id == id
-                                })
-                            })
-                        });
-                    return Ok(chosen.map(|item| {
-                        (
-                            item.provider.clone(),
-                            reference.to_string(),
-                            Some(rest.to_string()),
-                            Some(item.clone()),
-                        )
-                    }));
                 }
             }
         }
@@ -840,79 +795,6 @@ pub async fn registry_list(State(state): State<Arc<AppState>>) -> Response {
         Ok(items) => ok_json(json!({ "data": items })),
         Err(e) => admin_error(&e),
     }
-}
-
-/// `GET /api/models/preferences` — `{data:[{model,provider,updated_at}]}`.
-pub async fn list_preferences(State(state): State<Arc<AppState>>) -> Response {
-    match state.store.model_preferences().await {
-        Ok(preferences) => ok_json(json!({ "data": preference_rows(&preferences) })),
-        Err(e) => admin_error(&e),
-    }
-}
-
-/// `PUT /api/models/preference` — `{model, provider}` sets; `provider:null` clears.
-/// Returns the updated preference list plus a `{model: provider}` map.
-pub async fn put_preference(State(state): State<Arc<AppState>>, body: Body) -> Response {
-    let value = match body_json(body).await {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let Some(model) = value.get("model").and_then(Value::as_str) else {
-        return admin_error(&Error::BadRequest("model is required".into()));
-    };
-    match value.get("provider") {
-        Some(Value::Null) => {
-            if let Err(e) = state.store.clear_model_preference(model).await {
-                return admin_error(&e);
-            }
-        }
-        Some(Value::String(provider)) => {
-            if let Err(e) = state.store.set_model_preference(model, provider).await {
-                return admin_error(&e);
-            }
-        }
-        None => {
-            return admin_error(&Error::BadRequest(
-                "provider is required (null clears the preference)".into(),
-            ))
-        }
-        Some(_) => {
-            return admin_error(&Error::BadRequest(
-                "provider must be a string or null".into(),
-            ))
-        }
-    }
-    match state.store.model_preferences().await {
-        Ok(preferences) => {
-            let map: Map<String, Value> = preferences
-                .iter()
-                .map(|preference| {
-                    (
-                        preference.model.clone(),
-                        Value::String(preference.provider.clone()),
-                    )
-                })
-                .collect();
-            ok_json(json!({
-                "data": preference_rows(&preferences),
-                "preferences": map,
-            }))
-        }
-        Err(e) => admin_error(&e),
-    }
-}
-
-fn preference_rows(preferences: &[rrouter_store::ModelPreference]) -> Vec<Value> {
-    preferences
-        .iter()
-        .map(|preference| {
-            json!({
-                "model": preference.model,
-                "provider": preference.provider,
-                "updated_at": preference.updated_at,
-            })
-        })
-        .collect()
 }
 
 /// `GET /api/models/providers`: every routable provider, with whether it has an active

@@ -24,8 +24,6 @@ export function ModelFilters({
   onStatus,
   custom,
   onCustom,
-  shared,
-  onShared,
   extra,
   outside,
   onShowOutside,
@@ -44,8 +42,6 @@ export function ModelFilters({
   onStatus: (next: Set<StatusKey>) => void;
   custom: boolean;
   onCustom: () => void;
-  shared: boolean;
-  onShared: () => void;
   /** Page-level controls that belong beside the filters (groups, alias/combo links). */
   extra?: ReactNode;
   /** Rows a search found outside the current status filter. */
@@ -84,13 +80,6 @@ export function ModelFilters({
         ) : null}
         <FilterChip on={custom} onClick={onCustom} ariaLabel="Only custom model rows">
           custom
-        </FilterChip>
-        <FilterChip
-          on={shared}
-          onClick={onShared}
-          ariaLabel="Only models served by more than one provider"
-        >
-          shared
         </FilterChip>
         {extra}
         <div className="ml-auto flex items-center gap-2 pl-2">

@@ -246,6 +246,9 @@ const UNDO_AFTER_V24: &str = "\
     DROP TABLE IF EXISTS eval_cases; DROP TABLE IF EXISTS eval_suites; \
     DROP TABLE IF EXISTS events_outbox; DROP TABLE IF EXISTS webhook_endpoints; \
     DROP INDEX IF EXISTS idx_usage_trace; ALTER TABLE usage DROP COLUMN trace_id; \
+    ALTER TABLE usage DROP COLUMN requested_model; ALTER TABLE usage DROP COLUMN finish_reason; \
+    ALTER TABLE usage DROP COLUMN reasoning_effort; ALTER TABLE usage DROP COLUMN reasoning_tokens; \
+    ALTER TABLE usage DROP COLUMN session_id; \
     DROP INDEX IF EXISTS idx_connections_team; \
     ALTER TABLE connections DROP COLUMN owner_user_id; \
     ALTER TABLE connections DROP COLUMN team_id; \
@@ -858,6 +861,11 @@ fn spent_tokens_sums_only_that_key() {
             status: 200,
             streamed: false,
             error: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+            requested_model: None,
         };
         // a: 100 + 20 + 5 + 5 = 130 across two rows; b: 7; anonymous: excluded.
         s.record_usage(&rec(Some(a.id), 100, 60, 10, 5, 5))
@@ -923,6 +931,11 @@ fn cost_micros_round_trips_and_sums_per_key() {
             status: 200,
             streamed: false,
             error: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+            requested_model: None,
         };
         s.record_usage(&rec(Some(a.id), 1_250)).await.expect("a1");
         s.record_usage(&rec(Some(a.id), 3_000)).await.expect("a2");
@@ -1879,62 +1892,6 @@ fn quota_ping_config_round_trips_validates_and_samples_prune() {
 }
 
 #[test]
-fn model_preferences_round_trip_replace_and_clear() {
-    let store = Store::open_in_memory().expect("mem");
-    let s = &store;
-    rt().block_on(async {
-        assert!(s.model_preferences().await.expect("list").is_empty());
-        assert!(s
-            .model_preference("claude-haiku-5-5")
-            .await
-            .expect("none")
-            .is_none());
-
-        let first = s
-            .set_model_preference("  claude-haiku-5-5  ", "  opencode ")
-            .await
-            .expect("set");
-        assert_eq!(first.model, "claude-haiku-5-5");
-        assert_eq!(first.provider, "opencode");
-        assert_eq!(
-            s.model_preference("claude-haiku-5-5")
-                .await
-                .expect("get")
-                .expect("some"),
-            first
-        );
-
-        let replaced = s
-            .set_model_preference("claude-haiku-5-5", "claude")
-            .await
-            .expect("replace");
-        assert_eq!(replaced.provider, "claude");
-        assert_eq!(s.model_preferences().await.expect("list").len(), 1);
-
-        // The provider need not be connected; the store only bounds and trims it.
-        s.set_model_preference("disconnected-model", "unconnected-provider")
-            .await
-            .expect("preference survives disconnect");
-        assert!(s.set_model_preference("", "claude").await.is_err());
-        assert!(s.set_model_preference("model", " ").await.is_err());
-
-        assert!(s
-            .clear_model_preference("claude-haiku-5-5")
-            .await
-            .expect("clear"));
-        assert!(!s
-            .clear_model_preference("claude-haiku-5-5")
-            .await
-            .expect("idempotent"));
-        assert!(s
-            .model_preference("claude-haiku-5-5")
-            .await
-            .expect("none")
-            .is_none());
-    });
-}
-
-#[test]
 fn combos_upsert_preserve_order_and_identity() {
     let store = Store::open_in_memory().expect("mem");
     let s = &store;
@@ -2002,6 +1959,11 @@ fn usage_records_summary_and_recent_order() {
             status: st,
             streamed: true,
             error: (st >= 400).then(|| "upstream 429".to_string()),
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+            requested_model: None,
         }
     };
     rt().block_on(async {
@@ -2088,6 +2050,58 @@ fn usage_records_summary_and_recent_order() {
         assert_eq!((claude_bucket.requests, claude_bucket.errors), (2, 1));
         assert_eq!(claude_bucket.input_tokens, 30);
         assert_eq!(claude_bucket.output_tokens, 40);
+    });
+}
+
+/// Request context round-trips through the row: the model the client asked for, how
+/// the answer ended, the thinking split, and the conversation id.
+#[test]
+fn usage_record_keeps_request_context() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    let request_id = Uuid::new_v4();
+    rt().block_on(async {
+        s.record_usage(&UsageRecord {
+            id: None,
+            ts: 1_700_000_000,
+            request_id: Some(request_id),
+            trace_id: Some("0123456789abcdef0123456789abcdef".into()),
+            provider: "openai".into(),
+            model: "gpt-4.1".into(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".into()),
+            key_id: None,
+            cost_micros: 0,
+            input_tokens: 7,
+            output_tokens: 3,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 12,
+            ttft_ms: 4,
+            upstream_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+            requested_model: Some("my-alias".into()),
+            finish_reason: Some("tool_calls".into()),
+            reasoning_effort: Some("minimal".into()),
+            reasoning_tokens: 2,
+            session_id: Some("ses_abc123".into()),
+        })
+        .await
+        .expect("record");
+
+        let row = s
+            .usage_by_request(request_id)
+            .await
+            .expect("lookup")
+            .expect("row");
+        assert_eq!(row.model, "gpt-4.1");
+        assert_eq!(row.requested_model.as_deref(), Some("my-alias"));
+        assert_eq!(row.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(row.reasoning_effort.as_deref(), Some("minimal"));
+        assert_eq!(row.reasoning_tokens, 2);
+        assert_eq!(row.session_id.as_deref(), Some("ses_abc123"));
     });
 }
 
@@ -2192,6 +2206,11 @@ fn attempts_round_trip_under_the_request_id() {
             status: 200,
             streamed: false,
             error: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+            requested_model: None,
         })
         .await
         .expect("usage");
@@ -2385,6 +2404,11 @@ fn prune_usage_deletes_history_older_than_the_cutoff() {
         status: 200,
         streamed: false,
         error: None,
+        finish_reason: None,
+        reasoning_effort: None,
+        reasoning_tokens: 0,
+        session_id: None,
+        requested_model: None,
     };
     // Attempts carry their own request id, so each timestamp is separately reachable.
     let attempt_request = |ts: i64| Uuid::from_u128(0xa000 + ts as u128);
@@ -2650,6 +2674,11 @@ fn spend_since_counts_only_rows_inside_the_window() {
             status: 200,
             streamed: false,
             error: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+            requested_model: None,
         };
         let since = 1_000;
         s.record_usage(&rec(a.id, 999, 40, 400))
@@ -3099,6 +3128,11 @@ fn page_row(ts: i64, marker: &str) -> UsageRecord {
         status: 200,
         streamed: false,
         error: None,
+        finish_reason: None,
+        reasoning_effort: None,
+        reasoning_tokens: 0,
+        session_id: None,
+        requested_model: None,
     }
 }
 
@@ -3838,6 +3872,11 @@ fn account_quota_exhausts_only_on_usage_inside_its_window() {
             status: 200,
             streamed: false,
             error: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+            requested_model: None,
         };
 
         // Yesterday's rows are outside today's window but inside this week's.
@@ -3954,6 +3993,11 @@ fn account_quota_enforces_token_and_cost_limits() {
             status: 200,
             streamed: false,
             error: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+            requested_model: None,
         };
         store
             .record_usage(&rec(cost.id, 600, 1, 1))
@@ -4460,6 +4504,11 @@ fn usage_trace_id_roundtrips_and_absent_stays_null() {
             status: 200,
             streamed: false,
             error: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+            requested_model: None,
         }))
         .expect("record");
     }

@@ -73,14 +73,6 @@ fn is_registered_provider(id: &str) -> bool {
     rrouter_auth::registry::get(id).is_some()
 }
 
-/// Does the client's spelling name one provider explicitly? A preference keyed by a
-/// bare model id must not reorder an explicit `provider/model` request.
-fn explicit_provider(model: &str) -> bool {
-    model
-        .split_once('/')
-        .is_some_and(|(provider, _)| is_registered_provider(provider))
-}
-
 /// Prefix that forces combo interpretation even when a combo name collides with
 /// a model id.
 const COMBO_PREFIX: &str = "combo:";
@@ -615,18 +607,6 @@ impl Planner {
             }
         }
 
-        // Operator per-model preference. It is deliberately stronger than priority,
-        // strategy, headroom and canary: the operator said this provider should serve
-        // this bare id. Explicit `provider/model` requests skip it, and a later
-        // request-scoped `provider.order` still wins because that is the client's own
-        // explicit choice for this request. A preference for a provider with no
-        // surviving candidate is a no-op, so disconnected/disabled providers fall back.
-        if !explicit_provider(model) {
-            if let Some(preferred) = store.model_preference(model).await? {
-                candidates.sort_by_key(|candidate| candidate.provider != preferred.provider);
-            }
-        }
-
         // Request ordering is an intra-priority hint. A stable sort keeps the strategy's
         // order inside one provider's accounts and inside every unlisted provider, so a
         // `weighted` group still alternates while the named providers come first.
@@ -700,9 +680,10 @@ impl Planner {
         self.expand_entry_resolved(catalog, store, &current).await
     }
 
-    /// Resolve a free-form group prefix (`main/model`) before falling back to the
-    /// provider/catalog grammar. The group's name is the routing alias; its members are
-    /// exactly the rows the Models board places in that group.
+    /// Resolve a free-form group reference (`main/provider/model`) before falling back to
+    /// the provider/catalog grammar. The group name is a namespace, not a fan-out alias:
+    /// the provider segment pins the row, so it cannot be ambiguous when several providers
+    /// serve the same id. Combining providers is a combo's job.
     async fn expand_entry_resolved(
         &self,
         catalog: &Catalog,
@@ -711,26 +692,13 @@ impl Planner {
     ) -> Result<Vec<(String, String, bool)>> {
         if let Some((head, rest)) = entry.split_once('/') {
             if !rest.is_empty() && !is_registered_provider(head) {
-                if let Some(preset) = store.default_model_preset().await? {
-                    if let Some(group) = preset.layout.group_by_name(head) {
-                        let mut universe: Vec<(String, String)> = catalog
-                            .all()
-                            .into_iter()
-                            .map(|model| (model.provider, model.id))
-                            .collect();
-                        universe.extend(
-                            store
-                                .list_models()
-                                .await?
-                                .into_iter()
-                                .map(|row| (row.provider, row.model)),
-                        );
-                        return Ok(preset
-                            .layout
-                            .group_members(universe, group, rest)
-                            .into_iter()
-                            .map(|(provider, model)| (provider, model, true))
-                            .collect());
+                if let Some((provider, id)) = rest.split_once('/') {
+                    if !id.is_empty() && is_registered_provider(provider) {
+                        if let Some(preset) = store.default_model_preset().await? {
+                            if preset.layout.group_by_name(head).is_some() {
+                                return Ok(vec![(provider.to_string(), id.to_string(), true)]);
+                            }
+                        }
                     }
                 }
             }
@@ -1206,6 +1174,11 @@ mod tests {
                     status: 200,
                     streamed: false,
                     error: None,
+                    requested_model: None,
+                    finish_reason: None,
+                    reasoning_effort: None,
+                    reasoning_tokens: 0,
+                    session_id: None,
                 })
                 .await
                 .expect("usage");

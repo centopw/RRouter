@@ -219,6 +219,10 @@ pub struct Usage {
     pub output_tokens: u32,
     pub cache_read_tokens: u32,
     pub cache_write_tokens: u32,
+    /// Tokens the provider says were spent thinking. They are already inside
+    /// `output_tokens` (that is what the provider bills); this only makes the split
+    /// visible. `0` when the provider reports no such detail.
+    pub reasoning_tokens: u32,
 }
 
 impl Usage {

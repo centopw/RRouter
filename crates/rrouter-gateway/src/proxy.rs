@@ -558,6 +558,7 @@ async fn special_inner(
     // routed ref both see the model this key actually asked for.
     let model = state.mapped_model(caller.key_id(), &requested).await?;
     trace.set_model(&model);
+    trace.set_requested_model(&requested);
     // These endpoints forward a provider-native body, so the prompt is read through the
     // canonical parser — but only for a key that has a policy: a body these parsers do
     // not model must keep streaming through untouched for every other key. Only the
@@ -626,6 +627,8 @@ async fn special_inner(
                 key: caller.key_id(),
                 request_id: trace.request_id,
                 trace_id: trace.trace_id(),
+                meta: trace.meta(),
+                finish_reason: None,
                 started,
                 upstream_ms: 0,
                 ttft: None,
@@ -662,11 +665,18 @@ fn reported_usage(value: &Value) -> Option<Usage> {
         .and_then(Value::as_u64)
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(0);
+    let reasoning = usage
+        .pointer("/completion_tokens_details/reasoning_tokens")
+        .or_else(|| usage.pointer("/output_tokens_details/reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
     Some(Usage {
         input_tokens: input,
         output_tokens: output,
         cache_read_tokens: cache_read,
         cache_write_tokens: 0,
+        reasoning_tokens: reasoning,
     })
 }
 
@@ -948,6 +958,7 @@ async fn json_plan(
         .to_string();
     let model = state.mapped_model(caller.key_id(), &requested).await?;
     trace.set_model(&model);
+    trace.set_requested_model(&requested);
     admit_or_explain(state, caller, &model, trace).await?;
     let policy = provider_policy(body, headers)?;
     let config = state.config.load();
@@ -1168,6 +1179,7 @@ async fn transcriptions_inner(
         Some(requested) => {
             let model = state.mapped_model(caller.key_id(), &requested).await?;
             trace.set_model(&model);
+            trace.set_requested_model(&requested);
             admit_or_explain(state, caller, &model, trace).await?;
             // A multipart body has no `provider` object; only the headers can carry
             // routing preferences on this endpoint.
@@ -1369,6 +1381,8 @@ fn record_passthrough(
             key,
             request_id: trace.request_id,
             trace_id: trace.trace_id(),
+            meta: trace.meta(),
+            finish_reason: None,
             started,
             upstream_ms: trace.upstream_ms(),
             ttft: None,
@@ -1405,6 +1419,8 @@ async fn handle(
         .mapped_model(caller.key_id(), &canonical.model)
         .await?;
     trace.set_model(&model);
+    trace.set_requested_model(&canonical.model);
+    trace.set_reasoning_effort(&body);
     // Guardrails run on the canonical text after authentication and before any
     // governance bookkeeping or dispatch: a refused prompt costs no provider call, no
     // rate-limit slot and no cache entry.
@@ -1635,6 +1651,8 @@ async fn handle(
                 key: key_id,
                 request_id: trace.request_id,
                 trace_id: trace.trace_id(),
+                meta: trace.meta(),
+                finish_reason: Some(assembled.finish_reason.openai()),
                 started,
                 upstream_ms: trace.upstream_ms(),
                 ttft: None,
@@ -1773,6 +1791,7 @@ async fn handle(
             key: key_id,
             request_id: trace.request_id,
             trace_id: trace.trace_id().to_string(),
+            meta: trace.meta(),
             // The slot belongs to the stream, not to this handler: it is released when
             // the body ends or the client disconnects, whichever comes first.
             _permit: permit,
@@ -1883,6 +1902,8 @@ async fn complete_traced(
     let canonical = rrouter_translate::parse_request(inbound, body)?;
     let model = state.mapped_model(key, &canonical.model).await?;
     trace.set_model(&model);
+    trace.set_requested_model(&canonical.model);
+    trace.set_reasoning_effort(body);
     let config = state.config.load();
     let affinity = affinity_of(&canonical);
     let canary_seed = canary_seed_for(trace, Some(affinity));
@@ -1937,6 +1958,8 @@ async fn complete_traced(
             key,
             request_id: trace.request_id,
             trace_id: trace.trace_id(),
+            meta: trace.meta(),
+            finish_reason: Some(resp.finish_reason.openai()),
             started,
             upstream_ms: trace.upstream_ms(),
             ttft: None,
@@ -1969,6 +1992,8 @@ async fn complete_traced(
         key,
         request_id: trace.request_id,
         trace_id: trace.trace_id(),
+        meta: trace.meta(),
+        finish_reason: Some(assembled.finish_reason.openai()),
         started,
         upstream_ms: trace.upstream_ms(),
         ttft: None,
@@ -2348,6 +2373,48 @@ fn opencode_session(client: Option<&HeaderMap>, affinity: u64) -> String {
     out
 }
 
+/// Conversation id the client sent, when it sent one.
+///
+/// Several CLIs name the same idea differently, and the gateway records whichever
+/// header the client actually used. Nothing is invented: a client that sends no id gets
+/// `None`, so the log never shows a session for a request that had none.
+fn session_id_of(headers: Option<&HeaderMap>) -> Option<String> {
+    const NAMES: [&str; 4] = [
+        "x-opencode-session",
+        "x-session-id",
+        "x-claude-code-session-id",
+        "session-id",
+    ];
+    let headers = headers?;
+    for name in NAMES {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            let value = value.trim();
+            if !value.is_empty() && value.len() <= 256 {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Effort the client asked the model to think with, when the body names one.
+///
+/// The three shapes are OpenAI chat (`reasoning_effort`), OpenAI Responses
+/// (`reasoning.effort`) and Anthropic (`output_config.effort`). Anthropic's
+/// `thinking.budget_tokens` is a budget, not an effort, so it is not recorded here.
+fn reasoning_effort_of(body: &Value) -> Option<String> {
+    let effort = body
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .or_else(|| body.pointer("/reasoning/effort").and_then(Value::as_str))
+        .or_else(|| {
+            body.pointer("/output_config/effort")
+                .and_then(Value::as_str)
+        })?;
+    let effort = effort.trim();
+    (!effort.is_empty()).then(|| effort.to_string())
+}
+
 /// Provider headers with nothing of the client's added, for calls that have no inbound
 /// request (the admin probe).
 fn request_headers(spec: &ProviderSpec, creds: &Credentials) -> Result<axum::http::HeaderMap> {
@@ -2501,6 +2568,8 @@ async fn serve_cache_hit(
             key: key_id,
             request_id: trace.request_id,
             trace_id: trace.trace_id(),
+            meta: trace.meta(),
+            finish_reason: None,
             started,
             upstream_ms: 0,
             ttft: None,
@@ -2553,6 +2622,7 @@ fn record_cache_hit(
     started: Instant,
     budget_hold: Option<Arc<crate::state::BudgetHold>>,
 ) {
+    let meta = trace.meta();
     spawn_record(
         state,
         UsageRecord {
@@ -2576,6 +2646,11 @@ fn record_cache_hit(
             status: 200,
             streamed: false,
             error: None,
+            requested_model: meta.requested_model,
+            finish_reason: None,
+            reasoning_effort: meta.reasoning_effort,
+            reasoning_tokens: 0,
+            session_id: meta.session_id,
         },
         budget_hold,
     );
@@ -3282,6 +3357,12 @@ struct RequestTrace {
 struct TraceLabels {
     /// Model the client asked for, empty until the body is parsed.
     model: String,
+    /// Model the client named before key mapping, alias or combo resolution.
+    requested_model: Option<String>,
+    /// Effort the client asked the model to think with, when it asked.
+    reasoning_effort: Option<String>,
+    /// Conversation id the client sent, when it sent one.
+    session_id: Option<String>,
     /// Provider of the most recent attempt, empty before any dispatch.
     provider: String,
     /// Gateway key that paid for the request.
@@ -3305,6 +3386,10 @@ impl RequestTrace {
             .and_then(|headers| headers.get("tracestate"))
             .and_then(|value| value.to_str().ok());
         let started = crate::telemetry::start(traceparent, tracestate);
+        let labels = TraceLabels {
+            session_id: session_id_of(headers),
+            ..TraceLabels::default()
+        };
         Self {
             request_id,
             inbound,
@@ -3314,7 +3399,18 @@ impl RequestTrace {
             attempts: AtomicU32::new(0),
             upstream_ms: AtomicU32::new(0),
             budget_hold: Mutex::new(None),
-            inner: Mutex::new(TraceLabels::default()),
+            inner: Mutex::new(labels),
+        }
+    }
+
+    /// The request-scoped labels a usage row records: what the client asked for, and
+    /// which conversation it belonged to.
+    fn meta(&self) -> RequestMeta {
+        let labels = self.labels();
+        RequestMeta {
+            requested_model: labels.requested_model.clone(),
+            reasoning_effort: labels.reasoning_effort.clone(),
+            session_id: labels.session_id.clone(),
         }
     }
 
@@ -3423,6 +3519,17 @@ impl RequestTrace {
 
     fn set_model(&self, model: &str) {
         self.labels().model = model.to_string();
+    }
+
+    /// Remember the model the client itself named, before key mapping or aliasing. The
+    /// pair `requested_model` / `model` is what lets the log say "asked X, served Y".
+    fn set_requested_model(&self, model: &str) {
+        self.labels().requested_model = Some(model.to_string());
+    }
+
+    /// Remember the thinking effort the body asked for, when it named one.
+    fn set_reasoning_effort(&self, body: &Value) {
+        self.labels().reasoning_effort = reasoning_effort_of(body);
     }
 
     /// Label the request with the provider that would have served it. A cache hit has
@@ -3621,6 +3728,7 @@ impl RequestTrace {
             error = %err,
             "request failed"
         );
+        let meta = self.meta();
         let rec = UsageRecord {
             id: None,
             ts: crate::now_unix(),
@@ -3642,6 +3750,11 @@ impl RequestTrace {
             status: err.status(),
             streamed: false,
             error: Some(err.to_string()),
+            requested_model: meta.requested_model,
+            finish_reason: None,
+            reasoning_effort: meta.reasoning_effort,
+            reasoning_tokens: 0,
+            session_id: meta.session_id,
         };
         let store = Arc::clone(&state.store);
         let access_log = state.config.load().access_log;
@@ -3708,6 +3821,8 @@ struct Wire {
     inbound: Dialect,
     pending: std::collections::VecDeque<StreamEvent>,
     usage: Option<Usage>,
+    /// The provider's terminal reason, from the same `Done` event as `usage`.
+    finish: Option<rrouter_core::FinishReason>,
     finished: bool,
     failed: bool,
     /// When the first model output (not the envelope) was decoded: the honest end of
@@ -3759,6 +3874,7 @@ impl Wire {
             inbound,
             pending: std::collections::VecDeque::new(),
             usage: None,
+            finish: None,
             finished: false,
             failed: false,
             first_output: None,
@@ -3855,7 +3971,8 @@ impl Wire {
                 };
                 return Some(join(out, Bytes::from(error_frame(self.inbound, &err))));
             }
-            if let StreamEvent::Done { usage, .. } = &ev {
+            if let StreamEvent::Done { reason, usage } = &ev {
+                self.finish = Some(*reason);
                 // Flush the redaction carry before the terminal frame so the client gets
                 // the redacted tail in the same event order as the provider sent it.
                 match self.flush_stream_tail() {
@@ -4010,6 +4127,8 @@ struct PendingRecord {
     request_id: Uuid,
     /// W3C trace id, captured while the request is still in scope.
     trace_id: String,
+    /// What the client asked for, and which conversation it belonged to.
+    meta: RequestMeta,
     /// This request's concurrency slot. `ResponseStream` owns it until the body ends or
     /// is dropped, which is the whole release protocol.
     _permit: Option<OwnedSemaphorePermit>,
@@ -4059,6 +4178,8 @@ impl ResponseStream {
                 key: pending.key,
                 request_id: pending.request_id,
                 trace_id: &pending.trace_id,
+                meta: pending.meta.clone(),
+                finish_reason: self.inner.finish.map(|f| f.openai()),
                 started: pending.started,
                 upstream_ms: pending.upstream_ms,
                 ttft,
@@ -4146,6 +4267,18 @@ fn endpoint_of(dialect: Dialect) -> &'static str {
     }
 }
 
+/// Request-scoped labels the client supplied, copied out of the trace so a record can
+/// outlive the request (the streamed path commits after the handler returned).
+#[derive(Clone, Default)]
+struct RequestMeta {
+    /// Model the client named, before key mapping, alias or combo resolution.
+    requested_model: Option<String>,
+    /// Effort the client asked for, when the body carried one.
+    reasoning_effort: Option<String>,
+    /// Conversation id the client sent, when it sent one.
+    session_id: Option<String>,
+}
+
 /// One finished request, ready to turn into a usage row.
 #[derive(Clone)]
 struct Recorded<'a> {
@@ -4153,12 +4286,16 @@ struct Recorded<'a> {
     model: &'a str,
     endpoint: &'static str,
     usage: Usage,
-    /// Gateway key that paid for the request; `None` for anonymous traffic.
+    /// Gateway key that paid the request; `None` for anonymous traffic.
     key: Option<Uuid>,
     /// Id already echoed to the client, so the row can be found from its header.
     request_id: Uuid,
     /// W3C trace id of the request, so the access line joins the trace.
     trace_id: &'a str,
+    /// What the client asked for, and which conversation it belonged to.
+    meta: RequestMeta,
+    /// Provider terminal reason; `None` for a failed or unfinished request.
+    finish_reason: Option<&'static str>,
     started: Instant,
     /// Time to the winning attempt's upstream response headers.
     upstream_ms: u32,
@@ -4208,6 +4345,11 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
         status: r.status,
         streamed: r.streamed,
         error: r.error.map(str::to_owned),
+        requested_model: r.meta.requested_model,
+        finish_reason: r.finish_reason.map(str::to_owned),
+        reasoning_effort: r.meta.reasoning_effort,
+        reasoning_tokens: usage.reasoning_tokens,
+        session_id: r.meta.session_id,
     };
     spawn_record(state, rec, r.budget_hold);
 }
@@ -4280,6 +4422,7 @@ fn spawn_record(
             output_tokens: rec.output_tokens,
             cache_read_tokens: rec.cache_read_tokens,
             cache_write_tokens: rec.cache_write_tokens,
+            reasoning_tokens: rec.reasoning_tokens,
         };
         rec.cost_micros =
             crate::models_registry::cost_micros(&store, &rec.provider, &rec.model, usage).await;
@@ -4470,6 +4613,7 @@ async fn embeddings_inner(
         .to_string();
     let model = state.mapped_model(caller.key_id(), &requested).await?;
     trace.set_model(&model);
+    trace.set_requested_model(&requested);
     admit_or_explain(state, &caller, &model, trace).await?;
     let policy = provider_policy(&body, headers)?;
     let config = state.config.load();
@@ -4586,6 +4730,8 @@ async fn embeddings_inner(
                     key: caller.key_id(),
                     request_id: trace.request_id,
                     trace_id: trace.trace_id(),
+                    meta: trace.meta(),
+                    finish_reason: None,
                     started,
                     upstream_ms: 0,
                     ttft: None,
@@ -4812,6 +4958,11 @@ mod tests {
             status: 200,
             streamed: true,
             error: None,
+            requested_model: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
         }
     }
 

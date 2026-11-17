@@ -6,12 +6,15 @@ fallback and a per-account breaker.
 ## Model strings
 
 - **`provider/model`** — `openai/gpt-4.1`, `claude/sonnet-4-5`, `codex/gpt-5.6-luna`.
+- **`group/provider/model`** — a preset group namespaces the ref and still pins the
+  provider: `main/openai/gpt-4.1`. The provider segment is required, so a model id
+  served by several providers is never ambiguous.
 - **Aliases** — a stable name (`prod-default`) mapped to one target.
 - **Combos** — `combo:<name>` or a bare combo name; strategies are `fallback`,
-  `round_robin` and `smart`. See [Combos](COMBOS.md).
+  `round_robin` and `smart`. Combining providers is a combo, not a model row.
 
 A bare model id expands to every connected provider that serves it. Explicit
-`provider/model` never widens to another provider.
+`provider/model` and `group/provider/model` never widen to another provider.
 
 ## Account order
 
@@ -27,13 +30,6 @@ priority group:
 
 Priority always dominates across groups. A key's model mapping runs before alias/combo
 resolution, so a client can keep a stable name while the operator repoints it.
-
-## Preferred provider
-
-For a model served by several providers, the Models page can pin one provider for the bare
-model id. Bare requests place that provider first; explicit `provider/model` requests ignore
-the preference. `/v1/models` reports the preferred provider as `owned_by` when it serves the
-id. The preference survives a provider disconnect so reconnecting restores it.
 
 ## Breakers and fallback
 

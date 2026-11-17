@@ -12,13 +12,45 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 36;
+pub const SCHEMA_VERSION: i64 = 38;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38,
 ];
+
+/// V38: drop the per-model preferred provider. Choosing a provider is now explicit in the
+/// ref (`group/provider/model`); combining providers is a combo's job, so an invisible
+/// routing hint keyed by bare id has no surface left. Existing preferences are discarded.
+const V38: &str = r#"
+DROP TABLE IF EXISTS model_preferences;
+"#;
+
+/// V37: the per-request context the activity log needs to read like a request trace.
+///
+/// * `requested_model` is what the client asked for, before any key mapping, alias or
+///   combo resolution changed it into `model`. Nullable because old rows did not keep it
+///   and some writers (passthroughs) have no client model to record.
+/// * `finish_reason` is the provider's terminal reason (`stop`, `length`, `tool_calls`,
+///   `content_filter`), NULL for a failed request or one that never reached a terminal
+///   event. Exactly one of these is set for a completed request.
+/// * `reasoning_effort` is the effort the client requested (`minimal` … `high`), NULL
+///   when the request asked for none.
+/// * `reasoning_tokens` is the part of `output_tokens` the provider attributes to
+///   thinking; already inside output, so no cost or budget arithmetic changes.
+/// * `session_id` is the client's conversation id, only when the client actually sent
+///   one. Nested conversation grouping is not inferred.
+///
+/// All additive and nullable (except the token counter): a pre-v37 row keeps reading
+/// exactly as before, with the new fields absent.
+const V37: &str = r#"
+ALTER TABLE usage ADD COLUMN requested_model TEXT;
+ALTER TABLE usage ADD COLUMN finish_reason TEXT;
+ALTER TABLE usage ADD COLUMN reasoning_effort TEXT;
+ALTER TABLE usage ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage ADD COLUMN session_id TEXT;
+"#;
 
 /// V36: system-managed keys. `kind` separates operator-created keys (`user`) from keys
 /// the gateway manages itself (`playground`); `sealed_secret` holds a system key's
@@ -1494,15 +1526,12 @@ mod tests {
         assert_eq!(timezone, "UTC");
     }
 
-    /// v32 → v33: the preference table lands empty and accepts its first row.
+    /// v37 → v38: the preferred-provider table is gone, including any stored choice.
     #[test]
-    fn upgrades_from_v32_landing_v33_model_preferences() {
+    fn upgrades_from_v37_dropping_model_preferences() {
         let mut c = Connection::open_in_memory().expect("open");
-        at_version(&mut c, 32);
-        assert_eq!(user_version(&c), 32);
-        assert!(!has_table(&c, "model_preferences"));
-        migrate(&mut c).expect("upgrade");
-        assert_eq!(user_version(&c), SCHEMA_VERSION);
+        at_version(&mut c, 37);
+        assert_eq!(user_version(&c), 37);
         assert!(has_table(&c, "model_preferences"));
         c.execute(
             "INSERT INTO model_preferences (model, provider, updated_at) \
@@ -1510,16 +1539,9 @@ mod tests {
             [],
         )
         .expect("preference insert");
-        let (provider, updated): (String, i64) = c
-            .query_row(
-                "SELECT provider, updated_at FROM model_preferences \
-                 WHERE model = 'claude-haiku-5-5'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .expect("preference row");
-        assert_eq!(provider, "opencode");
-        assert_eq!(updated, 7);
+        migrate(&mut c).expect("upgrade");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+        assert!(!has_table(&c, "model_preferences"));
     }
 
     /// v31 → v32: eval context and judge columns land nullable, leaving existing suites

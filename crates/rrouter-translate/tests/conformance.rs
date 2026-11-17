@@ -360,7 +360,8 @@ fn a_chat_response_round_trips_through_both_dialects() {
             input_tokens: 40,
             output_tokens: 12,
             cache_read_tokens: 0,
-            cache_write_tokens: 0
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
         }
     );
 
@@ -517,7 +518,8 @@ fn a_streamed_tool_call_sequence_is_stable_through_the_anthropic_encoder() {
                     input_tokens: 11,
                     output_tokens: 7,
                     cache_read_tokens: 0,
-                    cache_write_tokens: 0
+                    cache_write_tokens: 0,
+                    reasoning_tokens: 0,
                 })
             },
         ]
@@ -602,7 +604,8 @@ fn streamed_reasoning_and_usage_survive_a_cycle() {
                 input_tokens: 3,
                 output_tokens: 9,
                 cache_read_tokens: 0,
-                cache_write_tokens: 0
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
             })
         })
     );

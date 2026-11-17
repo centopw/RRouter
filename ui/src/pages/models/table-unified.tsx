@@ -23,10 +23,6 @@ export type ModelActions = {
   onToggle: (model: Model) => void;
   onEdit: (model: Model) => void;
   onDelete: (model: Model) => void;
-  coverageFor: (id: string) => Model[];
-  displayOfProvider: (id: string) => string;
-  onPickProvider: (id: string) => void;
-  onPrefer: (id: string, provider: string | null) => void;
   /** Hide/restore is an entry operation; absent on rows the preset never stored. */
   onHide: (ref: string) => void;
 };
@@ -338,10 +334,6 @@ function UnifiedCard({
               ? (group) => controls.onAssignGroup(row.ref, group)
               : undefined
           }
-          coverageFor={actions.coverageFor}
-          displayOfProvider={actions.displayOfProvider}
-          onPickProvider={actions.onPickProvider}
-          onPreferPreference={(model, provider) => actions.onPrefer(model.id, provider)}
         />
         {controlsRow}
       </>

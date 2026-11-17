@@ -13,27 +13,26 @@ call right now, from connected providers.
 - **Disabled models** — disabled rows leave the active table and `/v1/models`; enabling
   restores them. A row hidden in the default preset also leaves `/v1/models` while remaining
   routable. Disabling is by canonical id, so a shared model is disabled on every provider.
-- **Provider coverage** — a model id served by several providers shows a provider count and
-  peer popover with price/state; `shared only` filters to those ids. `/v1/models` advertises
-  the callable form `provider/model` and keeps the bare id in `model`, so a client pins the
-  route it discovered. Aliases and combos keep their bare names. A bare request still routes:
-  an id with no exact catalog entry is tried against every active provider, never pinned to
-  an unconnected family match.
+- **Provider coverage** — every provider row is its own entry, and `/v1/models` advertises
+  each one as `provider/model` (or `group/provider/model` inside a preset group), keeping
+  the bare id in `model`. A client pins the exact provider it discovered. Aliases and combos
+  keep their bare names. A bare request still routes: an id with no exact catalog entry is
+  tried against every active provider, never pinned to an unconnected family match.
 - **Groups** — the board is grouped by provider by default. A preset can create free-form
   groups, rename providers' buckets, reorder groups, add/remove models, and move a model to
-  another group. A free-form group's **name is a routing alias**: `/v1/models` advertises
-  `<group>/<model>` (for example `main/deepseek-v4.1-flash`) and the planner resolves it to
-  that group's members, then picks their providers. A group or model can also be hidden
+  another group. A free-form group's name is a **namespace**: `/v1/models` advertises
+  `<group>/<provider>/<model>` (for example `main/opencode-go/deepseek-v4.1-flash`) and the
+  planner routes exactly that provider row. A group or model can also be hidden
   from `/v1/models`; routing is unchanged for hidden names. Aliases and combos have their
   own card with the same group and visibility controls.
 - **Group access** — a group can be granted to teams, API keys or users, or left open to
   everyone. Ungranted callers do not see the group in `/v1/models` and get `403` if they
-  try its alias. Keys inherit their team and can carry an `owner_user_id` for user grants.
+  try one of its refs. Keys inherit their team and can carry an `owner_user_id` for user grants.
 - **Thinking effort** — reasoning models advertise a normalized `reasoning` object and
   accept `reasoning_effort` / a `reasoning` object / Anthropic `thinking`. See
   [Thinking effort](REASONING.md).
-- **Preferred provider** — pin one provider for a bare model id. Bare requests use it first;
-  explicit `provider/model` ignores it. `/v1/models` reports it as `owned_by`.
+- **Combining providers** — a combo (`Routing → Combos`) is the way to fail over or
+  spread requests across providers. Models stay one row per provider.
 - **Test** — a real 16-token completion through the planner, dispatcher and reassembly path.
 
 Every model picker is grouped by provider by default; a preset can define custom groups and

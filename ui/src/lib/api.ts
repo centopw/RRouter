@@ -694,6 +694,20 @@ export type UsageEvent = {
   status: number;
   streamed: boolean;
   error: string | null;
+  /** Model the client named, before key mapping, aliasing or combo resolution. */
+  requested_model: string | null;
+  /** Provider terminal reason; null for a failed or unfinished request. */
+  finish_reason: string | null;
+  /** Thinking effort the client requested, e.g. `minimal`. */
+  reasoning_effort: string | null;
+  /** Thinking tokens, already included in `output_tokens`. */
+  reasoning_tokens: number;
+  /** Conversation id the client sent, when it sent one. */
+  session_id: string | null;
+  /** Always `POST`: only POST routes write usage rows. */
+  method: string;
+  /** Client dialect the endpoint names, e.g. `openai_chat`. */
+  protocol: string | null;
 };
 
 /** One dispatch attempt behind a request; attempt 1 is the first send, not the winner. */
@@ -793,11 +807,6 @@ export type Model = {
   available: boolean;
   /** A family its provider retired (or models.dev marks deprecated): listed last. */
   deprecated: boolean;
-  /**
-   * The provider the operator chose for this model id. It is the same on every provider
-   * row of that id; `null` (or absent on an older build) means "no preference".
-   */
-  preferred_provider?: string | null;
 };
 
 export type ModelProvider = {

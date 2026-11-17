@@ -1,11 +1,10 @@
 import { useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import * as Popover from "@radix-ui/react-popover";
-import { CircleNotch, DotsThree, Play, Star } from "@phosphor-icons/react";
+import { CircleNotch, DotsThree, Play } from "@phosphor-icons/react";
 import { Link } from "react-router-dom";
 import { Badge, Button, Card, CopyIconButton, cx } from "../../components/ui";
-import { Heading, IconButton, Toggle } from "../../components/atoms";
+import { Heading, Toggle } from "../../components/atoms";
 import { CapabilityChips } from "../../components/capability-chips";
-import { ProviderIcon } from "../../components/provider-icon";
 import { compact } from "../../lib/format";
 import type { Model } from "../../lib/api";
 import type { DraftGroup } from "../../lib/layout-draft";
@@ -204,10 +203,6 @@ export function ModelCardBody({
   onEdit,
   onDelete,
   onHide,
-  coverageFor,
-  displayOfProvider,
-  onPickProvider,
-  onPreferPreference,
   groups,
   currentGroup,
   onMoveGroup,
@@ -225,11 +220,8 @@ export function ModelCardBody({
   groups?: Array<DraftGroup & { implicit?: boolean }>;
   currentGroup?: string;
   onMoveGroup?: (group: string | null) => void;
-  coverageFor: (id: string) => Model[];
-  displayOfProvider: (id: string) => string;
-  onPickProvider: (id: string) => void;
-  onPreferPreference: (model: Model, provider: string | null) => void;
 }) {
+  const reference = groupProviderRef(m, currentGroup, groups);
   return (
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -239,28 +231,16 @@ export function ModelCardBody({
                 </span>
                 <h3
                   className={cx(
-                    "min-w-0 truncate font-mono text-small",
+                    "min-w-0 break-all font-mono text-small",
                     m.enabled ? "text-fg" : "text-faint",
                   )}
                 >
                   {m.id}
                 </h3>
                 <CopyIconButton
-                  value={groupModelRef(m, currentGroup, groups)}
-                  label={`Copy model reference ${m.id}`}
+                  value={reference}
+                  label={`Copy model reference ${reference}`}
                 />
-                <CoveragePeers
-                  model={m}
-                  peers={coverageFor(m.id)}
-                  displayOf={displayOfProvider}
-                  onPick={onPickProvider}
-                  onPrefer={(provider) => onPreferPreference(m, provider)}
-                />
-                {m.preferred_provider === m.provider ? (
-                  <Badge tone="accent" title={`preferred provider for ${m.id}`}>
-                    preferred
-                  </Badge>
-                ) : null}
                 {m.source === "custom" ? (
                   <Badge tone="accent" title="added by an operator, not synced from the provider">
                     custom
@@ -324,14 +304,18 @@ export function ModelCardBody({
   );
 }
 
-/** The `/v1/models` id for a row: group name for a free-form group, provider otherwise. */
-export function groupModelRef(
+/**
+ * The routable ref for a row: a free-form group namespaces it and still pins the provider
+ * (`group/provider/model`), so two providers serving one id can never be confused. A
+ * provider bucket keeps the plain `provider/model` ref.
+ */
+export function groupProviderRef(
   model: Model,
   groupId: string | undefined,
   groups: Array<DraftGroup & { implicit?: boolean }> | undefined,
 ): string {
   const group = groups?.find((candidate) => candidate.id === groupId);
-  return group && !group.provider ? `${group.name}/${model.id}` : model.ref;
+  return group && !group.provider ? `${group.name}/${model.provider}/${model.id}` : model.ref;
 }
 /** Nothing here means nothing is connected: models come from providers, not catalogs. */
 export function EmptyRegistry({
@@ -405,117 +389,4 @@ export function numeric(value: string): number | null {
   if (!trimmed) return null;
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
-}
-
-/**
- * "2 providers" for a canonical model id, with the peers behind a popover. The row itself
- * stays one provider: enabling, testing and pricing are per connection, so rows are never
- * merged; this only says the same id is routable elsewhere and lets the operator jump there.
- */
-export function CoveragePeers({
-  model,
-  peers,
-  displayOf,
-  onPick,
-  onPrefer,
-}: {
-  model: Model;
-  peers: Model[];
-  displayOf: (provider: string) => string;
-  onPick: (provider: string) => void;
-  /** `null` clears the preference; the same id carries it on every provider row. */
-  onPrefer: (provider: string | null) => void;
-}) {
-  if (peers.length < 2) return null;
-  const preferred = model.preferred_provider ?? null;
-  const preferredMissing = preferred !== null && !peers.some((peer) => peer.provider === preferred);
-  const refs = peers.map((peer) => peer.ref).join("\n");
-  return (
-    <Popover.Root>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          aria-label={`${peers.length} providers serve ${model.id}`}
-          aria-haspopup="dialog"
-          title={refs}
-          className="inline-flex h-5 shrink-0 items-center rounded-full border border-line bg-surface-2 px-1.5 text-caption text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline-none! outline-0!"
-        >
-          {peers.length} providers
-        </button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          side="bottom"
-          align="start"
-          sideOffset={4}
-          aria-label={`Providers serving ${model.id}`}
-          className="popover-panel z-50 w-80 rounded-[var(--radius-card)] border border-line bg-surface p-1.5 shadow-lg focus:outline-none"
-        >
-          <p className="px-1 pb-1 text-caption text-faint">
-            <span className="font-mono text-muted">{model.id}</span> is served by
-          </p>
-          <ul className="flex flex-col">
-            {peers.map((peer) => {
-              const isPreferred = preferred === peer.provider;
-              return (
-                <li key={peer.ref} className="flex items-center gap-1">
-                  <Popover.Close asChild>
-                    <button
-                      type="button"
-                      onClick={() => onPick(peer.provider)}
-                      className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-input)] px-1.5 py-1.5 text-left text-small hover:bg-surface-3 focus-visible:outline-none! outline-0!"
-                    >
-                      <ProviderIcon provider={peer.provider} size={14} />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-fg">{displayOf(peer.provider)}</span>
-                        <span className="block truncate font-mono text-caption text-faint">
-                          {peer.ref}
-                        </span>
-                      </span>
-                      <span className="shrink-0 text-caption text-faint tnum">
-                        {priceLabel(peer) ?? "no price"}
-                      </span>
-                      <Badge tone={peer.enabled ? "pos" : "neutral"}>
-                        {peer.enabled ? "on" : "off"}
-                      </Badge>
-                    </button>
-                  </Popover.Close>
-                  <IconButton
-                    label={
-                      isPreferred
-                        ? `Clear the preferred provider for ${model.id}`
-                        : `Use ${displayOf(peer.provider)} as the preferred provider for ${model.id}`
-                    }
-                    aria-pressed={isPreferred}
-                    onClick={() => onPrefer(isPreferred ? null : peer.provider)}
-                    className={isPreferred ? "text-[var(--color-accent-text)]" : undefined}
-                  >
-                    <Star size={14} weight={isPreferred ? "fill" : "regular"} aria-hidden />
-                  </IconButton>
-                </li>
-              );
-            })}
-          </ul>
-          {preferredMissing ? (
-            <p
-              role="status"
-              className="mt-1 flex items-center justify-between gap-2 rounded-[6px] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-2 py-1.5 text-caption leading-relaxed text-[var(--color-warn-ink)]"
-            >
-              <span className="min-w-0">
-                preferred provider <span className="font-mono">{preferred}</span> is not connected
-                right now
-              </span>
-              <button
-                type="button"
-                onClick={() => onPrefer(null)}
-                className="shrink-0 underline underline-offset-2"
-              >
-                clear
-              </button>
-            </p>
-          ) : null}
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
-  );
 }

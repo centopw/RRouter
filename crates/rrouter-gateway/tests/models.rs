@@ -380,10 +380,10 @@ async fn catalog_rows_have_nine_capabilities_and_are_sorted_newest_first() {
     assert_eq!(codex["max_output"], 128_000);
 }
 
-/// A preference is the same on every provider row of an id, and drives `/v1/models`
-/// `owned_by` only when the named provider actually serves the id.
+/// A shared id lists once per provider in `/v1/models`, each entry pinned to the
+/// provider that serves it. There is no hidden "preferred" provider any more.
 #[tokio::test]
-async fn model_preferences_drive_api_rows_and_v1_owned_by() {
+async fn shared_id_lists_one_v1_entry_per_provider() {
     let h = harness();
     for provider in ["openai", "github"] {
         h.connect(provider, "http://127.0.0.1:9").await;
@@ -396,82 +396,39 @@ async fn model_preferences_drive_api_rows_and_v1_owned_by() {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
-    for provider in ["openai", "github"] {
-        let (_, body) = h.get("/api/models").await;
-        let row = body["data"]
-            .as_array()
-            .expect("data")
-            .iter()
-            .find(|row| row["id"] == "shared-model" && row["provider"] == provider)
-            .unwrap_or_else(|| panic!("shared row {provider} missing: {body}"));
-        assert_eq!(row["preferred_provider"], Value::Null);
-    }
-    let (_, body) = h.get("/api/models/preferences").await;
-    assert_eq!(body["data"].as_array().expect("data").len(), 0);
+    let (_, models) = h.get("/v1/models").await;
+    let shared: Vec<&Value> = models["data"]
+        .as_array()
+        .expect("v1 data")
+        .iter()
+        .filter(|row| row["model"] == "shared-model")
+        .collect();
+    assert_eq!(shared.len(), 2, "one entry per provider: {models}");
+    let mut owners: Vec<&str> = shared
+        .iter()
+        .map(|row| row["owned_by"].as_str().expect("owned_by"))
+        .collect();
+    owners.sort_unstable();
+    assert_eq!(owners, vec!["github", "openai"]);
+    let mut ids: Vec<&str> = shared
+        .iter()
+        .map(|row| row["id"].as_str().expect("id"))
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["github/shared-model", "openai/shared-model"]);
 
-    let (status, body) = h
+    // The removed admin surface is gone, not silently accepting writes.
+    let (status, _) = h
         .send(
             "PUT",
             "/api/models/preference",
             json!({"model": "shared-model", "provider": "github"}),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["preferences"]["shared-model"], "github");
-    assert_eq!(body["data"][0]["provider"], "github");
-
-    for provider in ["openai", "github"] {
-        let (_, body) = h.get("/api/models").await;
-        let row = body["data"]
-            .as_array()
-            .expect("data")
-            .iter()
-            .find(|row| row["id"] == "shared-model" && row["provider"] == provider)
-            .expect("shared row");
-        assert_eq!(
-            row["preferred_provider"], "github",
-            "both rows carry the same preference: {row}"
-        );
-    }
-    let (_, models) = h.get("/v1/models").await;
-    let shared: Vec<&Value> = models["data"]
-        .as_array()
-        .expect("v1 data")
-        .iter()
-        .filter(|row| row["id"] == "github/shared-model")
-        .collect();
-    assert_eq!(shared.len(), 1, "one entry per id");
-    assert_eq!(shared[0]["owned_by"], "github");
-
-    let (status, body) = h
-        .send(
-            "PUT",
-            "/api/models/preference",
-            json!({"model": "shared-model", "provider": null}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body["preferences"].get("shared-model").is_none(), "{body}");
-    let (_, models) = h.get("/v1/models").await;
-    let shared = models["data"]
-        .as_array()
-        .expect("v1 data")
-        .iter()
-        .find(|row| row["id"] == "github/shared-model")
-        .expect("shared entry");
-    assert_eq!(
-        shared["owned_by"], "github",
-        "clearing restores the registry's first provider (sorted order)"
+    assert!(
+        status.is_client_error(),
+        "preference write answered {status}"
     );
-
-    let (status, body) = h
-        .send(
-            "PUT",
-            "/api/models/preference",
-            json!({"model": "shared-model", "provider": 5}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
 /// `/v1/models` carries what the registry knows: limits, modalities, the nine flags,
@@ -645,15 +602,15 @@ async fn free_form_group_name_is_a_routable_alias() {
         .as_array()
         .expect("data")
         .iter()
-        .find(|model| model["id"] == "main/gpt-4.1")
+        .find(|model| model["id"] == "main/openai/gpt-4.1")
         .unwrap_or_else(|| panic!("group-qualified id missing: {body}"));
     assert_eq!(listed["model"], "gpt-4.1");
     assert_eq!(listed["owned_by"], "openai");
     assert_eq!(listed["group"], "g-main");
 
-    let (status, body) = h.get("/v1/models/main/gpt-4.1").await;
+    let (status, body) = h.get("/v1/models/main/openai/gpt-4.1").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["id"], "main/gpt-4.1");
+    assert_eq!(body["id"], "main/openai/gpt-4.1");
     assert_eq!(body["model"], "gpt-4.1");
     assert_eq!(body["owned_by"], "openai");
 
@@ -661,7 +618,7 @@ async fn free_form_group_name_is_a_routable_alias() {
         .post(
             "/v1/chat/completions",
             json!({
-                "model": "main/gpt-4.1",
+                "model": "main/openai/gpt-4.1",
                 "messages": [{"role": "user", "content": "ping"}],
             }),
         )
@@ -736,7 +693,7 @@ async fn group_access_scopes_discovery_lookup_and_routing() {
             .as_array()
             .expect("data")
             .iter()
-            .any(|model| model["id"] == "main/gpt-4.1")
+            .any(|model| model["id"] == "main/openai/gpt-4.1")
     };
     let (_, anonymous) = h.get("/v1/models").await;
     assert!(!listed(&anonymous), "anonymous sees no restricted group");
@@ -746,15 +703,17 @@ async fn group_access_scopes_discovery_lookup_and_routing() {
     assert!(!listed(&denied), "ungranted key sees no restricted group");
 
     assert_eq!(
-        h.get("/v1/models/main/gpt-4.1").await.0,
+        h.get("/v1/models/main/openai/gpt-4.1").await.0,
         StatusCode::NOT_FOUND
     );
-    let (status, body) = h.get_as("/v1/models/main/gpt-4.1", &allowed_secret).await;
+    let (status, body) = h
+        .get_as("/v1/models/main/openai/gpt-4.1", &allowed_secret)
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["id"], "main/gpt-4.1");
+    assert_eq!(body["id"], "main/openai/gpt-4.1");
 
     let chat = json!({
-        "model": "main/gpt-4.1",
+        "model": "main/openai/gpt-4.1",
         "messages": [{"role": "user", "content": "ping"}],
     });
     assert_eq!(
@@ -873,7 +832,7 @@ async fn v1_models_groups_follow_the_default_preset() {
     let data = body["data"].as_array().expect("data");
     let gpt = data
         .iter()
-        .find(|model| model["id"] == "Fast/gpt-4.1" && model["owned_by"] == "openai")
+        .find(|model| model["id"] == "Fast/openai/gpt-4.1" && model["owned_by"] == "openai")
         .expect("gpt-4.1 after grouping");
     assert_eq!(gpt["group"], "g-fast");
     let claude = data
@@ -885,7 +844,7 @@ async fn v1_models_groups_follow_the_default_preset() {
     assert_eq!(claude["group"], "provider:anthropic");
     assert_eq!(
         data.first().map(|model| model["id"].clone()),
-        Some(Value::String("Fast/gpt-4.1".into())),
+        Some(Value::String("Fast/openai/gpt-4.1".into())),
         "the custom group is first: {body}"
     );
     // Grouping does not hide models: every entry still reports a group.
@@ -1310,8 +1269,7 @@ async fn v1_models_omits_disabled_models_and_keeps_preferred_ownership() {
         .expect("re-enabled id returns");
     assert_eq!(shared["owned_by"], "github");
 
-    // One provider disconnected: the id still lists through the other, and ownership
-    // falls back because the preferred provider no longer serves it.
+    // One provider disconnected: the id still lists through the other, pinned to it.
     h.state
         .store
         .set_connection_active(

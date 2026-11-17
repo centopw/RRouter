@@ -5,8 +5,8 @@ import { qk } from "../../lib/queries";
 import { useToast } from "../../components/toast";
 
 /**
- * The registry mutations every model row can reach: enable, test, prefer a provider,
- * delete a custom row, and sync metadata. One hook so the board and the registry table
+ * The registry mutations every model row can reach: enable, test, delete a custom row,
+ * and sync metadata. One hook so the board and the registry table
  * behave identically, and so a view never mounts a mutation it cannot reach.
  */
 export function useModelActions() {
@@ -59,16 +59,6 @@ export function useModelActions() {
       toast.error(`Test failed · ${model.ref}`, error instanceof Error ? error.message : String(error)),
   });
 
-  // One preference per canonical id, shared by every provider row of it; `null` clears.
-  const prefer = useMutation({
-    mutationFn: ({ model, provider }: { model: string; provider: string | null }) =>
-      api.put<{ model: string; preferred_provider: string | null }>("/api/models/preference", {
-        model,
-        provider,
-      }),
-    onSuccess: () => void client.invalidateQueries({ queryKey: qk.models }),
-  });
-
   const remove = useMutation({
     mutationFn: (model: Model) =>
       api.del<{ deleted: boolean }>(
@@ -79,10 +69,6 @@ export function useModelActions() {
 
   const onTest = useCallback((model: Model) => test.mutate(model), [test.mutate]);
   const onToggle = useCallback((model: Model) => toggle.mutate(model), [toggle.mutate]);
-  const onPrefer = useCallback(
-    (model: string, provider: string | null) => prefer.mutate({ model, provider }),
-    [prefer.mutate],
-  );
   const onSync = useCallback(() => sync.mutate(), [sync.mutate]);
 
   // Pending ids rather than whole mutation objects: the column list must keep the same
@@ -91,7 +77,6 @@ export function useModelActions() {
     sync,
     toggle,
     test,
-    prefer,
     remove,
     invalidateRegistry,
     testTarget: test.isPending ? (test.variables?.ref ?? null) : null,
@@ -99,7 +84,6 @@ export function useModelActions() {
     removeTarget: remove.isPending ? (remove.variables?.ref ?? null) : null,
     onTest,
     onToggle,
-    onPrefer,
     onSync,
   };
 }

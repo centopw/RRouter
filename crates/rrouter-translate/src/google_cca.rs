@@ -746,6 +746,7 @@ fn usage_from(usage: Option<&Value>) -> Usage {
         output_tokens: count("candidatesTokenCount").saturating_add(count("thoughtsTokenCount")),
         cache_read_tokens: count("cachedContentTokenCount"),
         cache_write_tokens: 0,
+        reasoning_tokens: count("thoughtsTokenCount"),
     }
 }
 

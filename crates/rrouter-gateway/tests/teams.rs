@@ -221,6 +221,11 @@ impl H {
             status: 200,
             streamed: false,
             error: None,
+            requested_model: None,
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
         };
         self.state.store.record_usage(&record).await.expect("usage");
     }

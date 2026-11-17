@@ -485,6 +485,11 @@ fn usage_from_openai(u: Option<&Value>) -> Usage {
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(0),
         cache_write_tokens: 0,
+        reasoning_tokens: u
+            .pointer("/completion_tokens_details/reasoning_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
     }
 }
 
@@ -496,6 +501,7 @@ fn usage_to_openai(usage: Usage) -> Value {
         "completion_tokens": usage.output_tokens,
         "total_tokens": usage.total(),
         "prompt_tokens_details": Value::Object(details),
+        "completion_tokens_details": {"reasoning_tokens": usage.reasoning_tokens},
     })
 }
 
@@ -506,6 +512,8 @@ fn usage_from_anthropic(u: Option<&Value>) -> Usage {
         output_tokens: u32_at(u, "output_tokens"),
         cache_read_tokens: u32_at(u, "cache_read_input_tokens"),
         cache_write_tokens: u32_at(u, "cache_creation_input_tokens"),
+        // Anthropic reports thinking tokens only inside `output_tokens`.
+        reasoning_tokens: 0,
     }
 }
 
@@ -529,6 +537,11 @@ fn usage_from_responses(u: Option<&Value>) -> Usage {
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(0),
         cache_write_tokens: 0,
+        reasoning_tokens: u
+            .pointer("/output_tokens_details/reasoning_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
     }
 }
 
@@ -538,7 +551,7 @@ fn usage_to_responses(usage: Usage) -> Value {
         "output_tokens": usage.output_tokens,
         "total_tokens": usage.total(),
         "input_tokens_details": {"cached_tokens": usage.cache_read_tokens},
-        "output_tokens_details": {"reasoning_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": usage.reasoning_tokens},
     })
 }
 

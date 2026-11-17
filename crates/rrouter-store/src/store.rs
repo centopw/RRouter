@@ -29,10 +29,6 @@ pub const MAX_API_KEY_NAME: usize = 100;
 pub const MAX_CONNECTION_NAME: usize = 80;
 /// Longest smart-router model reference.
 pub const MAX_COMBO_ROUTER_MODEL: usize = 200;
-/// Longest bare model id in a provider preference.
-pub const MAX_MODEL_PREFERENCE_MODEL: usize = 200;
-/// Longest provider id in a provider preference.
-pub const MAX_MODEL_PREFERENCE_PROVIDER: usize = 100;
 
 /// A stored provider credential set. `credentials` comes from the encrypted `data` blob.
 #[derive(Debug, Clone)]
@@ -546,14 +542,6 @@ pub struct ModelAlias {
     pub target: String,
 }
 
-/// One operator choice: a bare model id is routed to this provider first.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelPreference {
-    pub model: String,
-    pub provider: String,
-    pub updated_at: i64,
-}
-
 /// Longest ping model reference.
 pub const MAX_QUOTA_PING_MODEL: usize = 200;
 /// Schema spelling of the auto-ping mode.
@@ -778,6 +766,16 @@ pub struct UsageRecord {
     pub status: u16,
     pub streamed: bool,
     pub error: Option<String>,
+    /// Model the client asked for, before key mapping, aliasing or combo resolution.
+    pub requested_model: Option<String>,
+    /// Provider terminal reason: `stop`, `length`, `tool_calls`, `content_filter`.
+    pub finish_reason: Option<String>,
+    /// Effort the client requested for thinking, e.g. `minimal` or `high`.
+    pub reasoning_effort: Option<String>,
+    /// Thinking tokens, already included in `output_tokens`; `0` when unreported.
+    pub reasoning_tokens: u32,
+    /// Conversation id the client sent, when it sent one.
+    pub session_id: Option<String>,
 }
 
 /// Outcome class for [`UsageQuery::status`]. `Success` is a 2xx answer with no error text;
@@ -2304,98 +2302,6 @@ impl Store {
             .map_err(migrations::db_err)
     }
 
-    // ----- per-model provider preferences ------------------------------------------
-
-    /// The preference for one bare model id.
-    pub async fn model_preference(&self, model: &str) -> Result<Option<ModelPreference>> {
-        self.conn()
-            .query_row(
-                "SELECT model, provider, updated_at FROM model_preferences WHERE model = ?1",
-                params![model.trim()],
-                |r| {
-                    Ok(ModelPreference {
-                        model: r.get(0)?,
-                        provider: r.get(1)?,
-                        updated_at: r.get(2)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(migrations::db_err)
-    }
-
-    /// Every preference, by model id.
-    pub async fn model_preferences(&self) -> Result<Vec<ModelPreference>> {
-        let conn = self.conn();
-        let mut stmt = conn
-            .prepare("SELECT model, provider, updated_at FROM model_preferences ORDER BY model ASC")
-            .map_err(migrations::db_err)?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(ModelPreference {
-                    model: r.get(0)?,
-                    provider: r.get(1)?,
-                    updated_at: r.get(2)?,
-                })
-            })
-            .map_err(migrations::db_err)?;
-        rows.map(|row| row.map_err(migrations::db_err)).collect()
-    }
-
-    /// Set or replace one model's preferred provider. The provider does not have to be
-    /// connected now; the preference is a routing hint that survives disconnect.
-    pub async fn set_model_preference(
-        &self,
-        model: &str,
-        provider: &str,
-    ) -> Result<ModelPreference> {
-        let model = model.trim();
-        let provider = provider.trim();
-        if model.is_empty() {
-            return Err(Error::BadRequest("a model id is required".into()));
-        }
-        if model.chars().count() > MAX_MODEL_PREFERENCE_MODEL {
-            return Err(Error::BadRequest(format!(
-                "a model id is limited to {MAX_MODEL_PREFERENCE_MODEL} characters"
-            )));
-        }
-        if provider.is_empty() {
-            return Err(Error::BadRequest("a provider is required".into()));
-        }
-        if provider.chars().count() > MAX_MODEL_PREFERENCE_PROVIDER {
-            return Err(Error::BadRequest(format!(
-                "a provider is limited to {MAX_MODEL_PREFERENCE_PROVIDER} characters"
-            )));
-        }
-        let stamp = now();
-        self.conn()
-            .execute(
-                "INSERT INTO model_preferences (model, provider, updated_at) \
-                 VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(model) DO UPDATE SET \
-                 provider = excluded.provider, updated_at = excluded.updated_at",
-                params![model, provider, stamp],
-            )
-            .map_err(migrations::db_err)?;
-        Ok(ModelPreference {
-            model: model.to_string(),
-            provider: provider.to_string(),
-            updated_at: stamp,
-        })
-    }
-
-    /// Remove one preference. `true` means a row existed.
-    pub async fn clear_model_preference(&self, model: &str) -> Result<bool> {
-        let n = self
-            .conn()
-            .execute(
-                "DELETE FROM model_preferences WHERE model = ?1",
-                params![model.trim()],
-            )
-            .map_err(migrations::db_err)?;
-        Ok(n > 0)
-    }
-
     // ----- quota auto-ping ---------------------------------------------------------
 
     /// Every stored ping configuration, ordered by connection id.
@@ -3346,9 +3252,10 @@ impl Store {
             "INSERT INTO usage \
              (ts, request_id, provider, model, connection_id, endpoint, key_id, input_tokens, \
               output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, \
-              streamed, error, cost_micros, upstream_ms, trace_id, team_id) \
+              streamed, error, cost_micros, upstream_ms, trace_id, team_id, requested_model, \
+              finish_reason, reasoning_effort, reasoning_tokens, session_id) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-                     ?19, (SELECT team_id FROM api_keys WHERE id = ?7))",
+                     ?19, (SELECT team_id FROM api_keys WHERE id = ?7), ?20, ?21, ?22, ?23, ?24)",
             params![
                 r.ts,
                 r.request_id.map(|u| u.to_string()).unwrap_or_default(),
@@ -3369,6 +3276,11 @@ impl Store {
                 sql_u64(r.cost_micros),
                 r.upstream_ms,
                 r.trace_id,
+                r.requested_model,
+                r.finish_reason,
+                r.reasoning_effort,
+                r.reasoning_tokens,
+                r.session_id,
             ],
         )
         .map_err(migrations::db_err)?;
@@ -4058,7 +3970,8 @@ fn opt_uuid_col(raw: Option<String>) -> rusqlite::Result<Option<Uuid>> {
 /// every reader so a new column cannot desynchronize one query from the rest.
 const USAGE_COLUMNS: &str = "id, ts, request_id, provider, model, connection_id, endpoint, \
      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, \
-     status, streamed, error, key_id, cost_micros, upstream_ms, trace_id";
+     status, streamed, error, key_id, cost_micros, upstream_ms, trace_id, requested_model, \
+     finish_reason, reasoning_effort, reasoning_tokens, session_id";
 
 /// Empty `request_id` is the v8 "unknown" default written before request ids existed.
 fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
@@ -4086,6 +3999,11 @@ fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         key_id: kid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
         cost_micros: r.get_u64(17)?,
         upstream_ms: r.get(18)?,
+        requested_model: r.get(20)?,
+        finish_reason: r.get(21)?,
+        reasoning_effort: r.get(22)?,
+        reasoning_tokens: r.get(23)?,
+        session_id: r.get(24)?,
     })
 }
 

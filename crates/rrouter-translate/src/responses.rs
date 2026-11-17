@@ -1320,7 +1320,8 @@ mod tests {
                 input_tokens: 20,
                 output_tokens: 5,
                 cache_read_tokens: 8,
-                cache_write_tokens: 0
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
             }
         );
         assert_eq!(resp.finish_reason, FinishReason::Stop);
@@ -1404,7 +1405,8 @@ mod tests {
                     input_tokens: 4,
                     output_tokens: 9,
                     cache_read_tokens: 1,
-                    cache_write_tokens: 0
+                    cache_write_tokens: 0,
+                    reasoning_tokens: 0,
                 }),
             }
         );
@@ -1436,6 +1438,7 @@ mod tests {
                     output_tokens: 3,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
+                    reasoning_tokens: 0,
                 }),
             },
         ] {

@@ -2,8 +2,8 @@
 
 Layout presets for the **Models** page: a named, ordered board of registry models with
 groups and a per-row visibility flag. A preset changes what an operator sees and how it is
-ordered. A free-form group's name is also a routing alias: `/v1/models` advertises
-`<group>/<model>` and the planner resolves it to that group's members. Hiding a row or group
+ordered. A free-form group's name is a namespace: `/v1/models` advertises
+`<group>/<provider>/<model>` and the planner routes exactly that provider row. Hiding a row or group
 removes it from `/v1/models` discovery but leaves the model routable, and nothing here
 writes `disabled_models`.
 
@@ -17,7 +17,7 @@ and `scripts/model_presets_smoke.py` is the API half of acceptance.
 | --- | --- | --- |
 | **Preset** | server-side library, `scope: "global"` | Named layout document, instance-wide, admin-managed |
 | **Group** | preset `layout.groups[]` | `{ id, name, provider?, visible, access? }`; array order is display order. Provider buckets use `provider:<provider>`. A free-form group's name prefixes model ids |
-| **Access** | group `access` | `{ teams?, keys?, users? }` UUID grants; absent = everyone. Ungranted callers lose the group and its `/v1/models` models; the group alias returns `403` |
+| **Access** | group `access` | `{ teams?, keys?, users? }` UUID grants; absent = everyone. Ungranted callers lose the group and its `/v1/models` models; a `<group>/...` ref returns `403` |
 | **Item** | preset `layout.items[]` | `{ provider, id, group?, position, visible }`; `group` is an explicit group id, omitted means the provider bucket |
 | **visible: false** | item flag | The row is hidden from this preset's active list and from `/v1/models` when this is the default preset; it **stays routable** |
 | **`disabled_models`** | routing registry | Separate `PUT /api/disabled/{model}` state. Hiding a preset row never touches it |

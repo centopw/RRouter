@@ -35,7 +35,7 @@ only to build.
   request detail with the attempt timeline.
 - **Logs** — the full request log, filterable by range/status/provider/model/key, with
   backward paging and the same request detail.
-- **Models** — registry, provider coverage, disabled models, presets and preferred provider.
+- **Models** — registry, provider coverage, disabled models and presets.
 - **Providers** — accounts, subscription limits, quota windows and auto-ping.
 - **Evals** — suites with shared context, optional judge, cases and expandable results.
 - **Playground** — a real streamed request through the gateway.

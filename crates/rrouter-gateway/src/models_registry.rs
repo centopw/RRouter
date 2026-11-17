@@ -168,9 +168,6 @@ pub struct ModelItem {
     pub source: String,
     pub enabled: bool,
     pub available: bool,
-    /// Operator's provider choice for this bare model id. Same value on every provider
-    /// row of the id; `null` means no preference.
-    pub preferred_provider: Option<String>,
     /// A family its provider has retired (or models.dev marks deprecated). Still
     /// routable when a client names it explicitly, but never offered first.
     pub deprecated: bool,
@@ -194,7 +191,6 @@ impl ModelItem {
             source: source.to_string(),
             enabled: true,
             available: false,
-            preferred_provider: None,
             deprecated: rrouter_router::catalog::is_retired(provider, id),
         }
     }
@@ -585,16 +581,7 @@ pub async fn list(state: &AppState) -> Result<Vec<ModelItem>> {
         .filter(|conn| conn.is_active)
         .map(|conn| conn.provider)
         .collect();
-    let mut items = merge(state.catalog.all(), &rows, &disabled, &active_providers);
-    let preferences: BTreeMap<String, String> = store
-        .model_preferences()
-        .await?
-        .into_iter()
-        .map(|preference| (preference.model, preference.provider))
-        .collect();
-    for item in &mut items {
-        item.preferred_provider = preferences.get(&item.id).cloned();
-    }
+    let items = merge(state.catalog.all(), &rows, &disabled, &active_providers);
     Ok(items)
 }
 
@@ -628,11 +615,6 @@ pub async fn item(state: &AppState, provider: &str, id: &str) -> Result<Option<M
         .iter()
         .any(|c| c.is_active && c.provider == provider);
     item.deprecated = item.deprecated || rrouter_router::catalog::is_retired(provider, id);
-    item.preferred_provider = state
-        .store
-        .model_preference(id)
-        .await?
-        .map(|preference| preference.provider);
     Ok(Some(item))
 }
 
@@ -1392,6 +1374,7 @@ mod tests {
             output_tokens: 500,
             cache_read_tokens: 2_000,
             cache_write_tokens: 300,
+            reasoning_tokens: 0,
         };
         assert_eq!(cost.micros(usage), 10_725, "micro-USD, no rounding loss");
 
@@ -1403,6 +1386,7 @@ mod tests {
                 output_tokens: 10,
                 cache_read_tokens: 1_000,
                 cache_write_tokens: 1_000,
+                reasoning_tokens: 0,
             }),
             60
         );

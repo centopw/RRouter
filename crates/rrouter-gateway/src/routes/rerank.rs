@@ -446,6 +446,13 @@ async fn record_usage(
         status,
         streamed: false,
         error,
+        // Not a chat request: no thinking budget, and this route does not resolve an
+        // alias, so the client's model and the served model are the same string.
+        requested_model: None,
+        finish_reason: None,
+        reasoning_effort: None,
+        reasoning_tokens: 0,
+        session_id: None,
     };
     if let Err(e) = state.store.record_usage(&record).await {
         tracing::warn!(error = %e, "rerank usage row failed");

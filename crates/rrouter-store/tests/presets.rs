@@ -756,6 +756,9 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
              ALTER TABLE eval_suites DROP COLUMN system_prompt; \
              ALTER TABLE eval_runs DROP COLUMN judge_model; \
              DROP INDEX IF EXISTS idx_api_keys_system_kind; ALTER TABLE api_keys DROP COLUMN kind; ALTER TABLE api_keys DROP COLUMN sealed_secret; ALTER TABLE api_keys DROP COLUMN owner_user_id; \
+             ALTER TABLE usage DROP COLUMN requested_model; ALTER TABLE usage DROP COLUMN finish_reason; \
+             ALTER TABLE usage DROP COLUMN reasoning_effort; ALTER TABLE usage DROP COLUMN reasoning_tokens; \
+             ALTER TABLE usage DROP COLUMN session_id; \
              PRAGMA user_version = 29;",
         )
         .expect("rewind to v29");

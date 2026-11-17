@@ -325,11 +325,29 @@ export function RequestDetail({
           <Row k="When" v={when(row.ts)} />
           <Row k="Provider" v={providerName ?? row.provider} />
           <Row k="API key" v={(row.key_id ? keyNames?.get(row.key_id) : undefined) ?? "—"} />
-          {row.endpoint ? <Row k="Endpoint" v={row.endpoint} mono /> : null}
+          {row.requested_model && row.requested_model !== row.model ? (
+            <Row k="Requested" v={row.requested_model} mono />
+          ) : null}
+          {row.endpoint ? (
+            <Row k="Endpoint" v={`${row.method} ${row.endpoint}`} mono />
+          ) : null}
+          {row.protocol ? <Row k="Protocol" v={row.protocol} mono /> : null}
           <Row k="Tokens" v={failed ? "—" : `${row.input_tokens} in · ${row.output_tokens} out`} mono />
+          {row.reasoning_tokens > 0 || row.reasoning_effort ? (
+            <Row
+              k="Reasoning"
+              v={[
+                row.reasoning_effort ?? "unknown effort",
+                `${row.reasoning_tokens} tokens`,
+              ].join(" · ")}
+              mono
+            />
+          ) : null}
+          <Row k="Finish" v={row.finish_reason ?? "—"} mono />
           <Row k="Cost" v={usd(row.cost_micros, { dash: true })} mono />
           <Row k="Cache" v={failed ? "—" : `${row.cache_read_tokens} read · ${row.cache_write_tokens} write`} mono />
           <Row k="Connection" v={row.connection_id ?? "—"} mono />
+          {row.session_id ? <Row k="Session" v={row.session_id} mono /> : null}
         </dl>
 
         {showAttempts ? (

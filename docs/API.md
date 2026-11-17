@@ -58,14 +58,14 @@ unaffected, so hidden models still work when a client names them explicitly. A c
 ignores `groups` still reads a normal OpenAI `data` list.
 
 Every entry is identified by the route a client should use: a free-form group's name plus
-the model id (`main/deepseek-v4.1-flash`), the provider id for a provider bucket
-(`opencode-go/...`), or the bare alias/combo name. The planner resolves a group name to the
-models the board places in that group, so the provider is still chosen by the gateway. Each
+the provider and model id (`main/opencode-go/deepseek-v4.1-flash`), the provider id for a
+provider bucket (`opencode-go/...`), or the bare alias/combo name. The provider segment pins
+the row; combining providers is a combo's job. A shared id lists once per provider. Each
 provider entry also carries `model` with the bare id, so a client never has to split the id.
 
 Group access is opt-in. A group with no `access` object is open to everyone; otherwise
 `/v1/models` omits it (and its models) unless the caller's key, key team or key owner is
-granted, and the `<group>/<model>` alias answers `403` for an ungranted caller.
+granted, and a `<group>/...` ref answers `403` for an ungranted caller.
 
 ```sh
 # Open the group to everyone, or restrict it to identities:
@@ -84,7 +84,7 @@ without a second lookup. Unknown fields are omitted, never invented:
 
 | Field | Meaning |
 | --- | --- |
-| `id` | `<group>/<model>` for a free-form group, `<provider>/<model>` for a provider bucket, or the alias/combo name. |
+| `id` | `<group>/<provider>/<model>` for a free-form group, `<provider>/<model>` for a provider bucket, or the alias/combo name. |
 | `model` | Bare model id for provider entries (absent on aliases and combos). |
 | `name` | Operator/provider display name. |
 | `context_window`, `context_length` | Context window in tokens (both spellings). |
@@ -181,7 +181,7 @@ Usage reads are aggregated in SQL:
 
 | Query | Answers |
 | --- | --- |
-| `GET /api/usage?hours=&limit=` | request log: id, endpoint, tokens, cache, latency, status |
+| `GET /api/usage?hours=&limit=` | request log: id, endpoint, method/protocol, tokens, cache, latency, status, requested model, finish reason, reasoning effort/tokens, client session |
 | `GET /api/usage/series?hours=&bucket=5m\|hour\|day` | per-bucket requests, errors, tokens, cache, latency |
 | `GET /api/usage/series?by=model` | the same buckets split per model |
 | `GET /api/usage/summary?hours=` | per-model totals; omit `hours` for all time |
