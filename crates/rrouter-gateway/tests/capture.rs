@@ -5,7 +5,7 @@
 //! (`capture_bodies`, `system_logs`) are atomics shared by the whole binary.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -14,7 +14,6 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
-use bytes::Bytes;
 use http_body_util::BodyExt;
 use rrouter_auth::Credentials;
 use rrouter_gateway::{app, config::Config, AppState};
@@ -23,11 +22,12 @@ use rrouter_store::{CaptureRecord, Store};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-/// Serializes tests that flip process-global switches.
-static SWITCHES: Mutex<()> = Mutex::new(());
+/// Serializes tests that flip process-global switches. Tokio's mutex, because the
+/// tests hold it across awaits by design.
+static SWITCHES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn lock_switches() -> MutexGuard<'static, ()> {
-    SWITCHES.lock().unwrap_or_else(|e| e.into_inner())
+async fn lock_switches() -> tokio::sync::MutexGuard<'static, ()> {
+    SWITCHES.lock().await
 }
 
 // ---------------------------------------------------------------- mock upstream
@@ -68,10 +68,6 @@ impl Mock {
 
     fn url(&self) -> String {
         self.url.clone()
-    }
-
-    fn hits(&self) -> usize {
-        self.hits.load(Ordering::SeqCst)
     }
 }
 
@@ -393,7 +389,7 @@ fn chat_body() -> Value {
 /// answer and for SSE, and deleting the usage row removes the capture with it.
 #[tokio::test]
 async fn capture_is_opt_in_and_dies_with_its_usage_row() {
-    let _guard = lock_switches();
+    let _guard = lock_switches().await;
     let mock = Mock::start(vec![
         openai_reply("off"),
         openai_reply("on"),
@@ -508,7 +504,7 @@ async fn capture_is_opt_in_and_dies_with_its_usage_row() {
 /// One system-log entry can be deleted by id; an id that is gone is a 404.
 #[tokio::test]
 async fn system_log_entries_can_be_deleted_one_by_one() {
-    let _guard = lock_switches();
+    let _guard = lock_switches().await;
     let h = harness();
     let (status, body) = h.put("/api/system/logs", json!({"enabled": true})).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -537,5 +533,5 @@ async fn system_log_entries_can_be_deleted_one_by_one() {
         .filter_map(|entry| entry["id"].as_u64())
         .collect();
     assert!(!remaining.contains(&id), "entry {id} still listed");
-    let _ = rrouter_gateway::syslog::set_enabled(false);
+    rrouter_gateway::syslog::set_enabled(false);
 }

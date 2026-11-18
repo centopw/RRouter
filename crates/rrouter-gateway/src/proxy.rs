@@ -705,7 +705,7 @@ async fn special(state: &Arc<AppState>, req: Request, kind: Special) -> Response
             );
         }
     };
-    capture_request(&state, trace.request_id, &parts.headers, &raw);
+    capture_request(state, trace.request_id, &parts.headers, &raw);
     match special_inner(state, &parts.headers, &raw, kind, &trace).await {
         // Non-streaming: the permit dies with this scope, after the body is built.
         Ok(resp) => capture_response(state, trace.request_id, trace.respond(started, resp)),
@@ -1006,7 +1006,7 @@ async fn passthrough(state: &Arc<AppState>, req: Request, kind: Pass) -> Respons
             );
         }
     };
-    capture_request(&state, trace.request_id, &parts.headers, &raw);
+    capture_request(state, trace.request_id, &parts.headers, &raw);
     match passthrough_inner(state, &parts.headers, &raw, kind, &trace).await {
         // Audio streams: the slot has to outlive this handler and die with the body.
         Ok(resp) => capture_response(
