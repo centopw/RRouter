@@ -346,7 +346,9 @@ pub fn csrf_ok(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value == "1")
 }
 
-/// The peer address for throttling. Falls back to a proxy header, then to a shared key.
+/// The caller's address: the proxy header when a proxy set one, else the real peer.
+/// `"unknown"` is the last resort and only for a request genuinely carrying neither —
+/// an in-process `oneshot` call, never a served one.
 pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     if let Some(forwarded) = headers
         .get("x-forwarded-for")

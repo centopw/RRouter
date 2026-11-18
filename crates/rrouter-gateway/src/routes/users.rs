@@ -33,6 +33,7 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Response {
 pub async fn update(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
@@ -61,7 +62,7 @@ pub async fn update(
                 &state,
                 "user_updated",
                 Some(&user.email),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!(
                     "role {} · {}",
                     user.role.as_str(),
@@ -81,6 +82,7 @@ pub async fn update(
 pub async fn remove(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
 ) -> Response {
     let Ok(id) = Uuid::parse_str(&id) else {
@@ -92,7 +94,7 @@ pub async fn remove(
                 &state,
                 "user_removed",
                 None,
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("user {id}"),
             )
             .await;

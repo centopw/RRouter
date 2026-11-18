@@ -232,6 +232,7 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Res
 pub async fn create(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     body: Body,
 ) -> Response {
     let value = match body_json(body).await {
@@ -258,7 +259,7 @@ pub async fn create(
                 &state,
                 "team_created",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("team {} · name {}", team.id, team.name),
             )
             .await;
@@ -344,6 +345,7 @@ pub async fn get(
 pub async fn update(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
@@ -382,7 +384,7 @@ pub async fn update(
                 &state,
                 "team_updated",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!(
                     "team {} · name {} · budget_tokens {} · budget_micros {} · window {}",
                     team.id,
@@ -407,6 +409,7 @@ pub async fn update(
 pub async fn remove(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
 ) -> Response {
     let Ok(id) = Uuid::parse_str(&id) else {
@@ -419,7 +422,7 @@ pub async fn remove(
                 &state,
                 "team_deleted",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("team {id}"),
             )
             .await;
@@ -482,6 +485,7 @@ async fn members_json(state: &AppState, team_id: Uuid) -> Result<Vec<Value>, Err
 pub async fn add_member(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
@@ -533,7 +537,7 @@ pub async fn add_member(
                 &state,
                 "team_member_added",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!(
                     "team {team_id} · user {user_id} · role {}",
                     member.role.as_str()
@@ -561,6 +565,7 @@ pub async fn add_member(
 pub async fn remove_member(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path((id, user_id)): Path<(String, String)>,
 ) -> Response {
     let (Ok(team_id), Ok(user_id)) = (Uuid::parse_str(&id), Uuid::parse_str(&user_id)) else {
@@ -580,7 +585,7 @@ pub async fn remove_member(
                 &state,
                 "team_member_removed",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("team {team_id} · user {user_id}"),
             )
             .await;

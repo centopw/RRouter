@@ -233,6 +233,7 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
 pub async fn create(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     body: Body,
 ) -> Response {
     let value = match body_json(body).await {
@@ -258,7 +259,7 @@ pub async fn create(
                 &state,
                 "preset_created",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("preset {} · name {}", created.id, created.name),
             )
             .await;
@@ -278,6 +279,7 @@ pub async fn create(
 pub async fn update(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
@@ -312,7 +314,7 @@ pub async fn update(
                 &state,
                 "preset_updated",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("preset {id} · name {}", preset.name),
             )
             .await;
@@ -333,6 +335,7 @@ pub async fn update(
 pub async fn remove(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
 ) -> Response {
     let id = match id_or_404(&id) {
@@ -359,7 +362,7 @@ pub async fn remove(
                 &state,
                 "preset_deleted",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("preset {id}"),
             )
             .await;
@@ -374,6 +377,7 @@ pub async fn remove(
 pub async fn duplicate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
@@ -395,7 +399,7 @@ pub async fn duplicate(
                 &state,
                 "preset_created",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!(
                     "preset {} · duplicated from {id} · name {}",
                     copy.id, copy.name
@@ -421,6 +425,7 @@ pub async fn duplicate(
 pub async fn activate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
 ) -> Response {
     let id = match id_or_404(&id) {
@@ -454,7 +459,7 @@ pub async fn activate(
                 &state,
                 "preset_activated",
                 Some(&user.email),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("preset {id} · account {}", user.email),
             )
             .await;
@@ -471,6 +476,7 @@ pub async fn activate(
 pub async fn save_layout(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
     body: Body,
 ) -> Response {
@@ -503,7 +509,7 @@ pub async fn save_layout(
                 &state,
                 "preset_layout_saved",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("preset {id} · revision {}", preset.revision),
             )
             .await;
@@ -526,6 +532,7 @@ pub async fn save_layout(
 pub async fn set_group_access(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(group_id): Path<String>,
     body: Body,
 ) -> Response {
@@ -556,7 +563,7 @@ pub async fn set_group_access(
                 &state,
                 "group_access_saved",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("group {group_id} · preset {}", updated.id),
             )
             .await;
@@ -625,6 +632,7 @@ fn group_access_field(value: &Value) -> Result<Option<rrouter_store::GroupAccess
 pub async fn set_default(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     Path(id): Path<String>,
 ) -> Response {
     let id = match id_or_404(&id) {
@@ -638,7 +646,7 @@ pub async fn set_default(
                 &state,
                 "preset_default_set",
                 Some(&actor),
-                &crate::auth::client_ip(&headers, None),
+                &crate::auth::client_ip(&headers, peer.0),
                 &format!("preset {} · name {}", preset.id, preset.name),
             )
             .await;

@@ -249,7 +249,7 @@ pub async fn setup(
         &state,
         "setup",
         Some(&user.email),
-        &auth::client_ip(&headers, None),
+        &auth::client_ip(&headers, peer.0),
         "owner account created",
     )
     .await;
@@ -562,7 +562,7 @@ pub async fn update_me(
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    let ip = auth::client_ip(&headers, None);
+    let ip = auth::client_ip(&headers, peer.0);
     let mut cookie: Option<Response> = None;
     if let Some(name) = text(&value, "name") {
         if let Err(e) = state.store.rename_user(user.id, &name).await {
@@ -652,6 +652,7 @@ pub async fn update_me(
 pub async fn revoke_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
     let Some(user) = current_user(&state, &headers).await else {
@@ -696,7 +697,7 @@ pub async fn revoke_session(
         &state,
         "session_revoked",
         Some(&user.email),
-        &auth::client_ip(&headers, None),
+        &auth::client_ip(&headers, peer.0),
         "one device",
     )
     .await;
@@ -711,6 +712,7 @@ pub async fn revoke_session(
 pub async fn revoke_other_sessions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
 ) -> Response {
     let Some(user) = current_user(&state, &headers).await else {
         return fail(
@@ -732,7 +734,7 @@ pub async fn revoke_other_sessions(
                 &state,
                 "sessions_revoked",
                 Some(&user.email),
-                &auth::client_ip(&headers, None),
+                &auth::client_ip(&headers, peer.0),
                 &format!("{count} other device(s)"),
             )
             .await;
@@ -821,7 +823,11 @@ pub async fn refresh(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
 }
 
 /// `POST /api/auth/logout` — clears the session both server- and client-side.
-pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+pub async fn logout(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+) -> Response {
     if let Some(sid) = current_session_id(&state, &headers) {
         let user = current_user(&state, &headers).await;
         if let Err(e) = state.store.delete_session(&sid).await {
@@ -831,7 +837,7 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
             &state,
             "sign_out",
             user.as_ref().map(|u| u.email.as_str()),
-            &auth::client_ip(&headers, None),
+            &auth::client_ip(&headers, peer.0),
             "session ended",
         )
         .await;
@@ -846,13 +852,14 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
 pub async fn recover(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    peer: crate::auth::Peer,
     body: Body,
 ) -> Response {
     let value = match body_json(body).await {
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    let ip = auth::client_ip(&headers, None);
+    let ip = auth::client_ip(&headers, peer.0);
     let invalid = || {
         fail(
             StatusCode::BAD_REQUEST,
@@ -1035,7 +1042,7 @@ pub async fn signup(
         &state,
         "invitation_accepted",
         Some(&user.email),
-        &auth::client_ip(&headers, None),
+        &auth::client_ip(&headers, peer.0),
         &format!("role {}", user.role.as_str()),
     )
     .await;
@@ -1059,7 +1066,12 @@ pub async fn signup(
 }
 
 /// `POST /api/users/invites` — admin only; the link is returned once.
-pub async fn create_invite(State(state): State<Arc<AppState>>, body: Body) -> Response {
+pub async fn create_invite(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    body: Body,
+) -> Response {
     let value = match body_json(body).await {
         Ok(v) => v,
         Err(resp) => return *resp,
@@ -1113,7 +1125,7 @@ pub async fn create_invite(State(state): State<Arc<AppState>>, body: Body) -> Re
         &state,
         "invitation_created",
         Some(&creator.email),
-        &auth::client_ip(&HeaderMap::new(), None),
+        &auth::client_ip(&headers, peer.0),
         &format!("{} as {}", invite.email, invite.role.as_str()),
     )
     .await;

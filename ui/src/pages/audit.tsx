@@ -1,5 +1,18 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, CardHeader, EmptyState, ErrorNote, PageHeader, Segmented, Select } from "../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  CopyButton,
+  EmptyState,
+  ErrorNote,
+  Modal,
+  PageHeader,
+  SectionLabel,
+  Segmented,
+  Select,
+} from "../components/ui";
 import { DataTable, type Column } from "../components/table";
 import type { AuditEvent } from "../lib/auth";
 import { useAudit } from "../lib/queries";
@@ -69,10 +82,74 @@ function categoryOf(kind: string): Exclude<Category, "all"> {
   return "auth";
 }
 
+/** The full instant, to the second, in the reader's own timezone. */
+function fullWhen(ts: number): string {
+  return new Date(ts * 1000).toLocaleString(undefined, {
+    dateStyle: "full",
+    timeStyle: "long",
+  });
+}
+
+/** One event, untruncated: the row's cells elide, this is where the whole record sits. */
+function AuditDetail({ event, onClose }: { event: AuditEvent; onClose: () => void }) {
+  const detail = event.detail ?? "";
+  return (
+    <Modal
+      title="Audit event"
+      open
+      onClose={onClose}
+      width="md"
+      description="One row of this gateway's security trail, shown in full."
+      footer={
+        <Button variant="primary" onClick={onClose}>
+          Done
+        </Button>
+      }
+    >
+      <div className="flex flex-col gap-6">
+        <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-4 gap-y-3 text-small">
+          <dt className="text-faint">when</dt>
+          <dd className="text-fg tnum">{fullWhen(event.ts)}</dd>
+          <dt className="text-faint">event</dt>
+          <dd className="flex flex-wrap items-center gap-2">
+            <Badge
+              tone={
+                event.kind.includes("failed")
+                  ? "neg"
+                  : event.kind === "sign_in"
+                    ? "pos"
+                    : "neutral"
+              }
+            >
+              {event.kind.replaceAll("_", " ")}
+            </Badge>
+            <span className="font-mono text-caption text-muted">{event.kind}</span>
+          </dd>
+          <dt className="text-faint">actor</dt>
+          <dd className="break-words text-fg">{event.actor ?? "—"}</dd>
+          <dt className="text-faint">source</dt>
+          <dd className="break-all font-mono text-fg tnum">{event.ip ?? "—"}</dd>
+        </dl>
+
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <SectionLabel>detail</SectionLabel>
+            <CopyButton value={detail} label="Copy detail" />
+          </div>
+          <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-words rounded-[var(--radius-input)] border border-line bg-[var(--color-surface-2)] px-3 py-2.5 text-small text-fg">
+            {detail || "—"}
+          </pre>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 /** Security trail: who did what, from where. Read-only and admin-only. */
 export default function Audit() {
   const [category, setCategory] = useState<Category>("all");
   const [kind, setKind] = useState("");
+  const [selected, setSelected] = useState<AuditEvent | null>(null);
   const audit = useAudit(kind);
   const rawRows = audit.data ?? [];
 
@@ -102,27 +179,36 @@ export default function Audit() {
       key: "ts",
       title: "when",
       width: "12rem",
+      cellTitle: (event) => fullWhen(event.ts),
       render: (event) => <span className="font-mono text-small text-muted tnum">{when(event.ts)}</span>,
     },
     {
       key: "kind",
       title: "event",
+      cellTitle: (event) => event.kind.replaceAll("_", " "),
       render: (event) => (
         <Badge tone={event.kind.includes("failed") ? "neg" : event.kind === "sign_in" ? "pos" : "neutral"}>
           {event.kind.replaceAll("_", " ")}
         </Badge>
       ),
     },
-    { key: "actor", title: "actor", render: (event) => event.actor ?? "—" },
+    {
+      key: "actor",
+      title: "actor",
+      cellTitle: (event) => event.actor,
+      render: (event) => event.actor ?? "—",
+    },
     {
       key: "ip",
       title: "source",
       width: "10rem",
+      cellTitle: (event) => event.ip,
       render: (event) => <span className="font-mono text-caption text-muted tnum">{event.ip ?? "—"}</span>,
     },
     {
       key: "detail",
       title: "detail",
+      cellTitle: (event) => event.detail,
       render: (event) => <span className="text-muted">{event.detail ?? "—"}</span>,
     },
   ];
@@ -206,9 +292,20 @@ export default function Audit() {
             )}
           </EmptyState>
         ) : (
-          <DataTable columns={columns} rows={rows} rowKey={(event) => String(event.id)} loading={audit.isLoading} />
+          <DataTable
+            columns={columns}
+            rows={rows}
+            rowKey={(event) => String(event.id)}
+            selectedKey={selected?.id}
+            onRowClick={setSelected}
+            loading={audit.isLoading}
+          />
         )}
       </Card>
+
+      {selected ? (
+        <AuditDetail event={selected} onClose={() => setSelected(null)} />
+      ) : null}
     </>
   );
 }
