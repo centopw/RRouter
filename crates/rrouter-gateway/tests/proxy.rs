@@ -2325,6 +2325,7 @@ async fn key_rows_match_the_governance_contract() {
         "owner_user_id": null,
         "kind": "user",
         "models": [],
+        "last_used_at": 0,
     });
     assert_eq!(patched, expected);
 
