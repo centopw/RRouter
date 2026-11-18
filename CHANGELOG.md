@@ -2,6 +2,13 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.28.0 — 2026-11-18
+
+### Features
+
+- feat(ui): flatten dashboard navigation and reduce colour to signal ([`4c6f805`](https://github.com/centopw/RRouter/commit/4c6f805f43e924eec556ddefffd319e1ae4a52db))
+- feat(usage): exact per-connection aggregates and key last-used ([`86880ad`](https://github.com/centopw/RRouter/commit/86880ad58210680a5617d7874f5f142b38aae9fd))
+
 ## 0.27.0 — 2026-11-18
 
 ### Features
