@@ -8,6 +8,7 @@ import {
   Card,
   CardHeader,
   ErrorNote,
+  Input,
   PageHeader,
   Select,
   Toggle,
@@ -28,6 +29,10 @@ export default function RuntimeSettings() {
   const [metadataNote, setMetadataNote] = useState<string | null>(null);
   const [savingRtk, setSavingRtk] = useState(false);
   const [savingCapture, setSavingCapture] = useState(false);
+  const [savingRetention, setSavingRetention] = useState(false);
+  const [sweepBusy, setSweepBusy] = useState(false);
+  const [sweepNote, setSweepNote] = useState<string | null>(null);
+  const [draft, setDraft] = useState<RetentionDraft>(emptyDraft);
   const [error, setError] = useState<unknown>(null);
 
   const counts = system.data?.counts;
@@ -98,6 +103,48 @@ export default function RuntimeSettings() {
       setError(e);
     } finally {
       setSavingCapture(false);
+    }
+  };
+
+  const stored = settings.data as (Brand & HistorySettings) | undefined;
+  // Seed the draft once the blob arrives; a later save writes the same shape back.
+  const [seeded, setSeeded] = useState(false);
+  if (!seeded && stored) {
+    setSeeded(true);
+    setDraft(draftFrom(stored));
+  }
+
+  const saveRetention = async () => {
+    const patch = patchFrom(draft);
+    setSavingRetention(true);
+    setError(null);
+    try {
+      const saved = await api.put<Brand>("/api/settings", { ...(settings.data ?? {}), ...patch });
+      client.setQueryData(GATEWAY_SETTINGS_KEY, saved);
+      await client.invalidateQueries({ queryKey: GATEWAY_SETTINGS_KEY });
+    } catch (e) {
+      setError(e);
+    } finally {
+      setSavingRetention(false);
+    }
+  };
+
+  const sweepNow = async () => {
+    setSweepBusy(true);
+    setSweepNote(null);
+    setError(null);
+    try {
+      const report = await api.post<Record<string, number>>("/api/settings/retention/sweep");
+      const dropped = Object.entries(report)
+        .filter(([, n]) => n > 0)
+        .map(([name, n]) => `${name} ${n}`)
+        .join(" · ");
+      setSweepNote(dropped ? `removed ${dropped}` : "nothing was past its cutoff");
+      await client.invalidateQueries({ queryKey: GATEWAY_SETTINGS_KEY });
+    } catch (e) {
+      setError(e);
+    } finally {
+      setSweepBusy(false);
     }
   };
 
@@ -254,6 +301,91 @@ export default function RuntimeSettings() {
         </div>
       </Card>
 
+      <Card className="mt-4">
+        <CardHeader
+          title="Stored history"
+          action={
+            <span className="text-caption text-faint">
+              swept daily · 0 keeps until deleted by hand
+            </span>
+          }
+        />
+        <div className="flex flex-col gap-4 px-5 pb-5">
+          <p className="max-w-[70ch] text-small leading-relaxed text-muted">
+            Every store the gateway keeps has its own lifetime. A blank box follows the usage
+            window; a switch turns the store off immediately (nothing new is written) without
+            touching rows already there.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-body">
+              <thead>
+                <tr className="border-b border-line text-caption text-faint">
+                  <th className="py-2 pr-4 text-left font-medium">store</th>
+                  <th className="py-2 pr-4 text-left font-medium">record</th>
+                  <th className="py-2 text-left font-medium">keep (days)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <RetentionRow
+                  what="Usage, cost and quota history"
+                  detail="The accounting ledger: budgets, quotas and the Activity page read it, so it cannot be switched off."
+                  value={draft.usage_retention_days}
+                  onChange={(v) => setDraft({ ...draft, usage_retention_days: v })}
+                />
+                <RetentionRow
+                  what="Attempt traces"
+                  detail="One row per dispatch attempt: provider, model, status and latency. Backs the request inspector."
+                  toggle={{
+                    on: draft.record_attempts,
+                    label: "record attempts",
+                    onChange: (on) => setDraft({ ...draft, record_attempts: on }),
+                  }}
+                  value={draft.attempts_retention_days}
+                  onChange={(v) => setDraft({ ...draft, attempts_retention_days: v })}
+                />
+                <RetentionRow
+                  what="Captured bodies"
+                  detail="Prompt and response bodies, written only while Request capture is on."
+                  value={draft.capture_retention_days}
+                  onChange={(v) => setDraft({ ...draft, capture_retention_days: v })}
+                />
+                <RetentionRow
+                  what="Audit trail"
+                  detail="Admin and identity events, and the webhook fan-out they feed."
+                  toggle={{
+                    on: draft.record_audit,
+                    label: "record audit events",
+                    onChange: (on) => setDraft({ ...draft, record_audit: on }),
+                  }}
+                  value={draft.audit_retention_days}
+                  onChange={(v) => setDraft({ ...draft, audit_retention_days: v })}
+                />
+                <RetentionRow
+                  what="System logs"
+                  detail="The in-memory console buffer behind the System logs page; its switch lives there."
+                  value={draft.system_log_retention_days}
+                  onChange={(v) => setDraft({ ...draft, system_log_retention_days: v })}
+                />
+              </tbody>
+            </table>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button variant="primary" disabled={savingRetention || !seeded} onClick={() => void saveRetention()}>
+              {savingRetention ? "saving…" : "save retention"}
+            </Button>
+            <Button variant="quiet" disabled={sweepBusy} onClick={() => void sweepNow()}>
+              {sweepBusy ? "sweeping…" : "run sweep now"}
+            </Button>
+            {sweepNote ? <span className="text-small text-muted">{sweepNote}</span> : null}
+          </div>
+          <p className="text-caption text-faint">
+            A stored number is clamped to 3650 days; a value outside that range is refused, not
+            silently changed. The next scheduled sweep applies a change within a day, and “run
+            sweep now” applies it immediately.
+          </p>
+        </div>
+      </Card>
+
       <div className="mt-4">
         <UpdateCard />
       </div>
@@ -267,5 +399,111 @@ function Row({ k, v }: { k: string; v: string }) {
       <dt className="text-faint">{k}</dt>
       <dd className="min-w-0 truncate text-right font-mono text-small text-muted tnum">{v}</dd>
     </div>
+  );
+}
+
+/** The retention half of the settings blob; the white-label type stays untouched. */
+type HistorySettings = {
+  record_attempts?: boolean;
+  record_audit?: boolean;
+  usage_retention_days?: number | null;
+  attempts_retention_days?: number | null;
+  capture_retention_days?: number | null;
+  audit_retention_days?: number | null;
+  system_log_retention_days?: number | null;
+};
+
+/** Text drafts, because an empty box means "follow the usage window", not zero. */
+type RetentionDraft = {
+  record_attempts: boolean;
+  record_audit: boolean;
+  usage_retention_days: string;
+  attempts_retention_days: string;
+  capture_retention_days: string;
+  audit_retention_days: string;
+  system_log_retention_days: string;
+};
+
+const emptyDraft: RetentionDraft = {
+  record_attempts: true,
+  record_audit: true,
+  usage_retention_days: "0",
+  attempts_retention_days: "",
+  capture_retention_days: "",
+  audit_retention_days: "",
+  system_log_retention_days: "",
+};
+
+function asText(value: number | null | undefined): string {
+  return typeof value === "number" ? String(value) : "";
+}
+
+function draftFrom(stored: HistorySettings): RetentionDraft {
+  return {
+    record_attempts: stored.record_attempts ?? true,
+    record_audit: stored.record_audit ?? true,
+    usage_retention_days: asText(stored.usage_retention_days) || "0",
+    attempts_retention_days: asText(stored.attempts_retention_days),
+    capture_retention_days: asText(stored.capture_retention_days),
+    audit_retention_days: asText(stored.audit_retention_days),
+    system_log_retention_days: asText(stored.system_log_retention_days),
+  };
+}
+
+/** A blank box becomes `null`: the store follows the usage window. */
+function patchFrom(draft: RetentionDraft): HistorySettings {
+  const days = (value: string): number | null => {
+    const trimmed = value.trim();
+    return trimmed === "" ? null : Math.max(0, Math.min(3650, Number(trimmed) || 0));
+  };
+  return {
+    record_attempts: draft.record_attempts,
+    record_audit: draft.record_audit,
+    usage_retention_days: days(draft.usage_retention_days),
+    attempts_retention_days: days(draft.attempts_retention_days),
+    capture_retention_days: days(draft.capture_retention_days),
+    audit_retention_days: days(draft.audit_retention_days),
+    system_log_retention_days: days(draft.system_log_retention_days),
+  };
+}
+
+function RetentionRow({
+  what,
+  detail,
+  toggle,
+  value,
+  onChange,
+}: {
+  what: string;
+  detail: string;
+  toggle?: { on: boolean; label: string; onChange: (on: boolean) => void };
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <tr className="border-b border-[var(--color-rule)] align-top last:border-0">
+      <td className="py-3 pr-4">
+        <div className="font-medium text-fg">{what}</div>
+        <p className="mt-0.5 max-w-[52ch] text-caption leading-snug text-faint">{detail}</p>
+      </td>
+      <td className="py-3 pr-4">
+        {toggle ? (
+          <Toggle checked={toggle.on} label={toggle.label} onChange={toggle.onChange} />
+        ) : (
+          <span className="text-caption text-faint">always on</span>
+        )}
+      </td>
+      <td className="w-[110px] py-2.5">
+        <Input
+          type="number"
+          size="sm"
+          mono
+          value={value}
+          onChange={onChange}
+          placeholder="follow usage"
+          ariaLabel={`${what} retention in days`}
+        />
+      </td>
+    </tr>
   );
 }
