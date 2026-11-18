@@ -2,6 +2,17 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.31.0 — 2026-11-18
+
+### Features
+
+- feat(ui): expose stored-history retention in Runtime settings ([`10b9355`](https://github.com/centopw/RRouter/commit/10b9355fb9c747e1126f8de17af48f6d4cd48c49))
+- feat(settings): give every stored artifact its own switch and lifetime ([`471c126`](https://github.com/centopw/RRouter/commit/471c12699d4116d2efd0f5511db3f72c92d7df1d))
+
+### Other Changes
+
+- chore(ui): rebuild the served bundle ([`b782e30`](https://github.com/centopw/RRouter/commit/b782e30bd3f6463d1f8975b9dcbca241a6a53443))
+
 ## 0.30.0 — 2026-11-18
 
 ### Features
