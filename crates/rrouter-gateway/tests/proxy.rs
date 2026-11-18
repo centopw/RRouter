@@ -4315,6 +4315,12 @@ async fn failed_attempts_do_not_record_latency_samples() {
         "failure row carries the reason: {rows:?}"
     );
     assert_eq!(rows[0].input_tokens + rows[0].output_tokens, 0);
+    // The account that answered owns the failure: an unattributed bucket would hide a
+    // broken account behind a row nobody can act on.
+    assert!(
+        rows[0].connection_id.is_some(),
+        "a post-dispatch failure belongs to the connection: {rows:?}"
+    );
 }
 
 // ------------------------------------------------------- cost accounting (phase 6)

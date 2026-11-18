@@ -3594,6 +3594,9 @@ struct TraceLabels {
     session_id: Option<String>,
     /// Provider of the most recent attempt, empty before any dispatch.
     provider: String,
+    /// Account the most recent attempt went through. A request that fails after dispatch
+    /// belongs to the account that answered it, not to an unattributed bucket.
+    connection: Option<Uuid>,
     /// Gateway key that paid for the request.
     key: Option<Uuid>,
     /// What the key may still spend, once admission succeeded. `None` before admission
@@ -3794,6 +3797,7 @@ impl RequestTrace {
         let key = {
             let mut labels = self.labels();
             labels.provider.clone_from(&candidate.provider);
+            labels.connection = Some(candidate.connection);
             labels.key
         };
         crate::metrics::attempt_finished(&candidate.provider, status);
@@ -3945,9 +3949,14 @@ impl RequestTrace {
         endpoint: &'static str,
         err: &Error,
     ) -> Response {
-        let (provider, model, key) = {
+        let (provider, model, key, connection) = {
             let labels = self.labels();
-            (labels.provider.clone(), labels.model.clone(), labels.key)
+            (
+                labels.provider.clone(),
+                labels.model.clone(),
+                labels.key,
+                labels.connection,
+            )
         };
         tracing::warn!(
             request_id = %self.request_id,
@@ -3965,7 +3974,7 @@ impl RequestTrace {
             trace_id: Some(self.trace_id().to_string()),
             provider,
             model,
-            connection_id: None,
+            connection_id: connection,
             endpoint: Some(endpoint.to_string()),
             key_id: key,
             cost_micros: 0,
