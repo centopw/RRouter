@@ -58,6 +58,7 @@ fn row(
         "team_id": team_id.map(|team| team.to_string()),
         "owner_user_id": key.owner_user_id.map(|user| user.to_string()),
         "kind": key.kind.as_str(),
+        "last_used_at": key.last_used_at,
         "models": models_value(models),
     })
 }

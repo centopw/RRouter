@@ -374,7 +374,23 @@ impl AppState {
                     .to_string(),
             });
         }
+        // Every governance check passed: this key just authenticated a request.
+        self.touch_key_last_used(key.id);
         Ok(Caller::Key(key))
+    }
+
+    /// Record a successful key authentication off the request path.
+    ///
+    /// Fire-and-forget like the usage and attempt writers: the stamp is reporting, and a
+    /// failure to write it must never turn a valid credential into an error.
+    fn touch_key_last_used(&self, id: Uuid) {
+        let store = Arc::clone(&self.store);
+        let now = crate::now_unix();
+        tokio::spawn(async move {
+            if let Err(e) = store.touch_api_key_last_used(id, now).await {
+                tracing::warn!(error = %e, "api key last-used stamp failed");
+            }
+        });
     }
 
     /// The playground marker plus admin authority: the only context the playground key is

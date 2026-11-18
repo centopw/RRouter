@@ -593,6 +593,38 @@ pub async fn summary(
         Ok(scope) => scope,
         Err(response) => return *response,
     };
+    // `group_by=connection` splits each model by the account that served it; any other
+    // value (or none) keeps the historical provider+model rows, key for key.
+    if param(&query, "group_by") == Some("connection") {
+        return match state
+            .store
+            .usage_summary_by_connection(since, teams.as_deref())
+            .await
+        {
+            Ok(rows) => {
+                let data: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|s| {
+                        json!({
+                            "connection_id": s.connection_id.map(|c| c.to_string()),
+                            "provider": s.provider,
+                            "model": s.model,
+                            "requests": s.requests,
+                            "errors": s.errors,
+                            "input_tokens": s.input_tokens,
+                            "output_tokens": s.output_tokens,
+                            "cache_read_tokens": s.cache_read_tokens,
+                            "cache_write_tokens": s.cache_write_tokens,
+                            "cost_micros": s.cost_micros,
+                            "avg_latency_ms": s.avg_latency_ms,
+                        })
+                    })
+                    .collect();
+                ok_json(json!({ "data": data }))
+            }
+            Err(e) => admin_error(&e),
+        };
+    }
     match state
         .store
         .usage_summary_in_teams(since, teams.as_deref())

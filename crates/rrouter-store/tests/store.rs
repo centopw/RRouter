@@ -254,6 +254,7 @@ const UNDO_AFTER_V24: &str = "\
     ALTER TABLE connections DROP COLUMN team_id; \
     ALTER TABLE user_sessions DROP COLUMN user_agent; \
     ALTER TABLE user_sessions DROP COLUMN ip; \
+    ALTER TABLE api_keys DROP COLUMN last_used_at; \
     ALTER TABLE combos DROP COLUMN strategy; \
     ALTER TABLE combos DROP COLUMN router_model; \
     ALTER TABLE combos DROP COLUMN cursor; ";
@@ -4740,4 +4741,144 @@ fn semantic_cache_evicts_over_the_entry_cap() {
         let entries = store.semantic_cache_entries().await.expect("entries");
         assert_eq!(entries.len(), 2, "the cap is enforced on write");
     });
+}
+
+// ----- usage by connection ---------------------------------------------------------
+
+/// `group_by=connection` must split one provider+model into one row per account and
+/// sum each bucket's counters independently; a NULL connection is its own bucket.
+#[test]
+fn usage_summary_by_connection_splits_and_sums() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let rec = |ts: i64, connection: Option<Uuid>, inp: u32, out: u32, st: u16| UsageRecord {
+        id: None,
+        ts,
+        request_id: Some(Uuid::from_u128(ts as u128)),
+        trace_id: None,
+        provider: "claude".to_string(),
+        model: "sonnet".to_string(),
+        connection_id: connection,
+        endpoint: Some("/v1/messages".to_string()),
+        key_id: None,
+        cost_micros: 10,
+        input_tokens: inp,
+        output_tokens: out,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        latency_ms: 100,
+        ttft_ms: 0,
+        upstream_ms: 0,
+        status: st,
+        streamed: false,
+        error: (st >= 400).then(|| "upstream 500".to_string()),
+        finish_reason: None,
+        reasoning_effort: None,
+        reasoning_tokens: 0,
+        session_id: None,
+        requested_model: None,
+    };
+    rt().block_on(async {
+        s.record_usage(&rec(100, Some(first), 10, 20, 200))
+            .await
+            .expect("first 1");
+        s.record_usage(&rec(200, Some(first), 30, 40, 200))
+            .await
+            .expect("first 2");
+        s.record_usage(&rec(300, Some(second), 5, 6, 200))
+            .await
+            .expect("second");
+        s.record_usage(&rec(400, None, 7, 8, 429))
+            .await
+            .expect("unattributed");
+
+        let rows = s
+            .usage_summary_by_connection(None, None)
+            .await
+            .expect("summary by connection");
+        assert_eq!(rows.len(), 3, "one row per (connection, provider, model)");
+
+        // Ordering is provider, model, connection_id — NULL sorts first.
+        assert_eq!(rows[0].connection_id, None);
+        assert_eq!((rows[0].requests, rows[0].errors), (1, 1));
+        assert_eq!((rows[0].input_tokens, rows[0].output_tokens), (7, 8));
+
+        let first_row = rows
+            .iter()
+            .find(|r| r.connection_id == Some(first))
+            .expect("first connection row");
+        assert_eq!(first_row.provider, "claude");
+        assert_eq!(first_row.model, "sonnet");
+        assert_eq!(first_row.requests, 2);
+        assert_eq!(first_row.errors, 0);
+        assert_eq!((first_row.input_tokens, first_row.output_tokens), (40, 60));
+        assert_eq!(first_row.cost_micros, 20);
+        assert_eq!(first_row.avg_latency_ms, 100);
+
+        let second_row = rows
+            .iter()
+            .find(|r| r.connection_id == Some(second))
+            .expect("second connection row");
+        assert_eq!((second_row.requests, second_row.input_tokens), (1, 5));
+
+        // The time filter applies exactly as it does for the provider+model summary.
+        let recent = s
+            .usage_summary_by_connection(Some(250), None)
+            .await
+            .expect("since");
+        assert_eq!(recent.len(), 2);
+        assert!(recent.iter().all(|r| r.requests == 1));
+    });
+}
+
+/// The last-used stamp is throttled in SQL: one write per minute, never one per request.
+#[test]
+fn api_key_last_used_stamps_at_most_once_per_minute() {
+    let store = Store::open_in_memory().expect("mem");
+    let (_plain, key) = rt()
+        .block_on(store.create_api_key(Some("cli")))
+        .expect("create key");
+    assert_eq!(key.last_used_at, 0, "a fresh key was never used");
+
+    let stamped = |s: &Store| {
+        rt().block_on(s.list_api_keys())
+            .expect("list")
+            .into_iter()
+            .find(|k| k.id == key.id)
+            .expect("key row")
+            .last_used_at
+    };
+
+    assert!(
+        rt().block_on(store.touch_api_key_last_used(key.id, 1_000))
+            .expect("first stamp"),
+        "zero means never, so the first use always writes"
+    );
+    assert_eq!(stamped(&store), 1_000);
+
+    // Inside the 60 s floor the UPDATE matches no row and the value is untouched.
+    assert!(
+        !rt()
+            .block_on(store.touch_api_key_last_used(key.id, 1_030))
+            .expect("throttled"),
+        "a second stamp 30 s later must not write"
+    );
+    assert_eq!(stamped(&store), 1_000);
+
+    // Exactly 60 s later the floor opens again.
+    assert!(
+        rt().block_on(store.touch_api_key_last_used(key.id, 1_060))
+            .expect("after floor"),
+        "60 s after the last stamp writes"
+    );
+    assert_eq!(stamped(&store), 1_060);
+
+    // The authentication read sees the same value; nothing about revoke changed.
+    let seen = rt()
+        .block_on(store.verify_api_key(&_plain))
+        .expect("verify")
+        .expect("known key");
+    assert_eq!(seen.last_used_at, 1_060);
 }

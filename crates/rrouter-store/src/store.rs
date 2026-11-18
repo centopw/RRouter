@@ -203,6 +203,8 @@ pub struct ApiKey {
     pub owner_user_id: Option<Uuid>,
     /// Who manages the key; see [`KeyKind`].
     pub kind: KeyKind,
+    /// Last successful authentication, unix seconds; `0` = never used.
+    pub last_used_at: i64,
 }
 
 impl ApiKey {
@@ -963,6 +965,27 @@ pub struct UsageSummary {
     pub avg_latency_ms: u32,
 }
 
+/// Per connection+provider+model aggregate over `usage`.
+///
+/// `connection_id` is NULL for rows written before connections were recorded (or for
+/// passthroughs with no account), which is why the split is one row per distinct value
+/// rather than one row per model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageSummaryByConnection {
+    pub connection_id: Option<Uuid>,
+    pub provider: String,
+    pub model: String,
+    pub requests: u64,
+    pub errors: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    /// Summed micro-USD over the same rows.
+    pub cost_micros: u64,
+    pub avg_latency_ms: u32,
+}
+
 /// One time bucket of usage, for charts that must stay honest at high volume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageBucket {
@@ -1643,7 +1666,8 @@ impl Store {
     /// The key columns every read selects, in [`row_to_api_key`]'s order.
     const KEY_COLUMNS: &'static str =
         "id, key_hash, name, is_active, created_at, rpm, tpm, budget_tokens, allowed_models, \
-         expires_at, budget_micros, budget_window, guardrails, scope, team_id, owner_user_id, kind";
+         expires_at, budget_micros, budget_window, guardrails, scope, team_id, owner_user_id, kind, \
+         last_used_at";
 
     /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
     ///
@@ -1719,6 +1743,7 @@ impl Store {
                 team_id,
                 owner_user_id,
                 kind: KeyKind::User,
+                last_used_at: 0,
             },
         ))
     }
@@ -1750,7 +1775,7 @@ impl Store {
                     Self::KEY_COLUMNS
                 ),
                 params![kind.as_str()],
-                |r| Ok((row_to_api_key(r)?, r.get(17)?)),
+                |r| Ok((row_to_api_key(r)?, r.get(18)?)),
             )
             .optional()
             .map_err(migrations::db_err)?;
@@ -1854,6 +1879,24 @@ impl Store {
             .query_map(params![team_id.to_string()], row_to_api_key)
             .map_err(migrations::db_err)?;
         rows.map(|r| r.map_err(migrations::db_err)).collect()
+    }
+
+    /// Stamp a key as used at `now`, at most once per 60 s.
+    ///
+    /// The throttle is in the WHERE clause, so concurrent requests cannot each write:
+    /// SQLite serializes them and only the first sees a stamp older than 60 s. Returns
+    /// whether a row was written, which is what the test asserts against; a request must
+    /// never care.
+    pub async fn touch_api_key_last_used(&self, id: Uuid, now: i64) -> Result<bool> {
+        let n = self
+            .conn()
+            .execute(
+                "UPDATE api_keys SET last_used_at = ?2 \
+                 WHERE id = ?1 AND (last_used_at = 0 OR last_used_at <= ?2 - 60)",
+                params![id.to_string(), now],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(n > 0)
     }
 
     /// Assign a key to a team, or clear the assignment with `None`.
@@ -3801,6 +3844,54 @@ impl Store {
         rows.map(|r| r.map_err(migrations::db_err)).collect()
     }
 
+    /// Per connection+provider+model totals restricted to `teams`.
+    ///
+    /// Same counters and team scoping as [`Store::usage_summary_in_teams`]; the extra
+    /// `connection_id` dimension is what separates two accounts serving the same model.
+    /// `connection_id` sorts NULL first and the text order is the UUID's, so the row
+    /// order is stable without a second sort key.
+    pub async fn usage_summary_by_connection(
+        &self,
+        since: Option<i64>,
+        teams: Option<&[Uuid]>,
+    ) -> Result<Vec<UsageSummaryByConnection>> {
+        let (team_sql, team_args) = team_filter(teams, 2);
+        let mut args: Vec<SqlValue> = vec![since.into()];
+        args.extend(team_args);
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT connection_id, provider, model, count(*), \
+                        sum(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), \
+                        sum(input_tokens), sum(output_tokens), \
+                        sum(cache_read_tokens), sum(cache_write_tokens), \
+                        sum(cost_micros), avg(latency_ms) \
+                 FROM usage WHERE (?1 IS NULL OR ts >= ?1) {team_sql} \
+                 GROUP BY connection_id, provider, model \
+                 ORDER BY provider ASC, model ASC, connection_id ASC"
+            ))
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params_from_iter(args), |r| {
+                let avg: f64 = r.get(10)?;
+                Ok(UsageSummaryByConnection {
+                    connection_id: opt_uuid_col(r.get(0)?)?,
+                    provider: r.get(1)?,
+                    model: r.get(2)?,
+                    requests: r.get_u64(3)?,
+                    errors: r.get_u64(4)?,
+                    input_tokens: r.get_u64(5)?,
+                    output_tokens: r.get_u64(6)?,
+                    cache_read_tokens: r.get_u64(7)?,
+                    cache_write_tokens: r.get_u64(8)?,
+                    cost_micros: r.get_u64(9)?,
+                    avg_latency_ms: avg.round().clamp(0.0, u32::MAX as f64) as u32,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        rows.map(|r| r.map_err(migrations::db_err)).collect()
+    }
+
     /// Time buckets restricted to `teams`; see [`Store::recent_usage_in_teams`].
     pub async fn usage_series_in_teams(
         &self,
@@ -4235,6 +4326,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         team_id: opt_uuid_col(r.get(14)?)?,
         owner_user_id: opt_uuid_col(r.get(15)?)?,
         kind: KeyKind::from_stored(&r.get::<_, String>(16)?),
+        last_used_at: r.get(17)?,
     })
 }
 

@@ -12,13 +12,23 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 39;
+pub const SCHEMA_VERSION: i64 = 40;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40,
 ];
+
+/// V40: when a key was last presented successfully.
+///
+/// `0` means "never used" so the column is NOT NULL and a report never has to
+/// distinguish two kinds of absent. The value is written by the authentication path
+/// with a 60 s floor (`Store::touch_api_key_last_used`), which keeps a busy key from
+/// taking a write lock on every request.
+const V40: &str = r#"
+ALTER TABLE api_keys ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0;
+"#;
 
 /// V39: provider shorthands and operator-defined providers.
 ///
