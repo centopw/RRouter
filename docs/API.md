@@ -205,6 +205,14 @@ Usage reads are aggregated in SQL:
 | `GET /api/usage/summary?hours=` | per-model totals; omit `hours` for all time |
 | `GET /api/usage/export.csv?…` | the same filters as the log, streamed CSV |
 | `GET /api/usage/{id}` | one request plus its candidate attempts |
+| `DELETE /api/usage/{id}` | delete one request-log row by row id or request id; `204` on success, `404` when absent, audited as `log_deleted`. Its attempts and captured bodies are removed in the same transaction |
+| `GET /api/usage/{id}/capture` | the stored request headers/body and response body for one request, or `captured: false` when capture was off |
+
+Request/response capture is opt-in (`capture_bodies`, default off) and edited on
+`/settings/runtime`. While it is on, the proxy stores up to 64 KiB of each body — request
+as the client sent it, response as the client received it, including SSE frames — with
+the values of `authorization`, `x-api-key`, `api-key` and `cookie` redacted. Captured rows
+are pruned with usage retention and deleted with their usage row.
 
 ## Health
 

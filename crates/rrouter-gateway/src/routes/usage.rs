@@ -11,7 +11,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
-use axum::response::Response;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use rrouter_core::Error;
 use rrouter_store::{AttemptRecord, StatusFilter, UsageQuery, UsageRecord};
@@ -475,6 +476,95 @@ pub async fn detail(
             "attempts": attempts,
         }
     }))
+}
+
+/// `DELETE /api/usage/{id}` — remove one request-log row.
+///
+/// `id` is the usage row id the list exposes; a request id is accepted too because that
+/// is the handle most callers hold and the detail view links by. The row's attempt trail
+/// and captured bodies go with it in one transaction, so a deleted request cannot still
+/// be inspected. An unknown id is a 404, and the deletion is audited with the actor and
+/// the client IP the handler can see.
+pub async fn remove(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    Path(id): Path<String>,
+) -> Response {
+    let row_id = if let Ok(row_id) = id.parse::<i64>() {
+        row_id
+    } else if let Ok(request_id) = Uuid::parse_str(&id) {
+        match state.store.usage_by_request(request_id).await {
+            Ok(Some(row)) => match row.id {
+                Some(row_id) => row_id,
+                None => return admin_error(&Error::NotFound(format!("unknown usage row {id}"))),
+            },
+            Ok(None) => return admin_error(&Error::NotFound(format!("unknown usage row {id}"))),
+            Err(e) => return admin_error(&e),
+        }
+    } else {
+        return admin_error(&Error::BadRequest(format!(
+            "usage id {id} is neither a row id nor a request id"
+        )));
+    };
+    match state.store.delete_usage(row_id).await {
+        Ok(true) => {
+            let actor = super::auth::actor(&state, &headers).await;
+            let ip = crate::auth::client_ip(&headers, peer.0);
+            super::auth::audit(
+                &state,
+                "log_deleted",
+                Some(&actor),
+                &ip,
+                &format!("request log · row {row_id}"),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => admin_error(&Error::NotFound(format!("unknown usage row {id}"))),
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// `GET /api/usage/{request_id}/capture` — the stored bodies for one request.
+///
+/// `captured: false` is an answer, not an error: capture is opt-in and per-request, so
+/// the viewer distinguishes "off when this ran" from "unknown request". `enabled` says
+/// whether capture is on right now, so a reader knows whether a new request would show
+/// bodies. The response is admin-gated with the rest of the capture surface: prompt and
+/// completion text is more sensitive than the metadata the read-only API exposes.
+pub async fn capture(
+    State(state): State<Arc<AppState>>,
+    Path(request_id): Path<String>,
+) -> Response {
+    let Ok(id) = Uuid::parse_str(&request_id) else {
+        return admin_error(&Error::NotFound(format!("unknown request {request_id}")));
+    };
+    let enabled = crate::settings::capture_bodies();
+    match state.store.capture_by_request(id).await {
+        Ok(Some(capture)) => ok_json(json!({
+            "request_id": id.to_string(),
+            "captured": true,
+            "enabled": enabled,
+            "ts": capture.ts,
+            "request_headers": capture
+                .request_headers
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
+            "request_body": capture.request_body,
+            "response_body": capture.response_body,
+            "request_bytes": capture.request_bytes,
+            "response_bytes": capture.response_bytes,
+            "request_truncated": capture.request_truncated,
+            "response_truncated": capture.response_truncated,
+        })),
+        Ok(None) => ok_json(json!({
+            "request_id": id.to_string(),
+            "captured": false,
+            "enabled": enabled,
+        })),
+        Err(e) => admin_error(&e),
+    }
 }
 
 /// `GET /api/usage/series?hours=168&bucket=hour|day`

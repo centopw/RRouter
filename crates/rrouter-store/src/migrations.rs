@@ -12,13 +12,40 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 40;
+pub const SCHEMA_VERSION: i64 = 41;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
     V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40,
+    V41,
 ];
+
+/// V41: opt-in capture of request and response bodies.
+///
+/// Off by default and written only while the `capture_bodies` setting is on. One row per
+/// request id, keyed on the id the proxy already echoes, so the inspector joins it to the
+/// usage row and the attempt trail without a second lookup key. Bodies are stored as text
+/// up to the proxy's cap; `*_bytes` records the size actually observed and `*_truncated`
+/// says whether the stored text is a prefix. `ts` mirrors the usage row so one retention
+/// sweep can prune both, and `request_headers` holds the client headers with credentials
+/// redacted.
+const V41: &str = r#"
+CREATE TABLE IF NOT EXISTS request_captures (
+  request_id         TEXT PRIMARY KEY,
+  ts                 INTEGER NOT NULL,
+  request_headers    TEXT,
+  request_body       TEXT NOT NULL DEFAULT '',
+  response_body      TEXT,
+  request_bytes      INTEGER NOT NULL DEFAULT 0,
+  response_bytes     INTEGER NOT NULL DEFAULT 0,
+  request_truncated  INTEGER NOT NULL DEFAULT 0,
+  response_truncated INTEGER NOT NULL DEFAULT 0,
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_captures_ts ON request_captures(ts);
+"#;
 
 /// V40: when a key was last presented successfully.
 ///
@@ -898,12 +925,13 @@ mod tests {
                   'attempts','connection_stats','key_models','response_cache',\
                   'prompt_templates','prompt_template_versions','events_outbox',\
                   'webhook_endpoints','eval_suites','eval_cases','eval_runs','eval_results',\
-                  'model_presets','model_preset_versions','user_model_preferences')",
+                  'model_presets','model_preset_versions','user_model_preferences',\
+                  'request_captures')",
                 [],
                 |r| r.get(0),
             )
             .expect("count");
-        assert_eq!(tables, 21);
+        assert_eq!(tables, 22);
     }
 
     #[test]

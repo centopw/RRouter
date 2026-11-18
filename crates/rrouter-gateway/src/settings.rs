@@ -20,12 +20,27 @@ pub const BRAND_KEYS: &[&str] = &["brand_name", "brand_color", "logo_url", "foot
 /// database. Default on; a request can opt out with `x-rrouter-rtk: off`.
 static RTK: AtomicBool = AtomicBool::new(true);
 
+/// Opt-in storage of request and response bodies, readable on the proxy path. Default
+/// off: while off the proxy writes no capture row at all, so nothing needs to be cleaned
+/// up when an operator changes their mind.
+static CAPTURE_BODIES: AtomicBool = AtomicBool::new(false);
+
 pub fn rtk() -> bool {
     RTK.load(Ordering::Relaxed)
 }
 
+/// Whether the proxy should store request and response bodies for a request.
+pub fn capture_bodies() -> bool {
+    CAPTURE_BODIES.load(Ordering::Relaxed)
+}
+
 pub fn defaults() -> Value {
-    json!({ "brand_name": "RRouter", "rtk": true, "system_logs": false })
+    json!({
+        "brand_name": "RRouter",
+        "rtk": true,
+        "system_logs": false,
+        "capture_bodies": false,
+    })
 }
 
 /// Load the stored switch once at startup (and after a settings write).
@@ -33,6 +48,13 @@ pub async fn prime(state: &Arc<AppState>) -> Result<()> {
     let stored = load(state).await?;
     RTK.store(
         stored.get("rtk").and_then(Value::as_bool).unwrap_or(true),
+        Ordering::Relaxed,
+    );
+    CAPTURE_BODIES.store(
+        stored
+            .get("capture_bodies")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         Ordering::Relaxed,
     );
     crate::syslog::set_enabled(
@@ -72,6 +94,9 @@ pub async fn merge(state: &Arc<AppState>, patch: Value) -> Result<Value> {
     }
     if let Some(rtk) = current.get("rtk").and_then(Value::as_bool) {
         RTK.store(rtk, Ordering::Relaxed);
+    }
+    if let Some(capture) = current.get("capture_bodies").and_then(Value::as_bool) {
+        CAPTURE_BODIES.store(capture, Ordering::Relaxed);
     }
     if let Some(logs) = current.get("system_logs").and_then(Value::as_bool) {
         crate::syslog::set_enabled(logs);
@@ -173,5 +198,13 @@ mod tests {
         assert_eq!(brand["brand_color"], "#000");
         assert_eq!(brand["footer_text"], Value::Null);
         assert!(brand.get("junk").is_none());
+    }
+
+    /// Capture of request/response bodies is opt-in: the default blob says off and the
+    /// atomic the proxy reads starts off, so an untouched install stores no bodies.
+    #[test]
+    fn capture_is_off_by_default() {
+        assert_eq!(defaults()["capture_bodies"], json!(false));
+        assert!(!capture_bodies());
     }
 }

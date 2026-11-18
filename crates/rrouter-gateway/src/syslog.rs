@@ -46,6 +46,21 @@ pub fn clear() {
     buffer.clear();
 }
 
+/// Drop one entry by id, reporting whether it was still in the ring.
+///
+/// An id that already rotated out is a "no such row" answer rather than a silent success,
+/// so the dashboard cannot claim to have deleted something it never held.
+pub fn remove(id: u64) -> bool {
+    let mut buffer = RING.lock().unwrap_or_else(|e| e.into_inner());
+    match buffer.iter().position(|entry| entry.id == id) {
+        Some(index) => {
+            buffer.remove(index);
+            true
+        }
+        None => false,
+    }
+}
+
 pub fn push(level: &str, target: &str, message: String) {
     if !enabled() {
         return;

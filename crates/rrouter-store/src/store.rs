@@ -931,6 +931,29 @@ pub struct PruneReport {
     pub attempts: usize,
 }
 
+/// One request's stored bodies, written only while `capture_bodies` is on.
+///
+/// `request_body` and `response_body` are text as it crossed the wire, capped by the
+/// proxy; the `*_bytes` fields are the sizes actually observed, so a truncated prefix
+/// is never mistaken for the whole body. `request_headers` holds the client's headers
+/// with credentials redacted — never an upstream header, which would carry the
+/// gateway's own provider credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureRecord {
+    pub request_id: Uuid,
+    /// Unix seconds, mirrored from the usage row so one sweep prunes both.
+    pub ts: i64,
+    pub request_headers: Option<String>,
+    pub request_body: String,
+    /// `None` when the response was never captured (client gone, capture switched off
+    /// before it answered, or a body the proxy could not tee).
+    pub response_body: Option<String>,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+    pub request_truncated: bool,
+    pub response_truncated: bool,
+}
+
 /// One time bucket for one model: the traffic chart stacks these by model, so
 /// every segment is an honest server-side count rather than a client estimate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3573,6 +3596,103 @@ impl Store {
         .map_err(migrations::db_err)
     }
 
+    // ----- request capture ----------------------------------------------------------
+    /// Store the client-side half of one capture: redacted headers and the request body.
+    ///
+    /// Upsert on `request_id` so a retried write cannot duplicate a row; the response half
+    /// arrives later under the same key. Bodies arrive already capped by the proxy.
+    pub async fn record_capture_request(
+        &self,
+        request_id: Uuid,
+        ts: i64,
+        headers: Option<&str>,
+        body: &str,
+        bytes: u64,
+        truncated: bool,
+    ) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO request_captures \
+                 (request_id, ts, request_headers, request_body, request_bytes, \
+                  request_truncated, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?2, ?2) \
+                 ON CONFLICT(request_id) DO UPDATE SET \
+                   ts = excluded.ts, request_headers = excluded.request_headers, \
+                   request_body = excluded.request_body, \
+                   request_bytes = excluded.request_bytes, \
+                   request_truncated = excluded.request_truncated, \
+                   updated_at = excluded.updated_at",
+                params![
+                    request_id.to_string(),
+                    ts,
+                    headers,
+                    body,
+                    sql_u64(bytes),
+                    truncated as i64
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Store the response body for a request whose capture row already exists.
+    pub async fn record_capture_response(
+        &self,
+        request_id: Uuid,
+        body: &str,
+        bytes: u64,
+        truncated: bool,
+    ) -> Result<()> {
+        let now = now();
+        self.conn()
+            .execute(
+                "INSERT INTO request_captures \
+                 (request_id, ts, response_body, response_bytes, response_truncated, \
+                  created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?2, ?2) \
+                 ON CONFLICT(request_id) DO UPDATE SET \
+                   response_body = excluded.response_body, \
+                   response_bytes = excluded.response_bytes, \
+                   response_truncated = excluded.response_truncated, \
+                   updated_at = excluded.updated_at",
+                params![
+                    request_id.to_string(),
+                    now,
+                    body,
+                    sql_u64(bytes),
+                    truncated as i64
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// The captured bodies for one request id, or `None` when capture was off.
+    pub async fn capture_by_request(&self, request_id: Uuid) -> Result<Option<CaptureRecord>> {
+        self.conn()
+            .query_row(
+                "SELECT request_id, ts, request_headers, request_body, response_body, \
+                        request_bytes, response_bytes, request_truncated, response_truncated \
+                 FROM request_captures WHERE request_id = ?1",
+                params![request_id.to_string()],
+                |r| {
+                    Ok(CaptureRecord {
+                        request_id: uuid_col(r.get(0)?)?,
+                        ts: r.get(1)?,
+                        request_headers: r.get(2)?,
+                        request_body: r.get(3)?,
+                        response_body: r.get(4)?,
+                        request_bytes: r.get_u64(5)?,
+                        response_bytes: r.get_u64(6)?,
+                        request_truncated: r.get::<_, i64>(7)? != 0,
+                        response_truncated: r.get::<_, i64>(8)? != 0,
+                    })
+                },
+            )
+            .optional()
+            .map_err(migrations::db_err)
+    }
+
     /// Most recent records first, ordered `(ts, id)` descending. Every filter in `query`
     /// is applied in one SQL statement, so a filtered walk over history pages correctly.
     ///
@@ -3980,10 +4100,51 @@ impl Store {
 
     // ----- maintenance --------------------------------------------------------------
 
+    /// Delete one request-log row and everything hanging off it.
+    ///
+    /// One immediate transaction removes the usage row, its attempt trail and its captured
+    /// bodies, so a deleted request cannot still be inspected through the detail view. The
+    /// request id is read before the delete because attempts and captures are keyed by it;
+    /// a pre-v8 row with no id has neither and still deletes. Returns `false` when the id
+    /// names no row, which is the handler's 404.
+    pub async fn delete_usage(&self, id: i64) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        let request_id: Option<String> = tx
+            .query_row("SELECT request_id FROM usage WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(migrations::db_err)?;
+        let Some(request_id) = request_id else {
+            return Ok(false);
+        };
+        tx.execute("DELETE FROM usage WHERE id = ?1", params![id])
+            .map_err(migrations::db_err)?;
+        if !request_id.is_empty() {
+            tx.execute(
+                "DELETE FROM attempts WHERE request_id = ?1",
+                params![request_id],
+            )
+            .map_err(migrations::db_err)?;
+            tx.execute(
+                "DELETE FROM request_captures WHERE request_id = ?1",
+                params![request_id],
+            )
+            .map_err(migrations::db_err)?;
+        }
+        tx.commit().map_err(migrations::db_err)?;
+        Ok(true)
+    }
+
     /// Delete `usage` and `attempts` rows older than `cutoff` (unix seconds).
     ///
     /// One immediate transaction covers both tables: a sweep is either fully applied or
     /// not at all, and no reader observes usage rows whose attempt trail already went.
+    /// Captured bodies are pruned by the same cutoff in the same transaction: capture is
+    /// an attachment to history, so its life is exactly the usage row's life.
     /// Rows exactly at `cutoff` survive — retention is "keep this many days", inclusive
     /// at the boundary.
     pub async fn prune_usage(&self, cutoff: i64) -> Result<PruneReport> {
@@ -3997,6 +4158,11 @@ impl Store {
         let attempts = tx
             .execute("DELETE FROM attempts WHERE ts < ?1", params![cutoff])
             .map_err(migrations::db_err)?;
+        tx.execute(
+            "DELETE FROM request_captures WHERE ts < ?1",
+            params![cutoff],
+        )
+        .map_err(migrations::db_err)?;
         tx.commit().map_err(migrations::db_err)?;
         Ok(PruneReport { usage, attempts })
     }
@@ -4829,5 +4995,157 @@ mod system_key_tests {
         };
         assert!(block(store.update_api_key(key.id, &admin)).is_err());
         assert!(block(store.ensure_system_api_key(KeyKind::User, "x")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::{AttemptRecord, Store, UsageRecord};
+    use uuid::Uuid;
+
+    fn block<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    fn usage(request_id: Uuid, ts: i64) -> UsageRecord {
+        UsageRecord {
+            id: None,
+            ts,
+            request_id: Some(request_id),
+            trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".into()),
+            provider: "openai".into(),
+            model: "gpt-4o-mini".into(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".into()),
+            key_id: None,
+            cost_micros: 0,
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 5,
+            ttft_ms: 0,
+            upstream_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+            requested_model: None,
+            finish_reason: Some("stop".into()),
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+        }
+    }
+
+    fn attempt(request_id: Uuid, ts: i64) -> AttemptRecord {
+        AttemptRecord {
+            id: None,
+            request_id,
+            ts,
+            attempt: 1,
+            provider: "openai".into(),
+            model: "gpt-4o-mini".into(),
+            connection_id: None,
+            status: 200,
+            error: None,
+            latency_ms: 5,
+            key_id: None,
+        }
+    }
+
+    /// One row per request id, the response half lands on the same row, and reading back
+    /// returns exactly what was written including the truncation flag.
+    #[test]
+    fn capture_upserts_and_reads_back() {
+        let store = Store::open_in_memory().expect("store");
+        let rid = Uuid::new_v4();
+        let ts = 1_700_000_000;
+        block(store.record_capture_request(
+            rid,
+            ts,
+            Some(r#"{"authorization":"[redacted]"}"#),
+            r#"{"messages":[]}"#,
+            15,
+            false,
+        ))
+        .expect("request half");
+        // A retried write replaces, never duplicates.
+        block(store.record_capture_request(rid, ts, None, r#"{"messages":[1]}"#, 16, true))
+            .expect("retry");
+        block(store.record_capture_response(rid, "data: {}\n\n", 10, false))
+            .expect("response half");
+
+        let captured = block(store.capture_by_request(rid))
+            .expect("read")
+            .expect("row");
+        assert_eq!(captured.request_body, r#"{"messages":[1]}"#);
+        assert_eq!(captured.response_body.as_deref(), Some("data: {}\n\n"));
+        assert!(captured.request_truncated);
+        assert!(!captured.response_truncated);
+        assert_eq!(captured.request_bytes, 16);
+        assert_eq!(captured.response_bytes, 10);
+
+        let rows: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM request_captures", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(rows, 1);
+    }
+
+    /// The response half can arrive for a request whose row does not exist yet; the
+    /// insert path fills the mandatory columns.
+    #[test]
+    fn response_half_inserts_when_request_half_is_missing() {
+        let store = Store::open_in_memory().expect("store");
+        let rid = Uuid::new_v4();
+        block(store.record_capture_response(rid, "{}", 2, false)).expect("response");
+        let captured = block(store.capture_by_request(rid))
+            .expect("read")
+            .expect("row");
+        assert_eq!(captured.request_body, "");
+        assert_eq!(captured.response_body.as_deref(), Some("{}"));
+    }
+
+    /// Deleting the log row removes the capture and the attempt trail with it; a second
+    /// delete reports "nothing there" instead of pretending to succeed.
+    #[test]
+    fn delete_usage_removes_capture_and_attempts() {
+        let store = Store::open_in_memory().expect("store");
+        let rid = Uuid::new_v4();
+        let ts = 1_700_000_000;
+        block(store.record_usage(&usage(rid, ts))).expect("usage");
+        block(store.record_attempt(&attempt(rid, ts))).expect("attempt");
+        block(store.record_capture_request(rid, ts, None, "prompt", 6, false)).expect("capture");
+        let id = block(store.usage_by_request(rid))
+            .expect("read usage")
+            .expect("row")
+            .id
+            .expect("id");
+
+        assert!(block(store.delete_usage(id)).expect("delete"));
+        assert!(block(store.usage_by_request(rid)).expect("usage").is_none());
+        assert!(block(store.capture_by_request(rid)).expect("capture").is_none());
+        assert!(block(store.attempts_for(rid)).expect("attempts").is_empty());
+        assert!(!block(store.delete_usage(id)).expect("missing id"));
+    }
+
+    /// Retention prunes captured bodies by the same cutoff as the usage rows, and keeps
+    /// the ones inside the window.
+    #[test]
+    fn retention_prunes_captures_with_usage() {
+        let store = Store::open_in_memory().expect("store");
+        let old = Uuid::new_v4();
+        let kept = Uuid::new_v4();
+        for (rid, ts) in [(old, 100), (kept, 10_000)] {
+            block(store.record_usage(&usage(rid, ts))).expect("usage");
+            block(store.record_capture_request(rid, ts, None, "body", 4, false)).expect("capture");
+        }
+        let report = block(store.prune_usage(500)).expect("prune");
+        assert_eq!(report.usage, 1);
+        assert!(block(store.capture_by_request(old)).expect("old").is_none());
+        assert!(block(store.capture_by_request(kept)).expect("kept").is_some());
     }
 }

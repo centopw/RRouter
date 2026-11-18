@@ -63,6 +63,182 @@ fn is_google_cca(provider: &str) -> bool {
     provider == GOOGLE_ANTIGRAVITY
 }
 
+/// Bytes of one captured body kept in the database.
+///
+/// Capture is a debugging aid, never a reason to fail a request or let the database grow
+/// without bound, so a longer body is stored as a prefix plus an explicit marker naming
+/// both sizes.
+const CAPTURE_CAP: usize = 64 * 1024;
+
+/// Headers whose values never reach the capture table. They are still listed by name so
+/// a reader can see that the client sent one; only the value is replaced.
+const CAPTURE_REDACTED: &[&str] = &["authorization", "x-api-key", "api-key", "cookie"];
+
+/// The stored prefix of one body, and whether it was cut.
+///
+/// `total` is the byte count actually observed, which a live stream knows even when only
+/// a prefix was kept. The cut is moved back onto a character boundary so the stored text
+/// never ends in a mangled multibyte sequence.
+fn capture_text(raw: &[u8], total: usize) -> (String, bool) {
+    if total <= CAPTURE_CAP {
+        return match std::str::from_utf8(raw) {
+            Ok(text) => (text.to_string(), false),
+            // An audio or multipart upload is counted, never stored as a lossy string:
+            // mojibake in the inspector would suggest the body was text.
+            Err(_) => (format!("[binary body: {total} bytes not stored]"), false),
+        };
+    }
+    let mut end = CAPTURE_CAP.min(raw.len());
+    if let Err(e) = std::str::from_utf8(&raw[..end]) {
+        end = e.valid_up_to();
+    }
+    let mut text = String::from_utf8_lossy(&raw[..end]).into_owned();
+    text.push_str(&format!(
+        "\n\n[captured body truncated: kept {end} of {total} bytes]"
+    ));
+    (text, true)
+}
+
+/// The client's request headers as JSON, with every credential-bearing value replaced.
+///
+/// Only the client-facing headers are captured: the headers sent upstream carry the
+/// gateway's own provider credentials and must never be stored.
+fn capture_headers(headers: &HeaderMap) -> String {
+    let mut map = serde_json::Map::new();
+    for (name, value) in headers {
+        let key = name.as_str();
+        if CAPTURE_REDACTED.contains(&key) {
+            continue;
+        }
+        let text = value.to_str().unwrap_or("[non-utf8]");
+        map.insert(key.to_string(), Value::String(text.to_string()));
+    }
+    for key in CAPTURE_REDACTED {
+        if headers.contains_key(*key) {
+            map.insert((*key).to_string(), Value::String("[redacted]".into()));
+        }
+    }
+    Value::Object(map).to_string()
+}
+
+/// Store the request half of a capture, off the hot path.
+///
+/// Nothing is written while the setting is off, so an operator who never enables capture
+/// accumulates no rows to clean up afterwards.
+fn capture_request(
+    state: &Arc<AppState>,
+    request_id: Uuid,
+    headers: &HeaderMap,
+    raw: &[u8],
+) {
+    if !crate::settings::capture_bodies() {
+        return;
+    }
+    let (body, truncated) = capture_text(raw, raw.len());
+    let headers = capture_headers(headers);
+    let bytes = raw.len() as u64;
+    let ts = crate::now_unix();
+    let store = Arc::clone(&state.store);
+    tokio::spawn(async move {
+        if let Err(e) = store
+            .record_capture_request(request_id, ts, Some(&headers), &body, bytes, truncated)
+            .await
+        {
+            tracing::warn!(error = %e, "request capture failed");
+        }
+    });
+}
+
+/// Tee a response body into the capture table as it streams.
+///
+/// The client sees every chunk unchanged and immediately; the copy is bounded and is
+/// written when the body ends or is dropped (a disconnected client), whichever comes
+/// first. A response built while capture is off is returned untouched.
+fn capture_response(state: &Arc<AppState>, request_id: Uuid, resp: Response) -> Response {
+    if !crate::settings::capture_bodies() {
+        return resp;
+    }
+    let (parts, body) = resp.into_parts();
+    let stream = CaptureBody {
+        inner: body.into_data_stream(),
+        store: Arc::clone(&state.store),
+        request_id,
+        buffer: Vec::new(),
+        total: 0,
+        written: false,
+    };
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+/// The forwarding stream behind [`capture_response`].
+struct CaptureBody {
+    inner: axum::body::BodyDataStream,
+    store: Arc<rrouter_store::Store>,
+    request_id: Uuid,
+    /// The first [`CAPTURE_CAP`] bytes seen, which is all that is stored.
+    buffer: Vec<u8>,
+    /// Every byte forwarded, including the ones past the cap.
+    total: usize,
+    written: bool,
+}
+
+impl CaptureBody {
+    /// Write the stored copy once. Called from the stream end and from `Drop`; the flag
+    /// makes it idempotent because whichever comes first wins.
+    fn flush(&mut self) {
+        if self.written {
+            return;
+        }
+        self.written = true;
+        let (body, truncated) = capture_text(&self.buffer, self.total);
+        let bytes = self.total as u64;
+        let store = Arc::clone(&self.store);
+        let request_id = self.request_id;
+        tokio::spawn(async move {
+            if let Err(e) = store
+                .record_capture_response(request_id, &body, bytes, truncated)
+                .await
+            {
+                tracing::warn!(error = %e, "response capture failed");
+            }
+        });
+    }
+}
+
+impl Stream for CaptureBody {
+    type Item = Result<Bytes, axum::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                this.total += chunk.len();
+                let room = CAPTURE_CAP.saturating_sub(this.buffer.len());
+                if room > 0 {
+                    this.buffer
+                        .extend_from_slice(&chunk[..chunk.len().min(room)]);
+                }
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                this.flush();
+                Poll::Ready(Some(Err(e)))
+            }
+            Poll::Ready(None) => {
+                this.flush();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for CaptureBody {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
 /// Registry id of Qoder, whose COSY-signed envelope is rebuilt and re-signed per attempt.
 const QODER: &str = "qoder";
 
@@ -413,8 +589,9 @@ pub async fn proxy(State(state): State<Arc<AppState>>, req: Request) -> Response
             );
         }
     };
+    capture_request(&state, trace.request_id, &parts.headers, &raw);
     match handle(&state, inbound, &parts.headers, &raw, &trace, permit).await {
-        Ok(resp) => trace.respond(started, resp),
+        Ok(resp) => capture_response(&state, trace.request_id, trace.respond(started, resp)),
         Err(e) => trace.fail(&state, started, inbound, &e),
     }
 }
@@ -443,9 +620,10 @@ pub async fn embeddings(State(state): State<Arc<AppState>>, req: Request) -> Res
             );
         }
     };
+    capture_request(&state, trace.request_id, &parts.headers, &raw);
     match embeddings_inner(&state, &parts.headers, &raw, &trace).await {
         // Non-streaming: the permit dies with this scope, after the body is built.
-        Ok(resp) => trace.respond(started, resp),
+        Ok(resp) => capture_response(&state, trace.request_id, trace.respond(started, resp)),
         Err(e) => trace.fail(&state, started, Dialect::OpenAiEmbeddings, &e),
     }
 }
@@ -532,9 +710,10 @@ async fn special(state: &Arc<AppState>, req: Request, kind: Special) -> Response
             );
         }
     };
+    capture_request(&state, trace.request_id, &parts.headers, &raw);
     match special_inner(state, &parts.headers, &raw, kind, &trace).await {
         // Non-streaming: the permit dies with this scope, after the body is built.
-        Ok(resp) => trace.respond(started, resp),
+        Ok(resp) => capture_response(state, trace.request_id, trace.respond(started, resp)),
         Err(e) => trace.fail_at(state, started, kind.dialect(), kind.endpoint(), &e),
     }
 }
@@ -832,9 +1011,14 @@ async fn passthrough(state: &Arc<AppState>, req: Request, kind: Pass) -> Respons
             );
         }
     };
+    capture_request(&state, trace.request_id, &parts.headers, &raw);
     match passthrough_inner(state, &parts.headers, &raw, kind, &trace).await {
         // Audio streams: the slot has to outlive this handler and die with the body.
-        Ok(resp) => trace.respond(started, hold_slot(resp, permit)),
+        Ok(resp) => capture_response(
+            state,
+            trace.request_id,
+            trace.respond(started, hold_slot(resp, permit)),
+        ),
         Err(e) => trace.fail_at(state, started, kind.dialect(), kind.endpoint(), &e),
     }
 }
@@ -5238,5 +5422,72 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("application/json")
         );
+    }
+
+    /// A body under the cap is stored whole and reports no truncation.
+    #[test]
+    fn capture_text_keeps_a_short_body_whole() {
+        let (text, truncated) = capture_text(b"{\"prompt\":\"hi\"}", 14);
+        assert_eq!(text, "{\"prompt\":\"hi\"}");
+        assert!(!truncated);
+    }
+
+    /// A body over the cap is a prefix plus a marker naming both sizes, and the marker
+    /// never lands mid-character.
+    #[test]
+    fn capture_text_truncates_past_the_cap_with_a_marker() {
+        let body = "é".repeat(CAPTURE_CAP);
+        let (text, truncated) = capture_text(body.as_bytes(), body.len());
+        assert!(truncated);
+        assert!(text.starts_with('é'));
+        assert!(
+            text.ends_with(&format!(
+                "[captured body truncated: kept {CAPTURE_CAP} of {} bytes]",
+                body.len()
+            )),
+            "{}",
+            &text[text.len() - 80..]
+        );
+        // The stored prefix is valid UTF-8 by construction.
+        assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+    }
+
+    /// Credential-bearing headers keep their names but never their values; everything
+    /// else survives as sent.
+    #[test]
+    fn capture_headers_redacts_credentials() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer sk-live"));
+        headers.insert("x-api-key", HeaderValue::from_static("sk-abc"));
+        headers.insert("api-key", HeaderValue::from_static("sk-def"));
+        headers.insert(header::COOKIE, HeaderValue::from_static("session=secret"));
+        headers.insert("x-client-name", HeaderValue::from_static("dashboard"));
+        let parsed: Value = serde_json::from_str(&capture_headers(&headers)).expect("json");
+        for key in CAPTURE_REDACTED {
+            assert_eq!(parsed[*key], "[redacted]", "{key}");
+        }
+        assert_eq!(parsed["x-client-name"], "dashboard");
+        let raw = parsed.to_string();
+        for secret in ["sk-live", "sk-abc", "sk-def", "session=secret"] {
+            assert!(!raw.contains(secret), "{secret} leaked into {raw}");
+        }
+    }
+
+    /// A single SSE frame is stored verbatim, so the viewer can show the wire shape.
+    #[test]
+    fn capture_text_keeps_sse_frames_verbatim() {
+        let frame = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+        let (text, truncated) = capture_text(frame, frame.len());
+        assert_eq!(text.as_bytes(), frame);
+        assert!(!truncated);
+    }
+
+    /// A binary upload is counted but never turned into lossy text.
+    #[test]
+    fn capture_text_marks_binary_bodies_instead_of_storing_them() {
+        let audio = [0xff, 0xfb, 0x90, 0x00, 0x80];
+        let (text, truncated) = capture_text(&audio, audio.len());
+        assert_eq!(text, "[binary body: 5 bytes not stored]");
+        assert!(!truncated);
     }
 }

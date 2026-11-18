@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { api, type FetchResult, type SyncResult } from "../../lib/api";
 import { qk, useConnections, useSystem } from "../../lib/queries";
 import {
+  AlertBanner,
   Button,
   Card,
   CardHeader,
@@ -26,6 +27,7 @@ export default function RuntimeSettings() {
   const [metadataBusy, setMetadataBusy] = useState<null | "sync" | "fetch">(null);
   const [metadataNote, setMetadataNote] = useState<string | null>(null);
   const [savingRtk, setSavingRtk] = useState(false);
+  const [savingCapture, setSavingCapture] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
   const counts = system.data?.counts;
@@ -75,6 +77,27 @@ export default function RuntimeSettings() {
       setError(e);
     } finally {
       setSavingRtk(false);
+    }
+  };
+
+  // The settings query is typed for the white-label fields; capture rides in the same
+  // flat blob, so read it through a narrow view instead of widening the shared type.
+  const captureOn = (settings.data as (Brand & { capture_bodies?: boolean }) | undefined)?.capture_bodies ?? false;
+
+  const toggleCapture = async (next: boolean) => {
+    setSavingCapture(true);
+    setError(null);
+    try {
+      const saved = await api.put<Brand>("/api/settings", {
+        ...(settings.data ?? {}),
+        capture_bodies: next,
+      });
+      client.setQueryData(GATEWAY_SETTINGS_KEY, saved);
+      await client.invalidateQueries({ queryKey: GATEWAY_SETTINGS_KEY });
+    } catch (e) {
+      setError(e);
+    } finally {
+      setSavingCapture(false);
     }
   };
 
@@ -193,6 +216,41 @@ export default function RuntimeSettings() {
             disabled={savingRtk}
             onChange={() => void toggleRtk()}
           />
+        </div>
+      </Card>
+
+      <Card className="mt-4">
+        <CardHeader
+          title="Request capture"
+          action={
+            <span className="text-caption text-faint">
+              {captureOn ? "on · writing bodies to the local database" : "off by default"}
+            </span>
+          }
+        />
+        <div className="flex flex-col gap-4 px-5 pb-5">
+          <AlertBanner tone="warn" title="This stores prompt and response content on this machine">
+            Turning capture on writes each request body and the response the client received —
+            including streamed SSE frames — into the gateway's local SQLite database. The values of{" "}
+            <code className="font-mono text-caption">authorization</code>,{" "}
+            <code className="font-mono text-caption">x-api-key</code>,{" "}
+            <code className="font-mono text-caption">api-key</code> and{" "}
+            <code className="font-mono text-caption">cookie</code> are redacted before writing, but
+            the conversation itself is kept in cleartext. Bodies are capped at 64 KiB each and
+            pruned with usage retention.
+          </AlertBanner>
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <p className="max-w-[62ch] text-small leading-relaxed text-muted">
+              Needed only to debug a specific request in the inspector, for example to see the
+              exact prompt a provider received. Leave it off otherwise.
+            </p>
+            <Toggle
+              checked={captureOn}
+              label="Capture request and response bodies"
+              disabled={savingCapture}
+              onChange={(next) => void toggleCapture(next)}
+            />
+          </div>
         </div>
       </Card>
 

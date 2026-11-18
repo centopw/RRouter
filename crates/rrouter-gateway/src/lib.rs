@@ -243,6 +243,14 @@ pub fn app(state: Arc<AppState>) -> Router {
             put(routes::quotas::update).delete(routes::quotas::remove),
         )
         .route("/audit", get(routes::audit::list))
+        // Deleting one request-log row and reading its captured bodies. Both are admin
+        // actions while `GET /api/usage/{request_id}` stays on the read-only surface:
+        // deletion is destructive and a captured body carries prompt text.
+        .route(
+            "/usage/{request_id}",
+            axum::routing::delete(routes::usage::remove),
+        )
+        .route("/usage/{request_id}/capture", get(routes::usage::capture))
         // Webhook receivers and their delivery queue. Admin-only: a receiver URL is an
         // egress capability, and the queue names administrative actions.
         .route(
@@ -273,6 +281,10 @@ pub fn app(state: Arc<AppState>) -> Router {
             get(routes::system_logs::list)
                 .put(routes::system_logs::update)
                 .delete(routes::system_logs::clear),
+        )
+        .route(
+            "/system/logs/{id}",
+            axum::routing::delete(routes::system_logs::remove),
         )
         .route(
             "/settings",

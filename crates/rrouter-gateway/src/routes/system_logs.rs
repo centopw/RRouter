@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Query, State};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use super::{admin_error, body_json, ok_json};
@@ -58,4 +58,34 @@ pub async fn update(State(state): State<Arc<AppState>>, body: Body) -> Response 
 pub async fn clear() -> Response {
     crate::syslog::clear();
     ok_json(json!({ "cleared": true }))
+}
+
+/// `DELETE /api/system/logs/{id}`: drop one entry. 404 when it already rotated out.
+pub async fn remove(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    peer: crate::auth::Peer,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let Ok(id) = id.parse::<u64>() else {
+        return admin_error(&rrouter_core::Error::BadRequest(format!(
+            "system log id {id} is not a number"
+        )));
+    };
+    if !crate::syslog::remove(id) {
+        return admin_error(&rrouter_core::Error::NotFound(format!(
+            "unknown system log entry {id}"
+        )));
+    }
+    let actor = super::auth::actor(&state, &headers).await;
+    let ip = crate::auth::client_ip(&headers, peer.0);
+    super::auth::audit(
+        &state,
+        "log_deleted",
+        Some(&actor),
+        &ip,
+        &format!("system log · entry {id}"),
+    )
+    .await;
+    axum::http::StatusCode::NO_CONTENT.into_response()
 }
