@@ -15,6 +15,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::{admin_error, body_json, ok_json};
+use crate::combo_meta::{self, ComboMetadata, RegistrySnapshot};
 use crate::models_registry::{self, SOURCE_CUSTOM, SOURCE_UPSTREAM};
 use crate::state::{AppState, Caller};
 
@@ -24,6 +25,8 @@ struct ListedModel {
     id: String,
     provider: String,
     meta: Option<models_registry::ModelItem>,
+    /// Present for combos: the per-member target sets and the aggregate they fold to.
+    combo: Option<ComboMetadata>,
 }
 
 /// Models a client can actually call: the registry (already limited to connected
@@ -43,143 +46,81 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
         Ok(items) => items,
         Err(e) => return admin_error(&e),
     };
-    let by_ref: HashMap<String, models_registry::ModelItem> = registry
+    let aliases = state.store.list_aliases().await.unwrap_or_default();
+    let combos = state.store.list_combos().await.unwrap_or_default();
+    let layout = state
+        .store
+        .default_model_preset()
+        .await
+        .ok()
+        .flatten()
+        .map(|preset| preset.layout);
+    let snapshot = RegistrySnapshot::new(registry, aliases, layout);
+    let index = snapshot.index();
+    let known_ids: BTreeSet<&str> = snapshot
+        .items
         .iter()
         .filter(|item| item.enabled)
-        .map(|item| (item.reference.clone(), item.clone()))
+        .map(|item| item.id.as_str())
         .collect();
-    let by_id: HashMap<String, models_registry::ModelItem> = registry
-        .iter()
-        .filter(|item| item.enabled)
-        .fold(HashMap::new(), |mut map, item| {
-            map.entry(item.id.clone()).or_insert_with(|| item.clone());
-            map
-        });
-    let known_ids: BTreeSet<&str> = by_id.keys().map(String::as_str).collect();
-    let mut models: Vec<ListedModel> = registry
+    let mut models: Vec<ListedModel> = snapshot
+        .items
         .iter()
         .filter(|item| item.enabled)
         .map(|item| ListedModel {
             id: item.id.clone(),
             provider: item.provider.clone(),
             meta: Some(item.clone()),
+            combo: None,
         })
         .collect();
 
-    // Names the gateway owns are not registry rows. An alias or combo that collides with
-    // a real model id keeps the model's routing and metadata.
-    if let Ok(aliases) = state.store.list_aliases().await {
-        for alias in aliases {
-            if known_ids.contains(alias.alias.as_str()) {
-                continue;
-            }
-            models.push(ListedModel {
-                meta: resolve_meta(&state, &alias.target, &by_ref, &by_id).map(without_display),
-                id: alias.alias,
-                provider: "rrouter".to_string(),
-            });
+    // Names the gateway owns are not registry rows. An alias that collides with a real
+    // model id keeps the model's routing and metadata.
+    for alias in &snapshot.aliases {
+        if known_ids.contains(alias.alias.as_str()) {
+            continue;
         }
+        models.push(ListedModel {
+            meta: index.resolve_one(&alias.target).map(without_display),
+            id: alias.alias.clone(),
+            provider: "rrouter".to_string(),
+            combo: None,
+        });
     }
-    if let Ok(combos) = state.store.list_combos().await {
-        for combo in combos {
-            if known_ids.contains(combo.name.as_str()) {
-                continue;
-            }
-            models.push(ListedModel {
-                meta: combo_meta(&state, &combo.models, &by_ref, &by_id),
-                id: combo.name,
-                provider: "rrouter".to_string(),
-            });
+    // A combo whose name equals a registry id is advertised as the combo, because that is
+    // what routing serves for that name; the registry row stays reachable as
+    // `provider/id`. An alias outranks a combo (routing resolves the alias first), so a
+    // colliding combo is not advertised a second time; it stays reachable as
+    // `combo:<name>`. Aliases win even where the alias entry itself is skipped because a
+    // registry row already spells the id.
+    let alias_names: BTreeSet<&str> = snapshot
+        .aliases
+        .iter()
+        .map(|alias| alias.alias.as_str())
+        .collect();
+    for combo in &combos {
+        if alias_names.contains(combo.name.as_str()) {
+            continue;
         }
+        let metadata = combo_meta::combo_metadata(&index, combo);
+        models.push(ListedModel {
+            meta: metadata.legacy_meta(),
+            id: combo.name.clone(),
+            provider: "rrouter".to_string(),
+            combo: Some(metadata),
+        });
     }
 
     let created = crate::now_unix();
-    let (data, groups) = grouped_models(&state, created, models, &caller).await;
+    let (data, groups) =
+        grouped_models(&state, created, models, &caller, snapshot.layout.as_ref()).await;
     ok_json(json!({ "object": "list", "data": data, "groups": groups }))
-}
-
-/// Resolve an alias target or combo member to its registry row.
-fn resolve_meta(
-    state: &AppState,
-    reference: &str,
-    by_ref: &HashMap<String, models_registry::ModelItem>,
-    by_id: &HashMap<String, models_registry::ModelItem>,
-) -> Option<models_registry::ModelItem> {
-    by_ref
-        .get(reference)
-        .cloned()
-        .or_else(|| {
-            reference
-                .split_once('/')
-                .filter(|(provider, _)| state.provider_by_ref(provider).is_some())
-                .and_then(|(_, id)| by_id.get(id).cloned())
-        })
-        .or_else(|| by_id.get(reference).cloned())
 }
 
 fn without_display(mut meta: models_registry::ModelItem) -> models_registry::ModelItem {
     meta.display = None;
     meta
-}
-
-/// A combo can land on any member, so advertise only what every member supports and the
-/// smallest limits. Unknown members make the whole answer unknown.
-fn combo_meta(
-    state: &AppState,
-    members: &[String],
-    by_ref: &HashMap<String, models_registry::ModelItem>,
-    by_id: &HashMap<String, models_registry::ModelItem>,
-) -> Option<models_registry::ModelItem> {
-    let mut out: Option<models_registry::ModelItem> = None;
-    for member in members {
-        let meta = without_display(resolve_meta(state, member, by_ref, by_id)?);
-        out = Some(match out {
-            None => meta,
-            Some(current) => intersect_meta(current, meta),
-        });
-    }
-    out
-}
-
-fn intersect_meta(
-    mut left: models_registry::ModelItem,
-    right: models_registry::ModelItem,
-) -> models_registry::ModelItem {
-    left.context = min_limit(left.context, right.context);
-    left.max_output = min_limit(left.max_output, right.max_output);
-    left.capabilities = left.capabilities.intersect(right.capabilities);
-    // Reasoning support is derived, not intersected like a flag. Keep it only when both
-    // members advertise the same levels; otherwise the first member's levels would leak
-    // into a combo that cannot promise them.
-    if left.reasoning != right.reasoning {
-        left.reasoning = None;
-    }
-    left.capabilities_extra = if left.capabilities_extra == right.capabilities_extra {
-        left.capabilities_extra
-    } else {
-        None
-    };
-    left.effort = if left.effort == right.effort {
-        left.effort
-    } else {
-        None
-    };
-    left.api_capabilities = if left.api_capabilities == right.api_capabilities {
-        left.api_capabilities
-    } else {
-        None
-    };
-    left.deprecated |= right.deprecated;
-    left.display = None;
-    left.cost = None;
-    left
-}
-
-fn min_limit(left: Option<u32>, right: Option<u32>) -> Option<u32> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        _ => None,
-    }
 }
 
 /// Apply the default preset's groups and visibility to the flat `/v1/models` list.
@@ -194,21 +135,11 @@ async fn grouped_models(
     created: i64,
     models: Vec<ListedModel>,
     caller: &Caller,
+    layout: Option<&rrouter_store::LayoutDocument>,
 ) -> (Vec<Value>, Vec<Value>) {
-    let layout = state
-        .store
-        .default_model_preset()
-        .await
-        .ok()
-        .flatten()
-        .map(|preset| preset.layout);
-    let auto_include = layout
-        .as_ref()
-        .map(|layout| layout.auto_include_new)
-        .unwrap_or(true);
+    let auto_include = layout.map(|layout| layout.auto_include_new).unwrap_or(true);
     let empty = Vec::new();
     let explicit_groups: &[rrouter_store::LayoutGroup] = layout
-        .as_ref()
         .map(|layout| layout.groups.as_slice())
         .unwrap_or(&empty);
     let group_by_id: HashMap<&str, &rrouter_store::LayoutGroup> = explicit_groups
@@ -234,7 +165,6 @@ async fn grouped_models(
         .map(|group| group.id.as_str())
         .collect();
     let item_by_ref: HashMap<String, &rrouter_store::LayoutItem> = layout
-        .as_ref()
         .map(|layout| {
             layout
                 .items
@@ -361,6 +291,15 @@ async fn grouped_models(
         .iter()
         .map(|(id, name, provider)| (id.as_str(), (name.as_str(), provider.as_deref())))
         .collect();
+    let combo_by_ref: HashMap<(&str, &str), &ComboMetadata> = models
+        .iter()
+        .filter_map(|model| {
+            model
+                .combo
+                .as_ref()
+                .map(|combo| ((model.provider.as_str(), model.id.as_str()), combo))
+        })
+        .collect();
     let data = resolved
         .into_iter()
         .map(|(id, provider, group, _)| {
@@ -390,6 +329,7 @@ async fn grouped_models(
                 created,
                 Some(&group),
                 meta_by_ref.get(&(provider.as_str(), id.as_str())).copied(),
+                combo_by_ref.get(&(provider.as_str(), id.as_str())).copied(),
             )
         })
         .collect();
@@ -405,6 +345,7 @@ fn model_json(
     created: i64,
     group: Option<&str>,
     meta: Option<&models_registry::ModelItem>,
+    combo: Option<&ComboMetadata>,
 ) -> Value {
     let mut object = Map::new();
     object.insert("id".into(), Value::String(id.to_string()));
@@ -417,6 +358,11 @@ fn model_json(
     object.insert("created".into(), Value::Number(created.into()));
     if let Some(group) = group {
         object.insert("group".into(), Value::String(group.to_string()));
+    }
+    // Additive for combos only; OpenAI-compatible clients ignore unknown keys.
+    if let Some(combo) = combo {
+        object.insert("members".into(), combo.members_json());
+        object.insert("aggregate".into(), combo.aggregate_json());
     }
     let Some(meta) = meta else {
         return Value::Object(object);
@@ -436,16 +382,26 @@ fn model_json(
         );
     }
     let caps = meta.capabilities;
+    // A combo with an unresolved or empty target set advertises no capability block at
+    // all, exactly as before the metadata rework: the members are not all known, so no
+    // flag can be promised and no modality list can be stated.
+    let combo_unknown = combo.is_some_and(|combo| {
+        combo
+            .aggregate
+            .as_ref()
+            .is_none_or(|aggregate| aggregate.guaranteed_capabilities.is_none())
+    });
     // Modalities are emitted only when something is actually known. A bare upstream id
     // with no limits and no modality flag must not claim text-only or audio support.
-    if meta.context.is_some()
-        || meta.max_output.is_some()
-        || caps.vision
-        || caps.pdf
-        || caps.audio_input
-        || caps.video_input
-        || caps.image_output
-        || caps.audio_output
+    if !combo_unknown
+        && (meta.context.is_some()
+            || meta.max_output.is_some()
+            || caps.vision
+            || caps.pdf
+            || caps.audio_input
+            || caps.video_input
+            || caps.image_output
+            || caps.audio_output)
     {
         let mut input = vec!["text"];
         if caps.vision {
@@ -470,32 +426,34 @@ fn model_json(
         object.insert("input_modalities".into(), json!(input));
         object.insert("output_modalities".into(), json!(output));
     }
-    let mut capabilities = Map::new();
-    for (key, flag) in [
-        ("vision", caps.vision),
-        ("pdf", caps.pdf),
-        ("audioInput", caps.audio_input),
-        ("videoInput", caps.video_input),
-        ("imageOutput", caps.image_output),
-        ("audioOutput", caps.audio_output),
-        ("search", caps.search),
-        ("tools", caps.tools),
-        ("reasoning", caps.reasoning),
-    ] {
-        capabilities.insert(key.into(), Value::Bool(flag));
-    }
-    if let Some(context) = meta.context {
-        capabilities.insert("contextWindow".into(), Value::Number(context.into()));
-    }
-    if let Some(max_output) = meta.max_output {
-        capabilities.insert("maxOutput".into(), Value::Number(max_output.into()));
-    }
-    if let Some(extra) = &meta.capabilities_extra {
-        for (key, value) in extra {
-            capabilities.insert(key.clone(), value.clone());
+    if !combo_unknown {
+        let mut capabilities = Map::new();
+        for (key, flag) in [
+            ("vision", caps.vision),
+            ("pdf", caps.pdf),
+            ("audioInput", caps.audio_input),
+            ("videoInput", caps.video_input),
+            ("imageOutput", caps.image_output),
+            ("audioOutput", caps.audio_output),
+            ("search", caps.search),
+            ("tools", caps.tools),
+            ("reasoning", caps.reasoning),
+        ] {
+            capabilities.insert(key.into(), Value::Bool(flag));
         }
+        if let Some(context) = meta.context {
+            capabilities.insert("contextWindow".into(), Value::Number(context.into()));
+        }
+        if let Some(max_output) = meta.max_output {
+            capabilities.insert("maxOutput".into(), Value::Number(max_output.into()));
+        }
+        if let Some(extra) = &meta.capabilities_extra {
+            for (key, value) in extra {
+                capabilities.insert(key.clone(), value.clone());
+            }
+        }
+        object.insert("capabilities".into(), Value::Object(capabilities));
     }
-    object.insert("capabilities".into(), Value::Object(capabilities));
     if let Some(effort) = &meta.effort {
         object.insert("effort".into(), effort.clone());
     }
@@ -532,13 +490,14 @@ pub async fn get_model(
     };
     let reference = reference.trim_start_matches('/');
     match routable_model(&state, reference, &caller).await {
-        Ok(Some((owned_by, canonical, bare, meta))) => ok_json(model_json(
+        Ok(Some((owned_by, canonical, bare, meta, combo))) => ok_json(model_json(
             &canonical,
             bare.as_deref(),
             &owned_by,
             crate::now_unix(),
             None,
             meta.as_ref(),
+            combo.as_ref(),
         )),
         Ok(None) => crate::error::error_response(
             Dialect::OpenAiChat,
@@ -548,12 +507,14 @@ pub async fn get_model(
     }
 }
 
-/// What `GET /v1/models/{id}` resolved to: owner, advertised id, bare id, metadata.
+/// What `GET /v1/models/{id}` resolved to: owner, advertised id, bare id, metadata,
+/// and — for a combo — the per-member target sets plus the aggregate.
 type RoutedModel = (
     String,
     String,
     Option<String>,
     Option<models_registry::ModelItem>,
+    Option<ComboMetadata>,
 );
 
 /// Which provider owns `reference` and what the gateway knows about the model, when it
@@ -573,8 +534,43 @@ async fn routable_model(
         },
         _ => (None, reference),
     };
-    let items = models_registry::list(state).await?;
-    if let Some(item) = items.iter().find(|item| {
+    let snapshot = RegistrySnapshot::load(state).await?;
+    let index = snapshot.index();
+
+    // Routing prefers a gateway-owned name over a registry row with the same spelling
+    // (`Planner::targets`): alias first, then combo, then the registry grammar.
+    if let Some(alias) = snapshot
+        .aliases
+        .iter()
+        .find(|alias| alias.alias == reference)
+    {
+        let meta = index.resolve_one(&alias.target).map(without_display);
+        return Ok(Some((
+            "rrouter".to_string(),
+            reference.to_string(),
+            None,
+            meta,
+            None,
+        )));
+    }
+    if let Some(combo) = state
+        .store
+        .list_combos()
+        .await?
+        .iter()
+        .find(|combo| combo.name == reference)
+    {
+        let metadata = combo_meta::combo_metadata(&index, combo);
+        return Ok(Some((
+            "rrouter".to_string(),
+            reference.to_string(),
+            None,
+            metadata.legacy_meta(),
+            Some(metadata),
+        )));
+    }
+
+    if let Some(item) = snapshot.items.iter().find(|item| {
         item.enabled && item.id == bare && provider.as_deref().is_none_or(|p| item.provider == p)
     }) {
         return Ok(Some((
@@ -582,6 +578,7 @@ async fn routable_model(
             format!("{}/{}", item.provider, item.id),
             Some(item.id.clone()),
             Some(item.clone()),
+            None,
         )));
     }
 
@@ -593,8 +590,8 @@ async fn routable_model(
             if let Some((segment, id)) = rest.split_once('/') {
                 if !id.is_empty() {
                     if let Some(provider) = state.provider_by_ref(segment) {
-                        if let Some(preset) = state.store.default_model_preset().await? {
-                            if let Some(group) = preset.layout.group_by_name(head) {
+                        if let Some(layout) = snapshot.layout.as_ref() {
+                            if let Some(group) = layout.group_by_name(head) {
                                 if !rrouter_store::LayoutDocument::allows(
                                     group,
                                     caller.key_id(),
@@ -603,7 +600,8 @@ async fn routable_model(
                                 ) {
                                     return Ok(None);
                                 }
-                                return Ok(items
+                                return Ok(snapshot
+                                    .items
                                     .iter()
                                     .find(|item| {
                                         item.enabled && item.provider == provider && item.id == id
@@ -614,6 +612,7 @@ async fn routable_model(
                                             reference.to_string(),
                                             Some(id.to_string()),
                                             Some(item.clone()),
+                                            None,
                                         )
                                     }));
                             }
@@ -622,49 +621,6 @@ async fn routable_model(
                 }
             }
         }
-    }
-
-    // Alias and combo metadata comes from the registry rows they resolve to.
-    let by_ref: HashMap<String, models_registry::ModelItem> = items
-        .iter()
-        .filter(|item| item.enabled)
-        .map(|item| (item.reference.clone(), item.clone()))
-        .collect();
-    let by_id: HashMap<String, models_registry::ModelItem> = items
-        .iter()
-        .filter(|item| item.enabled)
-        .fold(HashMap::new(), |mut map, item| {
-            map.entry(item.id.clone()).or_insert_with(|| item.clone());
-            map
-        });
-    if let Some(alias) = state
-        .store
-        .list_aliases()
-        .await?
-        .into_iter()
-        .find(|alias| alias.alias == reference)
-    {
-        let meta = resolve_meta(state, &alias.target, &by_ref, &by_id).map(without_display);
-        return Ok(Some((
-            "rrouter".to_string(),
-            reference.to_string(),
-            None,
-            meta,
-        )));
-    }
-    if let Some(combo) = state
-        .store
-        .list_combos()
-        .await?
-        .into_iter()
-        .find(|combo| combo.name == reference)
-    {
-        return Ok(Some((
-            "rrouter".to_string(),
-            reference.to_string(),
-            None,
-            combo_meta(state, &combo.models, &by_ref, &by_id),
-        )));
     }
     Ok(None)
 }
@@ -750,6 +706,24 @@ async fn upsert_alias(state: &AppState, body: Body) -> Response {
     else {
         return admin_error(&Error::BadRequest("alias and target are required".into()));
     };
+    // A name has one owner and routing resolves the alias first. A name an alias already
+    // holds stays an alias (the upsert updates its target), but a fresh alias must not
+    // take a name a combo owns.
+    let existing = match state.store.alias_target(&alias).await {
+        Ok(existing) => existing.is_some(),
+        Err(e) => return admin_error(&e),
+    };
+    if !existing {
+        match state.store.get_combo(&alias).await {
+            Ok(Some(_)) => {
+                return admin_error(&Error::BadRequest(format!(
+                    "name {alias:?} is already a combo; a combo keeps the name and an alias must choose another"
+                )))
+            }
+            Ok(None) => {}
+            Err(e) => return admin_error(&e),
+        }
+    }
     match state.store.upsert_alias(&alias, &target).await {
         Ok(()) => ok_json(json!({ "alias": alias, "target": target })),
         Err(e) => admin_error(&e),

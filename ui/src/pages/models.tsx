@@ -1,5 +1,5 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import {
   AlertBanner,
@@ -27,11 +27,11 @@ import {
   usePresetIndex,
   usePresetLayout,
 } from "../lib/queries";
-import type { Model } from "../lib/api";
+import { api, type Combo, type Model } from "../lib/api";
 import { useModelActions } from "./models/actions";
 import { useUnifiedColumns } from "./models/columns-unified";
 import { CustomModelModal } from "./models/custom-model";
-import { ModelFilters } from "./models/filters";
+import { KINDS, ModelFilters, type KindKey } from "./models/filters";
 import { GroupManager, type GroupCandidate } from "./models/groups";
 import {
   ALL,
@@ -45,29 +45,46 @@ import {
   statusesOf,
   type StatusKey,
 } from "./models/params";
-import { AddMenu, PresetControls, SaveAsNewDialog } from "./models/preset-header";
+import {
+  AddMenu,
+  ComboCreateDialog,
+  PresetControls,
+  SaveAsNewDialog,
+  type ComboCreatePayload,
+} from "./models/preset-header";
 import { EmptyRegistry } from "./models/rows";
 import {
   BoardSection,
   UnifiedCards,
+  UnifiedRowProvider,
   type LayoutControls,
   type ModelActions,
 } from "./models/table-unified";
-import {
-  matchesSearch,
-  statusOfModel,
-  type ModelRow,
-} from "./models/unified-rows";
+import { matchesSearch, rowsFor, type UnifiedRow } from "./models/unified-rows";
 
 /**
  * Models: one page, one table.
  *
- * The table holds registry models only; aliases and combos live on their own screens.
- * `Status`, `Custom`, `Provider` and `q` narrow the same row set; none of them swaps the
- * surface. The preset header edits the draft that group and `/v1` controls write to, and
- * it is shared by every filter, so a save that is still debouncing survives a filter
- * change.
+ * The table is the union of registry models, live aliases, live combos, and preset entries
+ * nothing live answers (stale rows). `Status`, `Kind`, `Custom`, `Provider` and `q` narrow
+ * that one row set; none of them swaps the surface. The preset header edits the draft that
+ * group and `/v1` controls write to, and it is shared by every filter, so a save that is
+ * still debouncing survives a filter change.
  */
+const KIND_OF_ROW: Record<Exclude<KindKey, "all">, UnifiedRow["kind"]> = {
+  models: "model",
+  aliases: "alias",
+  combos: "combo",
+};
+
+/** Filter ownership, not route membership: a combo containing a model is RRouter's row. */
+function providerOfRow(row: UnifiedRow): string {
+  if (row.kind !== "model") return "rrouter";
+  if (row.model) return row.model.provider;
+  const cut = row.ref.indexOf("/");
+  return cut < 0 ? row.ref : row.ref.slice(0, cut);
+}
+
 export default function Models() {
   const isAdmin = useIsAdmin();
   const [params, setParams] = useSearchParams();
@@ -92,6 +109,7 @@ export default function Models() {
           value === "" ||
           (key === "provider" && value === ALL) ||
           (key === "status" && value === "routed") ||
+          (key === "kind" && value === "all") ||
           (key === "size" && Number(value) === DEFAULT_SIZE) ||
           (key === "page" && Number(value) === 1) ||
           (key === "custom" && value === "0");
@@ -115,6 +133,10 @@ export default function Models() {
   const appliedQuery = useDeferredValue(urlQuery).trim().toLowerCase();
 
   const requestedProvider = params.get("provider") ?? ALL;
+  const rawKind = params.get("kind");
+  const requestedKind: KindKey = KINDS.includes(rawKind as KindKey)
+    ? (rawKind as KindKey)
+    : "all";
   const customOnly = params.get("custom") === "1";
   const requestedStatus = useMemo(() => statusesOf(params), [params]);
   const size = sizeOf(params);
@@ -153,6 +175,7 @@ export default function Models() {
 
   const [copyOpen, setCopyOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
+  const [comboOpen, setComboOpen] = useState(false);
   const [editing, setEditing] = useState<Model | null>(null);
   const [deleting, setDeleting] = useState<Model | null>(null);
   const [groupsOpen, setGroupsOpen] = useState(false);
@@ -178,11 +201,6 @@ export default function Models() {
     () => (providers.data ?? []).filter((p) => p.has_connection),
     [providers.data],
   );
-  // A stale `?provider=` (disconnected since the link was copied) falls back to the list.
-  const effectiveProvider =
-    requestedProvider === ALL || providers.data?.some((p) => p.id === requestedProvider)
-      ? requestedProvider
-      : ALL;
 
   const hasPreset = isAdmin && presetId !== null && layout.data !== undefined;
   const presetAware = hasPreset;
@@ -200,57 +218,56 @@ export default function Models() {
   );
   const aliasList = useMemo(() => aliases.data ?? [], [aliases.data]);
   const comboList = useMemo(() => combos.data ?? [], [combos.data]);
-
-  const modelRows = useMemo<ModelRow[]>(
-    () =>
-      all.map((model) => {
-        const entry = entryByRef.get(model.ref);
-        return {
-          kind: "model",
-          ref: model.ref,
-          model,
-          entry,
-          status: statusOfModel(model, entry, presetAware),
-        };
-      }),
-    [all, entryByRef, presetAware],
+  const hasNames =
+    aliasList.length > 0 ||
+    comboList.length > 0 ||
+    layoutDraft.entries.some((entry) => entry.ref.startsWith("rrouter/"));
+  // A stale `?provider=` (disconnected since the link was copied) falls back to the list.
+  // RRouter is a filter option only while an alias, combo or stored name ref exists.
+  const effectiveProvider =
+    requestedProvider === ALL ||
+    providers.data?.some((provider) => provider.id === requestedProvider) ||
+    (requestedProvider === "rrouter" && hasNames)
+      ? requestedProvider
+      : ALL;
+  const providerOptions = useMemo(
+    () => [
+      ...connected.map((provider) => ({ id: provider.id, display: provider.display })),
+      ...(hasNames ? [{ id: "rrouter", display: "RRouter" }] : []),
+    ],
+    [connected, hasNames],
+  );
+  const modelByRef = useMemo(
+    () => new Map(all.map((model) => [model.ref, model] as const)),
+    [all],
   );
 
-  // A preset entry whose provider stopped listing it stays on the table, badged. A name
-  // ref waits for the alias/combo lists, so it is not mistaken for a stale model mid-load.
-  const staleRows = useMemo<ModelRow[]>(() => {
-    if (!hasPreset) return [];
-    const namesLoaded = aliases.isSuccess && combos.isSuccess;
-    const known = new Set([
-      ...all.map((model) => model.ref),
-      ...aliasList.map((alias) => `rrouter/${alias.alias}`),
-      ...comboList.map((combo) => `rrouter/${combo.name}`),
-    ]);
-    return layoutDraft.entries
-      .filter(
-        (entry) =>
-          !known.has(entry.ref) && (namesLoaded || !entry.ref.startsWith("rrouter/")),
-      )
-      .map<ModelRow>((entry) => ({
-        kind: "model",
-        ref: entry.ref,
-        model: null,
-        entry,
-        status: entry.visible ? "routed" : "hidden",
-      }));
-  }, [
-    hasPreset,
-    all,
-    aliasList,
-    comboList,
-    layoutDraft.entries,
-    aliases.isSuccess,
-    combos.isSuccess,
-  ]);
+  // One union: registry rows, live names at `rrouter/<name>`, then preset entries that no
+  // live row claimed. Everything downstream (filters, groups, `/v1`, hide, reorder) keys on
+  // the row ref, so a name needs no second code path.
+  const allRows = useMemo<UnifiedRow[]>(
+    () =>
+      rowsFor({
+        models: all,
+        aliases: aliases.data,
+        combos: combos.data,
+        entries: entryByRef,
+        presetAware,
+        autoInclude: layoutDraft.autoInclude,
+      }),
+    [
+      all,
+      aliases.data,
+      combos.data,
+      entryByRef,
+      presetAware,
+      layoutDraft.autoInclude,
+    ],
+  );
 
   const groupChoices = useMemo(() => {
     const knownProviders = new Set(all.map((model) => model.provider));
-    if (aliasList.length > 0 || comboList.length > 0) knownProviders.add("rrouter");
+    if (hasNames) knownProviders.add("rrouter");
     // Every stored entry contributes its bucket: an entry whose provider stopped listing
     // the model still needs a section to render in, badged `unavailable`.
     return effectiveGroups(
@@ -258,7 +275,7 @@ export default function Models() {
       layoutDraft.groups.filter((group) => !group.provider || knownProviders.has(group.provider)),
       displayOf,
     );
-  }, [layoutDraft.entries, layoutDraft.groups, all, aliasList.length, comboList.length, displayOf]);
+  }, [layoutDraft.entries, layoutDraft.groups, all, hasNames, displayOf]);
   const groupIndex = useMemo(
     () => new Map(groupChoices.map((group, index) => [group.id, index] as const)),
     [groupChoices],
@@ -269,15 +286,19 @@ export default function Models() {
   );
 
   const filteredRows = useMemo(() => {
-    const candidates: ModelRow[] = [...modelRows, ...staleRows];
-    return candidates.filter((row) => {
-      if (effectiveProvider !== ALL && row.model?.provider !== effectiveProvider) return false;
-      if (customOnly && row.model?.source !== "custom") return false;
+    return allRows.filter((row) => {
+      if (requestedKind !== "all" && row.kind !== KIND_OF_ROW[requestedKind]) return false;
+      // A combo containing an Anthropic model is still an RRouter row: provider filters on
+      // ownership, while search is the place a member can reveal its parent.
+      if (effectiveProvider !== ALL && providerOfRow(row) !== effectiveProvider) return false;
+      if (customOnly && !(row.kind === "model" && row.model?.source === "custom")) {
+        return false;
+      }
       return matchesSearch(row, appliedQuery, displayOf);
     });
   }, [
-    modelRows,
-    staleRows,
+    allRows,
+    requestedKind,
     effectiveProvider,
     customOnly,
     appliedQuery,
@@ -302,7 +323,7 @@ export default function Models() {
     return result;
   }, [filteredRows]);
 
-  const routedTotal = modelRows.filter((row) => row.status === "routed").length;
+  const routedTotal = allRows.filter((row) => row.status === "routed").length;
 
   const outside =
     statusAware && appliedQuery !== ""
@@ -317,6 +338,7 @@ export default function Models() {
     boardMode &&
     editable &&
     !customOnly &&
+    requestedKind === "all" &&
     appliedQuery === "" &&
     effectiveProvider === ALL;
 
@@ -344,15 +366,19 @@ export default function Models() {
       if (ap !== undefined && bp !== undefined) return ap - bp;
       if (ap !== undefined) return -1;
       if (bp !== undefined) return 1;
-      if (a.model && b.model) {
+      const am = a.kind === "model" ? a.model : null;
+      const bm = b.kind === "model" ? b.model : null;
+      if (am && bm) {
         return (
-          displayOf(a.model.provider).localeCompare(displayOf(b.model.provider)) ||
-          compareModels(a.model, b.model)
+          displayOf(am.provider).localeCompare(displayOf(bm.provider)) ||
+          compareModels(am, bm)
         );
       }
-      if (a.model) return -1;
-      if (b.model) return 1;
-      return a.ref.localeCompare(b.ref);
+      if (am) return -1;
+      if (bm) return 1;
+      return (
+        providerOfRow(a).localeCompare(providerOfRow(b)) || a.ref.localeCompare(b.ref)
+      );
     });
   }, [boardMode, statusRows, entryPosition, displayOf]);
 
@@ -363,7 +389,7 @@ export default function Models() {
     [boardMode, boardRows, flatRows, page, size],
   );
   const boardGroups = useMemo(() => {
-    const byGroup = new Map<string, ModelRow[]>();
+    const byGroup = new Map<string, UnifiedRow[]>();
     for (const row of pageSlice) {
       const id = groupOf(row.ref);
       const list = byGroup.get(id);
@@ -386,14 +412,14 @@ export default function Models() {
   // ---- draft behaviour -------------------------------------------------------------
   const newRefKey = useMemo(
     () =>
-      all
-        .filter((model) => !entryByRef.has(model.ref))
-        .map((model) => model.ref)
+      allRows
+        .filter((row) => !entryByRef.has(row.ref))
+        .map((row) => row.ref)
         .join("|"),
-    [all, entryByRef],
+    [allRows, entryByRef],
   );
-  // Auto-include is a policy, not a button: an opted-in preset adopts every registry model
-  // it never stored, and the debounced save persists them.
+  // Auto-include is a policy, not a button: an opted-in preset adopts every live row it
+  // never stored — registry, alias or combo — and the debounced save persists them.
   useEffect(() => {
     if (!draftReady || !isAdmin || !hasPreset || !layoutDraft.autoInclude || newRefKey === "") {
       return;
@@ -416,28 +442,71 @@ export default function Models() {
     setUndo({ ref });
   };
 
+  // Add → Combo creates the combo and writes its group in the same draft the row select
+  // writes, so the new row lands in that section without a second step. On a conflicted
+  // draft the group control is disabled and only the combo is created.
+  const createCombo = useMutation({
+    mutationFn: (payload: ComboCreatePayload) =>
+      api.post<Combo>("/api/combos", {
+        name: payload.name,
+        models: payload.models,
+        strategy: payload.strategy,
+        ...(payload.strategy === "smart" ? { router_model: payload.router_model } : {}),
+      }),
+    onSuccess: (combo, payload) => {
+      void client.invalidateQueries({ queryKey: qk.combos });
+      void client.invalidateQueries({ queryKey: qk.models });
+      void client.invalidateQueries({ queryKey: qk.system });
+      if (editable) {
+        layoutDraft.assignGroup(`rrouter/${combo.name}`, payload.group);
+      }
+      setComboOpen(false);
+    },
+  });
+
+  const groupDisabledReason = !hasPreset
+    ? "No preset is loaded to assign a group."
+    : layoutDraft.state === "conflict"
+      ? "Resolve the layout conflict below before assigning a group."
+      : null;
+
+  // Built from the same row set the board renders, so a name that is both an alias and a
+  // combo appears once (alias wins, as in rowsFor) and no candidate is unassignable.
   const groupCandidates = useMemo<GroupCandidate[]>(
-    () => [
-      ...all.map((model) => ({
-        ref: model.ref,
-        label: model.id,
-        provider: model.provider,
-        kind: "model" as const,
-      })),
-      ...aliasList.map((alias) => ({
-        ref: `rrouter/${alias.alias}`,
-        label: `${alias.alias} → ${alias.target}`,
-        provider: "rrouter",
-        kind: "alias" as const,
-      })),
-      ...comboList.map((combo) => ({
-        ref: `rrouter/${combo.name}`,
-        label: `${combo.name} · ${combo.models.length} models`,
-        provider: "rrouter",
-        kind: "combo" as const,
-      })),
-    ],
-    [all, aliasList, comboList],
+    () =>
+      allRows.flatMap((row): GroupCandidate[] => {
+        if (row.kind === "model") {
+          if (!row.model) return [];
+          return [
+            {
+              ref: row.ref,
+              label: row.model.id,
+              provider: row.model.provider,
+              kind: "model" as const,
+            },
+          ];
+        }
+        if (row.kind === "alias") {
+          return [
+            {
+              ref: row.ref,
+              label: `${row.name} → ${row.alias.target}`,
+              provider: "rrouter",
+              kind: "alias" as const,
+            },
+          ];
+        }
+        const count = row.combo.models.length;
+        return [
+          {
+            ref: row.ref,
+            label: `${row.name} · ${count} candidate${count === 1 ? "" : "s"}`,
+            provider: "rrouter",
+            kind: "combo" as const,
+          },
+        ];
+      }),
+    [allRows],
   );
 
   const openGroups = () => {
@@ -502,7 +571,11 @@ export default function Models() {
   const loading =
     !draftReady ||
     models.isLoading ||
-    (isAdmin && (presets.isLoading || (presetId !== null && layout.isLoading)));
+    (isAdmin &&
+      (presets.isLoading ||
+        aliases.isLoading ||
+        combos.isLoading ||
+        (presetId !== null && layout.isLoading)));
   const presetName =
     presets.data?.data.find((preset) => preset.id === presetId)?.name ?? "this preset";
   const statusCaption = STATUSES.filter((status) => requestedStatus.has(status))
@@ -512,13 +585,14 @@ export default function Models() {
     ? `${statusCaption} rows in ${presetName}`
     : "Every model this gateway can serve";
   const subtitle = hasPreset
-    ? `Every model this gateway can serve. ${routedTotal.toLocaleString()} routed · ${all.length.toLocaleString()} known`
+    ? `Every model this gateway can serve. ${routedTotal.toLocaleString()} routed · ${allRows.length.toLocaleString()} rows`
     : "Every model this gateway can serve.";
 
   const rowsNothing = total === 0;
   const hasRowFilters =
     appliedQuery !== "" ||
     effectiveProvider !== ALL ||
+    requestedKind !== "all" ||
     customOnly ||
     (statusAware && statusParam(requestedStatus) !== null);
   const clearFilters = () => {
@@ -527,6 +601,7 @@ export default function Models() {
       q: null,
       provider: null,
       status: null,
+      kind: null,
       custom: null,
       page: null,
     });
@@ -537,6 +612,7 @@ export default function Models() {
     urlQuery !== "" ||
     params.has("provider") ||
     params.has("status") ||
+    params.has("kind") ||
     params.has("custom");
 
   const emptyState =
@@ -615,7 +691,13 @@ export default function Models() {
                   onSaveAsNew={() => setCopyOpen(true)}
                 />
               ) : null}
-              <AddMenu onAddCustom={() => setCustomOpen(true)} />
+              <AddMenu
+                onAddCustom={() => setCustomOpen(true)}
+                onAddCombo={() => {
+                  createCombo.reset();
+                  setComboOpen(true);
+                }}
+              />
             </>
           ) : undefined
         }
@@ -714,7 +796,7 @@ export default function Models() {
         </div>
       ) : null}
 
-      {!models.isLoading && all.length === 0 ? (
+      {!models.isLoading && allRows.length === 0 ? (
         <EmptyRegistry
           onSync={actions.onSync}
           syncing={actions.sync.isPending}
@@ -722,13 +804,16 @@ export default function Models() {
           onAddCustom={isAdmin ? () => setCustomOpen(true) : undefined}
         />
       ) : (
-        <Card>
+        <UnifiedRowProvider modelByRef={modelByRef}>
+          <Card>
           <ModelFilters
             query={draft}
             onQuery={setDraft}
-            providers={connected}
+            providers={providerOptions}
             provider={effectiveProvider}
             onProvider={(next) => setFilters({ provider: next, page: "1" })}
+            kind={requestedKind}
+            onKind={(next) => setFilters({ kind: next, page: "1" })}
             statuses={requestedStatus}
             counts={counts}
             showStatus={statusAware}
@@ -818,7 +903,8 @@ export default function Models() {
           {boardMode && !loading && boardRows.length > 0 ? (
             <PaginationBar pagination={pagination} />
           ) : null}
-        </Card>
+          </Card>
+        </UnifiedRowProvider>
       )}
 
       {copyOpen ? (
@@ -866,6 +952,26 @@ export default function Models() {
           initial={editing}
           onClose={() => setEditing(null)}
           onSaved={actions.invalidateRegistry}
+        />
+      ) : null}
+
+      {comboOpen ? (
+        <ComboCreateDialog
+          models={all}
+          groups={groupChoices
+            .filter((group) => !group.provider)
+            .map((group) => ({ id: group.id, name: group.name }))}
+          editable={editable}
+          groupDisabledReason={groupDisabledReason}
+          busy={createCombo.isPending}
+          error={createCombo.error}
+          onClose={() => {
+            if (!createCombo.isPending) {
+              createCombo.reset();
+              setComboOpen(false);
+            }
+          }}
+          onSubmit={(payload) => createCombo.mutate(payload)}
         />
       ) : null}
 

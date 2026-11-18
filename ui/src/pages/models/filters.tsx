@@ -3,8 +3,17 @@ import * as Popover from "@radix-ui/react-popover";
 import { CaretDown } from "@phosphor-icons/react";
 import { Checkbox } from "../../components/atoms";
 import { Button, FilterChip, Input, Select } from "../../components/ui";
-import type { ModelProvider } from "../../lib/api";
 import { ALL, STATUSES, STATUS_LABELS, type StatusKey } from "./params";
+
+/** The row kinds the one table can hold; `all` is the absence of the `?kind=` filter. */
+export const KINDS = ["all", "models", "aliases", "combos"] as const;
+export type KindKey = (typeof KINDS)[number];
+export const KIND_LABELS: Record<KindKey, string> = {
+  all: "all kinds",
+  models: "models",
+  aliases: "aliases",
+  combos: "combos",
+};
 
 /**
  * The one toolbar. Filters narrow the single table; they never swap the surface, so the
@@ -18,6 +27,8 @@ export function ModelFilters({
   providers,
   provider,
   onProvider,
+  kind,
+  onKind,
   statuses,
   counts,
   showStatus,
@@ -32,9 +43,12 @@ export function ModelFilters({
 }: {
   query: string;
   onQuery: (next: string) => void;
-  providers: ModelProvider[];
+  /** One option per real provider, plus RRouter for aliases/combos when any exist. */
+  providers: Array<{ id: string; display: string }>;
   provider: string;
   onProvider: (next: string) => void;
+  kind: KindKey;
+  onKind: (next: KindKey) => void;
   statuses: ReadonlySet<StatusKey>;
   counts: Record<StatusKey, number>;
   /** The status filter is preset-scoped: members have no preset, so they get no menu. */
@@ -57,8 +71,8 @@ export function ModelFilters({
           <Input
             value={query}
             onChange={onQuery}
-            placeholder="search models…"
-            ariaLabel="Search models"
+            placeholder="search models, aliases, combos…"
+            ariaLabel="Search rows"
           />
         </div>
         <div className="w-[180px]">
@@ -71,6 +85,19 @@ export function ModelFilters({
             {providers.map((entry) => (
               <option key={entry.id} value={entry.id}>
                 {entry.display}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div className="w-[140px]">
+          <Select
+            ariaLabel="kind filter"
+            value={kind}
+            onChange={(next) => onKind(next as KindKey)}
+          >
+            {KINDS.map((value) => (
+              <option key={value} value={value}>
+                {KIND_LABELS[value]}
               </option>
             ))}
           </Select>

@@ -1,17 +1,79 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useId,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { Link } from "react-router-dom";
 import { Badge, Button, CopyIconButton, Select, cx } from "../../components/ui";
 import { Toggle } from "../../components/atoms";
 import type { Column } from "../../components/table";
 import { DragHandle, DragPreview, SortableLayout, useRowDrag } from "../../components/sortable-list";
 import type { LayoutRow } from "../../components/sortable-list";
+import { compact } from "../../lib/format";
 import type { Model } from "../../lib/api";
 import type { DraftGroup } from "../../lib/layout-draft";
 import { GroupHeading } from "./groups";
-import { ModelCardBody } from "./rows";
-import { nameDetail, type AliasRow, type ComboRow, type UnifiedRow } from "./unified-rows";
+import { ModelCardBody, priceLabel } from "./rows";
+import {
+  STRATEGY_LABEL,
+  nameDetail,
+  type AliasRow,
+  type ComboRow,
+  type UnifiedRow,
+} from "./unified-rows";
 
 const CHIP =
   "shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.06em] text-muted";
+
+/**
+ * A member disclosure is local page state keyed by the combo ref: it survives a status or
+ * provider filter, and it is shared by the desktop table and the phone cards so the same
+ * combo is open in both. The registry index is carried alongside so a member can be
+ * resolved without threading it through every row component.
+ */
+type UnifiedRowContextValue = {
+  expanded: ReadonlySet<string>;
+  toggle: (ref: string) => void;
+  modelByRef: ReadonlyMap<string, Model>;
+};
+
+const NO_MODELS: ReadonlyMap<string, Model> = new Map();
+const UnifiedRowContext = createContext<UnifiedRowContextValue>({
+  expanded: new Set(),
+  toggle: () => {},
+  modelByRef: NO_MODELS,
+});
+
+export function UnifiedRowProvider({
+  modelByRef,
+  children,
+}: {
+  modelByRef: ReadonlyMap<string, Model>;
+  children: ReactNode;
+}) {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = useCallback((ref: string) => {
+    setExpanded((previous) => {
+      const next = new Set(previous);
+      if (next.has(ref)) next.delete(ref);
+      else next.add(ref);
+      return next;
+    });
+  }, []);
+  const value = useMemo(
+    () => ({ expanded, toggle, modelByRef }),
+    [expanded, toggle, modelByRef],
+  );
+  return <UnifiedRowContext.Provider value={value}>{children}</UnifiedRowContext.Provider>;
+}
+
+function membersId(ref: string): string {
+  return `combo-members-${ref.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
 
 /** The registry mutations a model row reaches; the page owns the hooks behind them. */
 export type ModelActions = {
@@ -181,10 +243,11 @@ function BoardTable({
                 key={row.ref}
                 row={row}
                 columns={columns}
+                span={columns.length + 1}
                 reducedMotion={reducedMotion}
               />
             ) : (
-              <StaticRow key={row.ref} row={row} columns={columns} />
+              <StaticRow key={row.ref} row={row} columns={columns} span={columns.length} />
             ),
           )}
         </tbody>
@@ -241,33 +304,121 @@ function RowCells({ row, columns }: { row: UnifiedRow; columns: Array<Column<Uni
 function SortableRow({
   row,
   columns,
+  span,
   reducedMotion,
 }: {
   row: UnifiedRow;
   columns: Array<Column<UnifiedRow>>;
+  span: number;
   reducedMotion: boolean;
 }) {
   const drag = useRowDrag(row.ref, reducedMotion);
+  const expanded = useContext(UnifiedRowContext).expanded;
   return (
-    <tr
-      ref={drag.setNodeRef}
-      style={drag.style}
-      data-dragging={drag.isDragging || undefined}
-      className={cx("group", drag.isDragging && "relative z-10 opacity-70")}
-    >
-      <td className="border-b border-[var(--color-rule)] px-1 py-2 align-middle">
-        <DragHandle label={`Reorder ${row.ref}`} drag={drag} />
-      </td>
-      <RowCells row={row} columns={columns} />
-    </tr>
+    <>
+      <tr
+        ref={drag.setNodeRef}
+        style={drag.style}
+        data-dragging={drag.isDragging || undefined}
+        className={cx("group", drag.isDragging && "relative z-10 opacity-70")}
+      >
+        <td className="border-b border-[var(--color-rule)] px-1 py-2 align-middle">
+          <DragHandle label={`Reorder ${row.ref}`} drag={drag} />
+        </td>
+        <RowCells row={row} columns={columns} />
+      </tr>
+      {row.kind === "combo" ? (
+        <tr hidden={!expanded.has(row.ref)}>
+          <td
+            colSpan={span}
+            className="border-b border-[var(--color-rule)] bg-surface-2 px-4 py-3"
+          >
+            <ComboMemberList row={row} />
+          </td>
+        </tr>
+      ) : null}
+    </>
   );
 }
 
-function StaticRow({ row, columns }: { row: UnifiedRow; columns: Array<Column<UnifiedRow>> }) {
+function StaticRow({
+  row,
+  columns,
+  span,
+}: {
+  row: UnifiedRow;
+  columns: Array<Column<UnifiedRow>>;
+  span: number;
+}) {
+  const expanded = useContext(UnifiedRowContext).expanded;
   return (
-    <tr className="group">
-      <RowCells row={row} columns={columns} />
-    </tr>
+    <>
+      <tr className="group">
+        <RowCells row={row} columns={columns} />
+      </tr>
+      {row.kind === "combo" ? (
+        <tr hidden={!expanded.has(row.ref)}>
+          <td
+            colSpan={span}
+            className="border-b border-[var(--color-rule)] bg-surface-2 px-4 py-3"
+          >
+            <ComboMemberList row={row} />
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * The ordered stored candidates, joined to the registry for whatever it can prove. A ref
+ * the registry no longer lists keeps its position and all metadata cells read `—`; it is
+ * never dropped from the chain. Aggregate combo metadata is Phase 2, so nothing here is
+ * summed, minimized or presented as one model's spec.
+ */
+function ComboMemberList({ row }: { row: ComboRow }) {
+  const { modelByRef } = useContext(UnifiedRowContext);
+  const headingId = useId();
+  const strategy = row.combo.strategy ?? "fallback";
+  const candidates = row.combo.models;
+  const order =
+    strategy === "fallback"
+      ? "Fallback tries the candidates in this order."
+      : strategy === "round_robin"
+        ? "Round robin rotates the starting candidate; the rest keep this fallback order."
+        : `Smart routing asks ${row.combo.router_model ?? "an unknown router model"} to choose the starting candidate; the rest keep this fallback order.`;
+  return (
+    <div id={membersId(row.ref)} role="group" aria-labelledby={headingId}>
+      <p id={headingId} className="sr-only">
+        Members for combo {row.name}
+      </p>
+      {candidates.length === 0 ? (
+        <p className="text-caption text-faint">No candidates stored.</p>
+      ) : (
+        <ol className="flex flex-col gap-1">
+          {candidates.map((ref, index) => {
+            const model = modelByRef.get(ref);
+            const healthy = model !== undefined && model.enabled && model.available;
+            return (
+              <li
+                key={`${ref}-${index}`}
+                className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-caption"
+              >
+                <span className="tnum text-faint">{index + 1}.</span>
+                <span className="break-all font-mono text-fg">{ref}</span>
+                {healthy ? null : <Badge tone="warn">unavailable</Badge>}
+                <span className="tnum text-faint">ctx {compact(model?.context)}</span>
+                <span className="tnum text-faint">max {compact(model?.max_output)}</span>
+                <span className="tnum text-faint">
+                  {model && priceLabel(model) ? `${priceLabel(model)} / 1M` : "price —"}
+                </span>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      <p className="mt-1 text-caption text-faint">{order}</p>
+    </div>
   );
 }
 
@@ -343,14 +494,20 @@ function UnifiedCard({
   return (
     <>
       {row.kind === "model" ? <StaleIdentity row={row} /> : <NameIdentity row={row} />}
+      {row.kind === "combo" ? <CardComboMembers row={row} /> : null}
       <div className="mt-2 flex flex-wrap items-center gap-2 text-caption text-faint">
-        {row.kind === "model" ? (
-          row.entry && controls?.editable ? (
-            <Button variant="quiet" onClick={() => onHide(row.ref)} ariaLabel={`Hide ${row.ref}`}>
-              hide
-            </Button>
-          ) : null
-        ) : (
+        {controls?.editable ? (
+          <Button
+            variant="quiet"
+            onClick={() =>
+              row.entry ? onHide(row.ref) : controls.onVisible(row.ref, false)
+            }
+            ariaLabel={`Hide ${row.ref} from the active list`}
+          >
+            hide
+          </Button>
+        ) : null}
+        {row.kind === "model" ? null : (
           <Link
             to={row.kind === "alias" ? "/routing/aliases" : "/routing/combos"}
             className="inline-flex h-8 items-center rounded-full px-2 text-small text-accent-text underline underline-offset-2"
@@ -361,6 +518,19 @@ function UnifiedCard({
       </div>
       {controlsRow}
     </>
+  );
+}
+
+/** The card's half of the combo disclosure: same state, same ordered candidates. */
+function CardComboMembers({ row }: { row: ComboRow }) {
+  const open = useContext(UnifiedRowContext).expanded.has(row.ref);
+  return (
+    <div
+      hidden={!open}
+      className="mt-2 rounded-[var(--radius-input)] border border-line bg-surface-2 px-3 py-2"
+    >
+      <ComboMemberList row={row} />
+    </div>
   );
 }
 
@@ -391,6 +561,11 @@ function CardControls({
               </option>
             ))}
           </Select>
+          {explicit && row.entry?.visible ? (
+            <span className="mt-1 block truncate text-caption text-faint">
+              shown in {explicit.name}
+            </span>
+          ) : null}
         </div>
       ) : (
         <span className="text-caption text-muted">group · {explicit?.name ?? "ungrouped"}</span>
@@ -463,6 +638,16 @@ export function StaleIdentity({ row }: { row: UnifiedRow }) {
 }
 
 export function NameIdentity({ row }: { row: AliasRow | ComboRow }) {
+  const { expanded, toggle, modelByRef } = useContext(UnifiedRowContext);
+  const open = expanded.has(row.ref);
+  const members = row.kind === "combo" ? row.combo.models.length : 0;
+  const target = row.kind === "alias" ? modelByRef.get(row.alias.target) : undefined;
+  const targetLabel =
+    row.kind === "alias"
+      ? target && target.enabled && target.available
+        ? " · target available"
+        : " · target unavailable"
+      : "";
   return (
     <div className="flex min-w-0 flex-col">
       <div className="flex min-w-0 items-center gap-1.5">
@@ -470,9 +655,27 @@ export function NameIdentity({ row }: { row: AliasRow | ComboRow }) {
         <span className="min-w-0 truncate font-mono text-small text-fg">{row.name}</span>
         <CopyIconButton value={row.name} label={`Copy ${row.kind} ${row.name}`} />
         <Badge tone="neutral">{row.kind}</Badge>
+        {row.kind === "combo" ? (
+          <Badge tone="neutral">{STRATEGY_LABEL[row.combo.strategy ?? "fallback"]}</Badge>
+        ) : null}
         {row.status === "hidden" ? <Badge tone="warn">hidden</Badge> : null}
       </div>
-      <span className="mt-0.5 min-w-0 truncate text-caption text-faint">{nameDetail(row)}</span>
+      <span className="mt-0.5 min-w-0 truncate text-caption text-faint">
+        {nameDetail(row)}
+        {targetLabel}
+      </span>
+      {row.kind === "combo" ? (
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={membersId(row.ref)}
+          aria-label={`${open ? "Hide" : "Show"} ${members} members for ${row.name}`}
+          onClick={() => toggle(row.ref)}
+          className="mt-1 inline-flex w-fit items-center rounded-full border border-line bg-surface-2 px-2 py-0.5 text-caption text-muted transition-colors hover:border-line-strong hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+        >
+          {open ? "Hide members" : `Show ${members} member${members === 1 ? "" : "s"}`}
+        </button>
+      ) : null}
     </div>
   );
 }

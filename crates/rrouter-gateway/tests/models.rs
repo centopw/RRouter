@@ -2226,3 +2226,370 @@ async fn custom_provider_routes_by_code() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
+
+// ------------------------------------------------- combo metadata (target sets)
+
+/// One upstream row with limits, capabilities and an optional price.
+fn combo_row(
+    provider: &str,
+    model: &str,
+    context: u32,
+    max_output: u32,
+    price: Option<(f64, f64)>,
+) -> ModelRow {
+    ModelRow {
+        provider: provider.into(),
+        model: model.into(),
+        display: None,
+        context: Some(context),
+        max_output: Some(max_output),
+        caps: json!({"vision": false, "tools": true}),
+        cost: price.map(|(input, output)| json!({"input": input, "output": output})),
+        source: SOURCE_UPSTREAM.into(),
+        updated_at: 0,
+    }
+}
+
+fn find_model<'a>(body: &'a Value, id: &str) -> &'a Value {
+    body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|model| model["id"] == id)
+        .unwrap_or_else(|| panic!("{id} missing: {body}"))
+}
+
+fn find_combo<'a>(body: &'a Value, name: &str) -> &'a Value {
+    body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|combo| combo["name"] == name)
+        .unwrap_or_else(|| panic!("{name} missing: {body}"))
+}
+
+/// The reported defect: a shorthand ref was re-resolved on another provider, so a 1M
+/// member advertised the other provider's 256k. The provider segment now pins the row.
+#[tokio::test]
+async fn combo_with_a_1m_member_advertises_1m_when_every_target_supports_it() {
+    let h = harness();
+    h.connect("openai", "http://127.0.0.1:9").await;
+    h.connect("anthropic", "http://127.0.0.1:9").await;
+    h.state
+        .store
+        .upsert_model(&combo_row("openai", "shared", 1_048_576, 393_216, None))
+        .await
+        .expect("openai row");
+    h.state
+        .store
+        .upsert_model(&combo_row("anthropic", "shared", 262_144, 64_000, None))
+        .await
+        .expect("anthropic row");
+    h.state
+        .store
+        .upsert_combo("pin", &["oai/shared".into()])
+        .await
+        .expect("combo");
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let combo = find_model(&body, "pin");
+    assert_eq!(
+        combo["context_length"], 1_048_576,
+        "the pinned provider's window, not another provider's: {combo}"
+    );
+    assert_eq!(combo["max_completion_tokens"], 393_216);
+    assert_eq!(combo["aggregate"]["context"]["min"], 1_048_576);
+    assert_eq!(combo["aggregate"]["context"]["max"], 1_048_576);
+    let member = &combo["members"][0];
+    assert_eq!(member["ref"], "oai/shared");
+    assert_eq!(member["state"], "exact");
+    assert_eq!(member["targets"].as_array().expect("targets").len(), 1);
+    assert_eq!(member["targets"][0]["ref"], "openai/shared");
+
+    // The same two rows in one chain: the floor is the smaller member, the ceiling is
+    // the larger one. `min` alone used to hide the second number.
+    h.state
+        .store
+        .upsert_combo("both", &["oai/shared".into(), "ant/shared".into()])
+        .await
+        .expect("mixed combo");
+    let (status, body) = h.get("/v1/models/both").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["context_length"], 262_144, "guaranteed floor: {body}");
+    assert_eq!(body["aggregate"]["context"]["min"], 262_144);
+    assert_eq!(body["aggregate"]["context"]["max"], 1_048_576);
+}
+
+/// Routing fans a bare id out to every provider serving it, so the advertised metadata
+/// must describe all of them instead of one sampled row.
+#[tokio::test]
+async fn fanout_combo_advertises_the_guaranteed_floor_and_the_best_case() {
+    let h = harness();
+    h.connect("openai", "http://127.0.0.1:9").await;
+    h.connect("anthropic", "http://127.0.0.1:9").await;
+    h.state
+        .store
+        .upsert_model(&combo_row("openai", "shared", 1_048_576, 393_216, None))
+        .await
+        .expect("openai row");
+    h.state
+        .store
+        .upsert_model(&combo_row("anthropic", "shared", 262_144, 64_000, None))
+        .await
+        .expect("anthropic row");
+    h.state
+        .store
+        .upsert_combo("fanned", &["shared".into()])
+        .await
+        .expect("combo");
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let combo = find_model(&body, "fanned");
+    assert_eq!(combo["context_length"], 262_144, "flat field is the floor");
+    assert_eq!(combo["aggregate"]["context"]["min"], 262_144);
+    assert_eq!(combo["aggregate"]["context"]["max"], 1_048_576);
+    let member = &combo["members"][0];
+    assert_eq!(member["state"], "fanout");
+    let targets: Vec<&str> = member["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .map(|target| target["ref"].as_str().expect("ref"))
+        .collect();
+    assert_eq!(
+        targets,
+        vec!["anthropic/shared", "openai/shared"],
+        "sorted by (provider, id)"
+    );
+}
+
+/// Price lives on the target rows; the combo advertises a range plus a coverage count.
+#[tokio::test]
+async fn combo_members_carry_per_target_price_and_capabilities() {
+    let h = harness();
+    h.connect("openai", "http://127.0.0.1:9").await;
+    h.state
+        .store
+        .upsert_model(&combo_row(
+            "openai",
+            "priced",
+            1_048_576,
+            393_216,
+            Some((2.5, 10.0)),
+        ))
+        .await
+        .expect("row");
+    h.state
+        .store
+        .upsert_combo("priced-combo", &["oai/priced".into()])
+        .await
+        .expect("combo");
+
+    let (status, body) = h.get("/api/combos").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let combo = find_combo(&body, "priced-combo");
+    let target = &combo["members"][0]["targets"][0];
+    assert_eq!(target["cost"]["input"], 2.5);
+    assert_eq!(target["cost"]["output"], 10.0);
+    assert_eq!(target["capabilities"]["tools"], true);
+    let pricing = &combo["aggregate"]["pricing"];
+    assert_eq!(pricing["input"]["min"], 2.5);
+    assert_eq!(pricing["input"]["max"], 2.5);
+    assert_eq!(pricing["known"], 1);
+    assert_eq!(pricing["total"], 1);
+    assert_eq!(combo["aggregate"]["availability"], "ok");
+}
+
+/// An unresolved member makes the guarantees unknown but must not drop the combo or hide
+/// the members that did resolve.
+#[tokio::test]
+async fn unresolved_member_keeps_legacy_fields_omitted_but_lists_the_member() {
+    let h = harness();
+    h.connect("openai", "http://127.0.0.1:9").await;
+    h.state
+        .store
+        .upsert_model(&combo_row(
+            "openai",
+            "known",
+            1_048_576,
+            393_216,
+            Some((1.0, 2.0)),
+        ))
+        .await
+        .expect("row");
+    h.state
+        .store
+        .upsert_combo("partial-meta", &["oai/known".into(), "missing/zzz".into()])
+        .await
+        .expect("combo");
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let combo = find_model(&body, "partial-meta");
+    assert!(combo.get("context_length").is_none(), "{combo}");
+    assert!(combo.get("max_completion_tokens").is_none(), "{combo}");
+    assert!(combo.get("capabilities").is_none(), "{combo}");
+    assert!(combo["aggregate"]["context"].is_null(), "{combo}");
+    assert!(combo["aggregate"]["guaranteed_capabilities"].is_null());
+    // Pricing is accounting data, not a guarantee: it survives and states its coverage.
+    assert_eq!(combo["aggregate"]["pricing"]["known"], 1);
+    assert_eq!(combo["aggregate"]["pricing"]["total"], 1);
+    let members = combo["members"].as_array().expect("members");
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0]["state"], "exact");
+    assert_eq!(members[1]["state"], "unknown");
+    assert_eq!(members[1]["ref"], "missing/zzz");
+    assert_eq!(members[1]["targets"].as_array().expect("targets").len(), 0);
+}
+
+/// Routing prefers a combo over a registry row with the same spelling, so discovery must
+/// advertise the combo for that name.
+#[tokio::test]
+async fn combo_named_like_a_model_is_advertised_as_the_combo() {
+    let h = harness();
+    h.connect("openai", "http://127.0.0.1:9").await;
+    h.state
+        .store
+        .upsert_model(&combo_row("openai", "shadowed", 1_048_576, 393_216, None))
+        .await
+        .expect("row");
+    h.state
+        .store
+        .upsert_combo("shadowed", &["oai/shadowed".into()])
+        .await
+        .expect("combo");
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entries: Vec<&Value> = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .filter(|model| model["id"] == "shadowed")
+        .collect();
+    assert_eq!(entries.len(), 1, "one entry for the routable name: {body}");
+    assert_eq!(entries[0]["owned_by"], "rrouter");
+    assert_eq!(entries[0]["aggregate"]["context"]["max"], 1_048_576);
+
+    let (status, body) = h.get("/v1/models/shadowed").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["owned_by"], "rrouter");
+    assert_eq!(body["members"][0]["ref"], "oai/shadowed");
+}
+
+// ------------------------------------------------- alias / combo name collisions
+
+/// A name has one owner and routing resolves the alias first, so the admin routes keep
+/// the namespace disjoint: a fresh alias over a combo name and a fresh combo over an
+/// alias name are both refused, naming the owner. A name re-posted by its own owner
+/// still upserts.
+#[tokio::test]
+async fn alias_and_combo_cannot_claim_one_name() {
+    let h = harness();
+    h.connect("openai", "http://127.0.0.1:9").await;
+
+    let (status, body) = h
+        .post(
+            "/api/aliases",
+            json!({"alias": "taken", "target": "openai/gpt-4.1"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = h
+        .post(
+            "/api/combos",
+            json!({"name": "taken", "models": ["openai/gpt-4.1"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("alias"), "owner named in {body}");
+
+    let (status, body) = h
+        .post(
+            "/api/combos",
+            json!({"name": "owned", "models": ["openai/gpt-4.1"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = h
+        .send(
+            "PUT",
+            "/api/aliases",
+            json!({"alias": "owned", "target": "openai/gpt-4.1"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("combo"), "owner named in {body}");
+
+    // The same name from its owner is an update, not a collision.
+    let (status, body) = h
+        .post(
+            "/api/combos",
+            json!({"name": "owned", "models": ["openai/gpt-4.2"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["models"], json!(["openai/gpt-4.2"]), "{body}");
+    let (status, body) = h
+        .send(
+            "PUT",
+            "/api/aliases",
+            json!({"alias": "taken", "target": "openai/gpt-4.2"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["target"], "openai/gpt-4.2");
+}
+
+/// Rows written before the validation (or straight into the store) can still collide.
+/// Discovery then advertises the alias entry once, and the combo stays callable as
+/// `combo:<name>`.
+#[tokio::test]
+async fn colliding_alias_and_combo_list_once_and_the_combo_still_routes() {
+    let mock = start_mock().await;
+    let h = harness();
+    h.connect("openai", &mock).await;
+    h.state
+        .store
+        .upsert_alias("dual", "openai/alpha")
+        .await
+        .expect("alias");
+    h.state
+        .store
+        .upsert_combo("dual", &["openai/alpha".into()])
+        .await
+        .expect("combo");
+
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entries: Vec<&Value> = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .filter(|model| model["id"] == "dual")
+        .collect();
+    assert_eq!(entries.len(), 1, "one entry for one name: {body}");
+    assert_eq!(entries[0]["owned_by"], "rrouter");
+    assert!(
+        entries[0].get("members").is_none(),
+        "the alias entry, not the combo: {body}"
+    );
+
+    let (status, body) = h.get("/v1/models/dual").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["owned_by"], "rrouter");
+    assert!(body.get("members").is_none(), "{body}");
+
+    let (status, body) = h
+        .post(
+            "/v1/chat/completions",
+            json!({"model": "combo:dual", "messages": [{"role": "user", "content": "ping"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "pong", "{body}");
+}

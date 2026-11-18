@@ -64,18 +64,114 @@ export function statusOfName(
   return entry.visible ? "routed" : "hidden";
 }
 
-const STRATEGY_LABEL: Record<ComboStrategy, string> = {
+export const STRATEGY_LABEL: Record<ComboStrategy, string> = {
   fallback: "fallback",
   round_robin: "round robin",
   smart: "smart",
 };
 
-/** The second line of a name row: what it resolves to, which its page owns. */
+/** The routable ref every list and preset entry uses for an alias/combo name. */
+export function nameRef(name: string): string {
+  return `rrouter/${name}`;
+}
+
+/**
+ * The second line of a name row: what it resolves to, which its page owns. A combo carries
+ * no aggregate metadata in Phase 1, so it says so rather than borrowing a member's numbers.
+ */
 export function nameDetail(row: AliasRow | ComboRow): string {
   if (row.kind === "alias") return `alias → ${row.alias.target}`;
-  const strategy = STRATEGY_LABEL[row.combo.strategy ?? "fallback"];
-  const count = `${row.combo.models.length.toLocaleString()} model${row.combo.models.length === 1 ? "" : "s"}`;
-  return `combo · ${strategy} · ${count}`;
+  const count = `${row.combo.models.length.toLocaleString()} candidate${row.combo.models.length === 1 ? "" : "s"}`;
+  return `${count} · metadata —`;
+}
+
+/**
+ * The one row set of the Models page: registry models, then live aliases and combos at
+ * `rrouter/<name>`, then preset entries no live row claimed.
+ *
+ * `aliases`/`combos` are `undefined` until their list answers. A stored `rrouter/…` ref
+ * waits for both, so a name is never mistaken for a stale model mid-load; a registry ref
+ * needs only `/api/models`. Names are claimed even when the preset never stored them, so an
+ * unseen combo is a live row (and auto-include can adopt it) rather than a stale one.
+ */
+export function rowsFor({
+  models,
+  aliases,
+  combos,
+  entries,
+  presetAware,
+  autoInclude,
+}: {
+  models: Model[];
+  aliases: Alias[] | undefined;
+  combos: Combo[] | undefined;
+  entries: ReadonlyMap<string, DraftEntry>;
+  presetAware: boolean;
+  autoInclude: boolean;
+}): UnifiedRow[] {
+  const rows: UnifiedRow[] = [];
+  const claimed = new Set<string>();
+  for (const model of models) {
+    claimed.add(model.ref);
+    const entry = entries.get(model.ref);
+    rows.push({
+      kind: "model",
+      ref: model.ref,
+      model,
+      entry,
+      status: statusOfModel(model, entry, presetAware),
+    });
+  }
+  for (const alias of aliases ?? []) {
+    const ref = nameRef(alias.alias);
+    // One ref renders once. Routing resolves an alias before a combo of the same name
+    // (alias → explicit provider/model → combo), so when a name exists as both, the
+    // alias row owns the ref and the combo row is dropped. Registry refs are
+    // provider-qualified and `rrouter` is reserved as the name namespace, so this guard
+    // is a guarantee rather than the expected path.
+    if (claimed.has(ref)) continue;
+    claimed.add(ref);
+    const entry = entries.get(ref);
+    rows.push({
+      kind: "alias",
+      ref,
+      name: alias.alias,
+      alias,
+      entry,
+      status: statusOfName(entry, presetAware, autoInclude),
+    });
+  }
+  for (const combo of combos ?? []) {
+    const ref = nameRef(combo.name);
+    // Already claimed by an alias (or a duplicate combo): same rule as above — the ref
+    // is the row identity for React keys, the group select and the /v1 toggle.
+    if (claimed.has(ref)) continue;
+    claimed.add(ref);
+    const entry = entries.get(ref);
+    rows.push({
+      kind: "combo",
+      ref,
+      name: combo.name,
+      combo,
+      entry,
+      status: statusOfName(entry, presetAware, autoInclude),
+    });
+  }
+  const namesLoaded = aliases !== undefined && combos !== undefined;
+  for (const entry of entries.values()) {
+    if (claimed.has(entry.ref)) continue;
+    if (!namesLoaded && entry.ref.startsWith("rrouter/")) continue;
+    // No kind is inferred for a ref nothing live answers: it keeps its stored group and
+    // visibility, and the row copy never claims to know what it was.
+    rows.push({
+      kind: "model",
+      ref: entry.ref,
+      model: null,
+      entry,
+      status: entry.visible ? "routed" : "hidden",
+    });
+  }
+  return rows;
 }
 
 /** Search matches the ref, the display name, the owning provider name, or the target. */

@@ -10,7 +10,7 @@ import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import * as Popover from "@radix-ui/react-popover";
 import { ProviderIcon, providerBrand } from "../components/provider-icon";
-import { DotsThree, GearSix, MagnifyingGlass, Sliders, X } from "@phosphor-icons/react";
+import { DotsThree, GearSix, MagnifyingGlass, X } from "@phosphor-icons/react";
 import { Heading, IconButton, SectionLabel, Stack } from "../components/atoms";
 import {
   Badge,
@@ -65,6 +65,42 @@ import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
 
 type AddStep = "kind" | "provider" | "opencode" | "key";
 
+/**
+ * Grouping is a read projection over the connection list, never a routing entity: the
+ * accounts inside a group stay ordinary rows, and only a provider that owns several of
+ * them gets a summary row above them.
+ */
+type ProviderGroup = {
+  /** `provider` for a built-in provider, `custom:<name|id>` for one endpoint of its own. */
+  key: string;
+  /** Provider id used for the icon; `null` for a custom endpoint with no protocol row. */
+  provider: string | null;
+  label: string;
+  code: string | null;
+  connections: Connection[];
+  /** Distinct priorities, ascending, with how many accounts sit at each. */
+  tiers: Array<{ priority: number; count: number }>;
+  enabled: number;
+  backoff: number;
+  overQuota: number;
+  /** Current-window spend, summed; `null` until the admin-only quota list has arrived. */
+  spend: { cost_micros: number; tokens: number; requests: number } | null;
+  /** Worst subscription window in the group; `null` when no account reported one. */
+  subscription: { percent: number; resets_at: number | null; reporting: number } | null;
+  state: "healthy" | "degraded" | "down";
+};
+
+type GroupRow =
+  | { kind: "account"; connection: Connection; grouped: boolean }
+  | { kind: "provider"; group: ProviderGroup };
+
+/** A custom endpoint is its own source even though it borrows a protocol provider id. */
+function groupKeyOf(connection: Connection): string {
+  return isCustomConnection(connection)
+    ? `custom:${connection.name ?? connection.id}`
+    : connection.provider;
+}
+
 export default function Providers() {
   const client = useQueryClient();
   const isAdmin = useIsAdmin();
@@ -89,28 +125,154 @@ export default function Providers() {
   const [routing, setRouting] = useState<Connection | null>(null);
   const [baseUrlFor, setBaseUrlFor] = useState<Connection | null>(null);
   const [teamFor, setTeamFor] = useState<Connection | null>(null);
-  const [quotaFor, setQuotaFor] = useState<AccountQuotaRow | null>(null);
+  /** The account whose operator limits the row menu opened. */
+  const [limitsFor, setLimitsFor] = useState<Connection | null>(null);
+  const [codesOpen, setCodesOpen] = useState(false);
   const [pingFor, setPingFor] = useState<QuotaPingRow | null>(null);
   const [removing, setRemoving] = useState<Connection | null>(null);
   const [renaming, setRenaming] = useState<Connection | null>(null);
+  // The quota list is admin-only. The row-menu dialog edits one account, but the provider
+  // header sums spend for every account, so an admin reads the list once per page visit
+  // instead of only when a dialog opens.
   const quotas = useAccountQuotas(isAdmin);
   const subscriptions = useAccountSubscriptions();
   const pings = useQuotaPings();
 
   const accounts = connections.data ?? [];
-  // A custom endpoint is one operator-visible source even though it borrows a protocol
-  // id; count it by its name so the header matches the table beneath it.
-  const endpointCount = useMemo(
-    () =>
-      new Set(
-        accounts.map((a) =>
-          isCustomConnection(a) ? `custom:${a.name ?? a.id}` : a.provider,
-        ),
-      ).size,
-    [accounts],
-  );
+
+  // Pages are counted in accounts, not in table rows, so a provider header always lands on
+  // the same page as the first account it introduces.
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const lastPage = Math.max(1, Math.ceil(accounts.length / pageSize));
+  const currentPage = Math.min(page, lastPage);
+
   const displayOf = (id: string) =>
     providers.data?.find((p) => p.id === id)?.display ?? id;
+
+  /**
+   * One entry per provider or custom endpoint, built in the order the server returned the
+   * accounts (`provider, priority, created_at`). Everything here is a read over queries the
+   * page already makes; nothing is routed differently.
+   */
+  const groups = useMemo<ProviderGroup[]>(() => {
+    const quotaBy = new Map((quotas.data ?? []).map((row) => [row.connection_id, row]));
+    const subscriptionBy = new Map(
+      (subscriptions.data ?? []).map((row) => [row.connection_id, row]),
+    );
+    const order: string[] = [];
+    const byKey = new Map<string, Connection[]>();
+    for (const account of accounts) {
+      const key = groupKeyOf(account);
+      const list = byKey.get(key);
+      if (list) list.push(account);
+      else {
+        byKey.set(key, [account]);
+        order.push(key);
+      }
+    }
+    return order.map((key) => {
+      const connections = byKey.get(key) ?? [];
+      const first = connections[0]!;
+      const provider = first.provider;
+      const custom = key.startsWith("custom:");
+      const providerRow = custom
+        ? undefined
+        : providers.data?.find((row) => row.id === provider);
+      const label = custom
+        ? (first.name ?? `${providerRow?.display ?? provider} (custom URL)`)
+        : (providerRow?.display ?? provider);
+      const tiers = Array.from(
+        connections.reduce((counts, account) => {
+          counts.set(account.priority, (counts.get(account.priority) ?? 0) + 1);
+          return counts;
+        }, new Map<number, number>()),
+        ([priority, count]) => ({ priority, count }),
+      ).sort((a, b) => a.priority - b.priority);
+
+      let spend: ProviderGroup["spend"] = null;
+      let overQuota = 0;
+      let backoff = 0;
+      let worstPercent = 0;
+      let worstResets: number | null = null;
+      let reporting = 0;
+      let flagged = 0;
+      let eligible = 0;
+      for (const account of connections) {
+        const quota = quotaBy.get(account.id);
+        if (quota) {
+          spend ??= { cost_micros: 0, tokens: 0, requests: 0 };
+          spend.cost_micros += quota.cost_micros;
+          spend.tokens += quota.tokens;
+          spend.requests += quota.requests;
+          if (quota.exhausted) overQuota += 1;
+        }
+        if (account.backoff_level > 0) backoff += 1;
+        const windows = subscriptionBy.get(account.id)?.windows ?? [];
+        if (windows.length > 0) reporting += 1;
+        const accountWorst = windows.reduce((max, window) => Math.max(max, window.used_percent), 0);
+        if (accountWorst > worstPercent) {
+          worstPercent = accountWorst;
+          worstResets = windows.find((window) => window.used_percent === accountWorst)?.resets_at ?? null;
+        }
+        if (account.is_active) {
+          eligible += 1;
+          // Live breaker state has no API yet; the persisted probe backoff, an exhausted
+          // operator quota and a window at the reserve threshold are what the page can see.
+          if (account.backoff_level > 0 || quota?.exhausted === true || accountWorst >= 90) {
+            flagged += 1;
+          }
+        }
+      }
+
+      return {
+        key,
+        provider,
+        label,
+        code: providerRow?.code ?? null,
+        connections,
+        tiers,
+        enabled: connections.filter((account) => account.is_active).length,
+        backoff,
+        overQuota,
+        spend,
+        subscription:
+          reporting === 0
+            ? null
+            : {
+                percent: Math.round(worstPercent),
+                resets_at: worstResets,
+                reporting,
+              },
+        state:
+          eligible === 0 || flagged === eligible
+            ? "down"
+            : flagged > 0
+              ? "degraded"
+              : "healthy",
+      };
+    });
+  }, [accounts, providers.data, quotas.data, subscriptions.data]);
+
+  const rows = useMemo<GroupRow[]>(() => {
+    const byKey = new Map(groups.map((group) => [group.key, group]));
+    const start = (currentPage - 1) * pageSize;
+    const introduced = new Set<string>();
+    const out: GroupRow[] = [];
+    for (const account of accounts.slice(start, start + pageSize)) {
+      const key = groupKeyOf(account);
+      const group = byKey.get(key);
+      if (!group) continue;
+      // A single-account provider needs no header: the account row already names it.
+      const grouped = group.connections.length > 1;
+      if (grouped && !introduced.has(key)) {
+        introduced.add(key);
+        out.push({ kind: "provider", group });
+      }
+      out.push({ kind: "account", connection: account, grouped });
+    }
+    return out;
+  }, [accounts, groups, currentPage, pageSize]);
 
   /** A connection's owner team name, or `null` when it is shared. */
   const teamName = (id: string | null): string | null =>
@@ -245,82 +407,60 @@ export default function Providers() {
     display: providers.data?.find((x) => x.id === p.id)?.display ?? p.display,
   }));
 
-  const quotaColumns: Array<Column<AccountQuotaRow>> = [
-    {
-      key: "account",
-      title: "account",
-      render: (r) => {
-        // The quota row carries no base URL, so look up its connection to tell a custom
-        // endpoint from the provider it borrows a protocol from.
-        const connection = accounts.find((row) => row.id === r.connection_id);
-        const custom = connection ? isCustomConnection(connection) : false;
-        const label = custom
-          ? (r.name ?? `${displayOf(r.provider)} (custom URL)`)
-          : displayOf(r.provider);
-        return (
-          <span className="flex min-w-0 flex-wrap items-center gap-2">
-            <Dot tone={r.exhausted ? "neg" : r.is_active ? "pos" : "muted"} />
-            <ProviderIcon provider={r.provider} size={17} />
-            <span className="font-medium">{label}</span>
-            {custom ? (
-              <span className="shrink-0">
-                <Badge tone="neutral" title="keyed account pointing at a custom base URL">
-                  custom
-                </Badge>
-              </span>
-            ) : (
-              <span className="truncate text-muted">
-                {r.name ?? <span className="text-faint">unnamed</span>}
-              </span>
-            )}
-            <span className="text-caption text-faint md:hidden">{WINDOW_LABEL[r.window]}</span>
-            {r.exhausted ? <Badge tone="neg">over quota</Badge> : null}
-          </span>
-        );
-      },
-    },
-    {
-      key: "window",
-      title: "window",
-      className: "hidden md:table-cell",
-      render: (r) => <span className="text-muted">{WINDOW_LABEL[r.window]}</span>,
-    },
-    { key: "usage", title: "usage", render: (r) => <QuotaUsage row={r} /> },
-    {
-      key: "quota",
-      title: "",
-      align: "right",
-      width: "3rem",
-      render: (r) => (
-        <button
-          type="button"
-          onClick={() => setQuotaFor(r)}
-          aria-label={`Edit limits for ${r.name ?? displayOf(r.provider)}`}
-          title="requests, tokens and spend this account may use per window"
-          className="flex h-8 w-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
-        >
-          <Sliders size={16} aria-hidden />
-        </button>
-      ),
-    },
-  ];
-
-  const columns: Array<Column<Connection>> = [
+  const columns: Array<Column<GroupRow>> = [
     {
       key: "provider",
       title: "provider",
       render: (r) => {
-        const custom = isCustomConnection(r);
+        if (r.kind === "provider") {
+          const group = r.group;
+          const counts = [
+            `${group.connections.length} account${group.connections.length === 1 ? "" : "s"}`,
+            `${group.enabled} enabled`,
+            group.backoff > 0 ? `${group.backoff} in backoff` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          return (
+            <span
+              className="provider-group-row flex min-w-0 items-center gap-2"
+              title={`${group.label}${group.code ? ` · ${group.code}` : ""}: ${counts}`}
+            >
+              <ProviderIcon provider={group.provider ?? "custom"} size={17} />
+              <span className="flex min-w-0 flex-col">
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="min-w-0 break-words font-semibold sm:truncate">
+                    {group.label}
+                  </span>
+                  {group.code ? (
+                    <Badge
+                      tone="neutral"
+                      title="shorthand used in this provider's model refs"
+                    >
+                      {group.code}
+                    </Badge>
+                  ) : null}
+                </span>
+                <span className="truncate text-caption text-faint">{counts}</span>
+              </span>
+            </span>
+          );
+        }
+        const c = r.connection;
+        const custom = isCustomConnection(c);
         // A custom endpoint is not OpenAI, so an unnamed one says so instead of claiming
         // the built-in provider; the operator's name replaces both once it exists.
-        const display = displayOf(r.provider);
-        const label = custom ? (r.name ?? `${display} (custom URL)`) : display;
-        const protocol = custom ? protocolLabel(r.provider) : null;
-        const title = [label, protocol, r.base_url_override].filter(Boolean).join(" · ");
+        const display = displayOf(c.provider);
+        const label = custom ? (c.name ?? `${display} (custom URL)`) : display;
+        const protocol = custom ? protocolLabel(c.provider) : null;
+        const title = [label, protocol, c.base_url_override].filter(Boolean).join(" · ");
         return (
-          <span className="flex min-w-0 items-center gap-2" title={title}>
-            <Dot tone={!r.is_active ? "muted" : r.backoff_level > 0 ? "warn" : "pos"} />
-            <ProviderIcon provider={r.provider} size={17} />
+          <span
+            className={cx("flex min-w-0 items-center gap-2", r.grouped && "ml-4")}
+            title={title}
+          >
+            <Dot tone={!c.is_active ? "muted" : c.backoff_level > 0 ? "warn" : "pos"} />
+            <ProviderIcon provider={c.provider} size={17} />
             <span className="flex min-w-0 flex-col">
               <span className="flex min-w-0 items-center gap-1.5">
                 {/* Phones have no room for a 24-character provider name on one line; it
@@ -351,7 +491,17 @@ export default function Providers() {
       width: "9rem",
       className: "hidden xl:table-cell",
       render: (r) => {
-        const name = teamName(r.team_id);
+        if (r.kind === "provider") {
+          return (
+            <span
+              className="text-caption text-faint"
+              title="priority tiers: how many of this provider's accounts sit at each"
+            >
+              {r.group.tiers.map((tier) => `p${tier.priority} ×${tier.count}`).join(" · ")}
+            </span>
+          );
+        }
+        const name = teamName(r.connection.team_id);
         return name === null ? (
           <Badge
             tone="neutral"
@@ -369,13 +519,28 @@ export default function Providers() {
     {
       key: "account",
       title: "account",
-      render: (r) => (
-        <AccountCell
-          connection={r}
-          display={displayOf(r.provider)}
-          custom={isCustomConnection(r)}
-        />
-      ),
+      render: (r) => {
+        if (r.kind === "provider") {
+          const spend = r.group.spend;
+          // The quota list is admin-only; a reader sees the counts and nothing invented.
+          if (!spend) return null;
+          return (
+            <span
+              className="text-caption text-faint tnum"
+              title="current quota window, summed over this provider's accounts"
+            >
+              {usd(spend.cost_micros)} · {compact(spend.tokens)} tok · {compact(spend.requests)} req
+            </span>
+          );
+        }
+        return (
+          <AccountCell
+            connection={r.connection}
+            display={displayOf(r.connection.provider)}
+            custom={isCustomConnection(r.connection)}
+          />
+        );
+      },
     },
     {
       key: "auth",
@@ -385,17 +550,31 @@ export default function Providers() {
       // thing, needed 150px, and truncated to "o… a… re…" at 1440.
       className: "hidden xl:table-cell",
       render: (r) => {
+        if (r.kind === "provider") {
+          const subscription = r.group.subscription;
+          if (!subscription) return null;
+          return (
+            <span
+              className="text-caption text-faint tnum"
+              title={`worst subscription window in this provider · ${subscription.reporting} of ${r.group.connections.length} accounts reporting plan limits`}
+            >
+              {subscription.percent}%
+              {subscription.resets_at ? ` · ${until(subscription.resets_at)}` : ""}
+            </span>
+          );
+        }
+        const c = r.connection;
         const shape = [
-          r.auth_type,
-          r.has_access_token ? "access token" : null,
-          r.has_refresh_token ? "refresh token" : null,
-          r.has_api_key ? "api key" : null,
+          c.auth_type,
+          c.has_access_token ? "access token" : null,
+          c.has_refresh_token ? "refresh token" : null,
+          c.has_api_key ? "api key" : null,
         ]
           .filter(Boolean)
           .join(" · ");
         return (
-          <Badge tone={r.auth_type === "oauth" ? "accent" : "neutral"} title={shape}>
-            {r.auth_type}
+          <Badge tone={c.auth_type === "oauth" ? "accent" : "neutral"} title={shape}>
+            {c.auth_type}
           </Badge>
         );
       },
@@ -406,7 +585,7 @@ export default function Providers() {
       align: "right",
       width: "5rem",
       className: "hidden xl:table-cell",
-      render: (r) => r.priority,
+      render: (r) => (r.kind === "provider" ? null : r.connection.priority),
     },
     {
       key: "weight",
@@ -414,14 +593,18 @@ export default function Providers() {
       align: "right",
       width: "5rem",
       className: "hidden xl:table-cell",
-      render: (r) => (
-        <span
-          className={r.weight === 100 ? "text-faint" : "text-fg"}
-          title="traffic share inside this priority group"
-        >
-          {r.weight}
-        </span>
-      ),
+      render: (r) => {
+        if (r.kind === "provider") return null;
+        const c = r.connection;
+        return (
+          <span
+            className={c.weight === 100 ? "text-faint" : "text-fg"}
+            title="traffic share inside this priority group"
+          >
+            {c.weight}
+          </span>
+        );
+      },
     },
     {
       key: "state",
@@ -430,22 +613,47 @@ export default function Providers() {
       // The status dot in the provider cell already carries active/backoff; the badges
       // return from sm up, where there is room for them.
       className: "hidden sm:table-cell",
-      render: (r) => (
-        <span className="flex flex-wrap gap-1">
-          {needsOverride(r) ? (
-            <Badge tone="warn" title="cannot route until this account names its resource base URL">
-              base url
-            </Badge>
-          ) : null}
-          {r.backoff_level > 0 ? (
-            <Badge tone="warn">backoff {r.backoff_level}</Badge>
-          ) : r.is_active ? (
-            <Badge tone="pos">active</Badge>
-          ) : (
-            <Badge tone="neutral">disabled</Badge>
-          )}
-        </span>
-      ),
+      render: (r) => {
+        if (r.kind === "provider") {
+          const group = r.group;
+          return (
+            <span className="flex flex-wrap gap-1">
+              <Badge
+                tone={group.state === "healthy" ? "pos" : group.state === "degraded" ? "warn" : "neg"}
+                title={[
+                  "healthy: an enabled account is eligible",
+                  "degraded: an eligible account is in backoff, over quota or at 90%+ of a plan window",
+                  "down: every account is disabled, exhausted or in backoff",
+                ].join(" · ")}
+              >
+                {group.state}
+              </Badge>
+              {group.overQuota > 0 ? (
+                <Badge tone="neg" title="accounts over their operator quota; the router skips them">
+                  {group.overQuota} over quota
+                </Badge>
+              ) : null}
+            </span>
+          );
+        }
+        const c = r.connection;
+        return (
+          <span className="flex flex-wrap gap-1">
+            {needsOverride(c) ? (
+              <Badge tone="warn" title="cannot route until this account names its resource base URL">
+                base url
+              </Badge>
+            ) : null}
+            {c.backoff_level > 0 ? (
+              <Badge tone="warn">backoff {c.backoff_level}</Badge>
+            ) : c.is_active ? (
+              <Badge tone="pos">active</Badge>
+            ) : (
+              <Badge tone="neutral">disabled</Badge>
+            )}
+          </span>
+        );
+      },
     },
     // Mutations are admin-only at the API gate, so a reader gets no controls at all.
     ...(isAdmin
@@ -455,30 +663,58 @@ export default function Providers() {
           title: "",
           align: "right",
           width: "3.5rem",
-          render: (r) => (
-            <ConnectionMenu
-              connection={r}
-              display={displayOf(r.provider)}
-              scope={teamName(r.team_id) ?? "shared"}
-              testing={testingId === r.id}
-              onRename={() => setRenaming(r)}
-              onTeam={() => setTeamFor(r)}
-              onBaseUrl={() => setBaseUrlFor(r)}
-              onRouting={() => setRouting(r)}
-              onTest={() => test.mutate(r.id)}
-              onToggle={() => toggle.mutate({ id: r.id, active: !r.is_active })}
-              onRemove={() => {
-                remove.reset();
-                setRemoving(r);
-              }}
-            />
-          ),
-        } as Column<Connection>,
+          render: (r) => {
+            if (r.kind === "provider") return null;
+            const c = r.connection;
+            return (
+              <ConnectionMenu
+                connection={c}
+                display={displayOf(c.provider)}
+                scope={teamName(c.team_id) ?? "shared"}
+                testing={testingId === c.id}
+                onRename={() => setRenaming(c)}
+                onTeam={() => setTeamFor(c)}
+                onLimits={() => setLimitsFor(c)}
+                onBaseUrl={() => setBaseUrlFor(c)}
+                onRouting={() => setRouting(c)}
+                onTest={() => test.mutate(c.id)}
+                onToggle={() => toggle.mutate({ id: c.id, active: !c.is_active })}
+                onRemove={() => {
+                  remove.reset();
+                  setRemoving(c);
+                }}
+              />
+            );
+          },
+        } as Column<GroupRow>,
       ]
       : []),
   ];
 
   const pingByConnection = new Map((pings.data ?? []).map((ping) => [ping.connection_id, ping]));
+  // The dialog seeds from the fetched list; the server answers one row per connection.
+  // A connection the list somehow omits still gets an editable dialog with no limits set.
+  const quotaRow =
+    limitsFor === null
+      ? undefined
+      : (quotas.data?.find((row) => row.connection_id === limitsFor.id) ??
+        (quotas.data === undefined
+          ? undefined
+          : {
+              connection_id: limitsFor.id,
+              name: limitsFor.name,
+              provider: limitsFor.provider,
+              is_active: limitsFor.is_active,
+              window: "daily" as const,
+              max_requests: 0,
+              max_tokens: 0,
+              max_cost_micros: 0,
+              requests: 0,
+              tokens: 0,
+              cost_micros: 0,
+              exhausted: false,
+              resets_at: null,
+            }));
 
   return (
     <>
@@ -524,7 +760,17 @@ export default function Providers() {
         shared accounts serve instance-wide keys only.
       </p>
 
-      {isAdmin ? <ProviderCodesCard providers={providers.data ?? []} /> : null}
+      {isAdmin && codesOpen ? (
+        <Modal
+          title="Provider codes"
+          open
+          width="xl"
+          description="The shorthand each provider's model refs use. Unique across every provider, so two providers serving one model id can never be confused."
+          onClose={() => setCodesOpen(false)}
+        >
+          <ProviderCodesCard providers={providers.data ?? []} embedded />
+        </Modal>
+      ) : null}
 
       <ConfirmDialog
         open={removing !== null}
@@ -594,20 +840,46 @@ export default function Providers() {
           <CardHeader
             title="Connected"
             action={
-              <span className="text-caption text-faint">
-                {endpointCount} endpoint{endpointCount === 1 ? "" : "s"} · {accounts.length} account
-                {accounts.length === 1 ? "" : "s"}
+              <span className="flex items-center gap-3">
+                {isAdmin ? (
+                  <Button
+                    variant="quiet"
+                    title="shorthand codes and operator-defined providers"
+                    onClick={() => setCodesOpen(true)}
+                  >
+                    provider codes…
+                  </Button>
+                ) : null}
+                <span className="text-caption text-faint">
+                  {groups.length} endpoint{groups.length === 1 ? "" : "s"} · {accounts.length} account
+                  {accounts.length === 1 ? "" : "s"}
+                </span>
               </span>
             }
           />
-          <div id="providers-connected">
+          {/* The header row marks itself; tint it so it reads as a divider, not an account. */}
+          <div
+            id="providers-connected"
+            className="[&_tr:has(.provider-group-row)>td]:bg-[var(--color-surface-2)]"
+          >
             <DataTable
               columns={columns}
-              rows={connections.data}
-              rowKey={(r) => r.id}
+              rows={connections.isLoading ? undefined : rows}
+              rowKey={(r) => (r.kind === "provider" ? `provider:${r.group.key}` : r.connection.id)}
               loading={connections.isLoading}
               tableLayout="fixed"
               stickyRight="actions"
+              pagination={{
+                page: currentPage,
+                size: pageSize,
+                total: accounts.length,
+                label: "accounts",
+                onPage: setPage,
+                onSize: (next) => {
+                  setPageSize(next);
+                  setPage(1);
+                },
+              }}
               empty="No accounts yet."
             />
           </div>
@@ -659,30 +931,6 @@ export default function Providers() {
                 ))}
               </div>
             )}
-          </Card>
-        </div>
-      ) : null}
-
-      {isAdmin && !connections.isLoading && accounts.length > 0 ? (
-        <div className="mt-4">
-          <Card>
-            <CardHeader
-              title="Operator limits"
-              action={
-                <span className="text-caption text-faint">
-                  optional caps you set · an exhausted account is skipped by the router
-                </span>
-              }
-            />
-            <DataTable
-              columns={quotaColumns}
-              rows={quotas.data}
-              rowKey={(r) => r.connection_id}
-              loading={quotas.isLoading}
-              tableLayout="fixed"
-              stickyRight="quota"
-              empty="No accounts yet."
-            />
           </Card>
         </div>
       ) : null}
@@ -748,8 +996,25 @@ export default function Providers() {
         />
       ) : null}
 
-      {quotaFor ? (
-        <QuotaModal key={quotaFor.connection_id} row={quotaFor} onClose={() => setQuotaFor(null)} />
+      {limitsFor ? (
+        quotaRow ? (
+          <QuotaModal key={quotaRow.connection_id} row={quotaRow} onClose={() => setLimitsFor(null)} />
+        ) : (
+          <Modal
+            title="Operator limits"
+            open
+            width="lg"
+            description="Optional caps on one account; an exhausted account is skipped by the router."
+            onClose={() => setLimitsFor(null)}
+            footer={<Button onClick={() => setLimitsFor(null)}>close</Button>}
+          >
+            {quotas.isError ? (
+              <ErrorNote error={quotas.error} onRetry={() => void quotas.refetch()} />
+            ) : (
+              <p className="text-small text-faint">reading current limits…</p>
+            )}
+          </Modal>
+        )
       ) : null}
 
       {pingFor ? (
@@ -907,6 +1172,28 @@ function baseUrlProblem(value: string, required: boolean): string | null {
     return "The manifest host is a placeholder — replace RESOURCE with your own resource name.";
   }
   return null;
+}
+
+/**
+ * Why this shorthand cannot be saved, or `null`.
+ *
+ * Mirrors `valid_code` on the server — 1–16 characters of a–z, 0–9, “-”, “_” or “.”, not
+ * starting with “.”, not the reserved “rrouter” — plus the instance-wide uniqueness the
+ * provider list already answers.
+ */
+function codeProblemFor(
+  value: string,
+  providers: ModelProvider[],
+  selfId: string | null,
+): string | null {
+  const text = value.trim();
+  if (text === "") return "required";
+  if (text.length > 16) return "16 characters at most";
+  if (!/^[a-z0-9._-]+$/.test(text)) return "lowercase a–z, 0–9, “-”, “_” or “.” only";
+  if (text.startsWith(".")) return "cannot start with “.”";
+  if (text === "rrouter") return "“rrouter” is reserved";
+  const taken = providers.find((p) => p.id !== selfId && p.code === text);
+  return taken ? `already the code of ${taken.display}` : null;
 }
 
 /** Whole number inside `min..=max`; the server clamps, but a silent clamp would hide typos. */
@@ -1843,6 +2130,10 @@ function ApiKeyForm({
   const [team, setTeam] = useState("");
   const [key, setKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [code, setCode] = useState("");
+  const [codeError, setCodeError] = useState<unknown>(null);
+  const [codeNotice, setCodeNotice] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
 
   useEffect(() => {
@@ -1850,6 +2141,16 @@ function ApiKeyForm({
   }, [fixedProvider]);
 
   const selected = providers.find((p) => p.id === (fixedProvider ?? provider));
+  // The draft follows the selected provider's stored code, but only a provider switch
+  // resets it: a successful save refreshes `providers` and must not wipe the confirmation.
+  const selectedId = selected?.id ?? "";
+  useEffect(() => {
+    setCode(providers.find((p) => p.id === selectedId)?.code ?? "");
+    setCodeError(null);
+    setCodeNotice(null);
+    // `providers` is deliberately not a dependency; see above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
   const fixedDisplay = selected?.display;
   // A provider whose manifest host is a placeholder cannot route without a real URL, so
   // the field stops being optional and the button stays disabled until it is filled in.
@@ -1858,6 +2159,22 @@ function ApiKeyForm({
   const baseProblem = baseUrlProblem(baseUrl, requiresBaseUrl);
   const isCustom = customProtocol !== null;
   const protocol = customProtocol === null ? null : protocolLabel(customProtocol);
+  // The URL this account will really call: its own override, else the endpoint its
+  // provider publishes. A compiled provider publishes none here, and a placeholder host
+  // is not an endpoint — say so instead of inventing one.
+  const publishedDefault = (() => {
+    const own = selected?.base_url?.trim() ?? "";
+    if (own !== "") return own;
+    const candidate = selected?.base_url_example?.trim() ?? "";
+    if (candidate === "") return null;
+    if (/[<>]/.test(candidate)) return null;
+    if (PLACEHOLDER_LABELS.test(hostOf(candidate).split(".")[0] ?? "")) return null;
+    return candidate;
+  })();
+  const effectiveUrl = baseUrl.trim() !== "" ? baseUrl.trim() : publishedDefault;
+  // Required endpoints are never hidden: only an optional override can stay collapsed.
+  const showOverride = overrideOpen || requiresBaseUrl || isCustom;
+  const codeIssue = codeProblemFor(code, providers, selected?.id ?? null);
   // The name is the provider's identity in every list, so a custom endpoint has no
   // default to fall back on and cannot be saved without one.
   const providerName = name.trim();
@@ -1885,6 +2202,28 @@ function ApiKeyForm({
       onConnected(conn.name ?? protocol ?? conn.provider, null);
     },
     onError: setError,
+  });
+  // The code is a provider-level setting, so it saves on its own instead of riding on the
+  // connection POST: the operator can fix a ref before any account exists.
+  const saveCode = useMutation({
+    mutationFn: () => {
+      if (!selected) return Promise.reject(new Error("no provider selected"));
+      return api.patch<ModelProvider>(
+        `/api/models/providers/${encodeURIComponent(selected.id)}`,
+        { code: code.trim() },
+      );
+    },
+    onSuccess: () => {
+      setCodeError(null);
+      setCodeNotice(`Code saved — refs now read ${code.trim()}/…`);
+      void client.invalidateQueries({ queryKey: qk.modelProviders });
+      void client.invalidateQueries({ queryKey: qk.models });
+      void client.invalidateQueries({ queryKey: qk.connections });
+    },
+    onError: (error) => {
+      setCodeNotice(null);
+      setCodeError(error);
+    },
   });
   const ready =
     provider !== "" &&
@@ -1961,39 +2300,141 @@ function ApiKeyForm({
       <Field label="api key" hint="stored encrypted; never returned by the API">
         <Input value={key} onChange={setKey} type="password" placeholder="sk-…" ariaLabel="api key" />
       </Field>
-      <Field
-        label={
-          requiresBaseUrl
-            ? "resource base URL (required)"
-            : isCustom
-              ? "base url (required)"
-              : "base url"
-        }
-        hint={
-          requiresBaseUrl
-            ? `Your deployment's endpoint, for example ${example}. The gateway keeps the provider's API path.`
-            : isCustom
-              ? "required; the endpoint root that serves this protocol"
-              : "optional, for a self-hosted or proxy endpoint"
-        }
-      >
-        <Input
-          value={baseUrl}
-          onChange={setBaseUrl}
-          placeholder={requiresBaseUrl ? example : "https://api.example.com/v1"}
-          ariaLabel="base url override"
-        />
-      </Field>
-      {baseProblem ? (
-        <span role="alert" className="text-caption text-neg">
-          {baseProblem}
-        </span>
-      ) : null}
+      <details className="group rounded-lg border border-line bg-surface-2/60">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-3 py-2 text-small font-medium text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text">
+          <span>advanced</span>
+          <span className="text-caption font-normal text-faint">endpoint · provider code</span>
+        </summary>
+        <div className="flex flex-col gap-3 border-t border-line px-3 py-3">
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="text-caption font-semibold text-ink-soft">endpoint this account calls</span>
+            <span className="break-all font-mono text-small text-fg">
+              {effectiveUrl ?? (
+                <span className="text-faint">endpoint not published</span>
+              )}
+            </span>
+            <span className="text-caption text-faint">
+              {baseUrl.trim() !== ""
+                ? "this account's override"
+                : publishedDefault
+                  ? "the provider's published endpoint"
+                  : requiresBaseUrl || isCustom
+                    ? "this provider needs your own endpoint — fill it in below"
+                    : "the build does not publish a default host for this provider; the gateway uses its compiled route"}
+            </span>
+            {showOverride ? null : (
+              <button
+                type="button"
+                onClick={() => setOverrideOpen(true)}
+                className="mt-0.5 self-start text-caption text-muted underline underline-offset-2 hover:text-fg"
+              >
+                customise for this account
+              </button>
+            )}
+          </div>
+          {showOverride ? (
+            <Field
+              label={
+                requiresBaseUrl
+                  ? "resource base URL (required)"
+                  : isCustom
+                    ? "base url (required)"
+                    : "base url override"
+              }
+              hint={
+                requiresBaseUrl
+                  ? `Your deployment's endpoint, for example ${example}. The gateway keeps the provider's API path.`
+                  : isCustom
+                    ? "required; the endpoint root that serves this protocol"
+                    : "optional, for a self-hosted or proxy endpoint"
+              }
+            >
+              <Input
+                value={baseUrl}
+                onChange={(next) => {
+                  setBaseUrl(next);
+                  setError(null);
+                }}
+                placeholder={requiresBaseUrl ? example : "https://api.example.com/v1"}
+                ariaLabel="base url override"
+              />
+            </Field>
+          ) : null}
+          {baseProblem ? (
+            <span role="alert" className="text-caption text-neg">
+              {baseProblem}
+            </span>
+          ) : null}
+
+          <div className="flex flex-col gap-2 border-t border-line pt-3">
+            <Field
+              label="provider code"
+              hint={`the ${selected?.display ?? "provider"} segment in group/code/model`}
+            >
+              <div className="flex items-center gap-2">
+                <Input
+                  value={code}
+                  onChange={(next) => {
+                    setCode(next);
+                    setCodeError(null);
+                    setCodeNotice(null);
+                  }}
+                  placeholder={selected?.code ?? "code"}
+                  ariaLabel="provider code"
+                  disabled={!selected || saveCode.isPending}
+                  className="max-w-[180px] font-mono"
+                  onKeyDown={(event) => {
+                    // Enter here saves the code, not the connection the form posts.
+                    if (event.key !== "Enter") return;
+                    event.preventDefault();
+                    if (
+                      !selected ||
+                      saveCode.isPending ||
+                      codeIssue !== null ||
+                      code.trim() === (selected.code ?? "")
+                    ) {
+                      return;
+                    }
+                    saveCode.mutate();
+                  }}
+                />
+                <Button
+                  variant="quiet"
+                  disabled={
+                    !selected ||
+                    saveCode.isPending ||
+                    codeIssue !== null ||
+                    code.trim() === (selected.code ?? "")
+                  }
+                  onClick={() => saveCode.mutate()}
+                >
+                  {saveCode.isPending ? "saving…" : "save code"}
+                </Button>
+              </div>
+            </Field>
+            <p className="text-caption text-faint">
+              lowercase a–z, 0–9, “-”, “_” or “.” · 1–16 characters · unique across providers.
+              Changing it changes every ref built from this provider.
+            </p>
+            {codeIssue ? (
+              <span role="alert" className="text-caption text-neg">
+                {codeIssue}
+              </span>
+            ) : null}
+            {codeNotice ? (
+              <span role="status" className="text-caption text-[var(--color-pos)]">
+                {codeNotice}
+              </span>
+            ) : null}
+            {codeError ? <ErrorNote error={codeError} /> : null}
+          </div>
+        </div>
+      </details>
       {error ? <ErrorNote error={error} /> : null}
       {isCustom ? (
         <p className="text-caption leading-relaxed text-faint">
           This account is added to the {customProtocol} provider. To give an endpoint its own
-          name and model ref code, add it under Provider codes first.
+          name and model ref code, create it in Provider codes (Connected card header) first.
         </p>
       ) : null}
       <div className="flex justify-end">
@@ -2561,7 +3002,7 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
 
   return (
     <Modal
-      title="Account quota"
+      title="Operator limits"
       open
       width="lg"
       onClose={onClose}
@@ -2600,6 +3041,11 @@ function QuotaModal({ row, onClose }: { row: AccountQuotaRow; onClose: () => voi
           Measured from the start of the current UTC window. The router skips an account
           once a limit is reached and falls back to the next one.
         </p>
+
+        <div className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-caption text-muted">
+          <span className="font-medium text-fg">{WINDOW_LABEL[row.window]}</span> ·{" "}
+          <QuotaUsage row={row} />
+        </div>
 
         <Field label="window">
           <Segmented
@@ -2697,6 +3143,7 @@ function ConnectionMenu({
   testing,
   onRename,
   onTeam,
+  onLimits,
   onBaseUrl,
   onRouting,
   onTest,
@@ -2710,6 +3157,7 @@ function ConnectionMenu({
   testing: boolean;
   onRename: () => void;
   onTeam: () => void;
+  onLimits: () => void;
   onBaseUrl: () => void;
   onRouting: () => void;
   onTest: () => void;
@@ -2792,6 +3240,7 @@ function ConnectionMenu({
           </div>
           {entry("Rename…", onRename)}
           {entry("Team…", onTeam)}
+          {entry("Limits…", onLimits)}
           {entry("Routing…", onRouting)}
           {entry("Base URL…", onBaseUrl)}
           {entry(testing ? "Testing…" : "Test", onTest, false, testing)}
@@ -2809,7 +3258,14 @@ function ConnectionMenu({
  * A client-facing model ref is `group/code/model`; the code is what makes a ref short
  * without making it ambiguous, so it is unique across compiled and custom providers.
  */
-function ProviderCodesCard({ providers }: { providers: ModelProvider[] }) {
+function ProviderCodesCard({
+  providers,
+  embedded = false,
+}: {
+  providers: ModelProvider[];
+  /** Inside the codes dialog: no outer card chrome, and no repeated title. */
+  embedded?: boolean;
+}) {
   const client = useQueryClient();
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -2862,24 +3318,28 @@ function ProviderCodesCard({ providers }: { providers: ModelProvider[] }) {
     onError: setError,
   });
   const createReady = form.name.trim() !== "" && form.base_url.trim() !== "" && !create.isPending;
+  const newProviderButton = (
+    <Button variant="quiet" onClick={() => setCreating((open) => !open)}>
+      {creating ? "cancel" : "new provider"}
+    </Button>
+  );
 
   return (
-    <div className="mb-4">
-      <Card>
-        <CardHeader
-          title="Provider codes"
-          action={
-            <Button variant="quiet" onClick={() => setCreating((open) => !open)}>
-              {creating ? "cancel" : "new provider"}
-            </Button>
-          }
-        />
-        <div className="px-5 pb-4">
-          <p className="mb-3 text-small text-muted">
-            A model reference is <span className="font-mono">group/code/model</span>; the
-            code is unique across every provider, so two providers serving the same model id
-            can never be confused.
-          </p>
+    <div className={embedded ? "" : "mb-4"}>
+      <Card className={embedded ? "border-0" : undefined}>
+        {embedded ? (
+          <div className="flex justify-end pb-3">{newProviderButton}</div>
+        ) : (
+          <CardHeader title="Provider codes" action={newProviderButton} />
+        )}
+        <div className={embedded ? "" : "px-5 pb-4"}>
+          {embedded ? null : (
+            <p className="mb-3 text-small text-muted">
+              A model reference is <span className="font-mono">group/code/model</span>; the
+              code is unique across every provider, so two providers serving the same model id
+              can never be confused.
+            </p>
+          )}
           {error ? (
             <div className="mb-3">
               <ErrorNote error={error} />

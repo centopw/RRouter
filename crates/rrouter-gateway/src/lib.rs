@@ -10,6 +10,7 @@
 //! the inbound dialect's shape (see [`error`]).
 
 pub mod auth;
+pub mod combo_meta;
 pub mod config;
 pub mod error;
 pub mod events;

@@ -272,7 +272,7 @@ const BUILTIN: &[ProviderRow] = &[
 /// `gpt-5-mini` is a *different* model, but `gpt-4o` vs `gpt-4o-2024-08-06` is
 /// not). Compare on the version core — the leading alphanumeric segments — so
 /// the curated list keeps working as upstreams append date stamps.
-fn core_of(model: &str) -> &str {
+pub fn core_of(model: &str) -> &str {
     let mut end = 0usize;
     for seg in model.split('-') {
         // A dot belongs to a version (`v4.1`), not a boundary. Treating it as one folded

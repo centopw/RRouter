@@ -408,14 +408,27 @@ export function useLayoutDraft(
       if (added.length > 0) change(entries, [...groups, ...added]);
     },
     assignGroup: (ref, group) => {
-      const known = entries.some((entry) => entry.ref === ref);
-      const assigned = group === null ? { group: undefined } : { group };
+      // Moving a row into a group is a placement: it must render in that section, so a
+      // hidden entry is shown as part of the same write. `setGroupVisible` stays what it
+      // was — the group-level /v1 toggle, not a per-row visibility switch.
+      const current = entries.find((entry) => entry.ref === ref) ?? {
+        ref,
+        visible: true,
+      };
+      const assigned: DraftEntry =
+        group === null
+          ? { ...current, group: undefined }
+          : {
+              ...current,
+              group,
+              visible: true,
+              last_visible_position: undefined,
+              hidden_at: undefined,
+            };
       change(
-        known
-          ? entries.map((entry) =>
-              entry.ref === ref ? { ...entry, ...assigned } : entry,
-            )
-          : [...entries, { ref, visible: true, ...assigned }],
+        entries.some((entry) => entry.ref === ref)
+          ? entries.map((entry) => (entry.ref === ref ? assigned : entry))
+          : [...entries, assigned],
       );
     },
     setGroupVisible: (id, visible) => {

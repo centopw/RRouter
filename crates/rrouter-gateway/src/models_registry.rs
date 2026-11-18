@@ -95,6 +95,21 @@ impl Capabilities {
             }
         }
     }
+    /// A capability some combo candidate has. Display only: never a promise.
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            vision: self.vision || other.vision,
+            pdf: self.pdf || other.pdf,
+            audio_input: self.audio_input || other.audio_input,
+            video_input: self.video_input || other.video_input,
+            image_output: self.image_output || other.image_output,
+            audio_output: self.audio_output || other.audio_output,
+            tools: self.tools || other.tools,
+            reasoning: self.reasoning || other.reasoning,
+            search: self.search || other.search,
+        }
+    }
+
     /// A capability a fallback combo can rely on when every member has it.
     pub fn intersect(self, other: Self) -> Self {
         Self {
@@ -567,9 +582,11 @@ pub async fn cost_micros(
 /// Live `GET /api/models` payload.
 pub async fn list(state: &AppState) -> Result<Vec<ModelItem>> {
     let store = state.store.as_ref();
-    // Custom rows are the operator's own statement, so they always list. Synced and
-    // upstream rows are dropped for providers this binary cannot route, which keeps a
-    // stale sync from flooding the UI after a provider is removed.
+    // Custom rows are the operator's own statement, so they survive a provider this
+    // binary cannot route; synced and upstream rows do not, which keeps a stale sync
+    // from flooding the UI after a provider is removed. Every item still needs an active
+    // connection for its provider (see `merge`), so a custom model under a disconnected
+    // provider stays hidden until an account is added.
     let rows: Vec<ModelRow> = store
         .list_models()
         .await?

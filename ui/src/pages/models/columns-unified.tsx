@@ -1,16 +1,18 @@
 import { useMemo, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { Badge, Button, Select } from "../../components/ui";
 import { Toggle } from "../../components/atoms";
 import type { Column } from "../../components/table";
 import { useModelColumns, type ModelColumnsOptions } from "./columns";
-import { StaleIdentity } from "./table-unified";
+import { NameIdentity, StaleIdentity } from "./table-unified";
 import type { UnifiedRow } from "./unified-rows";
 
 /**
- * One column definition for the model table. Cells reuse {@link useModelColumns}, so a
+ * One column definition for the union table. Cells reuse {@link useModelColumns}, so a
  * price, a capability badge or a row menu cannot drift between the board and a filter
- * view; the group and `/v1` cells are the two layout controls this page owns. Aliases
- * and combos live on their own screens, so there is no name row here.
+ * view; the identity cell keys on the row kind, and the group and `/v1` cells are the two
+ * layout controls this page owns. A name row keeps the same ref and preset entry as a
+ * model, so grouping, visibility and hiding need no branch per kind.
  */
 export function useUnifiedColumns({
   model,
@@ -55,7 +57,7 @@ export function useUnifiedColumns({
       key: "model",
       title: "provider / name",
       render: (row) => {
-        if (row.kind !== "model") return null;
+        if (row.kind !== "model") return <NameIdentity row={row} />;
         if (row.model === null) return <StaleIdentity row={row} />;
         return identity ? dim(row, identity.render(row.model)) : null;
       },
@@ -78,18 +80,25 @@ export function useUnifiedColumns({
           }
           const explicit = customGroups.find((group) => group.id === groupOf(row.ref));
           return (
-            <Select
-              ariaLabel={`Group for ${row.ref}`}
-              value={explicit?.id ?? ""}
-              onChange={(next) => onAssignGroup(row.ref, next === "" ? null : next)}
-            >
-              <option value="">Ungrouped</option>
-              {customGroups.map((group) => (
-                <option key={group.id} value={group.id}>
-                  {group.name}
-                </option>
-              ))}
-            </Select>
+            <div className="flex flex-col gap-1">
+              <Select
+                ariaLabel={`Group for ${row.ref}`}
+                value={explicit?.id ?? ""}
+                onChange={(next) => onAssignGroup(row.ref, next === "" ? null : next)}
+              >
+                <option value="">Ungrouped</option>
+                {customGroups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name}
+                  </option>
+                ))}
+              </Select>
+              {explicit && row.entry?.visible ? (
+                <span className="truncate text-caption text-faint">
+                  shown in {explicit.name}
+                </span>
+              ) : null}
+            </div>
           );
         },
       });
@@ -148,7 +157,29 @@ export function useUnifiedColumns({
         // Test + delete (custom only) + overflow, plus the cell's horizontal padding.
         width: "8.5rem",
         render: (row) => {
-          if (row.kind !== "model") return null;
+          if (row.kind !== "model") {
+            return (
+              <div className="flex items-center justify-end gap-1.5">
+                {editable ? (
+                  <Button
+                    variant="quiet"
+                    ariaLabel={`Hide ${row.ref} from the active list`}
+                    onClick={() =>
+                      row.entry ? onHide(row.ref) : onVisible(row.ref, false)
+                    }
+                  >
+                    hide
+                  </Button>
+                ) : null}
+                <Link
+                  to={row.kind === "alias" ? "/routing/aliases" : "/routing/combos"}
+                  className="text-caption text-accent-text underline underline-offset-2"
+                >
+                  edit
+                </Link>
+              </div>
+            );
+          }
           if (!row.model) {
             return editable && row.entry ? (
               <div className="flex justify-end">

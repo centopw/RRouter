@@ -36,7 +36,7 @@ export function GroupHeading({
           </Badge>
         ) : null}
       </div>
-      <span className="text-caption text-faint tnum">{count.toLocaleString()} models</span>
+      <span className="text-caption text-faint tnum">{count.toLocaleString()} entries</span>
     </div>
   );
 }
@@ -112,7 +112,7 @@ export function GroupManager({
   return (
     <Modal
       title="model groups"
-      description="Groups change this preset's board and the default preset's /v1/models discovery. Routing is unchanged. Provider buckets start with every unassigned model of that provider."
+      description="Groups change this preset's board and the default preset's /v1/models discovery. Routing is unchanged. Adding a model to a group also shows it in this preset. Provider buckets start with every unassigned model of that provider."
       open={open}
       onClose={onClose}
       width="lg"
@@ -204,9 +204,8 @@ export function GroupManager({
                       );
                     })
                     .map((candidate) => {
-                      const checked =
-                        entries.find((entry) => entry.ref === candidate.ref)?.group ===
-                        group.id;
+                      const entry = entries.find((item) => item.ref === candidate.ref);
+                      const checked = entry?.group === group.id;
                       return (
                         <div
                           key={candidate.ref}
@@ -214,7 +213,11 @@ export function GroupManager({
                         >
                           <Checkbox
                             checked={checked}
-                            ariaLabel={`${checked ? "Remove" : "Add"} ${candidate.ref} ${checked ? "from" : "to"} ${group.name}`}
+                            ariaLabel={
+                              checked
+                                ? `Remove ${candidate.ref} from ${group.name}`
+                                : `Add ${candidate.ref} to ${group.name}, showing it in this preset`
+                            }
                             onChange={(next) =>
                               onAssign(candidate.ref, next ? group.id : null)
                             }
@@ -227,6 +230,13 @@ export function GroupManager({
                           </span>
                           {candidate.kind !== "model" ? (
                             <Badge tone="neutral">{candidate.kind}</Badge>
+                          ) : null}
+                          {entry && !entry.visible ? (
+                            <Badge tone="warn">hidden</Badge>
+                          ) : checked ? (
+                            <span className="shrink-0 text-caption text-faint">
+                              shown in {group.name}
+                            </span>
                           ) : null}
                         </div>
                       );
