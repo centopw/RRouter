@@ -1,9 +1,11 @@
 import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowUpRight,
   ArrowsSplit,
   ChartLineUp,
   ChatCircleText,
   GearSix,
+  GithubLogo,
   Heartbeat,
   Key,
   ListBullets,
@@ -22,6 +24,7 @@ import {
   User,
   UsersThree,
   WebhooksLogo,
+  X,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
@@ -166,9 +169,19 @@ function visibleSurfaceTabs(id: TabSurfaceId, isAdmin: boolean) {
 /** A first run (no accounts, no keys) lands on the wizard once; the flag is set by the
  *  wizard itself when the operator skips or finishes, so this never fights a choice. */
 const SETUP_DISMISSED = "rrouter:setup-dismissed";
+const STAR_DISMISSED = "rrouter:star-dismissed";
+const REPO_URL = "https://github.com/centopw/RRouter";
 const SIDEBAR_COLLAPSED = "rrouter:sidebar-collapsed";
 const THEME_KEY = "rrouter:theme";
 const DENSITY_KEY = "rrouter:density";
+
+function readStarDismissed(): boolean {
+  try {
+    return window.localStorage.getItem(STAR_DISMISSED) === "1";
+  } catch {
+    return false;
+  }
+}
 
 function readInitialTheme(): Theme {
   try {
@@ -236,6 +249,7 @@ export function Shell() {
   const navigate = useNavigate();
   const location = useLocation();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [starDismissed, setStarDismissed] = useState(readStarDismissed);
   const [theme, setTheme] = useState<Theme>(readInitialTheme);
   const [density, setDensity] = useState<Density>(readInitialDensity);
   const mainRef = useRef<HTMLElement | null>(null);
@@ -258,6 +272,15 @@ export function Shell() {
       // Storage unavailable; keep in-memory choice.
     }
   }, [density]);
+
+  const dismissStar = () => {
+    setStarDismissed(true);
+    try {
+      window.localStorage.setItem(STAR_DISMISSED, "1");
+    } catch {
+      // Storage unavailable; the in-memory choice still hides it for this session.
+    }
+  };
 
   const toggleTheme = () => setTheme((prev) => (prev === "dark" ? "light" : "dark"));
   const toggleDensity = () => setDensity((prev) => (prev === "compact" ? "comfortable" : "compact"));
@@ -501,6 +524,7 @@ export function Shell() {
           ))}
         </nav>
 
+        <StarLink collapsed={collapsed} />
         <UpdateMarker collapsed={collapsed} />
         <SessionFooter collapsed={collapsed} />
 
@@ -583,6 +607,7 @@ export function Shell() {
         className="main-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 focus:outline-none min-[820px]:px-10 min-[820px]:pb-14 min-[820px]:pt-8"
       >
         <div className="mx-auto w-full max-w-[1160px]">
+          {starDismissed ? null : <StarBanner onDismiss={dismissStar} />}
           {/* Keyed by path, not by query: a filter change inside a page must not remount
               it, while a route change fades the new page in. */}
           <div key={location.pathname} className="page-enter">
@@ -688,6 +713,74 @@ function UpdateMarker({ collapsed }: { collapsed?: boolean }) {
         </p>
       ) : null}
     </Link>
+  );
+}
+
+/**
+ * One quiet line asking for a star, above the page on every route.
+ *
+ * The only accent here is the link itself: a banner that decorates the dashboard to ask
+ * for attention it does not carry fights the pages it sits on. Dismissal is remembered
+ * per browser, so the ask happens once.
+ */
+function StarBanner({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div
+      role="note"
+      className="mb-4 flex items-center gap-3 rounded-lg border border-line bg-surface-2 px-3 py-2"
+    >
+      <GithubLogo size={16} aria-hidden className="shrink-0 text-muted" />
+      <p className="min-w-0 flex-1 truncate text-caption text-muted">
+        If RRouter saves you a router, a star helps other operators find it.
+      </p>
+      <a
+        href={REPO_URL}
+        target="_blank"
+        rel="noreferrer"
+        className="shrink-0 whitespace-nowrap text-caption font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline"
+      >
+        Star on GitHub
+      </a>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="dismiss the GitHub star banner"
+        title="dismiss"
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg"
+      >
+        <X size={13} aria-hidden />
+      </button>
+    </div>
+  );
+}
+
+/** The persistent half of the ask: the banner is dismissible, this link is not. */
+function StarLink({ collapsed }: { collapsed: boolean }) {
+  if (collapsed) {
+    return (
+      <a
+        href={REPO_URL}
+        target="_blank"
+        rel="noreferrer"
+        aria-label="Star RRouter on GitHub"
+        title="Star RRouter on GitHub"
+        className="mx-auto mb-1 flex h-8 w-8 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg"
+      >
+        <GithubLogo size={15} aria-hidden />
+      </a>
+    );
+  }
+  return (
+    <a
+      href={REPO_URL}
+      target="_blank"
+      rel="noreferrer"
+      className="mx-3 mb-1 flex items-center gap-2 rounded-[8px] px-2.5 py-1.5 text-caption text-muted hover:bg-surface-3 hover:text-fg"
+    >
+      <GithubLogo size={15} aria-hidden className="shrink-0" />
+      <span className="min-w-0 flex-1 truncate">Star on GitHub</span>
+      <ArrowUpRight size={12} aria-hidden className="shrink-0 text-faint" />
+    </a>
   );
 }
 
