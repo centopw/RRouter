@@ -125,12 +125,7 @@ fn capture_headers(headers: &HeaderMap) -> String {
 ///
 /// Nothing is written while the setting is off, so an operator who never enables capture
 /// accumulates no rows to clean up afterwards.
-fn capture_request(
-    state: &Arc<AppState>,
-    request_id: Uuid,
-    headers: &HeaderMap,
-    raw: &[u8],
-) {
+fn capture_request(state: &Arc<AppState>, request_id: Uuid, headers: &HeaderMap, raw: &[u8]) {
     if !crate::settings::capture_bodies() {
         return;
     }
@@ -5457,7 +5452,10 @@ mod tests {
     #[test]
     fn capture_headers_redacts_credentials() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer sk-live"));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer sk-live"),
+        );
         headers.insert("x-api-key", HeaderValue::from_static("sk-abc"));
         headers.insert("api-key", HeaderValue::from_static("sk-def"));
         headers.insert(header::COOKIE, HeaderValue::from_static("session=secret"));

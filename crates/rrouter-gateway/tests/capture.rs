@@ -298,9 +298,7 @@ impl Harness {
         let headers = res.headers().clone();
         let mut stream = res.into_body().into_data_stream();
         let mut wire = String::new();
-        while let Some(Ok(chunk)) =
-            futures_util::StreamExt::next(&mut stream).await
-        {
+        while let Some(Ok(chunk)) = futures_util::StreamExt::next(&mut stream).await {
             wire.push_str(&String::from_utf8_lossy(&chunk));
         }
         (status, headers, wire)
@@ -439,10 +437,7 @@ async fn capture_is_opt_in_and_dies_with_its_usage_row() {
         captured.request_body
     );
     let response = captured.response_body.as_deref().expect("response body");
-    assert!(
-        response.contains("\"on\""),
-        "response body: {response}"
-    );
+    assert!(response.contains("\"on\""), "response body: {response}");
     let headers_json = captured.request_headers.as_deref().expect("headers");
     assert!(
         headers_json.contains("\"[redacted]\""),
@@ -455,9 +450,7 @@ async fn capture_is_opt_in_and_dies_with_its_usage_row() {
     assert!(!captured.request_truncated && !captured.response_truncated);
 
     // The inspector's read endpoint returns the same row and confirms capture is on.
-    let (status, view) = h
-        .get(&format!("/api/usage/{plain}/capture"))
-        .await;
+    let (status, view) = h.get(&format!("/api/usage/{plain}/capture")).await;
     assert_eq!(status, StatusCode::OK, "{view}");
     assert_eq!(view["captured"], true);
     assert_eq!(view["enabled"], true);
@@ -487,14 +480,13 @@ async fn capture_is_opt_in_and_dies_with_its_usage_row() {
         StatusCode::NO_CONTENT
     );
     assert!(h.capture_for(plain).await.is_none());
-    assert!(
-        h.state
-            .store
-            .usage_by_request(plain)
-            .await
-            .expect("usage")
-            .is_none()
-    );
+    assert!(h
+        .state
+        .store
+        .usage_by_request(plain)
+        .await
+        .expect("usage")
+        .is_none());
     // A second delete of the same id is a 404, not a silent success.
     assert_eq!(
         h.delete(&format!("/api/usage/{row_id}")).await,
@@ -524,10 +516,7 @@ async fn system_log_entries_can_be_deleted_one_by_one() {
     // entry through the same buffer the layer feeds.
     rrouter_gateway::syslog::push("info", "test", "capture-test entry".into());
     let (_, body) = h.get("/api/system/logs?after=0&limit=10").await;
-    let entries = body["entries"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let entries = body["entries"].as_array().cloned().unwrap_or_default();
     assert!(!entries.is_empty(), "no entries: {body}");
     let id = entries[0]["id"].as_u64().expect("entry id");
     // Deleting an id that was never issued is a 404, so nothing is claimed falsely.

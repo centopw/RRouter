@@ -4113,9 +4113,11 @@ impl Store {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(migrations::db_err)?;
         let request_id: Option<String> = tx
-            .query_row("SELECT request_id FROM usage WHERE id = ?1", params![id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT request_id FROM usage WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
             .optional()
             .map_err(migrations::db_err)?;
         let Some(request_id) = request_id else {
@@ -5127,7 +5129,9 @@ mod capture_tests {
 
         assert!(block(store.delete_usage(id)).expect("delete"));
         assert!(block(store.usage_by_request(rid)).expect("usage").is_none());
-        assert!(block(store.capture_by_request(rid)).expect("capture").is_none());
+        assert!(block(store.capture_by_request(rid))
+            .expect("capture")
+            .is_none());
         assert!(block(store.attempts_for(rid)).expect("attempts").is_empty());
         assert!(!block(store.delete_usage(id)).expect("missing id"));
     }
@@ -5146,6 +5150,8 @@ mod capture_tests {
         let report = block(store.prune_usage(500)).expect("prune");
         assert_eq!(report.usage, 1);
         assert!(block(store.capture_by_request(old)).expect("old").is_none());
-        assert!(block(store.capture_by_request(kept)).expect("kept").is_some());
+        assert!(block(store.capture_by_request(kept))
+            .expect("kept")
+            .is_some());
     }
 }
