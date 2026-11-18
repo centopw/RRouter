@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { PencilSimple, Plus, Trash } from "@phosphor-icons/react";
+import { PencilSimple, Play, Plus, Trash } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Badge,
@@ -21,6 +21,9 @@ import { ModelChain } from "../components/model-select";
 import { IconButton } from "../components/atoms";
 import { qk, useCombos, useModels } from "../lib/queries";
 import { api, type Combo, type ComboStrategy } from "../lib/api";
+
+/** The rows-per-page choices every table in the app offers. */
+const PAGE_SIZES = [10, 25, 50, 100];
 
 /** The three strategies, in the order the form and the docs read them. */
 const STRATEGIES: Array<{
@@ -59,6 +62,32 @@ function strategyOf(combo: Combo): ComboStrategy {
 }
 
 /**
+ * The candidate chain as one ordered line: `1 model-a → 2 model-b → 3 model-c`, truncated
+ * with the full list in the title. No per-step boxes, so every row keeps the table's height.
+ */
+function CandidateChain({ combo }: { combo: Combo }) {
+  if (combo.models.length === 0) {
+    return <span className="block truncate text-small text-faint">no candidates</span>;
+  }
+  const full = combo.models.map((model, index) => `${index + 1}. ${model}`).join(" → ");
+  return (
+    <span className="block truncate text-small" title={full}>
+      {combo.models.map((model, index) => (
+        <span key={`${model}-${index}`}>
+          {index > 0 ? (
+            <span aria-hidden className="px-1 text-faint">
+              →
+            </span>
+          ) : null}
+          <span className="text-faint tnum">{index + 1}</span>{" "}
+          <span className="font-mono text-fg">{model}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/**
  * What is wrong with the form, if anything. The same rules the API enforces, checked here
  * so the operator sees the problem next to the field rather than as a 400.
  */
@@ -92,6 +121,8 @@ export default function Combos() {
   const [routerModel, setRouterModel] = useState("");
   const [pending, setPending] = useState<Combo | null>(null);
   const [editing, setEditing] = useState(false);
+  const [page, setPage] = useState(1);
+  const [size, setSize] = useState(PAGE_SIZES[0]!);
 
   const invalidate = () => {
     void client.invalidateQueries({ queryKey: qk.combos });
@@ -172,60 +203,40 @@ export default function Combos() {
 
   const problem = formProblem(name, chain, strategy, routerModel);
   const comboList = combos.data ?? [];
+  // The table is paginated here, so a shrinking list never strands the reader on a dead page.
+  const lastPage = Math.max(1, Math.ceil(comboList.length / size));
+  const currentPage = Math.min(page, lastPage);
+  const pagedCombos = comboList.slice((currentPage - 1) * size, currentPage * size);
 
   const columns: Array<Column<Combo>> = [
     {
       key: "name",
       title: "Name",
-      render: (r) => {
-        const kind = strategyOf(r);
-        const entry = STRATEGIES.find((candidate) => candidate.id === kind);
-        return (
-          <span className="flex min-w-0 flex-col gap-1">
-            <span className="block truncate font-mono text-small" title={r.name}>
-              {r.name}
-            </span>
-            {/* Below sm the strategy and candidates columns are gone; the row keeps both. */}
-            <span className="flex flex-wrap items-center gap-1 sm:hidden">
-              <Badge tone={kind === "fallback" ? "neutral" : "accent"}>{entry?.badge ?? "fallback"}</Badge>
-              <span className="text-caption text-faint tnum">
-                {r.models.length} candidate{r.models.length === 1 ? "" : "s"}
-              </span>
-              {kind === "smart" && r.router_model ? (
-                <span className="truncate font-mono text-caption text-faint">{r.router_model}</span>
-              ) : null}
-            </span>
-            <span className="flex flex-wrap items-center gap-1 sm:hidden">
-              {r.models.map((m, i) => (
-                <span key={`${m}-${i}`} className="flex items-center gap-1">
-                  {i > 0 ? <span className="text-faint">→</span> : null}
-                  <span className="rounded border border-line-strong bg-surface-2 px-1.5 py-0.5 font-mono text-caption text-muted">
-                    <span className="mr-1 text-faint tnum">{i + 1}.</span>
-                    {m}
-                  </span>
-                </span>
-              ))}
-            </span>
+      render: (r) => (
+        <span className="flex min-w-0 items-baseline gap-2">
+          <span className="min-w-0 truncate font-mono text-small text-fg" title={r.name}>
+            {r.name}
           </span>
-        );
-      },
+          {/* Below sm the strategy and candidates columns are hidden; the step count stays. */}
+          <span className="shrink-0 text-caption text-faint tnum sm:hidden">
+            {r.models.length} step{r.models.length === 1 ? "" : "s"}
+          </span>
+        </span>
+      ),
     },
     {
       key: "strategy",
       title: "Strategy",
+      width: "9rem",
       className: "hidden sm:table-cell",
       render: (r) => {
         const kind = strategyOf(r);
         const entry = STRATEGIES.find((candidate) => candidate.id === kind);
         return (
-          <span className="flex min-w-0 flex-col gap-0.5">
-            <span className="flex items-center gap-1.5">
-              <Badge tone={kind === "fallback" ? "neutral" : "accent"} title={entry?.body}>
-                {entry?.badge ?? "fallback"}
-              </Badge>
-              <span className="text-caption text-faint tnum">
-                {r.models.length} step{r.models.length === 1 ? "" : "s"}
-              </span>
+          <span className="flex min-w-0 items-center gap-2">
+            <Badge title={entry?.body}>{entry?.badge ?? "fallback"}</Badge>
+            <span className="shrink-0 text-caption text-faint tnum">
+              {r.models.length} step{r.models.length === 1 ? "" : "s"}
             </span>
             {kind === "smart" ? (
               <span
@@ -243,39 +254,23 @@ export default function Combos() {
       key: "models",
       title: "Candidates",
       className: "hidden sm:table-cell",
-      render: (r) => (
-        <span className="flex flex-wrap items-center gap-1.5">
-          {r.models.map((m, i) => (
-            <span key={`${m}-${i}`} className="flex items-center gap-1.5">
-              {i > 0 ? <span className="text-faint">→</span> : null}
-              <span
-                className={cx(
-                  "rounded border border-line-strong bg-surface-2 px-1.5 py-0.5 font-mono text-caption text-muted",
-                  i === 0 && strategyOf(r) !== "fallback" && "border-accent-text/40 text-fg",
-                )}
-                title={i === 0 && strategyOf(r) === "round_robin" ? "the starting model rotates" : undefined}
-              >
-                <span className="mr-1 text-faint tnum">{i + 1}.</span>
-                {m}
-              </span>
-            </span>
-          ))}
-        </span>
-      ),
+      render: (r) => <CandidateChain combo={r} />,
     },
     {
       key: "actions",
       title: "Actions",
       srOnlyTitle: true,
       align: "right",
-      width: "14rem",
+      width: "8.5rem",
       render: (r) => (
-        <span className="flex items-center justify-end gap-1">
+        <span className="flex items-center justify-end gap-0.5">
           <Link
             to={`/playground/chat?model=${encodeURIComponent(r.name)}`}
-            className="inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded-full border border-line bg-surface px-2.5 text-caption font-medium text-fg transition-colors hover:border-line-strong hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+            aria-label={`Test combo ${r.name} in Playground`}
+            title={`Test combo ${r.name} in Playground`}
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-faint transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
           >
-            Test in Playground →
+            <Play size={15} aria-hidden />
           </Link>
           <IconButton label={`Edit combo ${r.name}`} onClick={() => openEdit(r)}>
             <PencilSimple size={15} aria-hidden />
@@ -467,15 +462,28 @@ export default function Combos() {
         />
         <DataTable
           columns={columns}
-          rows={combos.data}
+          rows={combos.isLoading ? undefined : pagedCombos}
           rowKey={(r) => r.name}
           loading={combos.isLoading}
           tableLayout="fixed"
           stickyRight="actions"
+          scrollLabel="saved combos"
+          pagination={{
+            page: currentPage,
+            size,
+            total: comboList.length,
+            sizes: PAGE_SIZES,
+            label: "combos",
+            onPage: setPage,
+            onSize: (next) => {
+              setSize(next);
+              setPage(1);
+            },
+          }}
           empty={
             <div className="flex flex-col items-center gap-2">
               <span>No combos yet. A combo is a name your clients can send in place of a model.</span>
-              <Button variant="primary" onClick={openCreate}>
+              <Button variant="secondary" onClick={openCreate}>
                 <Plus size={15} aria-hidden />
                 Create combo
               </Button>

@@ -138,13 +138,17 @@ export function useUnifiedColumns({
     const enabled = byKey.get("enabled");
     if (enabled) {
       columns.push({
-        ...enabled,
+        // A model column is reusable as-is except for the two row-typed callbacks, which
+        // this literal re-supplies against the unified row.
+        ...(enabled as Omit<Column<UnifiedRow>, "render" | "cellTitle">),
         render: (row) =>
           row.kind === "model" && row.model ? (
             dim(row, enabled.render(row.model))
           ) : (
             <span className="text-faint">—</span>
           ),
+        cellTitle: (row) =>
+          row.kind === "model" && row.model ? enabled.cellTitle?.(row.model) : undefined,
       });
     }
 

@@ -11,6 +11,7 @@ import {
   Moon,
   Plugs,
   Pulse,
+  RocketLaunch,
   Rows,
   Scroll,
   SidebarSimple,
@@ -27,9 +28,8 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-do
 import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
 import { useAuthState, useHealth, useIsAdmin, useSignOut, useSystem, useUpdateStatus } from "./lib/queries";
 import { CommandPalette, type PaletteNavItem } from "./components/command-palette";
-import { Button, CopyChip, Dot, cx } from "./components/ui";
+import { Button, Dot, cx } from "./components/ui";
 import { BrandMark } from "./components/brand-mark";
-import { uptime } from "./lib/format";
 
 type Theme = "light" | "dark";
 type Density = "compact" | "comfortable";
@@ -83,6 +83,7 @@ const NAV_GROUPS: NavGroup[] = [
     id: "monitor",
     label: "MONITOR",
     leaves: [
+      { to: "/quickstart", label: "Quick start", icon: glyph(RocketLaunch) },
       { to: "/activity", label: "Activity", icon: glyph(Pulse) },
       { to: "/usage", label: "Usage", icon: glyph(ChartLineUp) },
       {
@@ -384,7 +385,6 @@ export function Shell() {
     navEdges.top ? "12px" : "0px"
   }, black calc(100% - ${navEdges.bottom ? "12px" : "0px"}), transparent 100%)`;
 
-  const endpoint = `${window.location.origin}/v1`;
   const running = !health.isError;
 
   if (adminRequired) {
@@ -522,10 +522,6 @@ export function Shell() {
           </div>
         ) : (
           <SidebarFooter
-            endpoint={endpoint}
-            running={running}
-            uptimeSecs={health.data?.uptime_secs ?? 0}
-            version={health.data?.version}
             note={brand.footer_text}
             theme={theme}
             onToggleTheme={toggleTheme}
@@ -652,8 +648,6 @@ function RunningDot({ running }: { running: boolean }) {
   );
 }
 
-/** Endpoint, liveness and version in one card. `CopyChip` carries its own aria-label,
- *  and truncates rather than widening the 236px rail. */
 /** A new release is otherwise invisible until someone opens Settings. */
 function UpdateMarker({ collapsed }: { collapsed?: boolean }) {
   const admin = useIsAdmin();
@@ -670,7 +664,7 @@ function UpdateMarker({ collapsed }: { collapsed?: boolean }) {
   if (collapsed) {
     return (
       <Link
-        to="/system/settings"
+        to="/settings/runtime"
         title={`${version} available${preview ? ` — ${preview}` : ""}`}
         aria-label={`${version} update available`}
         className="mx-auto mb-1 flex h-8 w-8 items-center justify-center rounded-full bg-[var(--color-accent)] text-small font-semibold text-[var(--color-accent-ink)]"
@@ -681,7 +675,7 @@ function UpdateMarker({ collapsed }: { collapsed?: boolean }) {
   }
   return (
     <Link
-      to="/system/settings"
+      to="/settings/runtime"
       className="mx-3 mb-2 block rounded-[8px] border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-2.5 py-2 hover:brightness-[1.02]"
     >
       <div className="flex items-center gap-2">
@@ -749,20 +743,12 @@ function SessionFooter({ collapsed }: { collapsed?: boolean }) {
 }
 
 function SidebarFooter({
-  endpoint,
-  running,
-  uptimeSecs,
-  version,
   note,
   theme,
   onToggleTheme,
   density,
   onToggleDensity,
 }: {
-  endpoint: string;
-  running: boolean;
-  uptimeSecs: number;
-  version?: string;
   note?: string;
   theme: Theme;
   onToggleTheme: () => void;
@@ -771,29 +757,12 @@ function SidebarFooter({
 }) {
   return (
     <div className="border-t border-line px-3 py-3">
-      <div className="rounded-[var(--radius-card)] border border-line bg-surface-2 px-2.5 py-2">
-        <div className="text-caption font-semibold uppercase tracking-[0.12em] text-faint">Endpoint</div>
-        <div className="mt-1 flex min-w-0">
-          <CopyChip value={endpoint} label="endpoint" className="w-full" />
+      {note?.trim() ? (
+        <div className="mb-2 truncate text-caption text-faint" title={note.trim()}>
+          {note.trim()}
         </div>
-        <div className="mt-2 flex items-center gap-1.5 text-caption text-muted">
-          <RunningDot running={running} />
-          <span className="truncate">
-            {running ? `Running · up ${uptime(uptimeSecs)}` : "unreachable"}
-          </span>
-        </div>
-        <div className="mt-0.5 truncate text-caption text-faint tnum">
-          v{version ?? "—"} · {note?.trim() || "MIT"}
-        </div>
-        <Link
-          to="/quickstart"
-          className="mt-2 flex items-center justify-between gap-1 border-t border-line/70 pt-2 text-caption font-medium text-accent-text hover:underline"
-        >
-          <span className="truncate">Connect a client tool (Quick start)</span>
-          <span aria-hidden>→</span>
-        </Link>
-      </div>
-      <div className="mt-2 flex items-center gap-1.5">
+      ) : null}
+      <div className="flex items-center gap-1.5">
         <button
           type="button"
           onClick={onToggleTheme}

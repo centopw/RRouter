@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, ErrorNote } from "../components/ui";
 import { Heading } from "../components/atoms";
+import { findModelRef } from "../lib/model-ref";
 import { useModels, usePlaygroundKey, useSystem, useTemplates } from "../lib/queries";
 import {
   Composer,
@@ -70,8 +71,7 @@ export default function Playground() {
     if (!modelParam || models.isLoading) return;
     const trimmed = modelParam.trim();
     if (trimmed) {
-      const list = models.data ?? [];
-      const match = list.find((m) => m.ref === trimmed) ?? list.find((m) => m.id === trimmed);
+      const match = findModelRef(models.data, trimmed);
       setModel(match ? match.ref : trimmed);
     }
     const next = new URLSearchParams(searchParams);

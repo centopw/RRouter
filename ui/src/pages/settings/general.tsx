@@ -184,7 +184,7 @@ export default function GeneralSettings() {
             />
           </Field>
 
-          <Field label="Footer note" hint="Replaces “MIT” under the version in the sidebar.">
+          <Field label="Footer note" hint="Shown as one line at the bottom of the sidebar, above the theme and density toggles.">
             <Input
               value={draft.footer_text ?? ""}
               onChange={set("footer_text")}

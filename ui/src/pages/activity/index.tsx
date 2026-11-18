@@ -17,23 +17,60 @@ import {
   statusText,
 } from "../../components/ui";
 import { pct } from "../../lib/format";
+import { modelRefFor } from "../../lib/model-ref";
 import { RANGES, incidentOf, rangeOf, type Incident, type RangeId } from "../../lib/activity";
 import {
+  useAccountQuotas,
   useConnections,
   useIsAdmin,
   useKeys,
   useLiveUsage,
+  useModels,
   useTeams,
   useUsage,
   useUsageSummary,
 } from "../../lib/queries";
 import type { UsageEvent } from "../../lib/api";
-import { LOG_PAGE, RequestDetailDialog, RequestLog } from "./request-log";
+import { RequestDetailDialog, RequestLog } from "./request-log";
+import { QuotaTotalLine, hasLimit } from "./quota-total";
 import { LiveRoutingCard } from "../../components/live-routing";
 import { Onboarding } from "./onboarding";
 
-/** Dismissed incident survives a route change or reload inside the tab. */
-const DISMISSED_INCIDENT = "rrouter.activity.dismissed-incident";
+/**
+ * Dismissed incidents are remembered per model ref, on the device, forever: the user's
+ * rule is "dismiss a warning once, never see that warning again". The list is bounded so
+ * a device cannot accumulate refs after models stop being used.
+ */
+const DISMISSED_INCIDENTS = "rrouter.activity.dismissed-incidents";
+const DISMISSED_LIMIT = 32;
+
+/** A corrupt or foreign value reads as "nothing dismissed" instead of throwing. */
+function readDismissed(): string[] {
+  try {
+    const raw = localStorage.getItem(DISMISSED_INCIDENTS);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((value): value is string => typeof value === "string");
+  } catch {
+    return [];
+  }
+}
+
+/** Most recent first, one entry per ref, oldest pruned once the cap is reached. */
+function rememberDismissed(ref: string): string[] {
+  const next = [ref, ...readDismissed().filter((value) => value !== ref)].slice(
+    0,
+    DISMISSED_LIMIT,
+  );
+  try {
+    localStorage.setItem(DISMISSED_INCIDENTS, JSON.stringify(next));
+  } catch {
+    // Storage disabled (private mode, quota): the banner returns next load, which is
+    // still better than breaking the page.
+  }
+  return next;
+}
 
 /**
  * Events, not aggregates. Spend, totals and per-model consumption belong to /usage;
@@ -48,10 +85,9 @@ export default function Activity() {
   const [teamFilter, setTeamFilter] = useState<string | null>(null);
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [showAll, setShowAll] = useState(false);
-  const [dismissedIncident, setDismissedIncident] = useState<string | null>(() =>
-    sessionStorage.getItem(DISMISSED_INCIDENT),
-  );
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [dismissedIncidents, setDismissedIncidents] = useState<string[]>(readDismissed);
   const logRef = useRef<HTMLDivElement>(null);
 
   const spec = rangeOf(rangeId);
@@ -73,6 +109,12 @@ export default function Activity() {
   const ever = useUsage(1);
   const live = useLiveUsage(200, teamParam);
   const connections = useConnections(isAdmin);
+  // Canonical model refs: the registry is what turns a row's recorded spelling into the
+  // one ref every surface uses (table, filter, incident banner, replay).
+  const models = useModels();
+  // Operator limits per account: the only place a quota is stated, and the current-window
+  // consumption that goes with it.
+  const quotas = useAccountQuotas(isAdmin);
 
   const providerIds = useMemo(() => {
     const seen = isAdmin
@@ -104,29 +146,33 @@ export default function Activity() {
         (e) =>
           (!errorsOnly || isFailure(e)) &&
           (!providerFilter || providerOf(e) === providerFilter) &&
-          (!modelFilter || splitModel(e.provider, e.model).ref === modelFilter) &&
+          (!modelFilter || modelRefFor(e.provider, e.model, models.data) === modelFilter) &&
           (!keyFilter || e.key_id === keyFilter),
       ),
-    [events, errorsOnly, providerFilter, providerOf, modelFilter, keyFilter],
+    [events, errorsOnly, providerFilter, providerOf, modelFilter, models.data, keyFilter],
   );
   const logRows = useMemo(
-    () => filtered.map((e) => ({ ...e, model: splitModel(e.provider, e.model).name })),
-    [filtered],
+    () => filtered.map((e) => ({ ...e, model: modelRefFor(e.provider, e.model, models.data) })),
+    [filtered, models.data],
   );
   // A request is opened by clicking a row; nothing is selected until then.
   const selected = filtered.find((e) => e.id !== null && e.id === selectedId) ?? null;
   const selectedRow = selected
-    ? { ...selected, model: splitModel(selected.provider, selected.model).name }
+    ? { ...selected, model: modelRefFor(selected.provider, selected.model, models.data) }
     : null;
   const selectedIndex =
     selectedId === null ? -1 : logRows.findIndex((row) => row.id !== null && row.id === selectedId);
+  // Stepping past the last row of a page turns the page, so the drawer never shows a
+  // request the table is not displaying.
+  const pageCount = Math.max(1, Math.ceil(logRows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
   const stepSelected = (delta: -1 | 1) => {
     if (selectedIndex < 0) return;
     const nextIndex = selectedIndex + delta;
     const target = logRows[nextIndex];
     if (!target || target.id === null) return;
-    if (!showAll && nextIndex >= LOG_PAGE) setShowAll(true);
     setSelectedId(target.id);
+    setPage(Math.floor(nextIndex / pageSize) + 1);
   };
 
   /** Filter options come from what this page can actually show, so no dead choices. */
@@ -139,27 +185,31 @@ export default function Activity() {
     return [...seen].sort();
   }, [events, providerOf]);
   const modelOptions = useMemo(() => {
-    const agg = new Map<string, { ref: string; provider: string; name: string; requests: number }>();
+    const agg = new Map<string, { ref: string; requests: number }>();
     for (const row of summary.data ?? []) {
-      const { ref, name } = splitModel(row.provider, row.model);
+      const ref = modelRefFor(row.provider, row.model, models.data);
       const entry = agg.get(ref);
       if (entry) entry.requests += row.requests;
-      else agg.set(ref, { ref, provider: row.provider, name, requests: row.requests });
+      else agg.set(ref, { ref, requests: row.requests });
     }
     return [...agg.values()].sort((a, b) => b.requests - a.requests);
-  }, [summary.data]);
+  }, [summary.data, models.data]);
 
   const incident: Incident | null = incidentOf(summary.data ?? []);
-  const incidentRef = incident ? splitModel(incident.provider, incident.model).ref : null;
+  const incidentRef = incident ? modelRefFor(incident.provider, incident.model, models.data) : null;
   const incidentFailures = useMemo(
     () =>
       incidentRef
-        ? events.filter((e) => isFailure(e) && splitModel(e.provider, e.model).ref === incidentRef)
+        ? events.filter(
+            (e) => isFailure(e) && modelRefFor(e.provider, e.model, models.data) === incidentRef,
+          )
         : [],
-    [events, incidentRef],
+    [events, incidentRef, models.data],
   );
   const dominant = incidentRef ? dominantStatus(incidentFailures) : null;
-  const showIncident = incident !== null && incidentRef !== dismissedIncident;
+  // A dismissed ref stays dismissed; a different model failing raises its own banner.
+  const showIncident =
+    incident !== null && incidentRef !== null && !dismissedIncidents.includes(incidentRef);
   const providerKnown = incident !== null && incident.provider !== "";
   const incidentConnectionId = useMemo(() => {
     if (!incident || !providerKnown) return null;
@@ -172,13 +222,6 @@ export default function Activity() {
     if (degradedMatch) return degradedMatch.id;
     return matching.length === 1 ? (matching[0]?.id ?? null) : null;
   }, [incident, providerKnown, incidentFailures, connections.data]);
-
-  // A resolved incident clears its dismissal, so a later recurrence alerts again.
-  useEffect(() => {
-    if (!summary.isSuccess || incidentRef !== null || dismissedIncident === null) return;
-    sessionStorage.removeItem(DISMISSED_INCIDENT);
-    setDismissedIncident(null);
-  }, [summary.isSuccess, incidentRef, dismissedIncident]);
 
   const degradedConnections = useMemo(
     () =>
@@ -195,6 +238,12 @@ export default function Activity() {
   const filtersActive =
     errorsOnly || providerFilter !== "" || modelFilter !== "" || keyFilter !== "" || teamFilter !== null;
 
+  // Any change to what the log contains starts the reader back at its first page.
+  useEffect(
+    () => setPage(1),
+    [rangeId, errorsOnly, providerFilter, modelFilter, keyFilter, teamFilter, pageSize],
+  );
+
   /** The incident's primary action stays on the page: one click, filtered in place. */
   const showFailures = () => {
     setErrorsOnly(true);
@@ -202,7 +251,6 @@ export default function Activity() {
     setModelFilter("");
     setKeyFilter("");
     setSelectedId(null);
-    setShowAll(false);
     requestAnimationFrame(() => logRef.current?.scrollIntoView({ block: "start" }));
   };
   const clearFilters = () => {
@@ -230,12 +278,6 @@ export default function Activity() {
               }}
               ariaLabel="time range"
             />
-            <Link
-              to="/usage"
-              className="text-small text-muted underline-offset-4 hover:text-fg hover:underline"
-            >
-              Open Usage →
-            </Link>
           </>
         }
       />
@@ -243,14 +285,9 @@ export default function Activity() {
       {incident && showPanels && showIncident ? (
         <div className="mb-5">
           <AlertBanner
-            title={
-              providerKnown
-                ? `${incident.provider}/${incident.model} is failing`
-                : `${incident.model} is failing`
-            }
+            title={`${incidentRef ?? incident.model} is failing`}
             onDismiss={() => {
-              if (incidentRef) sessionStorage.setItem(DISMISSED_INCIDENT, incidentRef);
-              setDismissedIncident(incidentRef);
+              if (incidentRef) setDismissedIncidents(rememberDismissed(incidentRef));
             }}
             actions={
               <>
@@ -337,6 +374,15 @@ export default function Activity() {
             loading={live.isLoading}
           />
 
+          {isAdmin && (quotas.data ?? []).some(hasLimit) ? (
+            <Card className="px-5 py-3">
+              <QuotaTotalLine
+                quotas={quotas.data ?? []}
+                connections={connections.data ?? []}
+              />
+            </Card>
+          ) : null}
+
           <Card>
             <div ref={logRef} className="scroll-mt-4" />
             <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-5 pb-1 pt-4">
@@ -400,7 +446,7 @@ export default function Activity() {
                       <option value="">All models</option>
                       {modelOptions.map((m) => (
                         <option key={m.ref} value={m.ref}>
-                          {m.provider ? `${m.provider}/${m.name}` : m.name}
+                          {m.ref}
                         </option>
                       ))}
                     </Select>
@@ -460,7 +506,21 @@ export default function Activity() {
                   <ErrorNote error={usage.error} onRetry={() => void usage.refetch()} />
                 </div>
               ) : usage.isLoading && !usage.data ? (
-                <RowsSkeleton rows={6} />
+                <div className="px-1">
+                  <RequestLog
+                    rows={[]}
+                    page={1}
+                    size={pageSize}
+                    onPage={setPage}
+                    onSize={setPageSize}
+                    selectedId={null}
+                    onSelect={() => {}}
+                    loading
+                    empty=""
+                    providerOf={providerOf}
+                    keyNames={keyNames}
+                  />
+                </div>
               ) : events.length === 0 ? (
                 <EmptyState>
                   No requests in this window.
@@ -485,21 +545,25 @@ export default function Activity() {
                   </div>
                 </EmptyState>
               ) : (
-                <div className="pb-1">
-                  <RequestLog
-                    rows={logRows}
-                    total={logRows.length}
-                    selectedId={selected?.id ?? null}
-                    onSelect={(row) => {
-                      if (row.id !== null) setSelectedId(row.id);
-                    }}
-                    showAll={showAll}
-                    onToggleAll={() => setShowAll((v) => !v)}
-                    empty=""
-                    providerOf={providerOf}
-                    keyNames={keyNames}
-                  />
-                </div>
+                <RequestLog
+                  rows={logRows}
+                  page={currentPage}
+                  size={pageSize}
+                  onPage={setPage}
+                  onSize={setPageSize}
+                  selectedId={selected?.id ?? null}
+                  onSelect={(row) => {
+                    if (row.id !== null) setSelectedId(row.id);
+                  }}
+                  empty="No requests in this window."
+                  providerOf={providerOf}
+                  keyNames={keyNames}
+                  canDelete={isAdmin}
+                  onDeleted={(row) => {
+                    // The inspector must not outlive the row it describes.
+                    if (row.id !== null && row.id === selectedId) setSelectedId(null);
+                  }}
+                />
               )}
             </div>
           </Card>
@@ -529,18 +593,6 @@ export default function Activity() {
 }
 
 /* ---------------------------------------------------------------- helpers */
-
-/**
- * Usage rows may store the client's model string, which already carries the
- * provider prefix (`codex/gpt-5.6-luna`). This keeps one canonical ref without
- * ever doubling the prefix; the name is what the tables show under `provider/`.
- */
-function splitModel(provider: string, model: string): { ref: string; name: string } {
-  if (provider && model.startsWith(`${provider}/`)) {
-    return { ref: model, name: model.slice(provider.length + 1) };
-  }
-  return { ref: provider ? `${provider}/${model}` : model, name: model };
-}
 
 function isFailure(row: UsageEvent): boolean {
   return row.status >= 400 || row.error !== null;
@@ -596,38 +648,5 @@ function LiveStamp({ at, waiting }: { at: number; waiting: boolean }) {
       />
       <span>{text}</span>
     </span>
-  );
-}
-
-function Skeleton({
-  height,
-  width = "100%",
-  className,
-}: {
-  height: number;
-  width?: number | string;
-  className?: string;
-}) {
-  return (
-    <div
-      aria-hidden
-      className={cx("rounded bg-[var(--color-surface-2)]", className)}
-      style={{ height, width }}
-    />
-  );
-}
-
-function RowsSkeleton({ rows }: { rows: number }) {
-  return (
-    <div aria-hidden className="divide-y divide-[var(--color-rule)]">
-      {Array.from({ length: rows }, (_, i) => (
-        <div key={i} className="flex items-center gap-3 px-6 py-3.5">
-          <Skeleton height={12} width="38%" />
-          <div className="ml-auto">
-            <Skeleton height={12} width={72} />
-          </div>
-        </div>
-      ))}
-    </div>
   );
 }

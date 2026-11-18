@@ -1,5 +1,7 @@
 import { Link } from "react-router-dom";
+import { DataTable, type Column } from "../components/table";
 import { Badge, Card, CardHeader, Dot, ErrorNote, PageHeader } from "../components/ui";
+import type { Connection } from "../lib/api";
 import { useConnections, useHealth, useSystem } from "../lib/queries";
 import { uptime } from "../lib/format";
 
@@ -19,6 +21,54 @@ export function Health({ embedded = false }: { embedded?: boolean } = {}) {
       {health.isError ? "unreachable" : "serving"}
     </Badge>
   );
+
+  const connectionColumns: Array<Column<Connection>> = [
+    {
+      key: "name",
+      title: "Connection",
+      render: (connection) => connection.name ?? connection.provider,
+      cellTitle: (connection) => connection.name ?? connection.provider,
+    },
+    {
+      key: "provider",
+      title: "Provider",
+      width: "160px",
+      className: "text-muted",
+      render: (connection) => connection.provider,
+    },
+    {
+      key: "backoff",
+      title: "Backoff",
+      width: "120px",
+      align: "right",
+      render: (connection) =>
+        connection.backoff_level > 0 ? (
+          <Badge tone="warn">
+            <span className="font-mono tnum">{connection.backoff_level}</span>
+          </Badge>
+        ) : (
+          "—"
+        ),
+      cellTitle: (connection) =>
+        connection.backoff_level > 0 ? `backoff ${connection.backoff_level}` : "no backoff",
+    },
+    {
+      key: "state",
+      title: "State",
+      width: "110px",
+      render: (connection) => (
+        <span className="inline-flex items-center gap-1.5">
+          <Dot
+            tone={
+              !connection.is_active ? "muted" : connection.backoff_level > 0 ? "warn" : "pos"
+            }
+          />
+          {connection.is_active ? "active" : "off"}
+        </span>
+      ),
+      cellTitle: (connection) => (connection.is_active ? "active" : "off"),
+    },
+  ];
 
   const setupLink = (
     <Link
@@ -131,27 +181,15 @@ export function Health({ embedded = false }: { embedded?: boolean } = {}) {
 
       <Card className="mt-3">
         <CardHeader title="Connection state" action={<span className="text-caption text-faint">live from /api/connections</span>} />
-        <div className="px-5 pb-4">
-          {(connections.data ?? []).length === 0 ? (
-            <p className="text-body text-faint">No connections. Add one under Providers.</p>
-          ) : (
-            <ul className="divide-y divide-[var(--color-rule)]">
-              {(connections.data ?? []).map((c) => (
-                <li key={c.id} className="flex items-center gap-3 py-2.5 text-body">
-                  <Dot tone={!c.is_active ? "muted" : c.backoff_level > 0 ? "warn" : "pos"} />
-                  <span className="min-w-0 flex-1 truncate">{c.name ?? c.provider}</span>
-                  <span className="text-caption text-faint">{c.provider}</span>
-                  {c.backoff_level > 0 ? (
-                    <Badge tone="warn">
-                      <span className="font-mono tnum">backoff {c.backoff_level}</span>
-                    </Badge>
-                  ) : null}
-                  <Badge tone={c.is_active ? "pos" : "neutral"}>{c.is_active ? "active" : "off"}</Badge>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        <DataTable<Connection>
+          columns={connectionColumns}
+          rows={connections.data}
+          rowKey={(connection) => connection.id}
+          loading={connections.isLoading}
+          empty="No connections. Add one under Providers."
+          caption="Connection state"
+          scrollLabel="connections"
+        />
       </Card>
     </>
   );

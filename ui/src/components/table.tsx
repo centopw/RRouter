@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { CaretDown, CaretUp, CaretUpDown } from "@phosphor-icons/react";
 import { Checkbox } from "./atoms/Checkbox";
 import { EmptyState, cx } from "./ui";
@@ -13,12 +13,26 @@ import { EmptyState, cx } from "./ui";
  * Pagination: controlled wins. A caller that passes `pagination` slices its own rows
  * (server-side or ahead of time) and this only paints the footer. Without the prop the
  * table paginates itself at 25 rows a page, so no page can render rows without controls.
+ * The footer renders even under an empty table: paging is the only way through rows.
+ *
+ * Grid: every row is one line tall, reserved from the density token rather than from the
+ * tallest cell. A body cell never wraps — it truncates with an ellipsis and carries the
+ * full value in `title` (`Column.wrap` opts a single column out).
  */
 
 export type DataTableSort = {
   key: string;
   direction: "asc" | "desc";
 };
+
+/**
+ * Method-shaped, so `Column<Model>` stays assignable to `Column<UnifiedRow>`: a column
+ * built for a narrower row type is reused for a wider one, and a plain function property
+ * would make the whole column list incompatible.
+ */
+type CellTitle<T> = {
+  cellTitle(row: T): string | null | undefined;
+}["cellTitle"];
 
 export type Column<T> = {
   key: string;
@@ -35,6 +49,19 @@ export type Column<T> = {
   className?: string;
   /** Enables clickable sorting on this column header (`aria-sort`). */
   sortable?: boolean;
+  /**
+   * Opt-out: lets this one cell wrap onto a second line. Off by default, because a row is
+   * only one line tall and a wrapping cell would break the grid. Reserve it for prose that
+   * genuinely needs two lines.
+   */
+  wrap?: boolean;
+  /**
+   * Full text carried in the cell's `title`. Only needed when the cell renders markup:
+   * a plain string or number is used automatically, and a cell that overflows reveals its
+   * own text on hover. Declared as a method so a column built for a wider row type (a
+   * model column reused for a unified row) stays assignable.
+   */
+  cellTitle?: CellTitle<T>;
 };
 
 export type Pagination = {
@@ -43,7 +70,7 @@ export type Pagination = {
   size: number;
   /** Rows after filtering, not rows on this page. */
   total: number;
-  /** Offered page sizes; the first is the default. */
+  /** Offered page sizes. Uncontrolled tables start at 25 rows a page. */
   sizes?: number[];
   /** What is being counted, for "1–50 of 9,243 models". */
   label?: string;
@@ -51,9 +78,18 @@ export type Pagination = {
   onSize: (size: number) => void;
 };
 
-const DEFAULT_SIZES = [25, 50, 100, 200];
+/** Offered rows-per-page. A page never renders rows without these controls. */
+const DEFAULT_SIZES = [10, 25, 50, 100];
 /** Page size an unpaginated table starts with; the footer offers the others. */
 const AUTO_PAGE_SIZE = 25;
+/**
+ * One row height for every row of a table, reserved by the template so a longer cell can
+ * never stretch a row. Read from the density tokens (36px compact, 48px comfortable).
+ */
+const ROW_HEIGHT = {
+  compact: "h-[var(--comp-table-row-height-compact)]",
+  comfortable: "h-[var(--comp-table-row-height-comfortable)]",
+} as const;
 const SKELETON_ROWS = 5;
 const SKELETON_WIDTHS = ["w-32", "w-24", "w-40", "w-20", "w-28"];
 const STICKY_SHADOW = "shadow-[var(--shadow-sticky-col)]";
@@ -84,6 +120,49 @@ function compareSortValues(a: unknown, b: unknown): number {
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
 }
 
+/**
+ * A cell that overflows says so on hover. Reading the rendered text at that moment keeps
+ * the promise of `title` without measuring hundreds of cells on every render.
+ */
+function revealOverflow(event: MouseEvent<HTMLElement>) {
+  const node = event.currentTarget;
+  if (node.title || node.scrollWidth <= node.clientWidth) return;
+  node.title = node.textContent?.trim() ?? "";
+}
+
+/** A click on a control inside a clickable row belongs to the control, not to the row. */
+function clickedAControl(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest("a, button, input, select, textarea, label, [role='button']") !== null
+  );
+}
+
+/**
+ * One line per cell: no wrapping, an ellipsis where the column is too narrow, and the full
+ * value in `title`. `wrap` is the opt-out for prose that genuinely needs a second line.
+ */
+function CellText({
+  title,
+  wrap,
+  children,
+}: {
+  title?: string;
+  wrap?: boolean;
+  children: ReactNode;
+}) {
+  if (wrap) return <div className="min-w-0 whitespace-normal">{children}</div>;
+  return (
+    <div
+      className="block max-w-full truncate"
+      title={title}
+      onMouseEnter={title ? undefined : revealOverflow}
+    >
+      {children}
+    </div>
+  );
+}
+
 export function DataTable<T>({
   columns,
   rows,
@@ -107,6 +186,7 @@ export function DataTable<T>({
   selectedKeys,
   onSelectionChange,
   bulkActions,
+  onRowClick,
 }: {
   columns: Array<Column<T>>;
   rows: T[] | undefined;
@@ -146,9 +226,15 @@ export function DataTable<T>({
   onSelectionChange?: (keys: string[]) => void;
   /** Rendered inside the floating bulk action bar when one or more rows are selected. */
   bulkActions?: ReactNode | ((selectedKeys: string[], clear: () => void) => ReactNode);
+  /**
+   * Makes the whole row a control that activates on click, Enter or Space. The caller owns
+   * the effect (opening a drawer); keyboard users get the same affordance as the mouse.
+   */
+  onRowClick?: (row: T) => void;
 }) {
   const docDensity = useDocumentDensity();
   const effectiveDensity = density ?? docDensity;
+  const rowHeight = ROW_HEIGHT[effectiveDensity];
   const headerCellPad = effectiveDensity === "compact" ? "px-3 py-1.5 text-caption" : "px-4 py-2.5 text-small";
   const bodyCellPad = effectiveDensity === "compact" ? "px-3 py-1.5 text-small" : "px-4 py-2.5 text-body";
 
@@ -286,7 +372,7 @@ export function DataTable<T>({
             </thead>
             <tbody>
               {Array.from({ length: SKELETON_ROWS }, (_, rowIdx) => (
-                <tr key={rowIdx} aria-hidden="true">
+                <tr key={rowIdx} aria-hidden="true" className={rowHeight}>
                   {selectable ? (
                     <td className={cx("w-10 border-b border-[var(--color-rule)] align-middle", bodyCellPad)}>
                       <div className="h-4 w-4 animate-pulse rounded-[3px] bg-surface-3" />
@@ -338,24 +424,6 @@ export function DataTable<T>({
       </div>
     );
   }
-  if (sortedRows.length === 0) {
-    // An empty page in controlled mode keeps its footer: the reader may need to page
-    // back. An auto table with no rows has nothing to paginate and stays a plain empty
-    // state.
-    const footer = controlled && pagination.total > 0
-      ? <PaginationBar pagination={pagination} />
-      : null;
-    return (
-      <>
-        <EmptyState>{empty ?? "nothing here yet"}</EmptyState>
-        {footer}
-      </>
-    );
-  }
-
-  const pageRows = controlled
-    ? sortedRows
-    : sortedRows.slice((page - 1) * autoSize, page * autoSize);
   const footer: Pagination = pagination ?? {
     page,
     size: autoSize,
@@ -367,6 +435,21 @@ export function DataTable<T>({
       setAutoPage(1);
     },
   };
+
+  if (sortedRows.length === 0) {
+    // The footer stays under an empty table too: the reader still owes the page controls
+    // that a filtered result and a shrunk dataset need.
+    return (
+      <>
+        <EmptyState>{empty ?? "nothing here yet"}</EmptyState>
+        <PaginationBar pagination={footer} />
+      </>
+    );
+  }
+
+  const pageRows = controlled
+    ? sortedRows
+    : sortedRows.slice((page - 1) * autoSize, page * autoSize);
 
   const pageRowKeys = pageRows.map((row) => rowKey(row));
   const selectedOnPageCount = selectable
@@ -494,7 +577,25 @@ export function DataTable<T>({
                   key={key}
                   data-selected={isHighlighted || undefined}
                   aria-selected={isHighlighted || undefined}
-                  className="group"
+                  tabIndex={onRowClick ? 0 : undefined}
+                  onClick={
+                    onRowClick
+                      ? (event) => {
+                          if (clickedAControl(event.target)) return;
+                          onRowClick(row);
+                        }
+                      : undefined
+                  }
+                  onKeyDown={
+                    onRowClick
+                      ? (event) => {
+                          if (event.key !== "Enter" && event.key !== " ") return;
+                          event.preventDefault();
+                          onRowClick(row);
+                        }
+                      : undefined
+                  }
+                  className={cx("group", rowHeight, onRowClick && "cursor-pointer")}
                 >
                   {selectable ? (
                     <td
@@ -515,6 +616,12 @@ export function DataTable<T>({
                   ) : null}
                   {columns.map((column) => {
                     const content = column.render(row);
+                    const fullText =
+                      column.cellTitle?.(row) ??
+                      (typeof content === "string" || typeof content === "number"
+                        ? String(content)
+                        : "");
+                    const title = fullText || undefined;
                     const cellBg = isHighlighted
                       ? "bg-[var(--color-selected)]"
                       : column.key === stickyRight
@@ -532,7 +639,9 @@ export function DataTable<T>({
                     if (column.key === rowHeaderKey) {
                       return (
                         <th key={column.key} scope="row" className={cx(shared, "text-left font-normal")}>
-                          {content}
+                          <CellText title={title} wrap={column.wrap}>
+                            {content}
+                          </CellText>
                         </th>
                       );
                     }
@@ -542,7 +651,9 @@ export function DataTable<T>({
                         style={column.width ? { width: column.width } : undefined}
                         className={shared}
                       >
-                        {content}
+                        <CellText title={title} wrap={column.wrap}>
+                          {content}
+                        </CellText>
                       </td>
                     );
                   })}
@@ -577,7 +688,7 @@ export function DataTable<T>({
           </button>
         </div>
       ) : null}
-      {pagination !== undefined || total > 0 ? <PaginationBar pagination={footer} /> : null}
+      <PaginationBar pagination={footer} />
     </div>
   );
 }

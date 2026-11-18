@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Badge, Button, Card, CardHeader, EmptyState, ErrorNote, PageHeader, cx } from "../components/ui";
-import { api } from "../lib/api";
+import { Trash } from "@phosphor-icons/react";
+import { DataTable, type Column } from "../components/table";
+import { useToast } from "../components/toast";
+import { Badge, Button, Card, CardHeader, ConfirmDialog, EmptyState, ErrorNote, PageHeader, cx } from "../components/ui";
+import { ApiError, api } from "../lib/api";
 
 type Entry = {
   id: number;
@@ -41,7 +44,10 @@ export function SystemLogs({ embedded = false }: { embedded?: boolean } = {}) {
   const [capacity, setCapacity] = useState(2000);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<unknown>(null);
-  const scroller = useRef<HTMLDivElement>(null);
+  const [pendingDelete, setPendingDelete] = useState<Entry | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<unknown>(null);
+  const toast = useToast();
   const lastId = useRef(0);
 
   const apply = (snapshot: Snapshot, append: boolean) => {
@@ -90,11 +96,6 @@ export function SystemLogs({ embedded = false }: { embedded?: boolean } = {}) {
     return () => window.clearInterval(timer);
   }, [enabled, capacity]);
 
-  useEffect(() => {
-    const node = scroller.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [entries.length]);
-
   const toggle = async () => {
     const next = !(enabled ?? false);
     setBusy(true);
@@ -121,8 +122,97 @@ export function SystemLogs({ embedded = false }: { embedded?: boolean } = {}) {
     }
   };
 
+  // No optimistic removal: the row stays until the gateway answers 204 and the refetch
+  // reports the new count. A 404 means it rotated out of the ring first, which is not a
+  // failure to report as one.
+  const deleteEntry = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await api.del(`/api/system/logs/${pendingDelete.id}`);
+      toast.success("Log entry deleted");
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) {
+        setDeleteError(e);
+        setDeleting(false);
+        return;
+      }
+      toast.info("That entry was already gone", "It rotated out of the buffer before the delete.");
+    }
+    setDeleting(false);
+    setPendingDelete(null);
+    await load(false).catch(setFailure);
+  };
+
   const subtitle =
     "Platform events for debugging the gateway itself. Off by default; nothing is written to disk.";
+
+  // Newest first: the buffer grows at the end, and a paged table must open on the events
+  // that just happened rather than on the oldest page of a 2,000-entry ring.
+  const logRows = useMemo(() => [...entries].reverse(), [entries]);
+
+  const logColumns: Array<Column<Entry>> = [
+    {
+      key: "ts",
+      title: "Time",
+      width: "104px",
+      className: "font-mono tnum",
+      render: (entry) => clock(entry.ts),
+    },
+    {
+      key: "level",
+      title: "Level",
+      width: "76px",
+      className: "font-mono",
+      render: (entry) => (
+        <span className={cx("font-semibold", LEVEL_TONE[entry.level] ?? "text-muted")}>
+          {entry.level}
+        </span>
+      ),
+      cellTitle: (entry) => entry.level,
+    },
+    {
+      key: "message",
+      title: "Message",
+      className: "font-mono",
+      render: (entry) => entry.message,
+      cellTitle: (entry) => entry.message,
+    },
+    {
+      key: "target",
+      title: "Target",
+      width: "240px",
+      className: "hidden font-mono text-faint min-[900px]:table-cell",
+      render: (entry) => entry.target,
+      cellTitle: (entry) => entry.target,
+    },
+    {
+      key: "actions",
+      title: "Actions",
+      srOnlyTitle: true,
+      align: "right",
+      width: "56px",
+      render: (entry) => {
+        const what = `log entry ${clock(entry.ts)} ${entry.level}`;
+        return (
+          <button
+            type="button"
+            aria-label={`Delete ${what}`}
+            title={`Delete ${what}`}
+            onClick={() => {
+              setDeleteError(null);
+              setPendingDelete(entry);
+            }}
+            // 24px keeps the row inside both density heights (36px compact, 48px roomy).
+            className="inline-flex h-6 w-6 items-center justify-center rounded-full text-faint transition-colors hover:bg-[var(--color-neg-tint)] hover:text-[var(--color-neg-ink)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+          >
+            <Trash size={14} aria-hidden />
+          </button>
+        );
+      },
+    },
+  ];
 
   const controls = (
     <>
@@ -186,31 +276,43 @@ export function SystemLogs({ embedded = false }: { embedded?: boolean } = {}) {
               failure here. It is not persisted, and prompt or response content is never logged.
             </div>
           </EmptyState>
-        ) : entries.length === 0 ? (
-          <div className="px-5 py-8 text-small text-faint">
-            Capturing. New platform events appear here.
-          </div>
         ) : (
-          <div ref={scroller} className="max-h-[560px] overflow-y-auto border-t border-line">
-            <div className="divide-y divide-[var(--color-rule)] font-mono text-caption tnum">
-              {entries.map((entry) => (
-                <div key={entry.id} className="flex gap-3 px-4 py-2 tnum hover:bg-surface-2">
-                  <span className="shrink-0 text-faint tnum">{clock(entry.ts)}</span>
-                  <span
-                    className={cx("w-[42px] shrink-0 font-semibold", LEVEL_TONE[entry.level] ?? "text-muted")}
-                  >
-                    {entry.level}
-                  </span>
-                  <span className="min-w-0 flex-1 break-words text-fg tnum">{entry.message}</span>
-                  <span className="hidden max-w-[220px] shrink-0 truncate text-faint min-[900px]:block">
-                    {entry.target}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
+          <DataTable<Entry>
+            columns={logColumns}
+            rows={logRows}
+            rowKey={(entry) => String(entry.id)}
+            tableLayout="fixed"
+            caption="Gateway events"
+            scrollLabel="events"
+            empty="Capturing. New platform events appear here."
+          />
         )}
       </Card>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete this log entry?"
+        message={
+          pendingDelete ? (
+            <>
+              <span className="font-mono">{pendingDelete.level}</span> at{" "}
+              <span className="font-mono tnum">{clock(pendingDelete.ts)}</span> on{" "}
+              <span className="font-mono tnum">
+                {new Date(pendingDelete.ts).toLocaleDateString()}
+              </span>
+              . It is dropped from the in-memory buffer and cannot be recovered.
+            </>
+          ) : null
+        }
+        confirmLabel="Delete entry"
+        busy={deleting}
+        error={deleteError}
+        onConfirm={() => void deleteEntry()}
+        onClose={() => {
+          setPendingDelete(null);
+          setDeleteError(null);
+        }}
+      />
     </>
   );
 

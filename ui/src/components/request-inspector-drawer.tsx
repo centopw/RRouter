@@ -5,14 +5,17 @@ import {
   Button,
   CopyButton,
   CopyChip,
+  Disclosure,
   ErrorNote,
   Modal,
   StatusPill,
   cx,
   statusText,
 } from "./ui";
+import { CaptureViewer } from "./capture-viewer";
 import { ms, splitRef, usd, when } from "../lib/format";
-import { useUsageDetail } from "../lib/queries";
+import { modelRefFor } from "../lib/model-ref";
+import { useModels, useUsageDetail } from "../lib/queries";
 import type { UsageEvent } from "../lib/api";
 
 export type RequestInspectorDrawerProps = {
@@ -110,6 +113,7 @@ function RequestInspectorBody({
   const waitMs = phased ? row.ttft_ms - row.upstream_ms : 0;
 
   const detail = useUsageDetail(row.request_id || null);
+  const registry = useModels();
   const { refetch } = detail;
   // Attempts land when the request finishes, so reload on the transition from the
   // in-flight status the log polled to the final one. Selecting another row is
@@ -131,11 +135,7 @@ function RequestInspectorBody({
     (detail.isPending || detail.isError || attempts.length > 1 || failedAttempts.length > 0);
   const maxAttemptLatency = attempts.reduce((max, a) => Math.max(max, a.latency_ms), 0);
 
-  const modelRef = row.provider
-    ? row.model.startsWith(`${row.provider}/`)
-      ? row.model
-      : `${row.provider}/${row.model}`
-    : (row.requested_model ?? row.model);
+  const modelRef = modelRefFor(row.provider, row.model, registry.data);
   const inspectConnectionId =
     row.connection_id ?? attempts.find((attempt) => attempt.connection_id)?.connection_id ?? null;
   const hasStepper = onPrev !== undefined || onNext !== undefined;
@@ -347,6 +347,14 @@ function RequestInspectorBody({
               </ol>
             )}
           </section>
+        ) : null}
+
+        {/* Collapsed by default and keyed by request, so the capture read happens only
+            when the reader asks for it and never carries over to the next row. */}
+        {row.request_id ? (
+          <Disclosure key={row.request_id} title="Captured bodies · request + response">
+            <CaptureViewer requestId={row.request_id} />
+          </Disclosure>
         ) : null}
       </div>
     </Modal>

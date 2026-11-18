@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Graph, Moon, Plugs, Plus, RocketLaunch, Sun } from "@phosphor-icons/react";
+import { Graph, Moon, Plugs, Plus, Sun } from "@phosphor-icons/react";
 import { useNavigate } from "react-router-dom";
 import { cx } from "../lib/cx";
 import { useFeatureFlag } from "../lib/flags";
@@ -105,14 +105,6 @@ export function CommandPalette({
         keywords: "map graph live upstream traffic",
         icon: iconGlyph(Graph),
         run: () => go("/routing/topology"),
-      },
-      {
-        id: "action-quickstart",
-        label: "Quick start guide",
-        hint: "/quickstart",
-        keywords: "connect client tool sdk setup curl",
-        icon: iconGlyph(RocketLaunch),
-        run: () => go("/quickstart"),
       },
       {
         id: "action-theme",
