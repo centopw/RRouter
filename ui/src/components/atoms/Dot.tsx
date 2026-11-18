@@ -11,6 +11,8 @@ const DOT_COLORS: Record<DotTone, string> = {
   muted: "bg-faint",
 };
 
-export function Dot({ tone = "pos", className }: { tone?: DotTone; className?: string }) {
+/** Colour is a status signal, so the default dot is neutral: pass a tone only when
+ *  the dot marks real state (ok/warn/error/info). */
+export function Dot({ tone = "muted", className }: { tone?: DotTone; className?: string }) {
   return <span aria-hidden className={cx("inline-block h-1.5 w-1.5 rounded-full", DOT_COLORS[tone], className)} />;
 }

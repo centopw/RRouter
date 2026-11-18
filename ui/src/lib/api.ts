@@ -415,6 +415,8 @@ export type KeyResult = {
   team_id?: string | null;
   /** Who manages the key; absent on builds that predate the playground key. */
   kind?: KeyKind;
+  /** Unix seconds of the newest request this key authenticated; 0 = never. */
+  last_used_at?: number;
 };
 
 /** Exactly the fields `PATCH /api/keys/{id}` accepts; null clears a nullable field. */
@@ -666,6 +668,13 @@ export type UsageSummaryRow = {
   cost_micros: number;
   avg_latency_ms: number;
 };
+
+/**
+ * `GET /api/usage/summary?group_by=connection`: the same totals grouped by
+ * (connection, provider, model), so an account row is exact over the whole range.
+ * `connection_id: null` is the unattributed bucket.
+ */
+export type UsageSummaryByConnection = UsageSummaryRow & { connection_id: string | null };
 
 export type UsageEvent = {
   /** Usage row id: what the master/detail list selects on. */

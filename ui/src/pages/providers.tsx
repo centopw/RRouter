@@ -18,10 +18,9 @@ import {
   useIsAdmin,
   useModelProviders,
   useOAuthProviders,
-  useQuotaPings,
   useTeams,
 } from "../lib/queries";
-import { buildProviderColumns, ConnectedAccountsCard } from "./providers/account-row";
+import { ProviderInventory } from "./providers/account-row";
 import {
   AddProviderFlow,
   EmptyProviders,
@@ -29,12 +28,9 @@ import {
   ProviderCodesModal,
 } from "./providers/add-provider-flow";
 import { ConnectionDrawer } from "./providers/connection-drawer";
-import { SubscriptionLimitsCard } from "./providers/quota-inspector";
 import {
-  buildGroupRows,
   buildProviderGroups,
   useConnectionMutations,
-  type ConnectionDrawerTab,
   type ProviderNotice,
 } from "./providers/types";
 
@@ -49,13 +45,12 @@ export default function Providers() {
 
   const connections = useConnections(true, teamFilter);
   const providers = useModelProviders();
-  // OAuth sign-in, subscription limits and operator quotas are admin surface; a reader
+  // OAuth sign-in, subscription plans and operator quotas are admin surface; a reader
   // must not fire requests that would only answer 403.
   const oauth = useOAuthProviders(isAdmin);
   const teams = useTeams();
   const quotas = useAccountQuotas(isAdmin);
   const subscriptions = useAccountSubscriptions();
-  const pings = useQuotaPings();
 
   const [adding, setAdding] = useState(false);
   const [initialCustomProtocol, setInitialCustomProtocol] = useState<
@@ -65,20 +60,12 @@ export default function Providers() {
   const [notice, setNotice] = useState<ProviderNotice | null>(null);
   const [codesOpen, setCodesOpen] = useState(false);
   const [removing, setRemoving] = useState<Connection | null>(null);
-  const [inspectTab, setInspectTab] = useState<ConnectionDrawerTab>("overview");
 
   const { invalidate, refreshRegistrySoon, remove, toggle, test, lastTest } =
     useConnectionMutations(setNotice);
   const testingId = test.isPending ? (test.variables ?? null) : null;
 
   const accounts = useMemo(() => connections.data ?? [], [connections.data]);
-
-  // Pages are counted in accounts, not in table rows, so a provider header always lands on
-  // the same page as the first account it introduces.
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
-  const lastPage = Math.max(1, Math.ceil(accounts.length / pageSize));
-  const currentPage = Math.min(page, lastPage);
 
   const displayOf = useCallback(
     (id: string) => providers.data?.find((p) => p.id === id)?.display ?? id,
@@ -98,11 +85,6 @@ export default function Providers() {
     [accounts, providers.data, quotas.data, subscriptions.data],
   );
 
-  const rows = useMemo(
-    () => buildGroupRows(accounts, groups, currentPage, pageSize),
-    [accounts, groups, currentPage, pageSize],
-  );
-
   const setTeamFilter = useCallback(
     (team: string) => {
       const next = new URLSearchParams(params);
@@ -115,8 +97,7 @@ export default function Providers() {
   );
 
   const openInspect = useCallback(
-    (connectionId: string, tab: ConnectionDrawerTab = "overview") => {
-      setInspectTab(tab);
+    (connectionId: string) => {
       const next = new URLSearchParams(params);
       if (teamFilter && isAdmin && !accounts.some((a) => a.id === connectionId)) {
         next.delete("team");
@@ -129,7 +110,6 @@ export default function Providers() {
   );
 
   const closeInspect = useCallback(() => {
-    setInspectTab("overview");
     if (!params.has("inspect")) return;
     const next = new URLSearchParams(params);
     next.delete("inspect");
@@ -197,30 +177,6 @@ export default function Providers() {
     display: providers.data?.find((x) => x.id === p.id)?.display ?? p.display,
   }));
 
-  const columns = useMemo(
-    () =>
-      buildProviderColumns({
-        providers: providers.data,
-        isAdmin,
-        testingId,
-        displayOf,
-        teamName,
-        onInspect: openInspect,
-        onTest: (id) => test.mutate(id),
-        onToggle: (c) => toggle.mutate({ id: c.id, active: !c.is_active }),
-        onRemove: (c) => {
-          remove.reset();
-          setRemoving(c);
-        },
-      }),
-    [providers.data, isAdmin, testingId, displayOf, teamName, openInspect, test, toggle, remove],
-  );
-
-  const pingByConnection = useMemo(
-    () => new Map((pings.data ?? []).map((ping) => [ping.connection_id, ping])),
-    [pings.data],
-  );
-
   return (
     <>
       <PageHeader
@@ -254,7 +210,7 @@ export default function Providers() {
       />
 
       {!isAdmin ? (
-        <p className="mb-3 text-small text-muted">
+        <p className="mb-2 text-small text-muted">
           Read-only: these are the provider accounts your team may route through. An administrator
           adds, edits and assigns them.
         </p>
@@ -350,39 +306,27 @@ export default function Providers() {
           <EmptyProviders onAdd={isAdmin ? openAdd : null} />
         )
       ) : (
-        <ConnectedAccountsCard
-          columns={columns}
-          rows={rows}
-          groupCount={groups.length}
-          accountCount={accounts.length}
+        <ProviderInventory
+          groups={groups}
+          quotas={quotas.data}
+          subscriptions={subscriptions.data}
+          providers={providers.data}
           selectedId={inspected?.id}
           loading={connections.isLoading}
           isAdmin={isAdmin}
-          pagination={{
-            page: currentPage,
-            size: pageSize,
-            total: accounts.length,
-            label: "accounts",
-            onPage: setPage,
-            onSize: (next) => {
-              setPageSize(next);
-              setPage(1);
-            },
+          testingId={testingId}
+          displayOf={displayOf}
+          teamName={teamName}
+          onConfigure={openInspect}
+          onTest={(id) => test.mutate(id)}
+          onToggle={(c) => toggle.mutate({ id: c.id, active: !c.is_active })}
+          onRemove={(c) => {
+            remove.reset();
+            setRemoving(c);
           }}
           onOpenCodes={() => setCodesOpen(true)}
         />
       )}
-
-      {!connections.isLoading && accounts.length > 0 ? (
-        <SubscriptionLimitsCard
-          subscriptions={subscriptions}
-          pings={pings.data ?? []}
-          pingsError={pings.isError}
-          isAdmin={isAdmin}
-          onEditPing={(connectionId) => openInspect(connectionId, "quotas")}
-          onRetrySubscriptions={() => void subscriptions.refetch()}
-        />
-      ) : null}
 
       <AddProviderFlow
         open={adding}
@@ -405,20 +349,10 @@ export default function Providers() {
           spec={providers.data?.find((p) => p.id === inspected.provider)}
           display={displayOf(inspected.provider)}
           teams={teams.data ?? []}
-          quota={quotas.data?.find((row) => row.connection_id === inspected.id)}
-          quotasLoaded={quotas.data !== undefined}
-          quotasLoading={quotas.isLoading}
-          quotasError={quotas.error}
-          onRetryQuotas={() => void quotas.refetch()}
-          subscription={subscriptions.data?.find((row) => row.connection_id === inspected.id)}
-          ping={pingByConnection.get(inspected.id)}
-          pings={pings.data ?? []}
-          pingsError={pings.error}
           isAdmin={isAdmin}
           testing={testingId === inspected.id}
           toggling={toggle.isPending && toggle.variables?.id === inspected.id}
           lastTest={lastTest}
-          initialTab={inspectTab}
           onTest={() => test.mutate(inspected.id)}
           onToggle={() => toggle.mutate({ id: inspected.id, active: !inspected.is_active })}
           onRemove={() => {

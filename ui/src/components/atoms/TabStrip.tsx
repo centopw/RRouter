@@ -41,8 +41,9 @@ export function TabStrip<T extends string>({
             value={option.id}
             className={cx(
               "h-[26px] rounded-full px-2.5 text-small transition-colors max-[820px]:h-9",
-              "text-muted hover:text-fg",
+              "text-muted hover:text-fg data-[state=inactive]:hover:bg-surface-2",
               "data-[state=active]:bg-accent data-[state=active]:font-medium data-[state=active]:text-[var(--color-accent-ink)]",
+              "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]",
             )}
           >
             {option.label}

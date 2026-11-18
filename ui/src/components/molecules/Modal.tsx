@@ -85,7 +85,7 @@ export function Modal({
           {modal ? (
             <Dialog.Overlay
               className={cx(
-                "fixed inset-0 z-[var(--z-modal)] backdrop-blur-[1.5px]",
+                "fixed inset-0 z-[var(--z-modal)]",
                 drawer ? "bg-[var(--color-scrim-drawer)]" : "bg-[var(--color-scrim-modal)]",
               )}
             />
@@ -144,7 +144,7 @@ export function Modal({
             </header>
             <div className="min-h-0 flex-1 overflow-auto px-5 py-5 min-[560px]:px-6">{children}</div>
             {footer ? (
-              <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3.5 min-[560px]:px-6">
+              <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line px-5 py-3.5 min-[560px]:px-6">
                 {footer}
               </footer>
             ) : null}

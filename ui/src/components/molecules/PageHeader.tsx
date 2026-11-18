@@ -18,7 +18,7 @@ export function PageHeader({
     <div className="mb-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <Heading level={1} className="font-bold">{title}</Heading>
+          <Heading level={1}>{title}</Heading>
           {subtitle ? <Text as="p" tone="muted" className="mt-1.5">{subtitle}</Text> : null}
         </div>
         {actions ? <Inline gap="sm" wrap>{actions}</Inline> : null}

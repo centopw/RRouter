@@ -5,17 +5,22 @@ type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "quiet";
 type ButtonSize = "sm" | "md" | "lg";
 
 const SECONDARY_STYLE =
-  "border border-[var(--color-line-strong)] bg-surface text-fg hover:bg-surface-3 disabled:border-line disabled:bg-surface-2 disabled:text-faint";
+  "border border-[var(--color-line-strong)] bg-surface text-fg enabled:hover:bg-surface-3 disabled:border-line disabled:bg-surface-2 disabled:text-faint";
+
+/* A ghost is a text action with no resting chrome; hover is the only affordance.
+   It is NOT a second bordered button — that role belongs to `secondary`. */
+const GHOST_STYLE =
+  "border border-transparent bg-transparent text-fg enabled:hover:bg-surface-3 disabled:bg-transparent disabled:text-faint";
 
 const STYLES: Record<ButtonVariant, string> = {
   primary:
-    "bg-accent text-[var(--color-accent-ink)] font-semibold border border-transparent hover:bg-fg disabled:bg-surface-3 disabled:text-faint",
+    "bg-accent text-[var(--color-accent-ink)] font-semibold border border-transparent enabled:hover:bg-[var(--comp-button-primary-hover)] disabled:bg-surface-3 disabled:text-faint",
   secondary: SECONDARY_STYLE,
-  ghost: SECONDARY_STYLE,
+  ghost: GHOST_STYLE,
   quiet:
-    "border border-line bg-surface text-muted hover:border-[var(--color-line-strong)] hover:bg-surface-3 hover:text-fg disabled:border-line disabled:bg-surface-2 disabled:text-faint",
+    "border border-line bg-surface text-muted enabled:hover:border-[var(--color-line-strong)] enabled:hover:bg-surface-3 enabled:hover:text-fg disabled:border-line disabled:bg-surface-2 disabled:text-faint",
   danger:
-    "border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)] hover:border-[var(--color-neg)] disabled:border-line disabled:bg-surface-2 disabled:text-faint",
+    "border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)] enabled:hover:border-[var(--color-neg)] disabled:border-line disabled:bg-surface-2 disabled:text-faint",
 };
 
 const SIZES: Record<ButtonSize, string> = {

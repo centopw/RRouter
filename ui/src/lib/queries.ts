@@ -47,6 +47,7 @@ import {
   type UsageDetail,
   type UsageEvent,
   type UsageModelBucket,
+  type UsageSummaryByConnection,
   type UsageSummaryRow,
 } from "./api";
 import {
@@ -105,6 +106,8 @@ export const qk = {
   series: (hours: number, bucket?: string, by?: string) =>
     ["usage-series", hours, bucket ?? "", by ?? ""] as const,
   summary: (hours: number | null) => ["usage-summary", hours ?? "all"] as const,
+  summaryByConnection: (hours: number | null) =>
+    ["usage-summary-connection", hours ?? "all"] as const,
   oauthProviders: ["oauth-providers"] as const,
   oauthStatus: (provider: string, id: string) => ["oauth-status", provider, id] as const,
 };
@@ -452,7 +455,7 @@ export function useTemplateVersions(id: string | null) {
   });
 }
 
-export function useUsage(limit = 1000, hours?: number, teamId?: string) {
+export function useUsage(limit = 1000, hours?: number, teamId?: string, enabled = true) {
   const query = new URLSearchParams({ limit: String(limit) });
   if (hours !== undefined) query.set("hours", String(hours));
   if (teamId) query.set("team_id", teamId);
@@ -460,6 +463,7 @@ export function useUsage(limit = 1000, hours?: number, teamId?: string) {
     queryKey: [...qk.usage(limit), hours ?? "all", teamId ?? ""] as const,
     queryFn: () => list<UsageEvent>(`/api/usage?${query}`),
     refetchInterval: 15_000,
+    enabled,
   });
 }
 
@@ -582,6 +586,27 @@ export function useUsageSummary(hours: number | null = null, teamId?: string) {
     queryFn: () =>
       list<UsageSummaryRow>(`/api/usage/summary${suffix === "" ? "" : `?${suffix}`}`),
     refetchInterval: 15_000,
+  });
+}
+
+/**
+ * The same window split by (connection, provider, model). This is what makes an
+ * account row exact over the whole range instead of a capped request-log sample.
+ * `enabled` lets callers keep it idle when nothing is being attributed.
+ */
+export function useUsageSummaryByConnection(
+  hours: number | null,
+  enabled = true,
+  teamId?: string,
+) {
+  const query = new URLSearchParams({ group_by: "connection" });
+  if (hours !== null) query.set("hours", String(hours));
+  if (teamId) query.set("team_id", teamId);
+  return useQuery({
+    queryKey: [...qk.summaryByConnection(hours), teamId ?? ""] as const,
+    queryFn: () => list<UsageSummaryByConnection>(`/api/usage/summary?${query}`),
+    refetchInterval: 15_000,
+    enabled,
   });
 }
 

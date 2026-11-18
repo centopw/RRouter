@@ -11,7 +11,7 @@ import {
   Segmented,
   Select,
 } from "./ui";
-import { Checkbox } from "./atoms";
+import { Checkbox, SectionLabel } from "./atoms";
 import { ModelPicker } from "./model-picker";
 import {
   api,
@@ -149,13 +149,13 @@ export function CreateKeyModal({
         title="Key created"
         open
         onClose={finish}
-        description="This is the only time the plaintext is shown. Store it before closing."
+        description="Copy it now — the secret is stored hashed and won't be shown again."
         footer={
           <>
             <Link
               to="/quickstart"
               onClick={finish}
-              className="mr-auto text-small font-medium text-[var(--color-accent-text)] hover:underline"
+              className="mr-auto text-small font-medium text-muted hover:text-fg hover:underline"
             >
               Quick start with this key →
             </Link>
@@ -254,6 +254,7 @@ export function CreateKeyModal({
             ))}
           </Select>
         </Field>
+        <SectionLabel>Limits (optional)</SectionLabel>
         <div className="grid grid-cols-2 gap-3">
           <div className="flex min-w-0 flex-col gap-1">
             <Field label="Requests / min" hint="Empty = unlimited">
@@ -341,6 +342,7 @@ export function CreateKeyModal({
             <option value="monthly">Monthly</option>
           </Select>
         </Field>
+        <SectionLabel>Access</SectionLabel>
         <ModelPicker selected={models} onChange={setModels} disabled={busy} />
 
         <div className="flex items-start gap-2 text-body text-fg">

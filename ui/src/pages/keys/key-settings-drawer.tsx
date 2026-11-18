@@ -9,8 +9,6 @@ import {
   Modal,
   Segmented,
   Select,
-  TabPanel,
-  TabStrip,
   control,
   cx,
 } from "../../components/ui";
@@ -45,14 +43,6 @@ export const MAX_TERM_CHARS = 200;
 export const SCOPES: ReadonlyArray<{ id: KeyScope; label: string }> = [
   { id: "inference", label: "Inference" },
   { id: "admin", label: "Admin" },
-];
-
-type SettingsTab = "identity" | "budgets" | "models";
-
-const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
-  { id: "identity", label: "Identity & Rate Limits" },
-  { id: "budgets", label: "Spend & Token Budgets" },
-  { id: "models", label: "Model Access & Guardrails" },
 ];
 
 /** Empty means unlimited; a bare `0` is the API's own spelling of the same thing. */
@@ -230,7 +220,7 @@ export function PlaygroundKeyModal({ onClose }: { onClose: () => void }) {
 }
 
 export function KeySettingsDrawer({ row, onClose }: { row: KeyResult; onClose: () => void }) {
-  const [tab, setTab] = useState<SettingsTab>("identity");
+  const [formProblem, setFormProblem] = useState<string | null>(null);
   const [name, setName] = useState(row.name ?? "");
   const [active, setActive] = useState(row.is_active);
   const [scope, setScope] = useState<KeyScope>(row.scope);
@@ -374,9 +364,10 @@ export function KeySettingsDrawer({ row, onClose }: { row: KeyResult; onClose: (
         : `${pairs.length} rewrite${pairs.length === 1 ? "" : "s"}`;
 
   const submit = () => {
+    setFormProblem(null);
     const trimmedName = name.trim();
     if ([...trimmedName].length > MAX_KEY_NAME) {
-      setTab("identity");
+      setFormProblem(`Name is limited to ${MAX_KEY_NAME} characters.`);
       return;
     }
     const rpmErr = intLimitProblem(rpm);
@@ -384,32 +375,32 @@ export function KeySettingsDrawer({ row, onClose }: { row: KeyResult; onClose: (
     const tokenErr = intLimitProblem(budget);
     setLimitsProblem({ rpm: rpmErr, tpm: tpmErr, budget: tokenErr });
     if (rpmErr || tpmErr) {
-      setTab("identity");
+      setFormProblem("Rate limits must be whole numbers, or empty for unlimited.");
       return;
     }
     const parsed = parseUsd(budgetUsd);
     if ("problem" in parsed) {
       setBudgetProblem(parsed.problem);
-      setTab("budgets");
+      setFormProblem(parsed.problem);
       return;
     }
     setBudgetProblem(null);
     if (tokenErr) {
-      setTab("budgets");
+      setFormProblem("Token budget must be a whole number, or empty for unlimited.");
       return;
     }
     const clean = pairs.map((p) => ({ from: p.from.trim(), to: p.to }));
     const invalid = validateMap(clean, refs, new Map((baseline ?? []).map((p) => [p.from, p.to])));
     if (invalid !== null) {
       setProblem(invalid);
-      setTab("models");
+      setFormProblem(invalid);
       return;
     }
     setProblem(null);
     const policy = buildGuardrailsPolicy({ maxPrompt, blocked, scanOutput, redact });
     if ("problem" in policy) {
       setGuardProblem(policy.problem);
-      setTab("models");
+      setFormProblem(policy.problem);
       return;
     }
     setGuardProblem(null);
@@ -468,10 +459,15 @@ export function KeySettingsDrawer({ row, onClose }: { row: KeyResult; onClose: (
       onClose={onClose}
       footer={
         <>
+          {formProblem ? (
+            <span role="alert" className="w-full text-small text-neg">
+              {formProblem}
+            </span>
+          ) : null}
           <Link
             to="/quickstart"
             onClick={onClose}
-            className="mr-auto text-small font-medium text-[var(--color-accent-text)] hover:underline"
+            className="mr-auto text-small font-medium text-muted hover:text-fg hover:underline"
           >
             Quick start with this key →
           </Link>
@@ -485,16 +481,117 @@ export function KeySettingsDrawer({ row, onClose }: { row: KeyResult; onClose: (
       }
     >
       <div className="flex flex-col gap-5">
-        <TabStrip
-          options={SETTINGS_TABS}
-          value={tab}
-          onChange={setTab}
-          ariaLabel="Key settings sections"
-          className="max-w-full overflow-x-auto"
-        >
-          <TabPanel value="identity" className="mt-5 flex flex-col gap-5 focus:outline-none">
-            <section className="flex min-w-0 flex-col gap-3">
-              <SectionLabel>Identity &amp; access</SectionLabel>
+        <section className="flex min-w-0 flex-col gap-2">
+          <SectionLabel>This window&apos;s spend</SectionLabel>
+          <div className="flex flex-wrap items-baseline justify-between gap-3">
+            <div className="flex items-baseline gap-1.5 tnum">
+              <span
+                className={cx("text-lead font-semibold", currentReached ? "text-neg" : "text-fg")}
+              >
+                {usd(row.spent_micros)}
+              </span>
+              <span className="text-small text-faint">
+                {hasUsdBudget ? `/ ${usd(row.budget_micros)} USD` : "USD spent"}
+              </span>
+            </div>
+            <div className="text-small text-muted tnum">
+              {hasTokenBudget
+                ? `${compact(row.spent_tokens)} / ${compact(row.budget_tokens)} tokens`
+                : `${compact(row.spent_tokens)} tokens`}
+            </div>
+          </div>
+          {hasUsdBudget || hasTokenBudget ? (
+            <>
+              <SpendProgressBar
+                share={
+                  hasUsdBudget && hasTokenBudget
+                    ? Math.max(usdShare, tokShare)
+                    : hasUsdBudget
+                      ? usdShare
+                      : tokShare
+                }
+                reached={currentReached}
+              />
+              <div className="flex items-center justify-between text-caption">
+                <span className="text-faint">Window: {currentWindowLabel}</span>
+                {currentReached ? <span className="text-neg">budget reached</span> : null}
+              </div>
+            </>
+          ) : (
+            <p className="text-caption text-faint">
+              No spend or token budget set ({currentWindowLabel}).
+            </p>
+          )}
+        </section>
+
+        <section className="flex min-w-0 flex-col gap-3 border-t border-line pt-5">
+          <SectionLabel>Budgets</SectionLabel>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex min-w-0 flex-col gap-1">
+              <Field label="Token budget" hint="Empty = unlimited">
+                <Input
+                  type="number"
+                  value={budget}
+                  onChange={(v) => {
+                    setBudget(v);
+                    setLimitsProblem((prev) => ({ ...prev, budget: intLimitProblem(v) }));
+                  }}
+                  placeholder="5000000"
+                  ariaLabel="token budget"
+                  invalid={limitsProblem.budget !== null}
+                  className="tnum"
+                  disabled={busy}
+                />
+              </Field>
+              {limitsProblem.budget ? (
+                <span role="alert" className="text-caption text-neg">
+                  {limitsProblem.budget}
+                </span>
+              ) : null}
+            </div>
+            <div className="flex min-w-0 flex-col gap-1">
+              <Field label="Budget (USD)" hint="Empty = unlimited">
+                <Input
+                  value={budgetUsd}
+                  onChange={(v) => {
+                    setBudgetUsd(v);
+                    setBudgetProblem(null);
+                  }}
+                  placeholder="1.00"
+                  ariaLabel="budget in USD"
+                  invalid={budgetProblem !== null}
+                  className="tnum"
+                  disabled={busy}
+                />
+              </Field>
+              {budgetProblem ? (
+                <span role="alert" className="text-caption text-neg">
+                  {budgetProblem}
+                </span>
+              ) : null}
+            </div>
+          </div>
+
+          <Field
+            label="Resets"
+            hint="Spend shown is for the current window; budgets are enforced against it"
+          >
+            <Select
+              value={resets}
+              onChange={(v) => setResets(v as BudgetWindow)}
+              ariaLabel="budget reset window"
+              disabled={busy}
+            >
+              <option value="total">Total (never)</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </Select>
+          </Field>
+        </section>
+
+        <section className="flex min-w-0 flex-col gap-3 border-t border-line pt-5">
+          <SectionLabel>Identity &amp; access</SectionLabel>
               <div className="flex min-w-0 flex-col gap-1">
                 <Field label="Name" hint="How this key appears in logs and budgets">
                   <Input
@@ -630,123 +727,8 @@ export function KeySettingsDrawer({ row, onClose }: { row: KeyResult; onClose: (
                 </div>
               </div>
             </section>
-          </TabPanel>
 
-          <TabPanel value="budgets" className="mt-5 flex flex-col gap-5 focus:outline-none">
-            <section className="flex min-w-0 flex-col gap-3">
-              <SectionLabel>Current window usage</SectionLabel>
-              <div className="rounded-[var(--radius-card)] border border-line bg-surface-2 px-4 py-3">
-                <div className="flex flex-wrap items-baseline justify-between gap-3">
-                  <div className="flex items-baseline gap-1.5 tnum">
-                    <span className={cx("text-lead font-semibold", currentReached ? "text-neg" : "text-fg")}>
-                      {usd(row.spent_micros)}
-                    </span>
-                    {hasUsdBudget ? (
-                      <span className="text-small text-faint">/ {usd(row.budget_micros)} USD</span>
-                    ) : (
-                      <span className="text-small text-faint">USD spent</span>
-                    )}
-                  </div>
-                  <div className="text-small text-muted tnum">
-                    {hasTokenBudget
-                      ? `${compact(row.spent_tokens)} / ${compact(row.budget_tokens)} tokens`
-                      : `${compact(row.spent_tokens)} tokens`}
-                  </div>
-                </div>
-                {hasUsdBudget || hasTokenBudget ? (
-                  <>
-                    <SpendProgressBar
-                      share={
-                        hasUsdBudget && hasTokenBudget
-                          ? Math.max(usdShare, tokShare)
-                          : hasUsdBudget
-                            ? usdShare
-                            : tokShare
-                      }
-                      reached={currentReached}
-                    />
-                    <div className="mt-1.5 flex items-center justify-between text-caption">
-                      <span className="text-faint">Window: {currentWindowLabel}</span>
-                      {currentReached ? <span className="text-neg">budget reached</span> : null}
-                    </div>
-                  </>
-                ) : (
-                  <p className="mt-1 text-caption text-faint">
-                    No spend or token budget configured ({currentWindowLabel}).
-                  </p>
-                )}
-              </div>
-            </section>
-
-            <section className="flex min-w-0 flex-col gap-3 border-t border-line pt-4">
-              <SectionLabel>Spend &amp; token budgets</SectionLabel>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="flex min-w-0 flex-col gap-1">
-                  <Field label="Token budget" hint="Empty = unlimited">
-                    <Input
-                      type="number"
-                      value={budget}
-                      onChange={(v) => {
-                        setBudget(v);
-                        setLimitsProblem((prev) => ({ ...prev, budget: intLimitProblem(v) }));
-                      }}
-                      placeholder="5000000"
-                      ariaLabel="token budget"
-                      invalid={limitsProblem.budget !== null}
-                      className="tnum"
-                      disabled={busy}
-                    />
-                  </Field>
-                  {limitsProblem.budget ? (
-                    <span role="alert" className="text-caption text-neg">
-                      {limitsProblem.budget}
-                    </span>
-                  ) : null}
-                </div>
-                <div className="flex min-w-0 flex-col gap-1">
-                  <Field label="Budget (USD)" hint="Empty = unlimited">
-                    <Input
-                      value={budgetUsd}
-                      onChange={(v) => {
-                        setBudgetUsd(v);
-                        setBudgetProblem(null);
-                      }}
-                      placeholder="1.00"
-                      ariaLabel="budget in USD"
-                      invalid={budgetProblem !== null}
-                      className="tnum"
-                      disabled={busy}
-                    />
-                  </Field>
-                  {budgetProblem ? (
-                    <span role="alert" className="text-caption text-neg">
-                      {budgetProblem}
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-
-              <Field
-                label="Resets"
-                hint="Spend shown is for the current window; budgets are enforced against it"
-              >
-                <Select
-                  value={resets}
-                  onChange={(v) => setResets(v as BudgetWindow)}
-                  ariaLabel="budget reset window"
-                  disabled={busy}
-                >
-                  <option value="total">Total (never)</option>
-                  <option value="daily">Daily</option>
-                  <option value="weekly">Weekly</option>
-                  <option value="monthly">Monthly</option>
-                </Select>
-              </Field>
-            </section>
-          </TabPanel>
-
-          <TabPanel value="models" className="mt-5 flex flex-col gap-5 focus:outline-none">
-            <section className="flex min-w-0 flex-col gap-3">
+            <section className="flex min-w-0 flex-col gap-3 border-t border-line pt-5">
               <SectionLabel>Model access &amp; rewrites</SectionLabel>
               <ModelPicker selected={allowed} onChange={setAllowed} disabled={busy} />
 
@@ -959,8 +941,6 @@ export function KeySettingsDrawer({ row, onClose }: { row: KeyResult; onClose: (
                 </span>
               ) : null}
             </section>
-          </TabPanel>
-        </TabStrip>
 
         <div className="flex items-center justify-between gap-3 border-t border-line pt-3 text-caption text-faint">
           <span className="font-mono">{row.id}</span>

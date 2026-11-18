@@ -36,7 +36,7 @@ export function Toggle({
     >
       <Switch.Thumb
         className={cx(
-          "absolute left-0 top-1/2 -translate-y-1/2 rounded-full bg-[var(--color-muted)] transition-transform duration-150",
+          "absolute left-0 top-1/2 -translate-y-1/2 rounded-full bg-[var(--color-muted)] transition-transform duration-[var(--duration-micro)]",
           "data-[state=checked]:bg-[var(--color-accent-ink)]",
           small ? "h-2.5 w-2.5" : "h-4 w-4",
           small

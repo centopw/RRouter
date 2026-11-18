@@ -1,4 +1,4 @@
-import { useId, type CSSProperties } from "react";
+import { useId } from "react";
 import { cx } from "../lib/cx";
 import { useReducedMotion } from "../lib/media";
 
@@ -38,34 +38,12 @@ export function BrandMark({
   const p = `rrb${uid}`;
   const id = (name: string) => `${p}-${name}`;
   const cls = (name: string) => `${p}-${name}`;
-  const arc = state === "error" ? "#EF4444" : state === "failover" ? "#10B981" : color ?? "#00B8FF";
-
-  const vars = (surface === "light"
-    ? {
-        "--rr-r-top": "#F8FAFC",
-        "--rr-r-mid": "#CBD5E1",
-        "--rr-r-bot": "#94A3B8",
-        "--rr-wm-top": "#1C2B42",
-        "--rr-wm-bot": "#44546F",
-        "--rr-tag-muted": "#5A667C",
-      }
-    : surface === "dark"
-      ? {
-          "--rr-r-top": "#FFFFFF",
-          "--rr-r-mid": "#E2E9F7",
-          "--rr-r-bot": "#B2C1E2",
-          "--rr-wm-top": "#FFFFFF",
-          "--rr-wm-bot": "#E7ECF7",
-          "--rr-tag-muted": "#BCC8E0",
-        }
-      : {
-          "--rr-r-top": "var(--comp-brand-r-top, #F8FAFC)",
-          "--rr-r-mid": "var(--comp-brand-r-mid, #CBD5E1)",
-          "--rr-r-bot": "var(--comp-brand-r-bot, #94A3B8)",
-          "--rr-wm-top": "var(--comp-brand-wm-top, #1C2B42)",
-          "--rr-wm-bot": "var(--comp-brand-wm-bot, #44546F)",
-          "--rr-tag-muted": "var(--comp-brand-tag-muted, #5A667C)",
-        }) as CSSProperties;
+  const arc =
+    state === "error"
+      ? "var(--color-neg)"
+      : state === "failover"
+        ? "var(--color-pos)"
+        : color ?? "var(--rr-brand-cyan)";
 
   const staticCss = `
     .${cls("s-top")},.${cls("s-bot")},.${cls("s-mid")},.${cls("r-body")},.${cls("r-leg")},.${cls("dg")},.${cls("t1")},.${cls("t2")},.${cls("dot")}{opacity:1;transform:none;animation:none}
@@ -138,7 +116,7 @@ export function BrandMark({
     @keyframes errShake{0%,100%{transform:none}25%{transform:translateX(-3px)}50%{transform:translateX(3px)}75%{transform:translateX(-2px)}}
     @keyframes dispatchNudge{0%{transform:none}26%{transform:translateX(5.5px)}56%{transform:translateX(-1px)}100%{transform:none}}
     @keyframes dispatchGlow{0%,100%{opacity:0}22%{opacity:.65}56%{opacity:.15}}
-    @keyframes failoverPulse{0%,100%{transform:none;filter:none}32%{transform:translateX(-3px);filter:drop-shadow(0 0 5px #8B3FF9)}68%{transform:translateX(3px)}}
+    @keyframes failoverPulse{0%,100%{transform:none}32%{transform:translateX(-3px)}68%{transform:translateX(3px)}}
     @keyframes failoverNod{0%,100%{transform:none}40%{transform:translateX(2.5px) rotate(1deg)}70%{transform:translateX(-1px)}}
     @keyframes failoverSpark{0%{opacity:0;transform:scale(.2)}28%{opacity:1;transform:translate(15px,17px) scale(1)}100%{opacity:0;transform:translate(26px,31px) scale(.2)}}
     @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.${cls("s-top")},.${cls("s-bot")},.${cls("s-mid")},.${cls("r-body")},.${cls("r-leg")},.${cls("dg")},.${cls("t1")},.${cls("t2")},.${cls("dot")}{opacity:1!important;transform:none!important}.${cls("spk")},.${cls("tip-glow")},.${cls("pk-top")},.${cls("pk-mid")},.${cls("pk-bot")},.${cls("r-glint")},.${cls("wm-glint")}{opacity:0!important}}
@@ -157,14 +135,14 @@ export function BrandMark({
       aria-label={decorative ? undefined : ariaLabel}
       focusable="false"
       data-state={state}
+      data-brand-surface={surface}
       className={cx("block", className)}
-      style={vars}
     >
       <defs>
         <linearGradient id={id("rMainGrad")} x1="184" y1="68" x2="334" y2="226" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="var(--rr-r-top, #FFFFFF)" />
-          <stop offset="55%" stopColor="var(--rr-r-mid, #E2E9F7)" />
-          <stop offset="100%" stopColor="var(--rr-r-bot, #B2C1E2)" />
+          <stop offset="0%" stopColor="var(--comp-brand-r-top)" />
+          <stop offset="55%" stopColor="var(--comp-brand-r-mid)" />
+          <stop offset="100%" stopColor="var(--comp-brand-r-bot)" />
         </linearGradient>
         <linearGradient id={id("rBevelGrad")} x1="184" y1="68" x2="352" y2="226" gradientUnits="userSpaceOnUse">
           <stop offset="0%" stopColor="#E5ECF8" />
@@ -191,8 +169,8 @@ export function BrandMark({
           <stop offset="100%" stopColor="#8B3FF9" />
         </linearGradient>
         <linearGradient id={id("wmGrad")} x1="404" y1="94" x2="880" y2="175" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="var(--rr-wm-top, #FFFFFF)" />
-          <stop offset="100%" stopColor="var(--rr-wm-bot, #E7ECF7)" />
+          <stop offset="0%" stopColor="var(--comp-brand-wm-top)" />
+          <stop offset="100%" stopColor="var(--comp-brand-wm-bot)" />
         </linearGradient>
         <linearGradient id={id("tagRGrad")} x1="610" y1="0" x2="882" y2="0" gradientUnits="userSpaceOnUse">
           <stop offset="0%" stopColor="#00A6FF" />
@@ -315,7 +293,7 @@ export function BrandMark({
       </g>
 
       <g fontFamily="'Plus Jakarta Sans','Inter',system-ui,sans-serif" fontSize="29.5" letterSpacing=".35">
-        <text className={cls("t1")} x="404" y="215" fontWeight="500" fill="var(--rr-tag-muted, #BCC8E0)">One endpoint.</text>
+        <text className={cls("t1")} x="404" y="215" fontWeight="500" fill="var(--comp-brand-tag-muted)">One endpoint.</text>
         <text className={cls("t2")} x="610" y="215" fontWeight="600" fill={`url(#${id("tagRGrad")})`}>Smarter routing</text>
         <circle className={cls("dot")} cx="852" cy="212.5" r="2.7" fill="#8E3DFF" />
       </g>

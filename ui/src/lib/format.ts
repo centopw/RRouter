@@ -28,17 +28,19 @@ export function pct(n: number): string {
 const MICROS = 1_000_000;
 
 /**
- * Money from micros. Four decimals from a cent up, up to six below it so a
- * fraction of a cent stays visible instead of rounding to nothing; `dash` shows
- * zero or absent spend as an em dash.
+ * Money from micros. Two decimals minimum so a zero reads as money; four decimals from a cent
+ * up, up to six below it so a fraction of a cent stays visible instead of rounding to nothing.
+ * `dash` shows absent spend (or zero) as an em dash.
  */
 export function usd(micros: number | null | undefined, opts?: { dash?: boolean }): string {
-  if (micros === null || micros === undefined || !Number.isFinite(micros) || micros === 0) {
-    return opts?.dash ? "—" : "$0.0000";
+  if (micros === null || micros === undefined || !Number.isFinite(micros)) {
+    return opts?.dash ? "—" : "$0.00";
   }
+  if (micros === 0 && opts?.dash) return "—";
   const dollars = micros / MICROS;
   if (Math.abs(dollars) < 0.01) {
-    return `$${dollars.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`;
+    // Fractional digits beyond two are kept only while they carry information.
+    return `$${dollars.toFixed(6).replace(/(\.\d{2}\d*?)0+$/, "$1")}`;
   }
   return `$${dollars.toFixed(4)}`;
 }

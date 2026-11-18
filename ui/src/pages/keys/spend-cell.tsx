@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
-import { Key as KeyIcon } from "@phosphor-icons/react";
-import { Badge, Dot, cx } from "../../components/ui";
+import { Badge, cx } from "../../components/ui";
 import { compact, usd, when } from "../../lib/format";
 import type { BudgetWindow, Guardrails, KeyResult } from "../../lib/api";
 
@@ -45,7 +44,7 @@ export function modelScopeLabel(row: KeyResult): string {
 }
 
 /** Everything hidden by a narrow breakpoint, kept as the row's title/aria summary. */
-export function rowSummary(row: KeyResult, team: string | null): string {
+export function rowSummary(row: KeyResult, team: string | null | undefined): string {
   const limits = [
     row.rpm > 0 ? `${compact(row.rpm)} rpm` : "unlimited rpm",
     row.tpm > 0 ? `${compact(row.tpm)} tpm` : "unlimited tpm",
@@ -56,7 +55,7 @@ export function rowSummary(row: KeyResult, team: string | null): string {
     .join(" · ");
   const models = modelScopeLabel(row);
   return [
-    `team ${team ?? "none"}`,
+    `team ${team ?? "shared"}`,
     `spend ${usd(row.spent_micros)} · ${compact(row.spent_tokens)} tokens used`,
     `limits ${limits}`,
     `models ${models}`,
@@ -64,21 +63,27 @@ export function rowSummary(row: KeyResult, team: string | null): string {
   ].join(" · ");
 }
 
-export function StatusBadge({ row }: { row: KeyResult }) {
-  const { label, tone, dot } = statusOf(row);
+/**
+ * Status is text, not a coloured pill: the normal case is "active", so tinting it would
+ * colour every row. Only an expiry that needs action shows state colour.
+ */
+export function StatusCell({ row }: { row: KeyResult }) {
+  const { label } = statusOf(row);
   const title = [
     row.is_active ? "accepting requests" : "every request is rejected with 403",
     row.expires_at === null ? "never expires" : `expires ${when(row.expires_at)}`,
   ].join(" · ");
   return (
-    <Badge tone={tone} title={title}>
-      <Dot tone={dot} />
+    <span
+      title={title}
+      className={cx("text-small", label === "expired" ? "text-warn-ink" : "text-muted")}
+    >
       {label}
-    </Badge>
+    </span>
   );
 }
 
-/** Displays upcoming (or elapsed on a disabled key) expiration dates with `.tnum`. */
+/** Displays upcoming (or elapsed on a disabled key) expiration dates. */
 export function ExpiryBadge({
   expiresAt,
   isActive,
@@ -89,7 +94,7 @@ export function ExpiryBadge({
   if (expiresAt === null) return null;
   const nowSecs = Date.now() / 1000;
   const elapsed = expiresAt <= nowSecs;
-  // Active expired keys already display "expired" in StatusBadge.
+  // Active expired keys already read "expired" in the status column.
   if (elapsed && isActive) return null;
   const soon = !elapsed && expiresAt - nowSecs <= EXPIRING_SOON_SECS;
   return (
@@ -103,75 +108,92 @@ export function ExpiryBadge({
   );
 }
 
-/** One key's identity: name, live status, expiry, tenancy/scope badges, and where it sits. */
-export function KeyCell({ row, team }: { row: KeyResult; team: string | null }) {
+/** One key's identity: name (the row's detail affordance), prefix, kind, expiry, scope. */
+export function KeyCell({
+  row,
+  team,
+  onOpen,
+}: {
+  row: KeyResult;
+  team?: string | null;
+  /** Omit to render the name as plain text (no detail surface on this screen). */
+  onOpen?: () => void;
+}) {
   const scope = modelScopeLabel(row);
-  const initial = (row.name ?? "?").trim().slice(0, 1).toUpperCase() || "?";
   const playground = row.kind === "playground";
+  const label = row.name ?? row.id.slice(0, 10);
+  const name = row.name ? (
+    <span className="min-w-0 truncate">{row.name}</span>
+  ) : (
+    <span className="min-w-0 truncate font-normal text-muted">unnamed</span>
+  );
   return (
-    <div className="flex min-w-0 items-start gap-3">
-      <span
-        aria-hidden
-        className={cx(
-          "grid h-8 w-8 shrink-0 place-items-center rounded-lg border text-caption font-semibold",
-          playground
-            ? "border-[var(--color-accent)]/25 bg-[var(--color-accent)]/10 text-[var(--color-accent-text)]"
-            : "border-line bg-[var(--color-surface-2)] text-muted",
-        )}
-      >
-        {playground ? <KeyIcon size={14} /> : initial}
-      </span>
-      <div className="min-w-0">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
-          <span
-            className="min-w-0 max-w-full truncate text-body font-semibold text-fg"
+    <div className="min-w-0">
+      <div className="flex min-w-0 items-center gap-2">
+        {onOpen ? (
+          <button
+            type="button"
+            onClick={onOpen}
             title={rowSummary(row, team)}
+            aria-label={`Open settings for ${label}`}
+            className="min-w-0 truncate rounded-sm text-left text-body font-medium text-fg underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)]/25"
           >
-            {row.name ?? <span className="font-normal text-faint">unnamed</span>}
-          </span>
-          <StatusBadge row={row} />
-          <ExpiryBadge expiresAt={row.expires_at} isActive={row.is_active} />
-        </div>
-        <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-caption text-faint">
-          {playground ? (
-            <Badge
-              tone="accent"
-              title="issued by the gateway; /v1 accepts it only from the dashboard playground"
-            >
-              playground
-            </Badge>
-          ) : null}
-          {row.scope === "admin" ? (
-            <Badge tone="accent" title="manages the gateway; cannot call /v1 or spend tokens">
-              admin
-            </Badge>
-          ) : null}
-          <span
-            className={cx("min-w-0 truncate", team !== null && "font-medium text-muted")}
-            title={team === null ? "not assigned to a team; serves instance-wide keys" : "team"}
-          >
-            {team ?? "Shared"}
-          </span>
-          <span aria-hidden>·</span>
-          <span className="shrink-0 tnum" title={`created ${when(row.created_at)}`}>
-            {createdDay(row.created_at)}
-          </span>
-          <span aria-hidden>·</span>
-          <span className="min-w-0 truncate tnum" title={scope}>
-            {scope}
-          </span>
-        </div>
+            {name}
+          </button>
+        ) : (
+          <span className="min-w-0 truncate text-body font-medium text-fg">{name}</span>
+        )}
+        {playground ? (
+          <Badge title="issued by the gateway; /v1 accepts it only from the playground">
+            playground
+          </Badge>
+        ) : null}
+        {row.scope === "admin" ? (
+          <Badge title="manages the gateway; cannot call /v1 or spend tokens">admin</Badge>
+        ) : null}
+        <ExpiryBadge expiresAt={row.expires_at} isActive={row.is_active} />
+      </div>
+      <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-caption text-faint">
+        <span className="shrink-0 font-mono" title={`key id ${row.id}`}>
+          {row.id.slice(0, 10)}
+        </span>
+        <span aria-hidden>·</span>
+        <span className="shrink-0 tnum" title={`created ${when(row.created_at)}`}>
+          {createdDay(row.created_at)}
+        </span>
+        <span aria-hidden>·</span>
+        <span className="min-w-0 truncate" title={scope}>
+          {scope}
+        </span>
       </div>
     </div>
   );
 }
 
-/** Dense semantic chips keep repeated limits scannable without a wall of separators. */
+/** Recency is context, not signal: no colour, and a key that never ran says so. */
+export function LastUsedCell({ lastUsedAt }: { lastUsedAt?: number }) {
+  if (!lastUsedAt) return <span className="text-faint">never</span>;
+  return <span className="tnum text-muted">{when(lastUsedAt)}</span>;
+}
+
+/** Shared keys are the default, so they stay plain text; an assigned team is named. */
+export function TeamCell({ team }: { team: string | null }) {
+  return (
+    <span
+      className={cx("block min-w-0 truncate text-small", team === null ? "text-faint" : "text-fg")}
+      title={team === null ? "not assigned to a team; serves instance-wide keys" : `team ${team}`}
+    >
+      {team ?? "Shared"}
+    </span>
+  );
+}
+
+/** Dense neutral chips keep repeated limits scannable without a wall of separators. */
 function LimitChip({ children, title }: { children: ReactNode; title?: string }) {
   return (
     <span
       title={title}
-      className="inline-flex items-center rounded-md border border-line bg-[var(--color-surface-2)] px-1.5 py-0.5 text-caption leading-4 text-muted tnum"
+      className="inline-flex items-center rounded-md border border-line px-1.5 py-0.5 text-caption leading-4 text-muted tnum"
     >
       {children}
     </span>
@@ -243,28 +265,38 @@ export function LimitsCell({ row }: { row: KeyResult }) {
   );
 }
 
+/**
+ * A budget bar is information only when a budget exists, so it is drawn only then; its
+ * fill is neutral until the spend is close to, or past, the limit.
+ */
 export function SpendProgressBar({
   share,
   reached,
+  near = false,
 }: {
   share: number;
   reached: boolean;
+  near?: boolean;
 }) {
   const pct = Math.min(100, Math.max(0, share));
   return (
     <span className="mt-1.5 block h-1 w-full overflow-hidden rounded-full bg-[var(--color-rule)]">
       <span
-        className="block h-full rounded-full transition-[width] duration-[var(--duration-micro)]"
+        className="block h-full rounded-full"
         style={{
           width: `${pct > 0 ? Math.max(2, pct) : 0}%`,
-          background: reached ? "var(--color-neg)" : "var(--color-accent)",
+          background: reached
+            ? "var(--color-neg)"
+            : near
+              ? "var(--color-warn)"
+              : "var(--color-muted)",
         }}
       />
     </span>
   );
 }
 
-/** Money & token usage against configured budgets, with progress bar and `.tnum` readouts. */
+/** Money & token usage against the budget that is set, right-aligned, tabular. */
 export function SpendCell({ row }: { row: KeyResult }) {
   const now = WINDOW_NOW[row.budget_window];
   const hasUsdBudget = row.budget_micros > 0;
@@ -272,14 +304,6 @@ export function SpendCell({ row }: { row: KeyResult }) {
   const usdReached = hasUsdBudget && row.spent_micros >= row.budget_micros;
   const tokenReached = hasTokenBudget && row.spent_tokens >= row.budget_tokens;
   const reached = usdReached || tokenReached;
-
-  const dollarNote = hasUsdBudget
-    ? `${usd(row.spent_micros)} of ${usd(row.budget_micros)} USD used`
-    : `${usd(row.spent_micros)} USD used · no USD budget`;
-  const tokenNote = hasTokenBudget
-    ? `${compact(row.spent_tokens)} of ${compact(row.budget_tokens)} tokens used`
-    : `${compact(row.spent_tokens)} tokens used · no token budget`;
-  const title = [dollarNote, tokenNote, ...(now ? [`resets ${row.budget_window}`] : [])].join(" · ");
 
   const usdShare = hasUsdBudget ? Math.min(100, (row.spent_micros / row.budget_micros) * 100) : 0;
   const tokenShare = hasTokenBudget
@@ -291,28 +315,36 @@ export function SpendCell({ row }: { row: KeyResult }) {
       : hasUsdBudget
         ? usdShare
         : tokenShare;
+  const near = !reached && share >= 90;
+
+  const dollarNote = hasUsdBudget
+    ? `${usd(row.spent_micros)} of ${usd(row.budget_micros)} USD used`
+    : `${usd(row.spent_micros)} USD used · no USD budget`;
+  const tokenNote = hasTokenBudget
+    ? `${compact(row.spent_tokens)} of ${compact(row.budget_tokens)} tokens used`
+    : `${compact(row.spent_tokens)} tokens used · no token budget`;
+  const title = [dollarNote, tokenNote, ...(now ? [`resets ${row.budget_window}`] : [])].join(" · ");
 
   return (
-    <div className="min-w-0" title={title}>
-      <div className="flex flex-wrap items-baseline gap-1 tnum">
-        <span className={cx("text-body font-semibold", usdReached ? "text-neg" : "text-fg")}>
+    <div className="min-w-0 text-right" title={title}>
+      <div className="tnum">
+        <span className={cx("text-body font-semibold", reached ? "text-neg" : "text-fg")}>
           {usd(row.spent_micros)}
         </span>
         {hasUsdBudget ? (
-          <span className="text-caption text-faint">/ {usd(row.budget_micros)}</span>
+          <span className="text-caption text-faint"> / {usd(row.budget_micros)}</span>
         ) : null}
       </div>
-      <div className={cx("text-caption tnum", tokenReached ? "text-neg" : "text-faint")}>
+      <div className={cx("text-caption tnum", reached ? "text-neg" : "text-faint")}>
         {hasTokenBudget
           ? `${compact(row.spent_tokens)} / ${compact(row.budget_tokens)} tok`
           : `${compact(row.spent_tokens)} tok`}
       </div>
       {hasUsdBudget || hasTokenBudget ? (
         <>
-          <SpendProgressBar share={share} reached={reached} />
-          <div className="mt-1 flex items-center justify-between gap-2 text-caption">
-            <span className="text-faint">{now ?? "total"}</span>
-            {reached ? <span className="text-neg">budget reached</span> : null}
+          <SpendProgressBar share={share} reached={reached} near={near} />
+          <div className="mt-1 text-caption text-faint">
+            {reached ? <span className="text-neg">budget reached</span> : now ?? "total"}
           </div>
         </>
       ) : null}

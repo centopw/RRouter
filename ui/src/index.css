@@ -57,6 +57,9 @@
   --rr-blue-900: #15253d;
   --rr-blue-950: #12233c;
 
+  /* Brand mark constants (logo art, not theme-sampled) */
+  --rr-brand-cyan: #00b8ff;
+
   /* Positive (Emerald) */
   --rr-green-50: #e6f9ef;
   --rr-green-200: #9fd9bb;
@@ -106,7 +109,6 @@
   --duration-drawer: 300ms;
   --ease-out-snappy: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-quick: cubic-bezier(0.4, 0, 1, 1);
-  --ease-spring-subtle: cubic-bezier(0.22, 1.15, 0.36, 1);
   --ease-standard: cubic-bezier(0.4, 0, 0, 1);
 
   /* Z-index Ladder */
@@ -171,7 +173,8 @@
   --sem-scrim-drawer: var(--rr-scrim-drawer-light);
   --sem-scrim-modal: var(--rr-scrim-modal-light);
 
-  --sem-shadow-panel: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 1px rgba(15, 23, 42, 0.03);
+  /* Elevation is only for real layering (popover/drawer/dialog) — never an ornament.
+     There is deliberately no panel/card shadow token: hierarchy comes from borders. */
   --sem-shadow-popover: 0 12px 32px -4px rgba(15, 23, 42, 0.14), 0 4px 10px -2px rgba(15, 23, 42, 0.08);
   --sem-shadow-modal: 0 24px 64px -8px rgba(15, 23, 42, 0.22), 0 8px 24px -4px rgba(15, 23, 42, 0.10);
   --sem-shadow-sticky-col: -8px 0 16px -8px rgba(15, 23, 42, 0.10);
@@ -300,7 +303,6 @@
   --sem-scrim-drawer: var(--rr-scrim-drawer-dark);
   --sem-scrim-modal: var(--rr-scrim-modal-dark);
 
-  --sem-shadow-panel: 0 1px 3px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(255, 255, 255, 0.03);
   --sem-shadow-popover: 0 16px 40px -4px rgba(0, 0, 0, 0.56), 0 0 0 1px rgba(255, 255, 255, 0.06);
   --sem-shadow-modal: 0 24px 64px -8px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.08);
   --sem-shadow-sticky-col: -10px 0 18px -6px rgba(0, 0, 0, 0.48);
@@ -343,6 +345,27 @@
 
 [data-density="compact"] {
   --comp-page-gap: 16px;
+}
+
+/* Fixed-surface brand palettes: the logo can be pinned to a light or dark surface
+   regardless of the active theme. Declared once here; BrandMark references
+   --comp-brand-* and never repeats these literals. */
+[data-brand-surface="light"] {
+  --comp-brand-r-top: #f8fafc;
+  --comp-brand-r-mid: #cbd5e1;
+  --comp-brand-r-bot: #94a3b8;
+  --comp-brand-wm-top: #1c2b42;
+  --comp-brand-wm-bot: #44546f;
+  --comp-brand-tag-muted: #5a667c;
+}
+
+[data-brand-surface="dark"] {
+  --comp-brand-r-top: #ffffff;
+  --comp-brand-r-mid: #e2e9f7;
+  --comp-brand-r-bot: #b2c1e2;
+  --comp-brand-wm-top: #ffffff;
+  --comp-brand-wm-bot: #e7ecf7;
+  --comp-brand-tag-muted: #bcc8e0;
 }
 
 [data-density="comfortable"] {
@@ -415,8 +438,7 @@
   --radius-card: 8px;
   --radius-input: 4px;
 
-  /* Elevation Shadows */
-  --shadow-panel: var(--sem-shadow-panel);
+  /* Elevation Shadows — layered surfaces only (popover/drawer/dialog/sticky column). */
   --shadow-popover: var(--sem-shadow-popover);
   --shadow-modal: var(--sem-shadow-modal);
   --shadow-sticky-col: var(--sem-shadow-sticky-col);
@@ -455,13 +477,8 @@
   --text-caption: 11px;
   --text-caption--line-height: 1.4;
 
-  /* Legacy Motion Aliases mapped onto the 3-tier duration scale */
-  --motion-fast: var(--duration-instant);
-  --motion-pop: var(--duration-micro);
+  /* Page-change motion stays sub-pixel (opacity + 4px), so it can be shorter than a drawer. */
   --motion-page: 160ms;
-  --motion-base: 400ms;
-  --motion-slow: 500ms;
-  --ease-standard: cubic-bezier(0.4, 0, 0, 1);
 }
 
 /* Categorical series for charts and the models table: assigned per model in a stable
@@ -552,26 +569,9 @@
 /* ==========================================================================
    Surface Patterns, Scrollports & Component Motion
    ========================================================================== */
-.route-grid {
-  background-image: radial-gradient(circle, var(--color-rule) 1px, transparent 1px);
-  background-size: 22px 22px;
-  opacity: 0.55;
-  mask-image: radial-gradient(ellipse at center, black 35%, transparent 80%);
-}
-
-.route-canvas {
-  background: radial-gradient(circle at 50% 45%, var(--color-surface) 0%, var(--color-surface-2) 100%);
-}
-
-@keyframes route-flow {
-  to {
-    stroke-dashoffset: -20;
-  }
-}
-
+/* Direction of a routing edge stays readable from its dash, not from motion. */
 .route-edge {
   stroke-dasharray: 3 7;
-  animation: route-flow 1.1s linear infinite;
 }
 
 @keyframes rrouter-pulse {
@@ -728,10 +728,17 @@
   overscroll-behavior: contain;
 }
 
-/* Numeric readouts line up in tables and metric cards. */
+/* Numeric readouts line up in tables and metric cards. `.num` is the canonical
+   utility; `.tnum` remains as an alias for existing call sites. */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  font-variant-ligatures: none;
+}
+
 .tnum {
   font-variant-numeric: tabular-nums;
-  font-feature-settings: "tnum";
+  font-feature-settings: "tnum" 1;
 }
 
 ::-webkit-scrollbar {
@@ -770,15 +777,10 @@
   .toast-root[data-state="open"],
   .toast-root[data-state="closed"],
   .toast-root[data-swipe="end"],
-  .route-edge,
   .live-dot,
   .pulse {
     animation: none !important;
     transition: none !important;
     transform: none !important;
-  }
-
-  .route-edge {
-    stroke-dasharray: none !important;
   }
 }

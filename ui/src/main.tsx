@@ -10,8 +10,9 @@ import {
   useRouteError,
 } from "react-router-dom";
 import "./index.css";
-import { SectionIndex, SectionLayout, Shell } from "./app";
+import { SectionLayout, Shell } from "./app";
 import { ToastProvider } from "./components/toast";
+import { useIsAdmin } from "./lib/queries";
 import { AuthGuard, RequireAdmin } from "./pages/auth/guard";
 
 const queryClient = new QueryClient({
@@ -65,17 +66,21 @@ const Evals = page(() => import("./pages/evals"));
 const Models = page(() => import("./pages/models"));
 const Presets = page(() => import("./pages/presets"));
 const Playground = page(() => import("./pages/playground"));
-const Settings = page(() => import("./pages/settings"));
+const Usage = page(() => import("./pages/usage"));
+const SettingsLayout = page(() => import("./pages/settings/layout"));
+const SettingsGeneral = page(() => import("./pages/settings/general"));
+const SettingsRuntime = page(() => import("./pages/settings/runtime"));
+const SettingsProfile = page(() => import("./pages/settings/profile"));
+const SettingsSecurity = page(() => import("./pages/settings/security"));
+const SettingsSessions = page(() => import("./pages/settings/sessions"));
 const Providers = page(() => import("./pages/providers"));
 const Setup = page(() => import("./pages/setup"));
-const Logs = page(() => import("./pages/logs"));
 const Users = page(() => import("./pages/users"));
 const Teams = page(() => import("./pages/teams"));
 const Audit = page(() => import("./pages/audit"));
 const Topology = page(() =>
   import("./components/live-routing").then((m) => ({ default: m.LiveRoutingCard })),
 );
-const Account = page(() => import("./pages/account"));
 const SignIn = page(() => import("./pages/auth/sign-in"));
 const Register = page(() => import("./pages/auth/register"));
 const TokenSignIn = page(() => import("./pages/auth/token-signin"));
@@ -86,6 +91,11 @@ const Invite = page(() => import("./pages/auth/invite"));
 /** An admin page: hidden from a reader's nav, and redirected here on a typed URL. */
 function AdminPage({ children }: { children: ReactNode }) {
   return <RequireAdmin>{children}</RequireAdmin>;
+}
+
+/** A surface whose root has no screen of its own: open its first role-visible tab. */
+function TabHome({ admin, member }: { admin: string; member: string }) {
+  return <Navigate to={useIsAdmin() ? admin : member} replace />;
 }
 
 /**
@@ -183,43 +193,38 @@ const router = createBrowserRouter(
             { index: true, element: <Navigate to="/activity" replace /> },
             {
               path: "activity",
-              element: <SectionLayout section="activity" />,
               children: [
                 { index: true, element: <Activity /> },
-                { path: "logs", element: <AdminPage><Logs /></AdminPage> },
+                // Logs and audit have canonical homes now; the old tabs stay as redirects.
+                { path: "logs", element: <Navigate to="/system/logs" replace /> },
                 { path: "audit", element: <Legacy to="/access/audit" /> },
               ],
             },
+            { path: "usage", element: <Usage /> },
             {
               path: "playground",
-              element: <SectionLayout section="playground" />,
+              element: <SectionLayout surface="playground" />,
               children: [
-                { index: true, element: <SectionIndex section="playground" /> },
+                {
+                  index: true,
+                  element: <TabHome admin="/playground/chat" member="/playground/templates" />,
+                },
                 { path: "chat", element: <AdminPage><Playground /></AdminPage> },
                 { path: "templates", element: <Templates /> },
                 { path: "evals", element: <Evals /> },
               ],
             },
-            {
-              path: "models",
-              element: <SectionLayout section="models" />,
-              children: [{ index: true, element: <Models /> }],
-            },
-            {
-              path: "providers",
-              element: <SectionLayout section="providers" />,
-              children: [{ index: true, element: <Providers /> }],
-            },
-            {
-              path: "quickstart",
-              element: <SectionLayout section="quickstart" />,
-              children: [{ index: true, element: <QuickStart /> }],
-            },
+            { path: "models", element: <Models /> },
+            { path: "providers", element: <Providers /> },
+            { path: "quickstart", element: <QuickStart /> },
             {
               path: "routing",
-              element: <SectionLayout section="routing" />,
+              element: <SectionLayout surface="routing" />,
               children: [
-                { index: true, element: <SectionIndex section="routing" /> },
+                {
+                  index: true,
+                  element: <TabHome admin="/routing/presets" member="/routing/topology" />,
+                },
                 { path: "presets", element: <AdminPage><Presets /></AdminPage> },
                 { path: "aliases", element: <AdminPage><Aliases /></AdminPage> },
                 { path: "combos", element: <AdminPage><Combos /></AdminPage> },
@@ -228,9 +233,8 @@ const router = createBrowserRouter(
             },
             {
               path: "access",
-              element: <SectionLayout section="access" />,
               children: [
-                { index: true, element: <SectionIndex section="access" /> },
+                { index: true, element: <Navigate to="/access/teams" replace /> },
                 { path: "keys", element: <AdminPage><Keys /></AdminPage> },
                 { path: "quickstart", element: <Navigate to="/quickstart" replace /> },
                 { path: "teams", element: <Teams /> },
@@ -240,20 +244,31 @@ const router = createBrowserRouter(
             },
             {
               path: "system",
-              element: <SectionLayout section="system" />,
               children: [
-                { index: true, element: <SectionIndex section="system" /> },
+                { index: true, element: <Navigate to="/system/health" replace /> },
                 { path: "diagnostics", element: <AdminPage><Diagnostics /></AdminPage> },
                 { path: "health", element: <AdminPage><Health /></AdminPage> },
                 { path: "webhooks", element: <AdminPage><Webhooks /></AdminPage> },
                 { path: "logs", element: <AdminPage><SystemLogs /></AdminPage> },
-                { path: "settings", element: <AdminPage><Settings /></AdminPage> },
+                { path: "settings", element: <Legacy to="/settings/general" /> },
               ],
             },
-            { path: "account", element: <Account /> },
+            {
+              path: "settings",
+              element: <SettingsLayout />,
+              children: [
+                { index: true, element: <Navigate to="/settings/general" replace /> },
+                { path: "general", element: <AdminPage><SettingsGeneral /></AdminPage> },
+                { path: "runtime", element: <AdminPage><SettingsRuntime /></AdminPage> },
+                { path: "profile", element: <SettingsProfile /> },
+                { path: "security", element: <SettingsSecurity /> },
+                { path: "sessions", element: <SettingsSessions /> },
+              ],
+            },
+            { path: "account", element: <Legacy to="/settings/profile" /> },
             // Legacy URLs keep working, filters included; `/models` and `/providers` are
             // canonical, so only the old surfaces redirect.
-            { path: "logs", element: <Navigate to="/activity/logs" replace /> },
+            { path: "logs", element: <Navigate to="/system/logs" replace /> },
             { path: "audit", element: <Legacy to="/access/audit" /> },
             { path: "topology", element: <Legacy to="/routing/topology" /> },
             { path: "templates", element: <Navigate to="/playground/templates" replace /> },
@@ -273,7 +288,6 @@ const router = createBrowserRouter(
             { path: "health", element: <Navigate to="/system/health" replace /> },
             { path: "webhooks", element: <Navigate to="/system/webhooks" replace /> },
             { path: "system-logs", element: <Navigate to="/system/logs" replace /> },
-            { path: "settings", element: <Navigate to="/system/settings" replace /> },
             { path: "*", element: <NotFound /> },
           ],
         },

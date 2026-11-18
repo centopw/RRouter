@@ -313,7 +313,7 @@ export function Composer({
       ) : null}
 
       <div className="z-10 px-1 pb-1 pt-1">
-        <div className="rounded-[16px] border border-[var(--color-line-strong)] bg-surface shadow-[var(--shadow-panel)] focus-within:border-[var(--color-focus-ring)]">
+        <div className="rounded-[16px] border border-[var(--color-line-strong)] bg-surface focus-within:border-[var(--color-focus-ring)]">
           <textarea
             value={draft}
             onChange={(event) => {

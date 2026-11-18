@@ -31,7 +31,7 @@ export function ConfirmDialog({
   return (
     <AlertDialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <AlertDialog.Portal>
-        <AlertDialog.Overlay className="fixed inset-0 z-[var(--z-modal)] bg-[var(--color-scrim-modal)] backdrop-blur-[1.5px]" />
+        <AlertDialog.Overlay className="fixed inset-0 z-[var(--z-modal)] bg-[var(--color-scrim-modal)]" />
         <AlertDialog.Content className="dialog-panel fixed left-1/2 top-1/2 z-[var(--z-modal)] w-[min(92vw,520px)] -translate-x-1/2 -translate-y-1/2 rounded-[var(--radius-overlay)] border border-line bg-surface p-5 shadow-[var(--shadow-modal)] focus:outline-none">
           <AlertDialog.Title className="text-heading font-semibold leading-tight text-fg">
             {title}

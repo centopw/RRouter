@@ -1,92 +1,50 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   AlertBanner,
   Badge,
   Button,
   Card,
-  Dot,
+  Divider,
+  EmptyState,
   ErrorNote,
   FilterChip,
+  Heading,
+  PageHeader,
   Segmented,
   Select,
   cx,
   statusText,
 } from "../../components/ui";
-import { Readout, TrafficChart, type TrafficBucket, type TrafficPart } from "../../components/charts";
-import { compact, ms, pct, usd } from "../../lib/format";
-import {
-  RANGES,
-  bucketLabel,
-  bucketRangeLabel,
-  deltaLabel,
-  incidentOf,
-  rangeOf,
-  seriesColors,
-  windowStarts,
-  type RangeId,
-  type RangeSpec,
-} from "../../lib/activity";
+import { pct } from "../../lib/format";
+import { RANGES, incidentOf, rangeOf, type Incident, type RangeId } from "../../lib/activity";
 import {
   useConnections,
   useIsAdmin,
   useKeys,
-  useTeams,
   useLiveUsage,
+  useTeams,
   useUsage,
-  useUsageByModel,
-  useUsageSeries,
   useUsageSummary,
 } from "../../lib/queries";
-import type { UsageBucket, UsageEvent, UsageModelBucket, UsageSummaryRow } from "../../lib/api";
-import { ModelTable, type ModelRow } from "./model-table";
-import { RequestDetailDialog, RequestLog } from "./request-log";
+import type { UsageEvent } from "../../lib/api";
+import { LOG_PAGE, RequestDetailDialog, RequestLog } from "./request-log";
 import { LiveRoutingCard } from "../../components/live-routing";
 import { Onboarding } from "./onboarding";
-import { Heading } from "../../components/atoms";
 
-/** The one id the chart uses when the per-model split is unavailable. */
-const ALL = "__all__";
 /** Dismissed incident survives a route change or reload inside the tab. */
 const DISMISSED_INCIDENT = "rrouter.activity.dismissed-incident";
-const METRICS = [
-  { id: "requests", label: "Requests" },
-  { id: "tokens", label: "Tokens" },
-  { id: "cost", label: "Cost" },
-] as const;
 
-type Metric = (typeof METRICS)[number]["id"];
-
-type Totals = {
-  requests: number;
-  tokens: number;
-  input: number;
-  errors: number;
-  cacheRead: number;
-  cacheWrite: number;
-  /** USD in micros, priced from catalog prices. */
-  cost: number;
-  /** Request-weighted mean, in milliseconds. */
-  latency: number;
-};
-
-const ZERO: Totals = {
-  requests: 0,
-  tokens: 0,
-  input: 0,
-  errors: 0,
-  cacheRead: 0,
-  cacheWrite: 0,
-  cost: 0,
-  latency: 0,
-};
-
+/**
+ * Events, not aggregates. Spend, totals and per-model consumption belong to /usage;
+ * this page answers "what happened, to which request, and what failed".
+ */
 export default function Activity() {
   const navigate = useNavigate();
   const [rangeId, setRangeId] = useState<RangeId>("7d");
-  const [metric, setMetric] = useState<Metric>("requests");
-  const [modelFilter, setModelFilter] = useState<string | null>(null);
-  const [keyFilter, setKeyFilter] = useState<string | null>(null);
+  const [providerFilter, setProviderFilter] = useState<string>("");
+  const [modelFilter, setModelFilter] = useState<string>("");
+  const [keyFilter, setKeyFilter] = useState<string>("");
   const [teamFilter, setTeamFilter] = useState<string | null>(null);
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -94,26 +52,20 @@ export default function Activity() {
   const [dismissedIncident, setDismissedIncident] = useState<string | null>(() =>
     sessionStorage.getItem(DISMISSED_INCIDENT),
   );
+  const logRef = useRef<HTMLDivElement>(null);
 
   const spec = rangeOf(rangeId);
-  const now = Math.floor(Date.now() / 1000);
-  const from = now - spec.hours * 3600;
-  // Bucket boundaries are aligned server-side, so the window starts at the
-  // first aligned bucket that still contains in-window traffic. Summing from
-  // there equals the chart's columns exactly.
-  const alignedFrom = Math.floor(from / spec.seconds) * spec.seconds;
 
-  // Current + previous window in one fetch: deltas are real, not estimated.
   // Tenancy filter: an admin narrows the whole page to one team; a reader's choices are
   // already their own teams, and the server scopes the unfiltered view anyway.
   const teams = useTeams();
   const teamParam = teamFilter ?? undefined;
-  const series = useUsageSeries(spec.hours * 2, spec.bucket, teamParam);
-  const byModel = useUsageByModel(spec.hours, spec.bucket, teamParam);
-  const summary = useUsageSummary(spec.hours, teamParam);
   const usage = useUsage(200, spec.hours, teamParam);
+  // Per-model window totals: the only server-side source for incident detection and
+  // for the model filter's options. Not rendered as a table — /usage owns aggregates.
+  const summary = useUsageSummary(spec.hours, teamParam);
   // Key names and the provider roster come from admin surface. A reader gets the log
-  // and the charts instead of two requests that would be refused.
+  // and the routing card instead of requests that would be refused.
   const isAdmin = useIsAdmin();
   const keys = useKeys(isAdmin);
   // One row proves the gateway has ever served traffic; the window-scoped
@@ -121,6 +73,7 @@ export default function Activity() {
   const ever = useUsage(1);
   const live = useLiveUsage(200, teamParam);
   const connections = useConnections(isAdmin);
+
   const providerIds = useMemo(() => {
     const seen = isAdmin
       ? (connections.data ?? []).filter((c) => c.is_active).map((c) => c.provider)
@@ -143,32 +96,25 @@ export default function Activity() {
     [providerById],
   );
 
-  const currentBuckets = (series.data ?? []).filter((b) => b.start >= alignedFrom);
-  const cur = totalsOf(currentBuckets);
-  const prev = totalsOf((series.data ?? []).filter((b) => b.start < alignedFrom));
-
-  const rows = useMemo(() => modelRows(summary.data ?? []), [summary.data]);
-  const colors = useMemo(() => seriesColors(rows.map((r) => r.ref)), [rows]);
-  const totalTokens = rows.reduce((n, r) => n + r.tokens, 0);
-
   const events = usage.data ?? [];
-  const failedEvents = events.filter(isFailure);
+  const failedEvents = useMemo(() => events.filter(isFailure), [events]);
   const filtered = useMemo(
     () =>
       events.filter(
         (e) =>
           (!errorsOnly || isFailure(e)) &&
+          (!providerFilter || providerOf(e) === providerFilter) &&
           (!modelFilter || splitModel(e.provider, e.model).ref === modelFilter) &&
           (!keyFilter || e.key_id === keyFilter),
       ),
-    [events, errorsOnly, modelFilter, keyFilter],
+    [events, errorsOnly, providerFilter, providerOf, modelFilter, keyFilter],
   );
-  // A request is opened by clicking a row; nothing is selected until then.
-  const selected = filtered.find((e) => e.id !== null && e.id === selectedId) ?? null;
   const logRows = useMemo(
     () => filtered.map((e) => ({ ...e, model: splitModel(e.provider, e.model).name })),
     [filtered],
   );
+  // A request is opened by clicking a row; nothing is selected until then.
+  const selected = filtered.find((e) => e.id !== null && e.id === selectedId) ?? null;
   const selectedRow = selected
     ? { ...selected, model: splitModel(selected.provider, selected.model).name }
     : null;
@@ -179,27 +125,31 @@ export default function Activity() {
     const nextIndex = selectedIndex + delta;
     const target = logRows[nextIndex];
     if (!target || target.id === null) return;
-    if (nextIndex >= 8 && !showAll) setShowAll(true);
+    if (!showAll && nextIndex >= LOG_PAGE) setShowAll(true);
     setSelectedId(target.id);
   };
 
-  const degradedConnections = useMemo(
-    () =>
-      (connections.data ?? []).filter(
-        (c) => c.backoff_level > 0 || (c.is_active && Boolean(c.last_error?.trim())),
-      ),
-    [connections.data],
-  );
+  /** Filter options come from what this page can actually show, so no dead choices. */
+  const providerOptions = useMemo(() => {
+    const seen = new Set<string>();
+    for (const event of events) {
+      const provider = providerOf(event);
+      if (provider) seen.add(provider);
+    }
+    return [...seen].sort();
+  }, [events, providerOf]);
+  const modelOptions = useMemo(() => {
+    const agg = new Map<string, { ref: string; provider: string; name: string; requests: number }>();
+    for (const row of summary.data ?? []) {
+      const { ref, name } = splitModel(row.provider, row.model);
+      const entry = agg.get(ref);
+      if (entry) entry.requests += row.requests;
+      else agg.set(ref, { ref, provider: row.provider, name, requests: row.requests });
+    }
+    return [...agg.values()].sort((a, b) => b.requests - a.requests);
+  }, [summary.data]);
 
-  const errorRate = cur.requests > 0 ? (cur.errors / cur.requests) * 100 : 0;
-  const prevErrorRate = prev.requests > 0 ? (prev.errors / prev.requests) * 100 : 0;
-  const slowest = rows.reduce<ModelRow | null>(
-    (best, r) => (r.requests > 0 && (!best || r.avg_latency_ms > best.avg_latency_ms) ? r : best),
-    null,
-  );
-  const latencyDelta = deltaLabel(cur.latency, prev.latency);
-
-  const incident = incidentOf(rows);
+  const incident: Incident | null = incidentOf(summary.data ?? []);
   const incidentRef = incident ? splitModel(incident.provider, incident.model).ref : null;
   const incidentFailures = useMemo(
     () =>
@@ -222,19 +172,6 @@ export default function Activity() {
     if (degradedMatch) return degradedMatch.id;
     return matching.length === 1 ? (matching[0]?.id ?? null) : null;
   }, [incident, providerKnown, incidentFailures, connections.data]);
-  // The Logs page filters on the server and pages through every match, unlike the
-  // 200-row Activity log, so an older incident is still fully reachable here.
-  const failingLogHref = incident
-    ? (() => {
-        const query = new URLSearchParams({
-          status: "errors",
-          range: rangeId === "30d" ? "all" : rangeId,
-          model: incidentRef ?? incident.model,
-        });
-        if (incident.provider) query.set("provider", incident.provider);
-        return `/activity/logs?${query.toString()}`;
-      })()
-    : "/activity/logs";
 
   // A resolved incident clears its dismissal, so a later recurrence alerts again.
   useEffect(() => {
@@ -243,133 +180,125 @@ export default function Activity() {
     setDismissedIncident(null);
   }, [summary.isSuccess, incidentRef, dismissedIncident]);
 
-  const chartBuckets = useMemo(
+  const degradedConnections = useMemo(
     () =>
-      buildChart({
-        spec,
-        now,
-        alignedFrom,
-        series: series.data ?? [],
-        byModel: byModel.data ?? [],
-        metric,
-        rankedRefs: rows.map((r) => r.ref),
-      }),
-    [spec, now, alignedFrom, series.data, byModel.data, metric, rows],
+      (connections.data ?? []).filter(
+        (c) => c.backoff_level > 0 || (c.is_active && Boolean(c.last_error?.trim())),
+      ),
+    [connections.data],
   );
-  const chartColor = (id: string) => (id === ALL ? "var(--color-series-1)" : colors.colorOf(id));
-  const legend = useMemo(() => {
-    const hasSplit = (byModel.data ?? []).some((b) => b.start >= alignedFrom);
-    if (!hasSplit) {
-      return cur.requests > 0
-        ? [{ id: ALL, label: "All models", color: "var(--color-series-1)" }]
-        : [];
-    }
-    const entries = colors.ids
-      .filter((id) => rows.some((r) => r.ref === id))
-      .map((id) => ({ id, label: nameOf(id), color: colors.colorOf(id) }));
-    if (colors.other) entries.push({ id: "other", label: "Other", color: "var(--color-series-6)" });
-    return entries;
-  }, [colors, rows, cur.requests, byModel.data, alignedFrom]);
-
-  // Honest "all traffic is recent" test: no older bucket in the window carries a
-  // request, so the hint is only offered when it is certainly true.
-  const hasOlderTraffic = currentBuckets.some((b) => b.start < now - 3600 && b.requests > 0);
-  const onlyLastHour = rangeId !== "1h" && cur.requests > 0 && !hasOlderTraffic;
-  const cacheNote = cur.cacheRead === 0;
-  const secondaryCount = Number(cur.cost > 0) + Number(cur.cacheRead > 0);
 
   const onboard = ever.isSuccess && (ever.data?.length ?? 0) === 0;
   const showPanels = !onboard;
   const baseUrl = `${window.location.origin}/v1`;
 
-  const selectModel = (ref: string) => {
-    setModelFilter((current) => (current === ref ? null : ref));
+  const filtersActive =
+    errorsOnly || providerFilter !== "" || modelFilter !== "" || keyFilter !== "" || teamFilter !== null;
+
+  /** The incident's primary action stays on the page: one click, filtered in place. */
+  const showFailures = () => {
+    setErrorsOnly(true);
+    setProviderFilter("");
+    setModelFilter("");
+    setKeyFilter("");
+    setSelectedId(null);
+    setShowAll(false);
+    requestAnimationFrame(() => logRef.current?.scrollIntoView({ block: "start" }));
+  };
+  const clearFilters = () => {
+    setErrorsOnly(false);
+    setProviderFilter("");
+    setModelFilter("");
+    setKeyFilter("");
     setSelectedId(null);
   };
 
   return (
     <div className="mx-auto max-w-[1160px] max-[820px]:-mx-4">
-      <header className="mb-5 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <Heading level={1} className="text-display font-semibold tracking-[-0.02em] text-fg">Activity</Heading>
-          <p className="mt-1 text-body text-muted">
-            What this gateway is serving, how fast, and whether anything is failing.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <LiveStamp at={series.dataUpdatedAt} waiting={onboard} />
-          <Segmented
-            options={RANGES.map((r) => ({ id: r.id, label: r.id }))}
-            value={rangeId}
-            onChange={setRangeId}
-            ariaLabel="time range"
-          />
-        </div>
-      </header>
+      <PageHeader
+        title="Activity"
+        subtitle="Every request this gateway served, newest first. Spend and totals live in Usage."
+        actions={
+          <>
+            <LiveStamp at={usage.dataUpdatedAt} waiting={onboard} />
+            <Segmented
+              options={RANGES.map((r) => ({ id: r.id, label: r.id }))}
+              value={rangeId}
+              onChange={(id) => {
+                setRangeId(id);
+                setSelectedId(null);
+              }}
+              ariaLabel="time range"
+            />
+            <Link
+              to="/usage"
+              className="text-small text-muted underline-offset-4 hover:text-fg hover:underline"
+            >
+              Open Usage →
+            </Link>
+          </>
+        }
+      />
 
       {incident && showPanels && showIncident ? (
-        <AlertBanner
-          title={
-            providerKnown
-              ? `${incident.provider}/${incident.model} is failing`
-              : `${incident.model} is failing`
-          }
-          onDismiss={() => {
-            if (incidentRef) sessionStorage.setItem(DISMISSED_INCIDENT, incidentRef);
-            setDismissedIncident(incidentRef);
-          }}
-          actions={
-            <>
-              <Button variant="primary" onClick={() => navigate(failingLogHref)}>
-                View failing requests
-              </Button>
-              {providerKnown ? (
-                <Button
-                  variant="quiet"
-                  onClick={() =>
-                    navigate(
-                      incidentConnectionId
-                        ? `/providers?inspect=${encodeURIComponent(incidentConnectionId)}`
-                        : "/providers",
-                    )
-                  }
-                >
-                  Open providers
+        <div className="mb-5">
+          <AlertBanner
+            title={
+              providerKnown
+                ? `${incident.provider}/${incident.model} is failing`
+                : `${incident.model} is failing`
+            }
+            onDismiss={() => {
+              if (incidentRef) sessionStorage.setItem(DISMISSED_INCIDENT, incidentRef);
+              setDismissedIncident(incidentRef);
+            }}
+            actions={
+              <>
+                <Button variant="primary" onClick={showFailures}>
+                  Show failing requests
                 </Button>
-              ) : null}
-            </>
-          }
-        >
-          <p className="tnum">
-            {incident.errors} of its {incident.requests} requests{" "}
-            {dominant !== null
-              ? `returned ${dominant} ${statusText(dominant)}`
-              : "failed"}{" "}
-            ({pct(incident.rate * 100)}).
-          </p>
-          <p className="mt-1 text-faint">
-            {providerKnown
-              ? "Check the provider connection."
-              : "No provider was recorded for these requests, so they failed before dispatch. Check the model id clients send and that a connection serves it."}
-          </p>
-        </AlertBanner>
+                {providerKnown ? (
+                  <Button
+                    variant="quiet"
+                    onClick={() =>
+                      navigate(
+                        incidentConnectionId
+                          ? `/providers?inspect=${encodeURIComponent(incidentConnectionId)}`
+                          : "/providers",
+                      )
+                    }
+                  >
+                    Open providers
+                  </Button>
+                ) : null}
+              </>
+            }
+          >
+            <p className="tnum">
+              {incident.errors} of its {incident.requests} requests{" "}
+              {dominant !== null ? `returned ${dominant} ${statusText(dominant)}` : "failed"} (
+              {pct(incident.rate * 100)}).
+            </p>
+            <p className="mt-1 text-faint">
+              {providerKnown
+                ? "Check the provider connection."
+                : "No provider was recorded for these requests, so they failed before dispatch. Check the model id clients send and that a connection serves it."}
+            </p>
+          </AlertBanner>
+        </div>
       ) : null}
 
       {isAdmin && showPanels && degradedConnections.length > 0 ? (
-        <section
-          aria-label="Upstream health"
-          className="mb-5 rounded-[var(--radius-card)] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-4 py-3"
-        >
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <div className="flex items-center gap-2 text-small font-semibold text-[var(--color-warn-ink)]">
-              <Dot tone="warn" />
-              <span>Upstream health</span>
-              <span className="font-normal text-muted tnum">
+        <div className="mb-5">
+          <AlertBanner
+            tone="warn"
+            title="Upstream health"
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-1 text-muted tnum">
                 {degradedConnections.length}{" "}
                 {degradedConnections.length === 1 ? "connection degraded" : "connections degraded"}
               </span>
-            </div>
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               {degradedConnections.map((c) => {
                 const label = c.name ? `${c.name} (${c.provider})` : c.provider;
                 return (
@@ -377,7 +306,7 @@ export default function Activity() {
                     key={c.id}
                     to={`/providers?inspect=${encodeURIComponent(c.id)}`}
                     title={c.last_error ?? undefined}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-warn-line)] bg-surface px-2.5 py-1 text-caption font-medium text-fg transition-colors hover:border-[var(--color-warn)] hover:bg-surface-2"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-warn-line)] bg-surface px-2.5 py-1 text-caption font-medium text-fg transition-colors hover:border-[var(--color-warn)]"
                   >
                     <span className="max-w-[180px] truncate">{label}</span>
                     {c.backoff_level > 0 ? (
@@ -394,456 +323,212 @@ export default function Activity() {
                 );
               })}
             </div>
-          </div>
-        </section>
+          </AlertBanner>
+        </div>
       ) : null}
 
-      <div className="space-y-5">
-        <Card>
-          {series.isError ? (
-            <div className="p-5">
-              <ErrorNote error={series.error} onRetry={() => void series.refetch()} />
-            </div>
-          ) : (
-            <>
-              {series.isLoading && !series.data ? (
-                <>
-                  <div className="grid gap-px overflow-hidden rounded-t-[var(--radius-card)] bg-[var(--color-line)] sm:grid-cols-2 xl:grid-cols-4">
-                    {Array.from({ length: 4 }, (_, i) => (
-                      <div key={i} className="bg-surface">
-                        <ReadoutSkeleton />
-                      </div>
-                    ))}
-                  </div>
-                  <div className="grid gap-px border-t border-[var(--color-line)] bg-[var(--color-line)] sm:grid-cols-2">
-                    {Array.from({ length: 2 }, (_, i) => (
-                      <div key={i} className="bg-surface">
-                        <ReadoutSkeleton />
-                      </div>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="grid gap-px overflow-hidden rounded-t-[var(--radius-card)] bg-[var(--color-line)] sm:grid-cols-2 xl:grid-cols-4">
-                    <div className="bg-surface">
-                      <Readout
-                        label="Requests"
-                        value={compact(cur.requests)}
-                        note={
-                          cur.errors > 0
-                            ? `${compact(cur.requests - cur.errors)} succeeded · ${compact(cur.errors)} failed`
-                            : "All succeeded"
-                        }
-                        delta={deltaLabel(cur.requests, prev.requests)}
-                      />
-                    </div>
-                    <div className="bg-surface">
-                      <Readout
-                        label="Tokens"
-                        value={compact(cur.tokens)}
-                        note={
-                          cur.requests > 0
-                            ? `~${compact(Math.round(cur.tokens / cur.requests))} per request`
-                            : "No tokens yet"
-                        }
-                        delta={deltaLabel(cur.tokens, prev.tokens)}
-                      />
-                    </div>
-                    <div className="bg-surface">
-                      <Readout
-                        label="Avg latency"
-                        value={cur.requests > 0 ? `${(cur.latency / 1000).toFixed(2)}s` : "—"}
-                        note={
-                          slowest ? (
-                            <>
-                              <span className="tnum">
-                                Slowest: {slowest.model} {ms(slowest.avg_latency_ms)}
-                              </span>
-                              {latencyDelta ? (
-                                <span className={cx("tnum", latencyDelta.up ? "text-warn" : "text-muted")}>
-                                  {latencyDelta.text}
-                                </span>
-                              ) : null}
-                            </>
-                          ) : (
-                            "No timed requests"
-                          )
-                        }
-                      />
-                    </div>
-                    <div className="bg-surface">
-                      <Readout
-                        label="Error rate"
-                        value={cur.requests > 0 ? pct(errorRate) : "—"}
-                        tone={cur.errors > 0 ? "neg" : "fg"}
-                        dot={cur.errors > 0 ? "neg" : "pos"}
-                        note={
-                          cur.errors > 0
-                            ? `${compact(cur.errors)} of ${compact(cur.requests)} failed`
-                            : "No failures"
-                        }
-                        delta={deltaLabel(errorRate, prevErrorRate)}
-                      />
-                    </div>
-                  </div>
-                  {secondaryCount > 0 ? (
-                    <div
-                      className={cx(
-                        "grid gap-px border-t border-[var(--color-line)] bg-[var(--color-line)]",
-                        secondaryCount === 1 ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2",
-                      )}
-                    >
-                      {cur.cost > 0 ? (
-                        <div className="bg-surface">
-                          <Readout
-                            label="Spend"
-                            value={usd(cur.cost)}
-                            note={
-                              cur.requests > 0
-                                ? `~${usd(cur.cost / cur.requests)} per request`
-                                : "Priced requests only"
-                            }
-                            delta={deltaLabel(cur.cost, prev.cost)}
-                          />
-                        </div>
-                      ) : null}
-                      {cur.cacheRead > 0 ? (
-                        <div className="bg-surface">
-                          <Readout
-                            label="Cache hit"
-                            value={pct(hitRate(cur))}
-                            note={`${compact(cur.cacheRead)} read · ${compact(cur.cacheWrite)} write`}
-                            delta={deltaLabel(hitRate(cur), hitRate(prev))}
-                          />
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </>
-              )}
+      {onboard ? <Onboarding baseUrl={baseUrl} canAdmin={isAdmin} /> : null}
 
-              {showPanels ? (
-                <div className="border-t border-line">
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-6 pb-2 pt-4">
-                    <Heading level={2} className="text-lead font-semibold">Traffic</Heading>
-                    <Segmented
-                      options={METRICS}
-                      value={metric}
-                      onChange={setMetric}
-                      ariaLabel="chart metric"
-                    />
-                    <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1">
-                      {legend.map((entry) => (
-                        <span
-                          key={entry.id}
-                          title={entry.id}
-                          className="inline-flex items-center gap-1.5 text-caption text-muted"
-                        >
-                          <span
-                            aria-hidden
-                            className="h-2 w-2 rounded-[2px]"
-                            style={{ background: entry.color }}
-                          />
-                          {entry.label}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  {byModel.isError ? (
-                    <div className="px-6 pb-3">
-                      <ErrorNote error={byModel.error} onRetry={() => void byModel.refetch()} />
-                    </div>
-                  ) : null}
-                  {series.isLoading && !series.data ? (
-                    <div className="px-6 py-4">
-                      <Skeleton height={200} width="100%" />
-                    </div>
-                  ) : (
-                    <TrafficChart
-                      buckets={chartBuckets}
-                      colorOf={chartColor}
-                      unit={metric}
-                      labelEvery={spec.labelEvery}
-                    />
-                  )}
-                  {cacheNote || onlyLastHour ? (
-                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-6 py-3 text-body text-muted">
-                      <span>
-                        {cacheNote
-                          ? "Cache hits: none recorded in this window. They appear once a request reuses an earlier prompt prefix."
-                          : ""}
-                      </span>
-                      {onlyLastHour ? (
-                        <span className="flex flex-wrap items-center gap-2">
-                          <span>
-                            All {compact(cur.requests)} requests arrived in the last hour.
-                          </span>
-                          <Button variant="quiet" onClick={() => setRangeId("1h")}>
-                            Zoom to 1h
-                          </Button>
-                        </span>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-            </>
-          )}
-        </Card>
+      {showPanels ? (
+        <div className="space-y-5">
+          <LiveRoutingCard
+            events={live.data ?? []}
+            providers={providerIds}
+            loading={live.isLoading}
+          />
 
-        {onboard ? <Onboarding baseUrl={baseUrl} canAdmin={isAdmin} /> : null}
-
-        {showPanels ? (
-          <>
-            <LiveRoutingCard
-              events={live.data ?? []}
-              providers={providerIds}
-              loading={live.isLoading}
-            />
-
-            <Card>
-              <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-6 py-4">
-                <div className="flex flex-wrap items-baseline gap-2">
-                  <Heading level={2} className="text-lead font-semibold">Models</Heading>
-                  <span className="text-small text-faint tnum">
-                    {rows.length} in use · ranked by tokens
-                  </span>
-                </div>
-                <span className="text-small text-faint">
-                  Select a model to filter the requests below
+          <Card>
+            <div ref={logRef} className="scroll-mt-4" />
+            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-5 pb-1 pt-4">
+              <div className="flex flex-wrap items-baseline gap-2">
+                <Heading level={2}>Requests</Heading>
+                <span className="text-small text-faint tnum">
+                  latest {Math.min(200, events.length)} in this range
                 </span>
               </div>
-              {summary.isError ? (
-                <div className="px-6 pb-5">
-                  <ErrorNote error={summary.error} onRetry={() => void summary.refetch()} />
-                </div>
-              ) : summary.isLoading && !summary.data ? (
-                <RowsSkeleton rows={3} />
-              ) : (
-                <ModelTable
-                  rows={rows}
-                  totalTokens={totalTokens}
-                  colorOf={colors.colorOf}
-                  selected={modelFilter}
-                  onSelect={selectModel}
-                />
-              )}
-            </Card>
+              <span className="text-small text-faint">
+                Select a request to inspect it
+              </span>
+            </div>
 
-            <Card>
-              <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
-                <div className="flex flex-wrap items-baseline gap-2">
-                  <Heading level={2} className="text-lead font-semibold">Requests</Heading>
-                  <span className="text-small text-faint">Most recent first</span>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  {(teams.data ?? []).length > 0 ? (
-                    <div className="w-[148px]">
-                      <Select
-                        ariaLabel="filter by team"
-                        value={teamFilter ?? ""}
-                        onChange={(v) => {
-                          setTeamFilter(v || null);
-                          setSelectedId(null);
-                        }}
-                      >
-                        <option value="">{isAdmin ? "All teams" : "My teams"}</option>
-                        {(teams.data ?? []).map((team) => (
-                          <option key={team.id} value={team.id}>
-                            {team.name}
-                          </option>
-                        ))}
-                      </Select>
-                    </div>
-                  ) : null}
-                  {isAdmin ? (
-                    <div className="w-[148px]">
-                      <Select
-                        ariaLabel="filter requests by key"
-                        value={keyFilter ?? ""}
-                        onChange={(v) => {
-                          setKeyFilter(v || null);
-                          setSelectedId(null);
-                        }}
-                      >
-                        <option value="">All keys</option>
-                        {(keys.data ?? []).map((k) => (
-                          <option key={k.id} value={k.id}>
-                            {k.name ?? k.id.slice(0, 8)}
-                          </option>
-                        ))}
-                      </Select>
-                    </div>
-                  ) : null}
-                  <FilterChip
-                    on={!errorsOnly && !modelFilter && !keyFilter}
-                    onClick={() => {
-                      setErrorsOnly(false);
-                      setModelFilter(null);
-                      setKeyFilter(null);
-                    }}
-                  >
-                    All <span className="tnum">{events.length}</span>
-                  </FilterChip>
-                  <FilterChip
-                    on={errorsOnly}
-                    bad={failedEvents.length > 0}
-                    onClick={() => setErrorsOnly((v) => !v)}
-                  >
-                    Errors <span className="tnum">{failedEvents.length}</span>
-                  </FilterChip>
-                  {modelFilter ? (
-                    <FilterChip
-                      on
-                      onClick={() => setModelFilter(null)}
-                      ariaLabel={`clear model filter ${modelFilter}`}
-                    >
-                      <span className="max-w-[220px] truncate">{nameOf(modelFilter)}</span>
-                      <span aria-hidden className="-mr-0.5 text-lead leading-none">
-                        ×
-                      </span>
-                    </FilterChip>
-                  ) : null}
-                </div>
+            <div className="flex flex-col gap-2 px-5 py-3 min-[1100px]:flex-row min-[1100px]:items-center">
+              <div className="flex shrink-0 items-center gap-2">
+                <FilterChip
+                  on={errorsOnly}
+                  bad={failedEvents.length > 0}
+                  onClick={() => {
+                    setErrorsOnly((v) => !v);
+                    setSelectedId(null);
+                  }}
+                >
+                  Failures <span className="tnum">{failedEvents.length}</span>
+                </FilterChip>
               </div>
+              <Divider vertical className="hidden min-[1100px]:block" />
+              <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+                {providerOptions.length > 1 ? (
+                  <div className="w-[168px] max-[520px]:w-full">
+                    <Select
+                      ariaLabel="filter by provider"
+                      value={providerFilter}
+                      onChange={(v) => {
+                        setProviderFilter(v);
+                        setSelectedId(null);
+                      }}
+                      className="w-full"
+                    >
+                      <option value="">All providers</option>
+                      {providerOptions.map((provider) => (
+                        <option key={provider} value={provider}>
+                          {provider}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                ) : null}
+                {modelOptions.length > 1 ? (
+                  <div className="w-[196px] max-[520px]:w-full">
+                    <Select
+                      ariaLabel="filter by model"
+                      value={modelFilter}
+                      onChange={(v) => {
+                        setModelFilter(v);
+                        setSelectedId(null);
+                      }}
+                      className="w-full"
+                    >
+                      <option value="">All models</option>
+                      {modelOptions.map((m) => (
+                        <option key={m.ref} value={m.ref}>
+                          {m.provider ? `${m.provider}/${m.name}` : m.name}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                ) : null}
+                {isAdmin ? (
+                  <div className="w-[168px] max-[520px]:w-full">
+                    <Select
+                      ariaLabel="filter by key"
+                      value={keyFilter}
+                      onChange={(v) => {
+                        setKeyFilter(v);
+                        setSelectedId(null);
+                      }}
+                      className="w-full"
+                    >
+                      <option value="">All keys</option>
+                      {(keys.data ?? []).map((k) => (
+                        <option key={k.id} value={k.id}>
+                          {k.name ?? k.id.slice(0, 8)}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                ) : null}
+                {(teams.data ?? []).length > 0 ? (
+                  <div className="w-[168px] max-[520px]:w-full">
+                    <Select
+                      ariaLabel="filter by team"
+                      value={teamFilter ?? ""}
+                      onChange={(v) => {
+                        setTeamFilter(v || null);
+                        setSelectedId(null);
+                      }}
+                      className="w-full"
+                    >
+                      <option value="">{isAdmin ? "All teams" : "My teams"}</option>
+                      {(teams.data ?? []).map((team) => (
+                        <option key={team.id} value={team.id}>
+                          {team.name}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                ) : null}
+              </div>
+              {filtersActive ? (
+                <Button variant="quiet" onClick={clearFilters}>
+                  Clear
+                </Button>
+              ) : null}
+            </div>
 
-              <div className="border-t border-line">
-                {usage.isError ? (
-                  <div className="p-5">
-                    <ErrorNote error={usage.error} onRetry={() => void usage.refetch()} />
-                  </div>
-                ) : usage.isLoading && !usage.data ? (
-                  <RowsSkeleton rows={3} />
-                ) : events.length === 0 ? (
-                  <div className="px-6 py-10 text-center text-body text-faint">
-                    No requests in this window. Try 30d.
-                    {rangeId !== "30d" ? (
-                      <div className="mt-3">
-                        <Button variant="quiet" onClick={() => setRangeId("30d")}>
-                          Widen to 30d
-                        </Button>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : filtered.length === 0 ? (
-                  <div className="px-6 py-10 text-center text-body text-faint">
-                    No requests match these filters.
+            <div className="border-t border-line">
+              {usage.isError ? (
+                <div className="p-5">
+                  <ErrorNote error={usage.error} onRetry={() => void usage.refetch()} />
+                </div>
+              ) : usage.isLoading && !usage.data ? (
+                <RowsSkeleton rows={6} />
+              ) : events.length === 0 ? (
+                <EmptyState>
+                  No requests in this window.
+                  {rangeId !== "30d" ? (
                     <div className="mt-3">
-                      <Button
-                        variant="quiet"
-                        onClick={() => {
-                          setErrorsOnly(false);
-                          setModelFilter(null);
-                          setKeyFilter(null);
-                        }}
-                      >
-                        Clear filters
+                      <Button variant="quiet" onClick={() => setRangeId("30d")}>
+                        Widen to 30d
                       </Button>
                     </div>
+                  ) : null}
+                </EmptyState>
+              ) : filtered.length === 0 ? (
+                <EmptyState>
+                  No loaded requests match these filters.
+                  {errorsOnly && failedEvents.length === 0
+                    ? " The failures shown above are older than the latest loaded requests."
+                    : ""}
+                  <div className="mt-3">
+                    <Button variant="quiet" onClick={clearFilters}>
+                      Clear filters
+                    </Button>
                   </div>
-                ) : (
-                  <div className="pb-3">
-                    <RequestLog
-                      rows={logRows}
-                      total={logRows.length}
-                      selectedId={selected?.id ?? null}
-                      onSelect={(row) => {
-                        if (row.id !== null) setSelectedId(row.id);
-                      }}
-                      showAll={showAll}
-                      onToggleAll={() => setShowAll((v) => !v)}
-                      empty=""
-                      providerOf={providerOf}
-                      keyNames={keyNames}
-                    />
-                  </div>
-                )}
-              </div>
-            </Card>
-            {selectedRow ? (
-              <RequestDetailDialog
-                row={selectedRow}
-                baseUrl={baseUrl}
-                keyNames={keyNames}
-                providerName={providerOf(selectedRow)}
-                onClose={() => setSelectedId(null)}
-                onPrev={selectedIndex > 0 ? () => stepSelected(-1) : null}
-                onNext={
-                  selectedIndex >= 0 && selectedIndex < logRows.length - 1
-                    ? () => stepSelected(1)
-                    : null
-                }
-                positionLabel={
-                  selectedIndex >= 0 ? `${selectedIndex + 1} / ${logRows.length}` : undefined
-                }
-              />
-            ) : null}
-          </>
-        ) : null}
-      </div>
+                </EmptyState>
+              ) : (
+                <div className="pb-1">
+                  <RequestLog
+                    rows={logRows}
+                    total={logRows.length}
+                    selectedId={selected?.id ?? null}
+                    onSelect={(row) => {
+                      if (row.id !== null) setSelectedId(row.id);
+                    }}
+                    showAll={showAll}
+                    onToggleAll={() => setShowAll((v) => !v)}
+                    empty=""
+                    providerOf={providerOf}
+                    keyNames={keyNames}
+                  />
+                </div>
+              )}
+            </div>
+          </Card>
+
+          {selectedRow ? (
+            <RequestDetailDialog
+              row={selectedRow}
+              baseUrl={baseUrl}
+              keyNames={keyNames}
+              providerName={providerOf(selectedRow)}
+              onClose={() => setSelectedId(null)}
+              onPrev={selectedIndex > 0 ? () => stepSelected(-1) : null}
+              onNext={
+                selectedIndex >= 0 && selectedIndex < logRows.length - 1
+                  ? () => stepSelected(1)
+                  : null
+              }
+              positionLabel={
+                selectedIndex >= 0 ? `${selectedIndex + 1} / ${logRows.length}` : undefined
+              }
+            />
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
 
 /* ---------------------------------------------------------------- helpers */
-
-function totalsOf(buckets: UsageBucket[]): Totals {
-  const t: Totals = { ...ZERO };
-  for (const b of buckets) {
-    t.requests += b.requests;
-    t.input += b.input_tokens;
-    t.tokens += b.input_tokens + b.output_tokens;
-    t.errors += b.errors;
-    t.cacheRead += b.cache_read_tokens;
-    t.cacheWrite += b.cache_write_tokens;
-    t.cost += b.cost_micros;
-    t.latency += b.avg_latency_ms * b.requests;
-  }
-  if (t.requests > 0) t.latency /= t.requests;
-  return t;
-}
-
-/**
- * Share of prompt tokens served from cache. Reads are priced at a discount and
- * writes at a premium, so a low ratio is the difference between a cheap session
- * and a full-price one.
- */
-function hitRate(t: Totals): number {
-  const prompt = t.input + t.cacheRead + t.cacheWrite;
-  return prompt > 0 ? (t.cacheRead / prompt) * 100 : 0;
-}
-
-/** Summary rows arrive sorted alphabetically; the page ranks them by traffic. */
-function modelRows(rows: UsageSummaryRow[]): ModelRow[] {
-  // Clients may send `gpt-5.6-luna` or `codex/gpt-5.6-luna`; both normalize to
-  // one ref, so merge them instead of rendering duplicate rows.
-  const merged = new Map<string, ModelRow>();
-  for (const r of rows) {
-    const { ref, name } = splitModel(r.provider, r.model);
-    const prior = merged.get(ref);
-    if (!prior) {
-      merged.set(ref, { ...r, model: name, ref, tokens: r.input_tokens + r.output_tokens });
-      continue;
-    }
-    const requests = prior.requests + r.requests;
-    const latency =
-      requests > 0 ? (prior.avg_latency_ms * prior.requests + r.avg_latency_ms * r.requests) / requests : 0;
-    merged.set(ref, {
-      ...prior,
-      requests,
-      errors: prior.errors + r.errors,
-      input_tokens: prior.input_tokens + r.input_tokens,
-      output_tokens: prior.output_tokens + r.output_tokens,
-      cache_read_tokens: prior.cache_read_tokens + r.cache_read_tokens,
-      cache_write_tokens: prior.cache_write_tokens + r.cache_write_tokens,
-      cost_micros: prior.cost_micros + r.cost_micros,
-      avg_latency_ms: Math.round(latency),
-      tokens: prior.tokens + r.input_tokens + r.output_tokens,
-    });
-  }
-  return [...merged.values()].sort((a, b) => b.tokens - a.tokens || a.ref.localeCompare(b.ref));
-}
 
 /**
  * Usage rows may store the client's model string, which already carries the
@@ -851,25 +536,24 @@ function modelRows(rows: UsageSummaryRow[]): ModelRow[] {
  * ever doubling the prefix; the name is what the tables show under `provider/`.
  */
 function splitModel(provider: string, model: string): { ref: string; name: string } {
-  const prefix = `${provider}/`;
-  return model.startsWith(prefix)
-    ? { ref: model, name: model.slice(prefix.length) }
-    : { ref: prefix + model, name: model };
-}
-
-/** Everything after the provider prefix: one label for chips and legends. */
-function nameOf(ref: string): string {
-  const slash = ref.indexOf("/");
-  return slash === -1 ? ref : ref.slice(slash + 1);
+  if (provider && model.startsWith(`${provider}/`)) {
+    return { ref: model, name: model.slice(provider.length + 1) };
+  }
+  return { ref: provider ? `${provider}/${model}` : model, name: model };
 }
 
 function isFailure(row: UsageEvent): boolean {
   return row.status >= 400 || row.error !== null;
 }
 
+/** The status most of a model's failures share; null when the sample has none. */
 function dominantStatus(rows: UsageEvent[]): number | null {
+  if (rows.length === 0) return null;
   const counts = new Map<number, number>();
-  for (const r of rows) counts.set(r.status, (counts.get(r.status) ?? 0) + 1);
+  for (const row of rows) {
+    const status = row.status || 0;
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
   let best: number | null = null;
   let bestCount = 0;
   for (const [status, count] of counts) {
@@ -878,101 +562,12 @@ function dominantStatus(rows: UsageEvent[]): number | null {
       bestCount = count;
     }
   }
-  return best;
-}
-
-/** The one number the chart plots for a bucket, already in the metric's own unit. */
-type MetricRow = {
-  requests: number;
-  input_tokens: number;
-  output_tokens: number;
-  cost_micros: number;
-};
-
-function metricValue(row: MetricRow, metric: Metric): number {
-  if (metric === "requests") return row.requests;
-  if (metric === "tokens") return row.input_tokens + row.output_tokens;
-  return row.cost_micros;
-}
-
-/**
- * One chart cell per aligned bucket in the window, zero cells included. Parts
- * come from the server-side per-model split; when that query has no data the
- * chart falls back to one total-coloured segment per bucket (never a guess).
- * Cost falls back the same way while the split carries no prices.
- */
-function buildChart({
-  spec,
-  now,
-  alignedFrom,
-  series,
-  byModel,
-  metric,
-  rankedRefs,
-}: {
-  spec: RangeSpec;
-  now: number;
-  alignedFrom: number;
-  series: UsageBucket[];
-  byModel: UsageModelBucket[];
-  metric: Metric;
-  rankedRefs: string[];
-}): TrafficBucket[] {
-  const starts = new Set<number>(windowStarts(spec, now));
-  const totals = new Map<number, UsageBucket>();
-  for (const b of series) {
-    if (b.start < alignedFrom) continue;
-    totals.set(b.start, b);
-    starts.add(b.start);
-  }
-
-  const parts = new Map<number, Map<string, number>>();
-  const partErrors = new Map<number, number>();
-  let hasModelRows = false;
-  let hasModelCost = false;
-  for (const b of byModel) {
-    if (b.start < alignedFrom) continue;
-    hasModelRows = true;
-    if (b.cost_micros > 0) hasModelCost = true;
-    starts.add(b.start);
-    const ref = splitModel(b.provider, b.model).ref;
-    let cell = parts.get(b.start);
-    if (!cell) {
-      cell = new Map<string, number>();
-      parts.set(b.start, cell);
-    }
-    cell.set(ref, (cell.get(ref) ?? 0) + metricValue(b, metric));
-    partErrors.set(b.start, (partErrors.get(b.start) ?? 0) + b.errors);
-  }
-
-  const splitUsable = metric === "cost" ? hasModelCost : hasModelRows;
-
-  return [...starts].sort((a, b) => a - b).map((start) => {
-    const total = totals.get(start);
-    const cell = parts.get(start);
-    let segments: TrafficPart[] = [];
-    if (splitUsable && cell) {
-      segments = rankedRefs
-        .filter((ref) => (cell.get(ref) ?? 0) > 0)
-        .map((ref) => ({ id: ref, value: cell.get(ref) ?? 0 }));
-    }
-    if (segments.length === 0 && !splitUsable && total) {
-      const value = metricValue(total, metric);
-      if (value > 0) segments = [{ id: ALL, value }];
-    }
-    return {
-      label: bucketLabel(start, spec.seconds, now),
-      full: bucketRangeLabel(start, spec.seconds),
-      parts: segments,
-      total: segments.reduce((n, p) => n + p.value, 0),
-      errors: total?.errors ?? partErrors.get(start) ?? 0,
-    };
-  });
+  return best && best >= 400 ? best : null;
 }
 
 /**
  * The clock lives in its own component so a one-second tick never re-renders
- * the page, its charts or the selected row.
+ * the page or the selected row.
  */
 function LiveStamp({ at, waiting }: { at: number; waiting: boolean }) {
   const [, setTick] = useState(0);
@@ -1019,20 +614,6 @@ function Skeleton({
       className={cx("rounded bg-[var(--color-surface-2)]", className)}
       style={{ height, width }}
     />
-  );
-}
-
-function ReadoutSkeleton() {
-  return (
-    <div className="px-6 py-5">
-      <Skeleton height={11} width={64} />
-      <div className="mt-3">
-        <Skeleton height={30} width={104} />
-      </div>
-      <div className="mt-3">
-        <Skeleton height={11} width={148} />
-      </div>
-    </div>
   );
 }
 

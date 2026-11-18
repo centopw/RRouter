@@ -14,10 +14,6 @@ import { qk } from "../../lib/queries";
 
 export type ProviderNotice = { tone: "pos" | "neg"; text: string };
 
-export type AddStep = "kind" | "provider" | "opencode" | "key";
-
-export type ConnectionDrawerTab = "overview" | "routing" | "quotas";
-
 export type ConnectionTestResult = {
   id: string;
   ok: boolean;
@@ -28,8 +24,8 @@ export type ConnectionTestResult = {
 
 /**
  * Grouping is a read projection over the connection list, never a routing entity: the
- * accounts inside a group stay ordinary rows, and only a provider that owns several of
- * them gets a summary row above them.
+ * accounts inside a group stay ordinary rows under one provider header, and every provider
+ * keeps its own header so two connections are never merged into one row.
  */
 export type ProviderGroup = {
   /** `provider` for a built-in provider, `custom:<name|id>` for one endpoint of its own. */
@@ -50,10 +46,6 @@ export type ProviderGroup = {
   subscription: { percent: number; resets_at: number | null; reporting: number } | null;
   state: "healthy" | "degraded" | "down";
 };
-
-export type GroupRow =
-  | { kind: "account"; connection: Connection; grouped: boolean }
-  | { kind: "provider"; group: ProviderGroup };
 
 export const PLACEHOLDER_LABELS = /^(resource|your-resource|placeholder)$/i;
 
@@ -333,11 +325,44 @@ export function providerLabel(provider: string): string {
             : provider;
 }
 
-/** Green under 70%, amber to 89%, red at 90%+. Text carries the number too. */
-export function usageTone(percent: number): { fill: string; text: string } {
-  if (percent >= 90) return { fill: "bg-[var(--color-neg-fill)]", text: "text-[var(--color-neg)]" };
-  if (percent >= 70) return { fill: "bg-[var(--color-warn)]", text: "text-[var(--color-warn)]" };
-  return { fill: "bg-[var(--color-pos)]", text: "text-[var(--color-pos)]" };
+/**
+ * Share of the tightest limit this account has used this window, or `null` when every
+ * counter is unlimited. A bar is a magnitude, so the callers keep the fill neutral until
+ * the number itself is a warning.
+ */
+export function quotaUsagePercent(row?: AccountQuotaRow): number | null {
+  if (!row) return null;
+  const ratios = [
+    row.max_requests > 0 ? row.requests / row.max_requests : null,
+    row.max_tokens > 0 ? row.tokens / row.max_tokens : null,
+    row.max_cost_micros > 0 ? row.cost_micros / row.max_cost_micros : null,
+  ].filter((value): value is number => value !== null);
+  if (ratios.length === 0) return null;
+  return Math.min(100, Math.round(Math.max(...ratios) * 100));
+}
+
+/** Worst plan window the provider reported for this account, or `null` when silent. */
+export function subscriptionUsagePercent(row?: AccountSubscription): number | null {
+  if (!row || row.windows.length === 0) return null;
+  return Math.round(Math.max(...row.windows.map((window) => window.used_percent)));
+}
+
+/** Fill for a magnitude bar: neutral until 70%, then the state colour only. */
+export function barFill(percent: number): string {
+  return percent >= 90
+    ? "bg-[var(--color-neg-fill)]"
+    : percent >= 70
+      ? "bg-[var(--color-warn-fill)]"
+      : "bg-muted";
+}
+
+/** Text for the same bar: the number is a signal at 70%+, plain otherwise. */
+export function barText(percent: number): string {
+  return percent >= 90
+    ? "text-[var(--color-neg)]"
+    : percent >= 70
+      ? "text-[var(--color-warn)]"
+      : "text-muted";
 }
 
 /** "1h 35m" until the window rolls over; empty when the provider gave no timestamp. */
@@ -493,32 +518,6 @@ export function buildProviderGroups(
             : "healthy",
     };
   });
-}
-
-/** Slice accounts into paginated `GroupRow` entries with S0 multi-account headers. */
-export function buildGroupRows(
-  accounts: Connection[],
-  groups: ProviderGroup[],
-  currentPage: number,
-  pageSize: number,
-): GroupRow[] {
-  const byKey = new Map(groups.map((group) => [group.key, group]));
-  const start = (currentPage - 1) * pageSize;
-  const introduced = new Set<string>();
-  const out: GroupRow[] = [];
-  for (const account of accounts.slice(start, start + pageSize)) {
-    const key = groupKeyOf(account);
-    const group = byKey.get(key);
-    if (!group) continue;
-    // A single-account provider needs no header: the account row already names it.
-    const grouped = group.connections.length > 1;
-    if (grouped && !introduced.has(key)) {
-      introduced.add(key);
-      out.push({ kind: "provider", group });
-    }
-    out.push({ kind: "account", connection: account, grouped });
-  }
-  return out;
 }
 
 /** Synthesize an unconfigured quota row when the server list omits a connection. */

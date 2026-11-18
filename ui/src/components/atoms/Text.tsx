@@ -30,7 +30,7 @@ export function Text({
         TYPE[variant],
         TONE[tone],
         mono && "font-mono",
-        numeric && "tnum",
+        numeric && "num",
         truncate && "truncate",
         className,
       )}

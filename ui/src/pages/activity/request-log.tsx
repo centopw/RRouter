@@ -15,6 +15,8 @@ export {
 /** Columns shared by the header and every row, so they cannot drift apart. */
 const GRID =
   "grid grid-cols-[86px_minmax(0,1fr)_108px_108px_112px_76px_54px_82px] items-center gap-2";
+/** Rows before "Show all": enough to scan a burst of failures without a wall. */
+export const LOG_PAGE = 20;
 
 export function RequestLog({
   rows,
@@ -40,7 +42,7 @@ export function RequestLog({
   /** Key id -> key name; ids missing from the roster print as a dash. */
   keyNames: Map<string, string>;
 }) {
-  const visible = showAll ? rows : rows.slice(0, 8);
+  const visible = showAll ? rows : rows.slice(0, LOG_PAGE);
 
   if (rows.length === 0) {
     return <div className="px-6 py-10 text-center text-body text-faint">{empty}</div>;
@@ -153,7 +155,7 @@ export function RequestLog({
         <span className="tnum">
           Showing {visible.length} of {total}
         </span>
-        {total > 8 ? (
+        {total > LOG_PAGE ? (
           <Button variant="quiet" onClick={onToggleAll}>
             {showAll ? "Show fewer" : `Show all ${total}`}
           </Button>

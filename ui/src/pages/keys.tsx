@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Key as KeyIcon, MagnifyingGlass, PencilSimple, Trash } from "@phosphor-icons/react";
+import { Key as KeyIcon, MagnifyingGlass, Trash } from "@phosphor-icons/react";
 import {
   Badge,
   Button,
@@ -19,7 +19,7 @@ import { usd } from "../lib/format";
 import { qk, useKeys, useSystem, useTeams } from "../lib/queries";
 import { api, type KeyResult } from "../lib/api";
 import { KeySettingsDrawer, PlaygroundKeyModal } from "./keys/key-settings-drawer";
-import { KeyCell, LimitsCell, SpendCell, modelScopeLabel, statusOf } from "./keys/spend-cell";
+import { KeyCell, LastUsedCell, LimitsCell, SpendCell, StatusCell, TeamCell, modelScopeLabel, statusOf } from "./keys/spend-cell";
 
 export default function Keys() {
   const keys = useKeys();
@@ -92,12 +92,6 @@ export default function Keys() {
         </IconButton>
       ) : null}
       <IconButton
-        label={`Edit key settings for ${r.name ?? r.id}`}
-        onClick={() => setEditing(r)}
-      >
-        <PencilSimple size={15} aria-hidden />
-      </IconButton>
-      <IconButton
         label={`Delete key ${r.name ?? r.id}`}
         onClick={() => setRevoking(r)}
         className="hover:bg-[var(--color-neg-tint)] hover:text-[var(--color-neg-ink)]"
@@ -111,9 +105,30 @@ export default function Keys() {
     {
       key: "key",
       title: "Key",
-      width: "36%",
+      width: "34%",
       className: "min-w-0 py-3",
-      render: (r) => <KeyCell row={r} team={teamName(r.team_id)} />,
+      render: (r) => <KeyCell row={r} team={teamName(r.team_id)} onOpen={() => setEditing(r)} />,
+    },
+    {
+      key: "team",
+      title: "Team",
+      width: "12%",
+      className: "min-w-0 py-3",
+      render: (r) => <TeamCell team={teamName(r.team_id)} />,
+    },
+    {
+      key: "status",
+      title: "Status",
+      width: "8rem",
+      className: "py-3",
+      render: (r) => <StatusCell row={r} />,
+    },
+    {
+      key: "last_used",
+      title: "Last used",
+      width: "8.5rem",
+      className: "py-3",
+      render: (r) => <LastUsedCell lastUsedAt={r.last_used_at} />,
     },
     {
       key: "limits",
@@ -124,15 +139,17 @@ export default function Keys() {
     {
       key: "spend",
       title: "Spend",
-      width: "10rem",
+      align: "right",
+      width: "9rem",
       className: "hidden md:table-cell py-3",
       render: (r) => <SpendCell row={r} />,
     },
     {
       key: "actions",
       title: "Actions",
+      srOnlyTitle: true,
       align: "right",
-      width: "6rem",
+      width: "4.5rem",
       className: "py-3",
       render: (r) => actionsFor(r),
     },
@@ -256,7 +273,6 @@ export default function Keys() {
             columns={columns}
             rows={visibleRows}
             rowKey={(r) => r.id}
-            selectedKey={editing?.id}
             loading={keys.isLoading}
             empty={emptyState}
             tableLayout="fixed"
@@ -276,23 +292,31 @@ export default function Keys() {
                 <article key={row.id} className="px-4 py-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
-                      <KeyCell row={row} team={teamName(row.team_id)} />
+                      <KeyCell
+                        row={row}
+                        team={teamName(row.team_id)}
+                        onOpen={() => setEditing(row)}
+                      />
                     </div>
                     {actionsFor(row)}
                   </div>
-                  <div className="mt-3 flex flex-wrap items-start justify-between gap-3 border-t border-[var(--color-rule)] pt-3">
-                    <LimitsCell row={row} />
-                    <div className="text-right">
-                      <div className="text-caption text-faint">spent</div>
-                      <SpendCell row={row} />
+                  <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 border-t border-line pt-3">
+                    <div className="flex min-w-0 flex-col gap-1.5">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <TeamCell team={teamName(row.team_id)} />
+                        <span aria-hidden className="text-faint">·</span>
+                        <StatusCell row={row} />
+                      </div>
+                      <LimitsCell row={row} />
                     </div>
+                    <SpendCell row={row} />
                   </div>
                 </article>
               ))}
             </div>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-2 border-t border-line bg-[var(--color-surface-2)]/45 px-5 py-3 text-caption text-faint">
+        <div className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-3 text-caption text-faint">
           <span className="ml-auto flex items-center gap-1.5">
             {system.data?.require_api_key ? (
               <>

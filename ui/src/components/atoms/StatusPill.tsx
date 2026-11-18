@@ -38,7 +38,7 @@ export function StatusPill({
   const ok = status >= 200 && status < 400;
   return (
     <Badge tone={ok ? "pos" : "neg"} size={size} title={title} className={className}>
-      <span className="font-mono tnum">
+      <span className="font-mono num">
         {status} {statusText(status)}
       </span>
     </Badge>

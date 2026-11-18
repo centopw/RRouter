@@ -19,7 +19,7 @@ export type PaletteNavItem = {
 
 export type PaletteEntry = {
   id: string;
-  section: "Quick Actions" | "Pages" | "Models";
+  section: string;
   label: string;
   hint?: string;
   icon?: ReactNode;
@@ -147,23 +147,32 @@ export function CommandPalette({
           }))
       : [];
 
-    const pages: PaletteEntry[] = nav
+    const pageHits = nav
       .filter(
         (n) =>
-          !q ||
-          n.label.toLowerCase().includes(q) ||
-          n.group.toLowerCase().includes(q) ||
-          n.to.toLowerCase().includes(q),
+          (isAdmin || !n.adminOnly) &&
+          (!q ||
+            n.label.toLowerCase().includes(q) ||
+            n.group.toLowerCase().includes(q) ||
+            n.to.toLowerCase().includes(q)),
       )
-      .slice(0, 8)
-      .map((p) => ({
+      .slice(0, 8);
+    // Group headings are the nav's own group labels: one source, no second taxonomy.
+    const pageGroups: Array<{ title: string; items: PaletteEntry[] }> = [];
+    for (const p of pageHits) {
+      const entry: PaletteEntry = {
         id: `page-${p.to}`,
-        section: "Pages",
+        section: p.group,
         label: p.label,
-        hint: p.group,
+        hint: p.to,
         icon: p.icon,
         run: () => go(p.to),
-      }));
+      };
+      const group = pageGroups.find((candidate) => candidate.title === p.group);
+      if (group) group.items.push(entry);
+      else pageGroups.push({ title: p.group, items: [entry] });
+    }
+    const pages = pageGroups.flatMap((group) => group.items);
 
     const modelHits: PaletteEntry[] = (models.data ?? [])
       .filter(
@@ -181,7 +190,7 @@ export function CommandPalette({
       }));
 
     const all = [...actions, ...pages, ...modelHits];
-    return { actions, pages, modelHits, all };
+    return { actions, pageGroups, pages, modelHits, all };
   }, [nav, query, models.data, isAdmin, theme, showQuickActions, go, onToggleTheme, onClose]);
 
   const clampedIndex =
@@ -279,9 +288,9 @@ export function CommandPalette({
                 })}
               </PaletteSection>
             ) : null}
-            {results.pages.length > 0 ? (
-              <PaletteSection title="Pages">
-                {results.pages.map((item) => {
+            {results.pageGroups.map((group) => (
+              <PaletteSection key={group.title} title={group.title}>
+                {group.items.map((item) => {
                   const idx = runningIndex++;
                   return (
                     <PaletteResultItem
@@ -289,13 +298,14 @@ export function CommandPalette({
                       id={optionId(item.id)}
                       item={item}
                       active={idx === clampedIndex}
+                      monoHint
                       onHover={() => setActiveIndex(idx)}
                       onSelect={item.run}
                     />
                   );
                 })}
               </PaletteSection>
-            ) : null}
+            ))}
             {results.modelHits.length > 0 ? (
               <PaletteSection title="Models">
                 {results.modelHits.map((item) => {

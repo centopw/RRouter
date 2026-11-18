@@ -1,22 +1,30 @@
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Pulse,
+  ArrowsSplit,
+  ChartLineUp,
   ChatCircleText,
   GearSix,
+  Heartbeat,
   Key,
+  ListBullets,
   MagnifyingGlass,
   Moon,
   Plugs,
+  Pulse,
   Rows,
+  Scroll,
   SidebarSimple,
   SignOut,
   SquaresFour,
+  Stethoscope,
   Sun,
+  User,
+  UsersThree,
+  WebhooksLogo,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
-import { useFeatureFlag } from "./lib/flags";
 import { useAuthState, useHealth, useIsAdmin, useSignOut, useSystem, useUpdateStatus } from "./lib/queries";
 import { CommandPalette, type PaletteNavItem } from "./components/command-palette";
 import { Button, CopyChip, Dot, cx } from "./components/ui";
@@ -26,38 +34,36 @@ import { uptime } from "./lib/format";
 type Theme = "light" | "dark";
 type Density = "compact" | "comfortable";
 
-type NavTab = {
+/** A leaf route. The sidebar and the command palette both render this list, so a page
+ *  can never exist in one and be missing from the other. */
+type NavLeaf = {
   to: string;
-  label: string;
-  /** Exact matching is needed when this tab is also the section root. */
-  end?: boolean;
-  adminOnly?: boolean;
-};
-
-type SectionId =
-  | "activity"
-  | "playground"
-  | "models"
-  | "providers"
-  | "quickstart"
-  | "routing"
-  | "access"
-  | "system";
-
-type NavSection = {
-  id: SectionId;
-  to: string;
+  /** Where a non-admin lands when the primary target is admin-only. */
+  memberTo?: string;
   label: string;
   icon: React.ReactNode;
-  tabs: NavTab[];
-  /** Additional route prefixes that keep this sidebar item highlighted (e.g. `/routing/*`). */
+  adminOnly?: boolean;
+  /** Additional route prefixes that keep this entry highlighted (e.g. `/routing/*`). */
   matchPrefixes?: string[];
 };
 
-type NavCadenceGroup = {
-  id: "monitor" | "routing" | "govern";
+type NavGroupId = "monitor" | "routing" | "access" | "system" | "you";
+
+/** Groups are separators, not destinations: nothing is clickable but a leaf. */
+type NavGroup = {
+  id: NavGroupId;
   label: string;
-  sections: NavSection[];
+  leaves: NavLeaf[];
+};
+
+/** The two surfaces whose sibling leaves share one in-page tab strip. */
+type TabSurfaceId = "playground" | "routing";
+
+type SurfaceTab = {
+  to: string;
+  label: string;
+  end?: boolean;
+  adminOnly?: boolean;
 };
 
 const glyph = (Icon: typeof Pulse) => <Icon size={17} weight="regular" aria-hidden />;
@@ -72,115 +78,88 @@ type Brand = {
 
 const DEFAULT_NAME = "RRouter";
 
-/**
- * The sidebar groups the 6 hubs into 3 operator cadence tiers:
- * MONITOR & TEST, ROUTING & UPSTREAMS, GOVERN & SYSTEM.
- */
-const NAV_GROUPS: NavCadenceGroup[] = [
+const NAV_GROUPS: NavGroup[] = [
   {
     id: "monitor",
-    label: "MONITOR & TEST",
-    sections: [
+    label: "MONITOR",
+    leaves: [
+      { to: "/activity", label: "Activity", icon: glyph(Pulse) },
+      { to: "/usage", label: "Usage", icon: glyph(ChartLineUp) },
       {
-        id: "activity",
-        to: "/activity",
-        label: "Activity",
-        icon: glyph(Pulse),
-        tabs: [
-          { to: "/activity", label: "Activity", end: true },
-          { to: "/activity/logs", label: "Logs", adminOnly: true },
-        ],
-      },
-      {
-        id: "playground",
-        to: "/playground",
+        to: "/playground/chat",
+        memberTo: "/playground/templates",
         label: "Playground",
         icon: glyph(ChatCircleText),
-        tabs: [
-          { to: "/playground/chat", label: "Playground", adminOnly: true },
-          { to: "/playground/templates", label: "Templates" },
-          { to: "/playground/evals", label: "Evals" },
-        ],
+        matchPrefixes: ["/playground"],
       },
     ],
   },
   {
     id: "routing",
-    label: "ROUTING & UPSTREAMS",
-    sections: [
+    label: "ROUTING",
+    leaves: [
+      { to: "/providers", label: "Providers", icon: glyph(Plugs) },
+      { to: "/models", label: "Models", icon: glyph(SquaresFour) },
       {
-        id: "providers",
-        to: "/providers",
-        label: "Providers",
-        icon: glyph(Plugs),
-        tabs: [{ to: "/providers", label: "Providers", end: true }],
-      },
-      {
-        id: "models",
-        to: "/models",
-        label: "Models & Routing",
-        icon: glyph(SquaresFour),
-        matchPrefixes: ["/models", "/routing"],
-        tabs: [
-          { to: "/models", label: "Catalog", end: true },
-          { to: "/routing/presets", label: "Presets", adminOnly: true },
-          { to: "/routing/combos", label: "Combos", adminOnly: true },
-          { to: "/routing/aliases", label: "Aliases", adminOnly: true },
-          { to: "/routing/topology", label: "Topology" },
-        ],
+        to: "/routing/presets",
+        memberTo: "/routing/topology",
+        label: "Routing",
+        icon: glyph(ArrowsSplit),
+        matchPrefixes: ["/routing"],
       },
     ],
   },
   {
-    id: "govern",
-    label: "GOVERN & SYSTEM",
-    sections: [
+    id: "access",
+    label: "ACCESS",
+    leaves: [
+      { to: "/access/keys", label: "API Keys", icon: glyph(Key), adminOnly: true },
+      { to: "/access/teams", label: "Teams", icon: glyph(UsersThree) },
+      { to: "/access/users", label: "Users", icon: glyph(User), adminOnly: true },
+      { to: "/access/audit", label: "Audit", icon: glyph(Scroll), adminOnly: true },
+    ],
+  },
+  {
+    id: "system",
+    label: "SYSTEM",
+    leaves: [
+      { to: "/system/health", label: "Health", icon: glyph(Heartbeat), adminOnly: true },
+      { to: "/system/diagnostics", label: "Diagnostics", icon: glyph(Stethoscope), adminOnly: true },
+      { to: "/system/logs", label: "Logs", icon: glyph(ListBullets), adminOnly: true },
+      { to: "/system/webhooks", label: "Webhooks", icon: glyph(WebhooksLogo), adminOnly: true },
+    ],
+  },
+  {
+    id: "you",
+    label: "YOU",
+    leaves: [
       {
-        id: "access",
-        to: "/access",
-        label: "Access",
-        icon: glyph(Key),
-        tabs: [
-          { to: "/access/keys", label: "API Keys", adminOnly: true },
-          { to: "/access/teams", label: "Teams" },
-          { to: "/access/users", label: "Users", adminOnly: true },
-          { to: "/access/audit", label: "Audit", adminOnly: true },
-        ],
-      },
-      {
-        id: "system",
-        to: "/system",
-        label: "System",
+        to: "/settings/general",
+        label: "Settings",
         icon: glyph(GearSix),
-        tabs: [
-          { to: "/system/diagnostics", label: "Diagnostics", adminOnly: true },
-          { to: "/system/health", label: "Health", adminOnly: true },
-          { to: "/system/logs", label: "System logs", adminOnly: true },
-          { to: "/system/webhooks", label: "Webhooks", adminOnly: true },
-          { to: "/system/settings", label: "Settings", adminOnly: true },
-        ],
+        matchPrefixes: ["/settings"],
       },
     ],
   },
 ];
 
-const SECTIONS: NavSection[] = NAV_GROUPS.flatMap((group) => group.sections);
+/** Only these surfaces keep a tab strip; every other leaf is directly reachable. */
+const SURFACE_TABS: Record<TabSurfaceId, SurfaceTab[]> = {
+  playground: [
+    { to: "/playground/chat", label: "Playground", adminOnly: true },
+    { to: "/playground/templates", label: "Templates" },
+    { to: "/playground/evals", label: "Evals" },
+  ],
+  routing: [
+    { to: "/routing/presets", label: "Presets", adminOnly: true },
+    { to: "/routing/combos", label: "Combos", adminOnly: true },
+    { to: "/routing/aliases", label: "Aliases", adminOnly: true },
+    { to: "/routing/topology", label: "Topology" },
+  ],
+};
 
-function resolveSection(id: SectionId): NavSection | undefined {
-  // `/routing/*` shares the unified Models & Routing hub.
-  const target = id === "routing" ? "models" : id;
-  return SECTIONS.find((candidate) => candidate.id === target);
-}
-
-function visibleTabs(section: NavSection, isAdmin: boolean, unifiedDiagnostics = true) {
-  return section.tabs.filter(
-    (tab) => (isAdmin || !tab.adminOnly) && (unifiedDiagnostics || tab.to !== "/system/diagnostics"),
-  );
-}
-
-/** Never the section root: a role with no visible tab would redirect to itself. */
-function sectionDefault(section: NavSection, isAdmin: boolean, unifiedDiagnostics = true) {
-  return visibleTabs(section, isAdmin, unifiedDiagnostics)[0]?.to ?? "/models";
+function visibleSurfaceTabs(id: TabSurfaceId, isAdmin: boolean) {
+  return SURFACE_TABS[id].filter((tab) => isAdmin || !tab.adminOnly);
 }
 
 /** A first run (no accounts, no keys) lands on the wizard once; the flag is set by the
@@ -229,7 +208,6 @@ function findActiveSearchInput(root: HTMLElement | null): HTMLInputElement | nul
 
 export function Shell() {
   const isAdmin = useIsAdmin();
-  const unifiedDiagnostics = useFeatureFlag("unifiedDiagnostics");
   const health = useHealth();
   // `/api/system` is admin surface; asking as a reader would only produce a 403 toast.
   const system = useSystem(isAdmin);
@@ -362,32 +340,26 @@ export function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [paletteOpen]);
 
-  /** The rail shows cadence groups & hubs; ⌘K and the tab strips show the pages inside them. */
+  /** One list feeds the sidebar, the phone strip and ⌘K; the role filter happens once. */
   const groups = useMemo(
     () =>
       NAV_GROUPS.map((group) => ({
         ...group,
-        sections: group.sections
-          .map((section) => ({
-            ...section,
-            tabs: visibleTabs(section, isAdmin, unifiedDiagnostics),
-          }))
-          .filter((section) => section.tabs.length > 0),
-      })).filter((group) => group.sections.length > 0),
-    [isAdmin, unifiedDiagnostics],
+        leaves: group.leaves.filter((leaf) => isAdmin || !leaf.adminOnly),
+      })).filter((group) => group.leaves.length > 0),
+    [isAdmin],
   );
-  const sections = useMemo(() => groups.flatMap((group) => group.sections), [groups]);
   const nav = useMemo<PaletteNavItem[]>(
     () =>
-      sections.flatMap((section) =>
-        section.tabs.map((tab) => ({
-          to: tab.to,
-          label: tab.label,
-          icon: section.icon,
-          group: section.label,
+      groups.flatMap((group) =>
+        group.leaves.map((leaf) => ({
+          to: isAdmin || !leaf.memberTo ? leaf.to : leaf.memberTo,
+          label: leaf.label,
+          icon: leaf.icon,
+          group: group.label,
         })),
       ),
-    [sections],
+    [groups, isAdmin],
   );
 
   useEffect(() => {
@@ -511,13 +483,7 @@ export function Shell() {
           {groups.map((group, groupIndex) => (
             <div
               key={group.id}
-              className={
-                groupIndex > 0
-                  ? collapsed
-                    ? "mt-2 border-t border-line pt-2"
-                    : "mt-4"
-                  : undefined
-              }
+              className={groupIndex > 0 ? "mt-3 border-t border-line pt-3" : undefined}
             >
               {!collapsed ? (
                 <div className="px-2.5 pb-1 text-caption font-semibold uppercase tracking-[0.08em] text-faint">
@@ -525,9 +491,9 @@ export function Shell() {
                 </div>
               ) : null}
               <ul className="space-y-0.5">
-                {group.sections.map((section) => (
-                  <li key={section.id}>
-                    <NavSectionLink section={section} variant="sidebar" collapsed={collapsed} />
+                {group.leaves.map((leaf) => (
+                  <li key={leaf.to}>
+                    <NavLeafLink leaf={leaf} variant="sidebar" collapsed={collapsed} />
                   </li>
                 ))}
               </ul>
@@ -601,8 +567,15 @@ export function Shell() {
           className="tab-strip flex gap-1 overflow-x-auto px-2 pb-2"
           aria-label="Dashboard"
         >
-          {sections.map((section) => (
-            <NavSectionLink key={section.id} section={section} variant="tab" />
+          {groups.map((group, groupIndex) => (
+            <Fragment key={group.id}>
+              {groupIndex > 0 ? (
+                <span aria-hidden className="mx-0.5 w-px shrink-0 self-stretch bg-line" />
+              ) : null}
+              {group.leaves.map((leaf) => (
+                <NavLeafLink key={leaf.to} leaf={leaf} variant="tab" />
+              ))}
+            </Fragment>
           ))}
         </nav>
       </header>
@@ -848,45 +821,47 @@ function SidebarFooter({
   );
 }
 
-/** One sidebar/tab entry for a whole surface. The active state covers every tab. */
-function NavSectionLink({
-  section,
+/** One leaf in the sidebar or the phone strip. The active state is the underline alone. */
+function NavLeafLink({
+  leaf,
   variant,
   collapsed = false,
 }: {
-  section: NavSection;
+  leaf: NavLeaf;
   variant: "sidebar" | "tab";
   collapsed?: boolean;
 }) {
   const location = useLocation();
   const isAdmin = useIsAdmin();
-  const unifiedDiagnostics = useFeatureFlag("unifiedDiagnostics");
-  const prefixes = section.matchPrefixes ?? [section.to];
+  const prefixes = leaf.matchPrefixes ?? [leaf.to];
   const active = prefixes.some(
     (prefix) => location.pathname === prefix || location.pathname.startsWith(`${prefix}/`),
   );
+  const to = isAdmin || !leaf.memberTo ? leaf.to : leaf.memberTo;
   return (
     <Link
-      to={sectionDefault(section, isAdmin, unifiedDiagnostics)}
+      to={to}
       aria-current={active ? "page" : undefined}
-      title={variant === "sidebar" && collapsed ? section.label : undefined}
-      aria-label={variant === "sidebar" && collapsed ? section.label : undefined}
+      title={variant === "sidebar" && collapsed ? leaf.label : undefined}
+      aria-label={variant === "sidebar" && collapsed ? leaf.label : undefined}
       className={cx(
         "relative flex items-center text-body transition-colors",
         variant === "tab"
-          ? "h-14 shrink-0 flex-col justify-center gap-0.5 rounded-lg px-2 text-caption"
+          ? "h-12 shrink-0 flex-col justify-center gap-0.5 rounded-lg px-2.5 text-caption"
           : collapsed
             ? "justify-center rounded-[8px] px-0 py-2"
             : "gap-2.5 rounded-[8px] px-2.5 py-2",
-        variant === "sidebar"
-          ? active
-            ? "bg-[var(--color-selected)] font-medium text-accent-text"
-            : "text-ink-soft hover:bg-surface-3 hover:text-fg"
-          : active
-            ? "bg-accent font-medium text-[var(--color-accent-ink)]"
-            : "text-muted hover:bg-surface-3 hover:text-fg",
+        active
+          ? "font-medium text-fg"
+          : variant === "tab"
+            ? "text-muted hover:bg-surface-3 hover:text-fg"
+            : "text-ink-soft hover:bg-surface-3 hover:text-fg",
       )}
     >
+      <span className="shrink-0">{leaf.icon}</span>
+      {collapsed ? null : (
+        <span className={variant === "tab" ? "whitespace-nowrap" : "truncate"}>{leaf.label}</span>
+      )}
       {active ? (
         <span
           aria-hidden
@@ -895,49 +870,25 @@ function NavSectionLink({
             variant === "tab"
               ? "inset-x-2 bottom-0 h-[2px]"
               : collapsed
-                ? "inset-y-1.5 left-0 w-[2px]"
-                : "left-0 top-1.5 h-[calc(100%-12px)] w-[2px]",
+                ? "inset-x-3 bottom-0.5 h-[2px]"
+                : "inset-x-2.5 bottom-0.5 h-[2px]",
           )}
         />
       ) : null}
-      <span className="shrink-0">{section.icon}</span>
-      {collapsed ? null : (
-        <span className={variant === "tab" ? "whitespace-nowrap" : undefined}>
-          {section.label}
-        </span>
-      )}
     </Link>
   );
 }
 
-/** Tab strip for one surface. The page content is the nested route's `<Outlet/>`. */
-/** Section root opens the first tab the current role can use. */
-export function SectionIndex({ section: id }: { section: SectionId }) {
+/** Tab strip for the two surfaces whose sibling leaves share it; the page is `<Outlet/>`. */
+export function SectionLayout({ surface }: { surface: TabSurfaceId }) {
   const isAdmin = useIsAdmin();
-  const unifiedDiagnostics = useFeatureFlag("unifiedDiagnostics");
-  if (id === "routing") {
-    return <Navigate to={isAdmin ? "/routing/presets" : "/routing/topology"} replace />;
-  }
-  const section = resolveSection(id);
-  if (!section) return <Navigate to="/activity" replace />;
-  const tabs = visibleTabs(section, isAdmin, unifiedDiagnostics);
-  // No tab for this role: land somewhere real. Redirecting to the section root loops.
-  if (tabs.length === 0) return <Navigate to="/models" replace />;
-  return <Navigate to={tabs[0]?.to ?? "/models"} replace />;
-}
-
-export function SectionLayout({ section: id }: { section: SectionId }) {
-  const isAdmin = useIsAdmin();
-  const unifiedDiagnostics = useFeatureFlag("unifiedDiagnostics");
-  const section = resolveSection(id);
-  if (!section) return <Outlet />;
-  const tabs = visibleTabs(section, isAdmin, unifiedDiagnostics);
-  // Standalone pages (Providers) get no one-item tab strip.
+  const tabs = visibleSurfaceTabs(surface, isAdmin);
+  // A single tab is a label, not navigation.
   if (tabs.length <= 1) return <Outlet />;
   return (
     <>
       <nav
-        aria-label={`${section.label} sections`}
+        aria-label={`${surface} sections`}
         className="tab-strip mb-4 flex gap-1 overflow-x-auto border-b border-line"
       >
         {tabs.map((tab) => (
@@ -948,9 +899,7 @@ export function SectionLayout({ section: id }: { section: SectionId }) {
             className={({ isActive }) =>
               cx(
                 "relative shrink-0 px-3 py-2 text-body transition-colors",
-                isActive
-                  ? "font-medium text-accent-text"
-                  : "text-muted hover:text-fg",
+                isActive ? "font-medium text-fg" : "text-muted hover:text-fg",
               )
             }
           >

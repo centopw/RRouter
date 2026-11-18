@@ -19,7 +19,7 @@ export function Disclosure({
     <Accordion.Root type="single" collapsible className={cx("rounded-[var(--radius-surface)] border border-line bg-surface", className)}>
       <Accordion.Item value="content">
         <Accordion.Header>
-          <Accordion.Trigger className="group flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-small font-medium text-fg">
+          <Accordion.Trigger className="group flex w-full items-center justify-between gap-3 rounded-t-[var(--radius-surface)] px-4 py-2.5 text-left text-small font-medium text-fg transition-colors hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]">
             {title}
             <CaretDown
               size={13}

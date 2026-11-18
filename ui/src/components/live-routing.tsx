@@ -546,15 +546,10 @@ function LiveRoutingCanvas({
           aria-label="Live routing canvas. Drag provider cards to arrange them."
           aria-describedby="live-routing-help"
           className={cx(
-            "route-canvas relative touch-none overflow-hidden",
+            "relative touch-none overflow-hidden",
             standalone ? "h-[520px] max-[700px]:h-[480px]" : "h-[380px] max-[700px]:h-[440px]",
           )}
         >
-          <div aria-hidden className="route-grid absolute inset-0" />
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-surface/80 to-transparent"
-          />
           <svg
             aria-hidden
             viewBox="0 0 100 100"
@@ -614,11 +609,11 @@ function LiveRoutingCanvas({
                   }
             }
           >
-            <div className="flex w-[152px] flex-col items-center rounded-2xl border border-[var(--color-line-strong)] bg-surface/95 px-3 py-2.5 text-center shadow-[var(--shadow-panel)] backdrop-blur">
+            <div className="flex w-[152px] flex-col items-center rounded-2xl border border-[var(--color-line-strong)] bg-surface px-3 py-2.5 text-center">
               <BrandMark
                 state={brandState}
                 angleDeg={brandAngle}
-                color={latestFailed ? "#EF4444" : latestProvider ? providerBrand(latestProvider).color : undefined}
+                color={latestFailed ? "var(--color-neg)" : latestProvider ? providerBrand(latestProvider).color : undefined}
                 surface={theme}
                 decorative
                 className="h-11 w-[72px]"
@@ -655,7 +650,7 @@ function LiveRoutingCanvas({
                 onPointerCancel={endDrag}
                 onKeyDown={(event) => nudge(event, node.provider)}
                 className={cx(
-                  "absolute z-10 w-[168px] max-[760px]:w-[160px] select-none rounded-xl border bg-surface shadow-[var(--shadow-panel)] outline-none focus-visible:ring-2 focus-visible:ring-accent-text/40",
+                  "absolute z-10 w-[168px] max-[760px]:w-[160px] select-none rounded-xl border bg-surface outline-none focus-visible:ring-2 focus-visible:ring-accent-text/40",
                   flowing ? "border-[var(--color-line-strong)]" : "border-line",
                   node.errors > 0 && "border-[var(--color-neg-line)]",
                   isDragging

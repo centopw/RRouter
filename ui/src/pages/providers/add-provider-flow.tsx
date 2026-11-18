@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { MagnifyingGlass, X } from "@phosphor-icons/react";
-import { Heading, SectionLabel, Stack } from "../../components/atoms";
-import { ProviderIcon, providerBrand } from "../../components/provider-icon";
+import { Heading, SectionLabel } from "../../components/atoms";
+import { ProviderIcon } from "../../components/provider-icon";
 import {
   Badge,
   Button,
@@ -30,7 +30,6 @@ import {
   providerMeta,
   publishedDefaultUrl,
   useInvalidateProviders,
-  type AddStep,
 } from "./types";
 
 export function EmptyProviders({ onAdd }: { onAdd: (() => void) | null }) {
@@ -121,9 +120,12 @@ export function ProviderCodesModal({
   );
 }
 
+type AddStep = "pick" | "credential";
+
 /**
- * Multi-step provider onboarding wizard: choice (Sign in vs API key) -> provider catalog
- * grid -> optional OpenCode plan guide -> credential & endpoint form.
+ * Two steps only: pick a provider (sign-in, API key, or a custom endpoint), then enter the
+ * credential. Validation is inline and every branch keeps its own form; there is no
+ * full-screen wizard churn between them.
  */
 export function AddProviderFlow({
   open,
@@ -145,54 +147,41 @@ export function AddProviderFlow({
   providers: ModelProvider[];
   onConnected: (label: string, warning: string | null) => void;
 }) {
-  const [step, setStep] = useState<AddStep>("kind");
-  const [kind, setKind] = useState<"subscription" | "api_key" | null>(null);
+  const [step, setStep] = useState<AddStep>("pick");
   const [keyProvider, setKeyProvider] = useState<string | null>(null);
   const [customProtocol, setCustomProtocol] = useState<"openai" | "anthropic" | null>(null);
-  // Scoped to the registered list: the custom endpoint cards above are actions, not
-  // providers, so filtering never hides them.
   const [query, setQuery] = useState("");
 
   useEffect(() => {
+    setQuery("");
     if (!open) {
-      setKind(null);
+      setStep("pick");
       setKeyProvider(null);
       setCustomProtocol(null);
-      setStep("kind");
-      setQuery("");
       return;
     }
     if (initialCustomProtocol) {
-      setKind("api_key");
+      setStep("credential");
       setKeyProvider(initialCustomProtocol);
       setCustomProtocol(initialCustomProtocol);
-      setStep("key");
     } else {
-      setKind(null);
+      setStep("pick");
       setKeyProvider(null);
       setCustomProtocol(null);
-      setStep("kind");
     }
-    setQuery("");
   }, [open, initialCustomProtocol]);
 
-  useEffect(() => {
-    // A new step or a new kind is a new list: a stale filter would look like a missing provider.
-    if (step !== "provider") setQuery("");
-  }, [step, kind]);
-
   const needle = query.trim().toLowerCase();
-  // An empty box lists what this step is for (API keys). A search also finds providers
-  // that only appear under Sign in, so the operator can get back to the other flow.
-  const oauthById = new Map(subscriptionProviders.map((provider) => [provider.id, provider]));
-  const directory = needle === "" ? keyProviders : providers;
-  const matching = directory.filter((provider) => matchesProvider(needle, provider));
+  const signIn = subscriptionProviders.filter((provider) => matchesProvider(needle, provider));
+  const keyMatches = keyProviders.filter((provider) => matchesProvider(needle, provider));
+  const noMatch = needle !== "" && signIn.length === 0 && keyMatches.length === 0;
+  const chosenLabel = keyProviders.find((provider) => provider.id === keyProvider)?.display;
 
-  const goBack = () => {
-    setStep("kind");
-    setKind(null);
-    setKeyProvider(null);
-    setCustomProtocol(null);
+  const choose = (provider: string, protocol: "openai" | "anthropic" | null) => {
+    setQuery("");
+    setKeyProvider(provider);
+    setCustomProtocol(protocol);
+    setStep("credential");
   };
 
   return (
@@ -205,278 +194,210 @@ export function AddProviderFlow({
         }
       }}
       title={
-        step === "kind"
+        step === "pick"
           ? "Add a provider"
-          : step === "opencode"
-            ? "Add OpenCode"
-            : kind === "subscription"
-              ? "Sign in with an account"
-              : customProtocol !== null
-                ? "Add a custom endpoint"
-                : "Add an API key"
+          : customProtocol !== null
+            ? "Add a custom endpoint"
+            : keyProvider === "opencode"
+              ? "Add OpenCode"
+              : `Add an API key${chosenLabel ? ` · ${chosenLabel}` : ""}`
       }
       open={open}
       variant="dialog"
-      width={step === "provider" ? "lg" : "md"}
+      width={step === "pick" ? "lg" : "md"}
       onClose={onClose}
       footer={
-        step === "kind" ? null : (
-          <Button variant="quiet" onClick={goBack}>
+        step === "credential" ? (
+          <Button
+            variant="quiet"
+            onClick={() => {
+              setStep("pick");
+              setKeyProvider(null);
+              setCustomProtocol(null);
+            }}
+          >
             Back
           </Button>
-        )
+        ) : null
       }
     >
-      {step === "kind" ? (
-        <div className="grid gap-2 sm:grid-cols-2">
-          <Choice
-            title="Sign in"
-            body="Use a Claude, ChatGPT, or Copilot plan, or connect OpenRouter to create an API key tied to your account."
-            onClick={() => {
-              setKind("subscription");
-              setStep("provider");
-            }}
-          />
-          <Choice
-            title="API key"
-            body="Paste a key from any provider. Stored encrypted; the key is never returned by the API again."
-            onClick={() => {
-              setKind("api_key");
-              setStep("provider");
-            }}
-          />
+      {step === "pick" ? (
+        <div className="flex flex-col gap-3">
+          <div className="relative">
+            <MagnifyingGlass
+              size={14}
+              aria-hidden
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
+            />
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && query !== "") {
+                  event.preventDefault();
+                  setQuery("");
+                }
+              }}
+              aria-label="Search providers"
+              placeholder="Search sign-in and API-key providers…"
+              autoComplete="off"
+              spellCheck={false}
+              className="h-9 w-full min-w-0 rounded-[var(--radius-input)] border border-[var(--color-line-strong)] bg-surface pl-8 pr-8 text-body text-fg placeholder:text-faint focus:border-[var(--color-focus-ring)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)]/25 [&::-webkit-search-cancel-button]:hidden"
+            />
+            {query !== "" ? (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="Clear provider search"
+                className="absolute right-1 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+              >
+                <X size={12} aria-hidden />
+              </button>
+            ) : null}
+          </div>
+
+          <div className="h-[min(48vh,380px)] overflow-y-auto pr-1">
+            {noMatch ? (
+              <div className="flex flex-col items-start gap-2 px-1 py-3">
+                <p className="text-body text-faint">
+                  No provider matches <span className="text-fg">“{query.trim()}”</span>.
+                </p>
+                <Button variant="quiet" size="sm" onClick={() => setQuery("")}>
+                  Clear search
+                </Button>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-5">
+                <section className="flex flex-col gap-2">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <SectionLabel>Sign in</SectionLabel>
+                    <span className="text-caption text-faint">
+                      subscription or account sign-in
+                    </span>
+                  </div>
+                  <ProviderCatalogGrid
+                    empty={
+                      <p className="px-1 py-2 text-body text-faint">No sign-in provider matches.</p>
+                    }
+                    items={signIn.map((provider) => {
+                      const spec = providers.find((row) => row.id === provider.id);
+                      return {
+                        id: provider.id,
+                        title: provider.display,
+                        meta: [
+                          provider.id === "openrouter"
+                            ? "browser sign-in · creates an API key"
+                            : isAntigravity(provider.id)
+                              ? "Google Cloud Code Assist · browser sign-in"
+                              : provider.flow === "device_code"
+                                ? "device code"
+                                : "browser sign-in",
+                          spec?.compaction === "anthropic_messages"
+                            ? "compaction beta"
+                            : spec?.compaction === "openai_responses"
+                              ? "server compact"
+                              : null,
+                        ]
+                          .filter((part): part is string => part !== null)
+                          .join(" · "),
+                        scope: spec?.scope ?? "none",
+                        onClick: () => onChooseOAuth(provider),
+                      };
+                    })}
+                  />
+                </section>
+
+                <section className="flex flex-col gap-2">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <SectionLabel>API key</SectionLabel>
+                    <span className="text-caption text-faint tnum">
+                      {keyProviders.length} available
+                    </span>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {(
+                      [
+                        { protocol: "openai", body: "OpenAI-compatible · any chat API" },
+                        { protocol: "anthropic", body: "Anthropic Messages · any messages API" },
+                      ] as const
+                    ).map((item) => (
+                      <button
+                        key={item.protocol}
+                        type="button"
+                        onClick={() => choose(item.protocol, item.protocol)}
+                        className="flex items-center gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-3 py-2.5 text-left transition-colors hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+                      >
+                        <ProviderIcon provider={item.protocol} size={22} />
+                        <span className="min-w-0">
+                          <span className="block truncate text-body font-medium">
+                            Custom endpoint
+                          </span>
+                          <span className="block truncate text-caption text-muted">
+                            {item.body}
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <ProviderCatalogGrid
+                    empty={
+                      <p className="px-1 py-2 text-body text-faint">
+                        No API-key provider matches.
+                      </p>
+                    }
+                    items={keyMatches.map((provider) => ({
+                      id: provider.id,
+                      title: provider.display,
+                      meta:
+                        provider.kind === "oauth"
+                          ? "paste an API key · or sign in above"
+                          : providerMeta(provider),
+                      scope: provider.scope,
+                      onClick: () => choose(provider.id, null),
+                    }))}
+                  />
+                </section>
+              </div>
+            )}
+          </div>
+
+          <p className="text-caption leading-relaxed text-faint">
+            Missing a provider?{" "}
+            <a
+              className="text-muted underline underline-offset-2 hover:text-fg"
+              href="https://github.com/centopw/RRouter/issues/new?template=provider-api.yml"
+              target="_blank"
+              rel="noreferrer"
+            >
+              request an API provider
+            </a>{" "}
+            ·{" "}
+            <a
+              className="text-muted underline underline-offset-2 hover:text-fg"
+              href="https://github.com/centopw/RRouter/issues/new?template=provider-oauth.yml"
+              target="_blank"
+              rel="noreferrer"
+            >
+              request an OAuth provider
+            </a>
+            . Keys are stored encrypted and never returned by the API.
+          </p>
         </div>
       ) : null}
 
-      {step === "provider" && kind === "subscription" ? (
-        <ProviderCatalogGrid
-          empty="No account sign-in is wired for this build."
-          items={subscriptionProviders.map((p) => ({
-            id: p.id,
-            title: p.display,
-            meta: [
-              p.id === "openrouter"
-                ? "browser sign-in · creates an API key"
-                : isAntigravity(p.id)
-                  ? "Google Cloud Code Assist · browser sign-in"
-                  : p.flow === "device_code"
-                    ? "device code"
-                    : "browser sign-in",
-              (() => {
-                const row = providers.find((item) => item.id === p.id);
-                if (row?.compaction === "anthropic_messages") return "compaction beta";
-                if (row?.compaction === "openai_responses") return "server compact";
-                return null;
-              })(),
-            ]
-              .filter((part): part is string => part !== null)
-              .join(" · "),
-            scope: providers.find((row) => row.id === p.id)?.scope ?? "none",
-            onClick: () => onChooseOAuth(p),
-          }))}
-        />
-      ) : null}
-
-      {step === "provider" &&
-      kind === "subscription" &&
-      subscriptionProviders.some((p) => isAntigravity(p.id)) ? (
-        <p className="mt-3 text-caption leading-relaxed text-faint">
-          Google Antigravity signs in to{" "}
-          <span className="text-fg">Google Cloud Code Assist</span>, not the Gemini API. Your
-          account email and Cloud project are discovered during sign-in — there is no project id
-          to enter, and nothing pasted here becomes a key.
-        </p>
-      ) : null}
-
-      {step === "provider" && kind === "api_key" ? (
-        <Stack gap="lg">
-          <div>
-            <SectionLabel className="mb-2">custom endpoint</SectionLabel>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {(
-                [
-                  {
-                    protocol: "openai",
-                    title: "Custom endpoint",
-                    body: "OpenAI-compatible · any chat API",
-                  },
-                  {
-                    protocol: "anthropic",
-                    title: "Custom endpoint",
-                    body: "Anthropic Messages · any messages API",
-                  },
-                ] as const
-              ).map((item) => {
-                const brand = providerBrand(item.protocol);
-                return (
-                  <button
-                    key={item.protocol}
-                    type="button"
-                    onClick={() => {
-                      setKind("api_key");
-                      setKeyProvider(item.protocol);
-                      setCustomProtocol(item.protocol);
-                      setStep("key");
-                    }}
-                    className="flex items-center gap-3 rounded-[var(--radius-card)] border px-3 py-2.5 text-left transition-colors hover:brightness-[0.98]"
-                    style={{
-                      borderColor: `${brand.color}66`,
-                      backgroundColor: `${brand.color}0f`,
-                    }}
-                  >
-                    <ProviderIcon provider={item.protocol} size={22} />
-                    <span className="min-w-0">
-                      <span className="block truncate text-body font-medium">{item.title}</span>
-                      <span className="block truncate text-caption text-muted">{item.body}</span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          <div className="min-w-0">
-            <div className="mb-2 flex items-baseline justify-between gap-3">
-              <SectionLabel>registered providers</SectionLabel>
-              <span className="text-caption text-faint tnum" aria-live="polite">
-                {needle === ""
-                  ? `${keyProviders.length} available`
-                  : `${matching.length} of ${providers.length}`}
-              </span>
-            </div>
-            <div className="relative mb-2">
-              <MagnifyingGlass
-                size={14}
-                aria-hidden
-                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
-              />
-              <input
-                type="search"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape" && query !== "") {
-                    event.preventDefault();
-                    setQuery("");
-                  }
-                }}
-                aria-label="Search providers"
-                placeholder="Search providers…"
-                autoComplete="off"
-                spellCheck={false}
-                className="h-8 w-full min-w-0 rounded-[var(--radius-input)] border border-[var(--color-line-strong)] bg-surface pl-8 pr-8 text-body text-fg placeholder:text-faint focus:border-[var(--color-focus-ring)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)]/25 [&::-webkit-search-cancel-button]:hidden"
-              />
-              {query !== "" ? (
-                <button
-                  type="button"
-                  onClick={() => setQuery("")}
-                  aria-label="Clear provider search"
-                  className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
-                >
-                  <X size={12} aria-hidden />
-                </button>
-              ) : null}
-            </div>
-            {/* A fixed-height list: filtering changes what is inside the box, never the
-                box, so the cards below stay put while the operator types. */}
-            <div className="h-[min(40vh,320px)] overflow-y-auto pr-1">
-              <ProviderCatalogGrid
-                empty={
-                  needle === "" ? (
-                    <p className="px-1 py-3 text-body text-faint">
-                      No API-key provider is registered.
-                    </p>
-                  ) : (
-                    <div className="flex flex-col items-start gap-2 px-1 py-3">
-                      <p className="text-body text-faint">
-                        No providers match <span className="text-fg">“{query.trim()}”</span>.
-                      </p>
-                      <Button variant="quiet" onClick={() => setQuery("")}>
-                        Clear search
-                      </Button>
-                    </div>
-                  )
-                }
-                items={matching.map((p) => {
-                  const signIn = oauthById.get(p.id);
-                  return {
-                    id: p.id,
-                    title: p.display,
-                    meta: signIn
-                      ? p.id === "openrouter"
-                        ? "API key, or sign in under Sign in"
-                        : signIn.flow === "device_code"
-                          ? "device code sign-in"
-                          : "browser sign-in"
-                      : p.id === "openrouter"
-                        ? "API key · or sign in under Sign in"
-                        : providerMeta(p),
-                    scope: p.scope,
-                    onClick: () => {
-                      if (p.kind === "oauth" && signIn) {
-                        onChooseOAuth(signIn);
-                      } else {
-                        setKeyProvider(p.id);
-                        setCustomProtocol(null);
-                        setStep(p.id === "opencode" ? "opencode" : "key");
-                      }
-                    },
-                  };
-                })}
-              />
-            </div>
-          </div>
-          <div className="rounded-lg border border-dashed border-[var(--color-line-strong)] bg-surface-2 px-3 py-3">
-            <span className="block text-small font-medium">Missing your favorite provider?</span>
-            <span className="mt-0.5 block text-caption leading-relaxed text-muted">
-              Add it yourself. API-provider requests become a reviewed JSON manifest and a pull
-              request; OAuth providers are reviewed with their sign-in flow.
-            </span>
-            <span className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-small">
-              <a
-                className="font-medium text-[var(--color-accent-text)] hover:underline"
-                href="https://github.com/centopw/RRouter/issues/new?template=provider-api.yml"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Add an API provider →
-              </a>
-              <a
-                className="text-muted hover:text-fg hover:underline"
-                href="https://github.com/centopw/RRouter/issues/new?template=provider-oauth.yml"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Add an OAuth provider →
-              </a>
-            </span>
-          </div>
-        </Stack>
-      ) : null}
-
-      {step === "opencode" ? <OpenCodeGuide onContinue={() => setStep("key")} /> : null}
-
-      {step === "key" && kind === "api_key" ? (
-        <ApiKeyForm
-          providers={keyProviders}
-          fixedProvider={keyProvider}
-          customProtocol={customProtocol}
-          onConnected={onConnected}
-        />
+      {step === "credential" ? (
+        <div className="flex flex-col gap-4">
+          {keyProvider === "opencode" ? <OpenCodeGuide /> : null}
+          <ApiKeyForm
+            providers={keyProviders}
+            fixedProvider={keyProvider}
+            customProtocol={customProtocol}
+            onConnected={onConnected}
+          />
+        </div>
       ) : null}
     </Modal>
-  );
-}
-
-function Choice({ title, body, onClick }: { title: string; body: string; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="rounded-[var(--radius-card)] border border-[var(--color-line-strong)] bg-surface-2 p-4 text-left transition-colors hover:bg-[var(--color-selected)]"
-    >
-      <span className="block text-lead font-medium">{title}</span>
-      <span className="mt-1 block text-small leading-relaxed text-muted">{body}</span>
-    </button>
   );
 }
 
@@ -509,11 +430,11 @@ function ProviderCatalogGrid({
               <span className="flex flex-wrap items-center gap-1.5">
                 <span className="truncate text-body font-medium text-fg">{item.title}</span>
                 {item.scope === "global" ? (
-                  <Badge tone="pos" title="a shared instance account: serves non-team keys only">
+                  <Badge tone="neutral" title="a shared instance account: serves non-team keys only">
                     connected · shared
                   </Badge>
                 ) : item.scope === "team" ? (
-                  <Badge tone="accent" title="a team-owned account: serves that team's keys">
+                  <Badge tone="neutral" title="a team-owned account: serves that team's keys">
                     connected · team
                   </Badge>
                 ) : null}
@@ -528,14 +449,18 @@ function ProviderCatalogGrid({
   );
 }
 
-function OpenCodeGuide({ onContinue }: { onContinue: () => void }) {
+/** OpenCode plan reference, folded away so the key form stays the first thing on screen. */
+function OpenCodeGuide() {
   return (
-    <div className="flex flex-col gap-3">
-      <p className="text-small leading-relaxed text-muted">
-        OpenCode exposes its models through an OpenAI-compatible endpoint. Pick the plan you use —
-        all three reuse one OpenCode API key, created in the Console.
-      </p>
-      <div className="grid gap-2">
+    <details className="rounded-[var(--radius-card)] border border-line bg-surface-2/60">
+      <summary className="cursor-pointer list-none px-3 py-2 text-small font-medium text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]">
+        OpenCode plans — free, pay-as-you-go, Go
+      </summary>
+      <div className="flex flex-col gap-2 border-t border-line px-3 py-3">
+        <p className="text-caption leading-relaxed text-muted">
+          OpenCode exposes its models through an OpenAI-compatible endpoint. All three plans reuse
+          one OpenCode API key, created in the Console.
+        </p>
         {[
           {
             title: "Free",
@@ -553,43 +478,36 @@ function OpenCodeGuide({ onContinue }: { onContinue: () => void }) {
             body: "Subscription access to the Go model list with 5-hour, weekly and monthly allowances. Upgrade or manage members in the Console.",
           },
         ].map((plan) => (
-          <div key={plan.title} className="rounded-lg border border-line bg-surface-2 px-3 py-2.5">
-            <div className="flex flex-wrap items-baseline gap-2">
-              <span className="text-body font-medium">{plan.title}</span>
-              <span className="text-caption text-faint">{plan.meta}</span>
-            </div>
-            <p className="mt-0.5 text-caption leading-relaxed text-muted">{plan.body}</p>
+          <div key={plan.title} className="text-caption leading-relaxed">
+            <span className="font-medium text-fg">{plan.title}</span>
+            <span className="text-faint"> · {plan.meta}</span>
+            <span className="block text-muted">{plan.body}</span>
           </div>
         ))}
+        <div className="flex flex-wrap items-center gap-3 text-caption">
+          <a
+            className="text-muted underline underline-offset-2 hover:text-fg"
+            href="https://opencode.ai/console"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Create an OpenCode API key →
+          </a>
+          <a
+            className="text-muted underline underline-offset-2 hover:text-fg"
+            href="https://opencode.ai/docs/go"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Go plans and limits
+          </a>
+        </div>
+        <p className="text-caption leading-relaxed text-faint">
+          The OpenCode key authorises RRouter upstream. Clients calling RRouter still need a gateway
+          key from API Keys unless the server runs with RROUTER_REQUIRE_API_KEY=false.
+        </p>
       </div>
-      <div className="flex flex-wrap items-center gap-3 text-small">
-        <a
-          className="font-medium text-[var(--color-accent-text)] hover:underline"
-          href="https://opencode.ai/console"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Create an OpenCode API key →
-        </a>
-        <a
-          className="text-muted hover:text-fg hover:underline"
-          href="https://opencode.ai/docs/go"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Go plans and limits
-        </a>
-      </div>
-      <p className="text-caption leading-relaxed text-faint">
-        The OpenCode key authorises RRouter upstream. Clients calling RRouter still need a gateway
-        key from API Keys unless the server runs with RROUTER_REQUIRE_API_KEY=false.
-      </p>
-      <div className="flex justify-end">
-        <Button variant="primary" arrow onClick={onContinue}>
-          Continue with API key
-        </Button>
-      </div>
-    </div>
+    </details>
   );
 }
 
@@ -903,7 +821,7 @@ function ApiKeyForm({
       {isCustom ? (
         <p className="text-caption leading-relaxed text-faint">
           This account is added to the {customProtocol} provider. To give an endpoint its own name
-          and model ref code, create it in Provider codes (Connected card header) first.
+          and model ref code, create it in Provider codes (Connections card header) first.
         </p>
       ) : null}
       <div className="flex justify-end">

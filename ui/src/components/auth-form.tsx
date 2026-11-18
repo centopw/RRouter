@@ -48,12 +48,12 @@ export function AuthShell({
   );
 }
 
-/** White panel, hairline border, generous padding. */
+/** Bordered panel, generous padding. No elevation: it is not a layer over the page. */
 export function AuthCard({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <section
       className={cx(
-        "rounded-[var(--radius-card)] border border-line bg-surface px-6 py-8 shadow-[var(--shadow-panel)] min-[560px]:px-8",
+        "rounded-[var(--radius-card)] border border-line bg-surface px-6 py-8 min-[560px]:px-8",
         className,
       )}
     >

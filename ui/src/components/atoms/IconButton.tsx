@@ -25,7 +25,7 @@ export function IconButton({
       disabled={disabled}
       className={cx(
         "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-faint transition-colors",
-        "hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2",
+        "enabled:hover:bg-surface-3 enabled:hover:text-fg focus-visible:outline focus-visible:outline-2",
         "focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)] disabled:cursor-not-allowed disabled:opacity-50",
         className,
       )}
