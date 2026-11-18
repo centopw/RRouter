@@ -1,0 +1,1 @@
+import{Jt as e}from"./index-D1iuRxUE.js";import{ft as t}from"./ui-BH0luDS8.js";var n=[`gateway-settings`];function r(){return e({queryKey:n,queryFn:()=>t.get(`/api/settings`),staleTime:6e4})}export{r as n,n as t};
