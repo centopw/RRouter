@@ -153,10 +153,11 @@ pub async fn retention(state: &Arc<AppState>) -> Result<Retention> {
 }
 
 fn days_of(settings: &Value, key: &str) -> Option<usize> {
-    settings
-        .get(key)
-        .and_then(Value::as_u64)
-        .map(|days| usize::try_from(days).unwrap_or(usize::MAX).min(MAX_RETENTION_DAYS))
+    settings.get(key).and_then(Value::as_u64).map(|days| {
+        usize::try_from(days)
+            .unwrap_or(usize::MAX)
+            .min(MAX_RETENTION_DAYS)
+    })
 }
 
 /// The stored settings merged over the defaults.
@@ -360,7 +361,10 @@ mod tests {
         let stored = serde_json::json!({"attempts_retention_days": 7});
         assert_eq!(days_of(&stored, "attempts_retention_days"), Some(7));
         assert_eq!(days_of(&stored, "capture_retention_days"), None);
-        assert_eq!(days_of(&json!({"usage_retention_days": 0}), "usage_retention_days"), Some(0));
+        assert_eq!(
+            days_of(&json!({"usage_retention_days": 0}), "usage_retention_days"),
+            Some(0)
+        );
         let capped = serde_json::json!({"usage_retention_days": 999_999});
         assert_eq!(
             days_of(&capped, "usage_retention_days"),

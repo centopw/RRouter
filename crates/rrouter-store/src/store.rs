@@ -4155,7 +4155,10 @@ impl Store {
     /// Delete captured request/response bodies older than `cutoff`.
     pub async fn prune_captures(&self, cutoff: i64) -> Result<usize> {
         self.conn()
-            .execute("DELETE FROM request_captures WHERE ts < ?1", params![cutoff])
+            .execute(
+                "DELETE FROM request_captures WHERE ts < ?1",
+                params![cutoff],
+            )
             .map_err(migrations::db_err)
     }
 
@@ -5139,9 +5142,10 @@ mod capture_tests {
         }
         let usage = block(store.prune_usage(500)).expect("prune");
         assert_eq!(usage, 1);
-        assert!(block(store.capture_by_request(old))
-            .expect("old")
-            .is_some(), "captures have their own switch");
+        assert!(
+            block(store.capture_by_request(old)).expect("old").is_some(),
+            "captures have their own switch"
+        );
         assert_eq!(block(store.prune_captures(500)).expect("captures"), 1);
         assert!(block(store.capture_by_request(old)).expect("old").is_none());
         assert!(block(store.capture_by_request(kept))
