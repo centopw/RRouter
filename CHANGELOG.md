@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.29.1 — 2026-11-18
+
+### Bug Fixes
+
+- fix(providers): carry the client fingerprints the upstreams gate on ([`98ac8f5`](https://github.com/centopw/RRouter/commit/98ac8f5c77921bce6b1ad2c1c5bd95bbdb584a39))
+
 ## 0.29.0 — 2026-11-18
 
 ### Features
