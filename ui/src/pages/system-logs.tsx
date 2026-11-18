@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorNote, PageHeader, cx } from "../components/ui";
 import { api } from "../lib/api";
 
@@ -34,7 +35,7 @@ const LEVEL_TONE: Record<string, string> = {
  * Opt-in platform diagnostics. The gateway always writes its console log; this page
  * streams the extra in-memory capture, which is off until someone turns it on.
  */
-export default function SystemLogs() {
+export function SystemLogs({ embedded = false }: { embedded?: boolean } = {}) {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [capacity, setCapacity] = useState(2000);
@@ -120,23 +121,45 @@ export default function SystemLogs() {
     }
   };
 
-  return (
-    <div className="mx-auto max-w-[1160px]">
-      <PageHeader
-        title="System logs"
-        subtitle="Platform events for debugging the gateway itself. Off by default; nothing is written to disk."
-        actions={
-          <>
-            <Badge tone={enabled ? "pos" : "neutral"}>{enabled ? "capturing" : "off"}</Badge>
-            <Button variant={enabled ? "quiet" : "primary"} onClick={toggle} disabled={busy}>
-              {busy ? "saving…" : enabled ? "disable logging" : "enable logging"}
-            </Button>
-            <Button variant="quiet" onClick={clear} disabled={!enabled || entries.length === 0}>
-              clear
-            </Button>
-          </>
-        }
-      />
+  const subtitle =
+    "Platform events for debugging the gateway itself. Off by default; nothing is written to disk.";
+
+  const controls = (
+    <>
+      <Badge tone={enabled ? "pos" : "neutral"}>{enabled ? "capturing" : "off"}</Badge>
+      <Button variant={enabled ? "quiet" : "primary"} onClick={toggle} disabled={busy}>
+        {busy ? "Saving…" : enabled ? "Disable logging" : "Enable logging"}
+      </Button>
+      <Button variant="quiet" onClick={clear} disabled={!enabled || entries.length === 0}>
+        Clear
+      </Button>
+    </>
+  );
+
+  const body = (
+    <>
+      {embedded ? (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-body text-muted">{subtitle}</p>
+          <div className="flex flex-wrap items-center gap-2">{controls}</div>
+        </div>
+      ) : (
+        <PageHeader
+          title="System logs"
+          subtitle={subtitle}
+          actions={
+            <>
+              <Link
+                to="/system/health"
+                className="inline-flex h-8 items-center rounded-full border border-line bg-surface px-3 text-body text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg"
+              >
+                System health →
+              </Link>
+              {controls}
+            </>
+          }
+        />
+      )}
 
       {failure ? (
         <div className="mb-4">
@@ -169,16 +192,16 @@ export default function SystemLogs() {
           </div>
         ) : (
           <div ref={scroller} className="max-h-[560px] overflow-y-auto border-t border-line">
-            <div className="divide-y divide-[var(--color-rule)] font-mono text-caption">
+            <div className="divide-y divide-[var(--color-rule)] font-mono text-caption tnum">
               {entries.map((entry) => (
-                <div key={entry.id} className="flex gap-3 px-4 py-2 hover:bg-surface-2">
-                  <span className="shrink-0 text-faint">{clock(entry.ts)}</span>
+                <div key={entry.id} className="flex gap-3 px-4 py-2 tnum hover:bg-surface-2">
+                  <span className="shrink-0 text-faint tnum">{clock(entry.ts)}</span>
                   <span
                     className={cx("w-[42px] shrink-0 font-semibold", LEVEL_TONE[entry.level] ?? "text-muted")}
                   >
                     {entry.level}
                   </span>
-                  <span className="min-w-0 flex-1 break-words text-fg">{entry.message}</span>
+                  <span className="min-w-0 flex-1 break-words text-fg tnum">{entry.message}</span>
                   <span className="hidden max-w-[220px] shrink-0 truncate text-faint min-[900px]:block">
                     {entry.target}
                   </span>
@@ -188,6 +211,11 @@ export default function SystemLogs() {
           </div>
         )}
       </Card>
-    </div>
+    </>
   );
+
+  if (embedded) return body;
+  return <div className="mx-auto max-w-[1160px]">{body}</div>;
 }
+
+export default SystemLogs;

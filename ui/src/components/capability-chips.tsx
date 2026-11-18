@@ -76,7 +76,7 @@ export function CapabilityChips({
               align="end"
               sideOffset={4}
               aria-label={`Hidden capabilities${who}`}
-              className="popover-panel z-50 w-64 rounded-[var(--radius-card)] border border-line bg-surface p-2 shadow-lg focus:outline-none"
+              className="popover-panel z-[var(--z-popover-portal)] w-64 rounded-[var(--radius-card)] border border-line-strong bg-surface p-2 shadow-[var(--shadow-popover)] focus:outline-none"
             >
               <p className="px-1.5 pb-1 text-caption font-semibold uppercase tracking-[0.08em] text-faint">
                 Also supports

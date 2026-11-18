@@ -10,6 +10,7 @@ import {
   CopyChip,
   Input,
   PageHeader,
+  Segmented,
   cx,
 } from "../components/ui";
 import { ConnectionCard } from "../components/connection-card";
@@ -426,43 +427,6 @@ function Sample({ code, label }: { code: string; label: string }) {
   );
 }
 
-function Segmented<T extends string>({
-  options,
-  value,
-  onChange,
-  label,
-}: {
-  options: ReadonlyArray<{ id: T; label: string }>;
-  value: T;
-  onChange: (value: T) => void;
-  label: string;
-}) {
-  return (
-    <div
-      role="group"
-      aria-label={label}
-      className="inline-flex flex-wrap gap-0.5 rounded-full border border-line bg-surface-3 p-0.5"
-    >
-      {options.map((option) => (
-        <button
-          key={option.id}
-          type="button"
-          aria-pressed={value === option.id}
-          onClick={() => onChange(option.id)}
-          className={cx(
-            "h-7 rounded-full px-2.5 text-small transition-colors max-[820px]:h-9",
-            value === option.id
-              ? "bg-accent font-medium text-[var(--color-accent-ink)]"
-              : "text-muted hover:text-fg",
-          )}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 function Step({
   number,
   title,
@@ -510,7 +474,7 @@ export default function QuickStart() {
   const openai = `${origin}/v1`;
   const key = apiKey.trim() || "sk-rr-...";
 
-  const requestedTool = params.get("tool");
+  const requestedTool = params.get("tool") ?? params.get("client");
   const guide = RECIPES.find((recipe) => recipe.id === requestedTool) ?? RECIPES[0]!;
   const requestedProtocol = params.get("api") as Protocol | null;
   const protocol = guide.protocols.includes(requestedProtocol as Protocol)
@@ -570,10 +534,10 @@ export default function QuickStart() {
                 keyRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
               }
             >
-              create API key
+              Create API key
             </Button>
           ) : (
-            <Badge>ask an administrator for a key</Badge>
+            <Badge>Ask an administrator for a key</Badge>
           )
         }
       />
@@ -604,10 +568,10 @@ export default function QuickStart() {
               {apiKey.trim() ? <CopyButton value={apiKey.trim()} label="Copy key" /> : null}
               {isAdmin ? (
                 <Button variant="primary" onClick={() => setCreatingKey(true)}>
-                  {apiKey.trim() ? "create another" : "create key"}
+                  {apiKey.trim() ? "Create another" : "Create key"}
                 </Button>
               ) : (
-                <Badge>ask an administrator for a key</Badge>
+                <Badge>Ask an administrator for a key</Badge>
               )}
             </div>
           </div>
@@ -771,7 +735,7 @@ export default function QuickStart() {
                   </div>
                   {guide.protocols.length > 1 ? (
                     <Segmented
-                      label="Wire format"
+                      ariaLabel="Wire format"
                       value={protocol}
                       onChange={(next) => update({ api: next })}
                       options={guide.protocols.map((id) => ({ id, label: PROTOCOL_LABELS[id] }))}
@@ -791,7 +755,7 @@ export default function QuickStart() {
                       </span>
                       {showOs ? (
                         <Segmented
-                          label="Operating system"
+                          ariaLabel="Operating system"
                           value={os}
                           onChange={(next) => update({ os: next })}
                           options={OSES.map((id) => ({ id, label: OS_LABELS[id] }))}

@@ -1,9 +1,14 @@
-import { useEffect, useRef, type ReactNode } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
-import { Badge, Button, CopyButton, CopyChip, ErrorNote, StatusPill, cx, statusText } from "../../components/ui";
+import { type ReactNode } from "react";
+import { Badge, Button, cx } from "../../components/ui";
 import { compact, ms, splitRef, usd, when } from "../../lib/format";
-import { useUsageDetail } from "../../lib/queries";
 import type { UsageEvent } from "../../lib/api";
+
+export {
+  curlFor,
+  RequestInspectorDrawer,
+  RequestInspectorDrawer as RequestDetailDialog,
+  type RequestInspectorDrawerProps,
+} from "../../components/request-inspector-drawer";
 
 /** Master/detail for one request: what it cost, how long it took, where it went. */
 
@@ -42,7 +47,7 @@ export function RequestLog({
   }
 
   return (
-    <div className="min-w-0">
+    <div className="min-w-0" data-log-table>
       <div className="overflow-x-auto">
         <div role="table" aria-label="request log" className="min-w-[880px]">
           <div
@@ -88,10 +93,12 @@ export function RequestLog({
                 className={cx(
                   GRID,
                   "cursor-pointer border-b border-[var(--color-rule)] px-6 py-2.5 text-body last:border-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text",
-                  selected ? "bg-[var(--color-surface-2)]" : "hover:bg-[var(--color-row-hover)]",
+                  selected
+                    ? "bg-[var(--color-selected)] shadow-[inset_2px_0_0_var(--color-fg)]"
+                    : "hover:bg-[var(--color-row-hover)]",
                 )}
               >
-                <span role="cell" className="font-mono text-small text-muted" title={when(row.ts)}>
+                <span role="cell" className="font-mono text-small text-muted tnum" title={when(row.ts)}>
                   {new Date(row.ts * 1000).toLocaleTimeString(undefined, {
                     hour: "2-digit",
                     minute: "2-digit",
@@ -134,7 +141,7 @@ export function RequestLog({
                 </span>
                 <span role="cell">
                   <Badge tone={failed ? "neg" : "pos"} title={row.error ?? undefined}>
-                    <span className="font-mono">{row.status || "err"}</span>
+                    <span className="font-mono tnum">{row.status || "err"}</span>
                   </Badge>
                 </span>
               </div>
@@ -143,7 +150,7 @@ export function RequestLog({
         </div>
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-6 py-2.5 text-small text-faint">
-        <span>
+        <span className="tnum">
           Showing {visible.length} of {total}
         </span>
         {total > 8 ? (
@@ -160,320 +167,4 @@ export function cacheLabel(row: UsageEvent): string {
   if (row.cache_read_tokens > 0) return "hit";
   if (row.cache_write_tokens > 0) return "write";
   return "miss";
-}
-
-export function RequestDetail({
-  row,
-  onClose,
-  baseUrl,
-  keyNames,
-  providerName,
-}: {
-  row: UsageEvent;
-  onClose: () => void;
-  baseUrl: string;
-  /** Key id -> key name; ids missing from the roster print as a dash. */
-  keyNames?: Map<string, string>;
-  /** Connection label for this request, falling back to its recorded provider. */
-  providerName?: string;
-}) {
-  const failed = row.status >= 400 || row.error !== null;
-  const endpoint = row.endpoint ?? "/v1/chat/completions";
-  // Only streamed requests measure a first output, and only when it arrived before
-  // the stream ended; otherwise the split would be an invention.
-  const measured = !failed && row.ttft_ms > 0 && row.ttft_ms < row.latency_ms;
-  const generation = row.latency_ms - row.ttft_ms;
-  // The phases add up to the stored latency: upstream headers, model wait, generation.
-  const phased = measured && row.upstream_ms > 0 && row.upstream_ms <= row.ttft_ms;
-  const waitMs = phased ? row.ttft_ms - row.upstream_ms : 0;
-
-  const detail = useUsageDetail(row.request_id || null);
-  const { refetch } = detail;
-  // Attempts land when the request finishes, so reload on the transition from the
-  // in-flight status the log polled to the final one. Selecting another row is
-  // already a fresh query and must not double-fetch.
-  const seen = useRef({ id: row.request_id, status: row.status });
-  useEffect(() => {
-    const prev = seen.current;
-    seen.current = { id: row.request_id, status: row.status };
-    if (prev.id === row.request_id && prev.status !== row.status) void refetch();
-  }, [row.request_id, row.status, refetch]);
-
-  const attempts = detail.data?.attempts ?? [];
-  // Status 0 means the attempt got no response at all, so it is a failure too.
-  const failedAttempts = attempts.filter(
-    (a) => a.status === 0 || a.status >= 400 || a.error !== null,
-  );
-  const showAttempts =
-    row.request_id !== "" &&
-    (detail.isPending || detail.isError || attempts.length > 1 || failedAttempts.length > 0);
-  return (
-    <aside aria-label="request detail" className="min-w-0">
-      <div className="flex items-start gap-2 border-b border-line px-5 py-3">
-        <div className="min-w-0 flex-1">
-          <div
-            className="truncate font-mono text-caption text-faint"
-            title={row.request_id || undefined}
-          >
-            {row.request_id ? `request ${row.request_id.slice(0, 8)}` : "request"}
-          </div>
-          <div className="mt-1 truncate text-lead font-semibold">
-            {(() => {
-              const { provider, id } = splitRef(row.model);
-              return provider ? (
-                <>
-                  <span className="text-faint">{provider}/</span>
-                  {id}
-                </>
-              ) : (
-                row.model
-              );
-            })()}
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="close request detail"
-          className="shrink-0 rounded-lg p-1 text-muted hover:bg-surface-2 hover:text-fg"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-            <path d="M6 6l12 12M18 6L6 18" />
-          </svg>
-        </button>
-      </div>
-
-      <div className="space-y-3 px-5 py-4">
-        <StatusPill status={row.status} title={row.error ?? undefined} />
-
-        {failed ? (
-          <div className="rounded-lg border border-[var(--color-neg)]/30 bg-[var(--color-neg)]/10 px-3 py-2 text-small text-[var(--color-neg-ink)]">
-            {row.error ?? `upstream answered ${row.status} ${statusText(row.status)}`}
-          </div>
-        ) : (
-          <>
-            <div className="text-body text-muted">
-              Latency <span className="font-mono text-fg tnum">{ms(row.latency_ms)}</span>
-              {row.streamed ? <span className="text-faint"> · streamed</span> : null}
-            </div>
-            {measured ? (
-              phased ? (
-                <div>
-                  <div className="text-small text-faint">
-                    First output <span className="font-mono tnum">{ms(row.ttft_ms)}</span> ·
-                    generation <span className="font-mono tnum">{ms(generation)}</span>
-                  </div>
-                  <div
-                    aria-hidden
-                    className="mt-2 flex h-2 overflow-hidden rounded-full bg-[var(--color-rule)]"
-                    title="connect and headers, model wait, generation"
-                  >
-                    <span
-                      className="bg-[var(--color-series-3)]"
-                      style={{ width: `${(row.upstream_ms / row.latency_ms) * 100}%` }}
-                    />
-                    <span
-                      className="bg-accent"
-                      style={{ width: `${(waitMs / row.latency_ms) * 100}%` }}
-                    />
-                    <span
-                      className="bg-[var(--color-pos)]"
-                      style={{ width: `${(generation / row.latency_ms) * 100}%` }}
-                    />
-                  </div>
-                  <dl className="mt-2 grid grid-cols-[auto_1fr_auto] items-center gap-x-2 gap-y-1 text-caption">
-                    {[
-                      ["connect + headers", row.upstream_ms, "var(--color-series-3)"],
-                      ["model → first token", waitMs, "var(--color-accent)"],
-                      ["generation", generation, "var(--color-pos)"],
-                    ].map(([label, value, color]) => (
-                      <div key={String(label)} className="contents">
-                        <span
-                          aria-hidden
-                          className="h-2 w-2 rounded-full"
-                          style={{ backgroundColor: String(color) }}
-                        />
-                        <span className="text-muted">{label}</span>
-                        <span className="text-right font-mono text-fg tnum">{ms(Number(value))}</span>
-                      </div>
-                    ))}
-                  </dl>
-                </div>
-              ) : (
-                <div>
-                  <div className="text-small text-faint">
-                    First output <span className="font-mono tnum">{ms(row.ttft_ms)}</span> · generation{" "}
-                    <span className="font-mono tnum">{ms(generation)}</span>
-                  </div>
-                  <div
-                    className="mt-1.5 flex h-1.5 overflow-hidden rounded-full bg-[var(--color-rule)]"
-                    title="time to first output vs generation"
-                  >
-                    <span
-                      aria-hidden
-                      className="bg-accent"
-                      style={{ width: `${(row.ttft_ms / row.latency_ms) * 100}%` }}
-                    />
-                  </div>
-                </div>
-              )
-            ) : null}
-          </>
-        )}
-
-        <dl className="divide-y divide-[var(--color-rule)] text-body">
-          <Row k="When" v={when(row.ts)} />
-          <Row k="Provider" v={providerName ?? row.provider} />
-          <Row k="API key" v={(row.key_id ? keyNames?.get(row.key_id) : undefined) ?? "—"} />
-          {row.requested_model && row.requested_model !== row.model ? (
-            <Row k="Requested" v={row.requested_model} mono />
-          ) : null}
-          {row.endpoint ? (
-            <Row k="Endpoint" v={`${row.method} ${row.endpoint}`} mono />
-          ) : null}
-          {row.protocol ? <Row k="Protocol" v={row.protocol} mono /> : null}
-          <Row k="Tokens" v={failed ? "—" : `${row.input_tokens} in · ${row.output_tokens} out`} mono />
-          {row.reasoning_tokens > 0 || row.reasoning_effort ? (
-            <Row
-              k="Reasoning"
-              v={[
-                row.reasoning_effort ?? "unknown effort",
-                `${row.reasoning_tokens} tokens`,
-              ].join(" · ")}
-              mono
-            />
-          ) : null}
-          <Row k="Finish" v={row.finish_reason ?? "—"} mono />
-          <Row k="Cost" v={usd(row.cost_micros, { dash: true })} mono />
-          <Row k="Cache" v={failed ? "—" : `${row.cache_read_tokens} read · ${row.cache_write_tokens} write`} mono />
-          <Row k="Connection" v={row.connection_id ?? "—"} mono />
-          {row.session_id ? <Row k="Session" v={row.session_id} mono /> : null}
-        </dl>
-
-        {showAttempts ? (
-          <section aria-label="attempts" className="space-y-2">
-            <div className="flex items-baseline justify-between gap-2">
-              <h3 className="text-small font-medium text-muted">Attempts</h3>
-              {attempts.length > 1 ? (
-                <span className="text-caption text-faint">{attempts.length} in dispatch order</span>
-              ) : null}
-            </div>
-            {detail.isError ? (
-              <ErrorNote error={detail.error} onRetry={() => void detail.refetch()} />
-            ) : detail.isPending ? (
-              <div aria-hidden className="rounded-lg border border-line px-3 py-2.5">
-                <div className="h-3 w-2/3 rounded bg-[var(--color-surface-2)]" />
-              </div>
-            ) : (
-              <ol className="divide-y divide-[var(--color-rule)] rounded-lg border border-line">
-                {attempts.map((attempt, i) => {
-                  const attemptFailed = failedAttempts.includes(attempt);
-                  const { provider, id } = splitRef(attempt.model);
-                  const served = !attemptFailed && i === attempts.length - 1;
-                  return (
-                    <li key={attempt.attempt} className="px-3 py-2">
-                      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-small">
-                        <span className="font-mono text-faint tnum">#{attempt.attempt}</span>
-                        <span className="min-w-0 flex-1 truncate font-mono">
-                          <span className="text-faint">{provider ?? attempt.provider}/</span>
-                          {id}
-                        </span>
-                        <span aria-hidden className="text-faint">
-                          ·
-                        </span>
-                        <Badge
-                          tone={attemptFailed ? "neg" : "pos"}
-                          title={
-                            attempt.status === 0
-                              ? "no response: transport failure or open breaker"
-                              : statusText(attempt.status)
-                          }
-                        >
-                          <span className="font-mono">{attempt.status || "err"}</span>
-                        </Badge>
-                        <span aria-hidden className="text-faint">
-                          ·
-                        </span>
-                        <span className="font-mono text-muted tnum">{ms(attempt.latency_ms)}</span>
-                        {served ? <span className="text-caption text-faint">served</span> : null}
-                      </div>
-                      {attemptFailed && attempt.error ? (
-                        <p className="mt-1 break-words text-small leading-[1.45] text-neg">
-                          {attempt.error}
-                        </p>
-                      ) : null}
-                    </li>
-                  );
-                })}
-              </ol>
-            )}
-          </section>
-        ) : null}
-
-        <div className="flex flex-wrap items-center gap-2 pt-1">
-          {row.request_id ? (
-            <CopyChip value={row.request_id} label="request ID" />
-          ) : null}
-          <CopyButton
-            value={curlFor(baseUrl, endpoint, row.model)}
-            label="Copy as cURL"
-          />
-        </div>
-      </div>
-    </aside>
-  );
-}
-
-/** The detail slides in from the right, matching every other inspector. */
-export function RequestDetailDialog({
-  row,
-  onClose,
-  baseUrl,
-  keyNames,
-  providerName,
-}: {
-  row: UsageEvent;
-  onClose: () => void;
-  baseUrl: string;
-  keyNames?: Map<string, string>;
-  providerName?: string;
-}) {
-  return (
-    <Dialog.Root open onOpenChange={(next) => { if (!next) onClose(); }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-[rgba(16,18,20,0.38)] backdrop-blur-[1.5px]" />
-        <Dialog.Content className="drawer-panel fixed inset-y-0 right-0 z-50 h-full w-full max-w-[560px] overflow-y-auto border-l border-line bg-surface shadow-[0_24px_64px_rgba(16,18,20,0.22)] focus:outline-none">
-          <Dialog.Title className="sr-only">Request detail</Dialog.Title>
-          <Dialog.Description className="sr-only">
-            One gateway request, its timing, attempts and error.
-          </Dialog.Description>
-          <RequestDetail row={row} onClose={onClose} baseUrl={baseUrl} keyNames={keyNames} providerName={providerName} />
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
-}
-
-function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
-  return (
-    <div className="flex items-center justify-between gap-3 py-2">
-      <dt className="text-faint">{k}</dt>
-      <dd className={cx("min-w-0 truncate text-right text-muted", mono && "font-mono text-small")}>{v}</dd>
-    </div>
-  );
-}
-
-/** A replay command for the endpoint this request used; the key stays a placeholder. */
-export function curlFor(baseUrl: string, endpoint: string, model: string): string {
-  const base = baseUrl.replace(/\/$/, "");
-  if (endpoint === "/v1/messages") {
-    return `curl -s ${base}/v1/messages -H "x-api-key: sk-rr-..." -H "content-type: application/json" -d '{"model":"${model}","max_tokens":64,"messages":[{"role":"user","content":"ping"}]}'`;
-  }
-  if (endpoint === "/v1/responses") {
-    return `curl -s ${base}/v1/responses -H "Authorization: Bearer sk-rr-..." -H "content-type: application/json" -d '{"model":"${model}","input":"ping","store":false}'`;
-  }
-  if (endpoint === "/v1/embeddings") {
-    return `curl -s ${base}/v1/embeddings -H "Authorization: Bearer sk-rr-..." -H "content-type: application/json" -d '{"model":"${model}","input":"ping"}'`;
-  }
-  return `curl -s ${base}/v1/chat/completions -H "Authorization: Bearer sk-rr-..." -H "content-type: application/json" -d '{"model":"${model}","messages":[{"role":"user","content":"ping"}]}'`;
 }

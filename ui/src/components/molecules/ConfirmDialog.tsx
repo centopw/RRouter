@@ -31,8 +31,8 @@ export function ConfirmDialog({
   return (
     <AlertDialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <AlertDialog.Portal>
-        <AlertDialog.Overlay className="fixed inset-0 z-50 bg-[rgba(16,18,20,0.48)] backdrop-blur-[1.5px]" />
-        <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(92vw,520px)] -translate-x-1/2 -translate-y-1/2 rounded-[12px] border border-line bg-surface p-5 shadow-[0_24px_64px_rgba(16,18,20,0.22)] focus:outline-none">
+        <AlertDialog.Overlay className="fixed inset-0 z-[var(--z-modal)] bg-[var(--color-scrim-modal)] backdrop-blur-[1.5px]" />
+        <AlertDialog.Content className="dialog-panel fixed left-1/2 top-1/2 z-[var(--z-modal)] w-[min(92vw,520px)] -translate-x-1/2 -translate-y-1/2 rounded-[var(--radius-overlay)] border border-line bg-surface p-5 shadow-[var(--shadow-modal)] focus:outline-none">
           <AlertDialog.Title className="text-heading font-semibold leading-tight text-fg">
             {title}
           </AlertDialog.Title>
@@ -51,16 +51,11 @@ export function ConfirmDialog({
           ) : null}
           <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
             <AlertDialog.Cancel asChild>
-              <Button disabled={busy}>cancel</Button>
+              <Button disabled={busy}>Cancel</Button>
             </AlertDialog.Cancel>
-            <button
-              type="button"
-              onClick={onConfirm}
-              disabled={busy}
-              className="inline-flex h-8 items-center gap-1.5 rounded-full bg-[var(--color-neg-fill)] px-3.5 text-body font-semibold text-white transition-colors hover:bg-[var(--color-neg)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:cursor-not-allowed"
-            >
-              {busy ? "working…" : confirmLabel}
-            </button>
+            <Button variant="danger" loading={busy} onClick={onConfirm}>
+              {busy ? "Working…" : confirmLabel}
+            </Button>
           </div>
         </AlertDialog.Content>
       </AlertDialog.Portal>

@@ -155,11 +155,18 @@ export function useUnifiedColumns({
         srOnlyTitle: true,
         align: "right",
         // Test + delete (custom only) + overflow, plus the cell's horizontal padding.
-        width: "8.5rem",
+        width: "10.5rem",
         render: (row) => {
           if (row.kind !== "model") {
             return (
-              <div className="flex items-center justify-end gap-1.5">
+              <div className="flex items-center justify-end gap-2">
+                <Link
+                  to={`/playground/chat?model=${encodeURIComponent(row.name)}`}
+                  className="text-caption text-accent-text underline underline-offset-2"
+                  title={`Test ${row.name} in Playground`}
+                >
+                  Test
+                </Link>
                 {editable ? (
                   <Button
                     variant="quiet"
@@ -172,7 +179,7 @@ export function useUnifiedColumns({
                   </Button>
                 ) : null}
                 <Link
-                  to={row.kind === "alias" ? "/routing/aliases" : "/routing/combos"}
+                  to={`${row.kind === "alias" ? "/routing/aliases" : "/routing/combos"}?edit=${encodeURIComponent(row.name)}`}
                   className="text-caption text-accent-text underline underline-offset-2"
                 >
                   edit

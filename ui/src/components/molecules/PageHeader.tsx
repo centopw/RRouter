@@ -1,5 +1,7 @@
 import { type ReactNode } from "react";
-import { Heading, Inline, Text } from "../atoms";
+import { Heading } from "../atoms/Heading";
+import { Inline } from "../atoms/Inline";
+import { Text } from "../atoms/Text";
 
 export function PageHeader({
   title,

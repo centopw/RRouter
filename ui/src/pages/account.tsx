@@ -82,10 +82,10 @@ export default function Account() {
       title: "signed in",
       render: (row) => (
         <div className="flex flex-col">
-          <span className="whitespace-nowrap text-muted">{when(row.created_at)}</span>
+          <span className="whitespace-nowrap text-muted tnum">{when(row.created_at)}</span>
           {/* Below md the expiry column is hidden and folds in here, so a phone keeps
               both timestamps without a second column pushing the device off-screen. */}
-          <span className="whitespace-nowrap text-caption text-faint md:hidden">
+          <span className="whitespace-nowrap text-caption text-faint tnum md:hidden">
             expires {when(row.expires_at)}
           </span>
         </div>
@@ -95,7 +95,7 @@ export default function Account() {
       key: "expires",
       title: "expires",
       className: "hidden md:table-cell",
-      render: (row) => <span className="whitespace-nowrap text-muted">{when(row.expires_at)}</span>,
+      render: (row) => <span className="whitespace-nowrap text-muted tnum">{when(row.expires_at)}</span>,
     },
     {
       key: "current",
@@ -219,7 +219,7 @@ export default function Account() {
                   <p className="mt-1 text-small text-fg">
                     {currentSession.device_label ?? "Unknown device"}
                   </p>
-                  <p className="mt-1 text-caption text-muted">
+                  <p className="mt-1 text-caption text-muted tnum">
                     Signed in {when(currentSession.created_at)} · expires{" "}
                     {when(currentSession.expires_at)}
                   </p>
@@ -234,11 +234,11 @@ export default function Account() {
                     ) : null}
                     <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
                       {currentSession.ip ? (
-                        <span className="font-mono" title="address that created this session">
+                        <span className="font-mono tnum" title="address that created this session">
                           {currentSession.ip}
                         </span>
                       ) : null}
-                      <span className="font-mono" title="session reference">
+                      <span className="font-mono tnum" title="session reference">
                         {shortRef(currentSession.id)}
                       </span>
                     </span>
@@ -315,11 +315,11 @@ function SessionDevice({ session, clamped = false }: { session: SessionRow; clam
       ) : null}
       <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-caption text-faint">
         {session.ip ? (
-          <span className="shrink-0 font-mono" title="address that created this session">
+          <span className="shrink-0 font-mono tnum" title="address that created this session">
             {session.ip}
           </span>
         ) : null}
-        <span className="min-w-0 truncate font-mono" title="session reference">
+        <span className="min-w-0 truncate font-mono tnum" title="session reference">
           {shortRef(session.id)}
         </span>
       </span>
@@ -368,7 +368,7 @@ function SessionCards({
           className="border-b border-[var(--color-rule)] px-5 py-3 last:border-b-0"
         >
           <SessionDevice session={session} />
-          <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-caption text-muted">
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-caption text-muted tnum">
             <span>
               signed in <span className="whitespace-nowrap">{when(session.created_at)}</span>
             </span>

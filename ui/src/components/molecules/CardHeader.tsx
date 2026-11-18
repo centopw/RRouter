@@ -1,5 +1,5 @@
 import { type ReactNode } from "react";
-import { Heading } from "../atoms";
+import { Heading } from "../atoms/Heading";
 
 /** Section header used inside cards: title on the left, an action on the right. */
 export function CardHeader({ title, action }: { title: string; action?: ReactNode }) {

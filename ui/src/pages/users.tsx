@@ -89,7 +89,7 @@ export default function Users() {
       key: "last",
       title: "last sign in",
       render: (u) => (
-        <span className="text-muted">{u.last_sign_in_at ? when(u.last_sign_in_at) : "never"}</span>
+        <span className="text-muted tnum">{u.last_sign_in_at ? when(u.last_sign_in_at) : "never"}</span>
       ),
     },
     {
@@ -103,7 +103,7 @@ export default function Users() {
             onClick={() => update.mutate({ id: u.id, patch: { disabled: !u.disabled } })}
             title={u.is_owner ? "the owner cannot be disabled" : undefined}
           >
-            {u.disabled ? "enable" : "disable"}
+            {u.disabled ? "Enable" : "Disable"}
           </Button>
           <Button
             variant="danger"
@@ -114,7 +114,7 @@ export default function Users() {
               setRemoving(u);
             }}
           >
-            remove
+            Remove
           </Button>
         </span>
       ),
@@ -127,7 +127,7 @@ export default function Users() {
     {
       key: "expires",
       title: "expires",
-      render: (i) => <span className="text-muted">{when(i.expires_at)}</span>,
+      render: (i) => <span className="text-muted tnum">{when(i.expires_at)}</span>,
     },
     {
       key: "actions",
@@ -142,7 +142,7 @@ export default function Users() {
             setRevoking(i);
           }}
         >
-          revoke
+          Revoke
         </Button>
       ),
     },
@@ -155,7 +155,7 @@ export default function Users() {
         subtitle="Accounts that can sign in to this dashboard. Gateway API keys are separate, on the Keys page."
         actions={
           <Button variant="primary" onClick={() => setInviting(true)}>
-            invite someone
+            Invite someone
           </Button>
         }
       />
@@ -215,7 +215,7 @@ export default function Users() {
       <Card>
         <CardHeader
           title="Accounts"
-          action={<span className="text-caption text-faint">{users.data?.length ?? 0} total</span>}
+          action={<span className="text-caption text-faint tnum">{users.data?.length ?? 0} total</span>}
         />
         <DataTable
           columns={columns}
@@ -230,7 +230,7 @@ export default function Users() {
         <Card>
           <CardHeader
             title="Invitations"
-            action={<span className="text-caption text-faint">single use · expire in 7 days</span>}
+            action={<span className="text-caption text-faint tnum">single use · expire in 7 days</span>}
           />
           <DataTable
             columns={inviteColumns}
@@ -294,7 +294,7 @@ function InviteModal({
       onClose={onClose}
       footer={
         <>
-          <Button onClick={onClose}>close</Button>
+          <Button onClick={onClose}>Close</Button>
           <Button
             variant="primary"
             disabled={create.isPending || email.trim() === ""}
@@ -303,7 +303,7 @@ function InviteModal({
               form?.requestSubmit();
             }}
           >
-            {create.isPending ? "creating…" : "create invitation"}
+            {create.isPending ? "Creating…" : "Create invitation"}
           </Button>
         </>
       }

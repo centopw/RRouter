@@ -10,7 +10,7 @@ import {
 import * as Popover from "@radix-ui/react-popover";
 import { cx } from "../../lib/cx";
 import { CaretDown, Check, MagnifyingGlass, X } from "@phosphor-icons/react";
-import { control } from "./Input";
+import { control, controlInvalid } from "./Input";
 
 type Option = { value: string; label: string; group?: string; disabled?: boolean };
 
@@ -35,8 +35,8 @@ function readOptions(children: ReactNode, group?: string): Option[] {
 
 /**
  * Searchable dropdown on Radix Popover. Same `value`/`onChange`/`<option>` surface as
- * before and the same filter-as-you-type behaviour, but positioning, outside dismissal
- * and focus containment come from Radix rather than a hand-rolled portal.
+ * before and the same filter-as-you-type behaviour, with positioning, outside dismissal
+ * and focus containment from Radix.
  */
 export function Select({
   value,
@@ -44,6 +44,9 @@ export function Select({
   children,
   ariaLabel,
   disabled,
+  invalid = false,
+  id,
+  "aria-describedby": ariaDescribedBy,
   className,
   plain = false,
   footer,
@@ -53,6 +56,9 @@ export function Select({
   children: ReactNode;
   ariaLabel: string;
   disabled?: boolean;
+  invalid?: boolean;
+  id?: string;
+  "aria-describedby"?: string;
   className?: string;
   /** Borderless trigger for a composer: the menu still has the full popover. */
   plain?: boolean;
@@ -62,10 +68,6 @@ export function Select({
   const options = useMemo(() => readOptions(children), [children]);
   const selected = options.find((option) => option.value === value);
   const [open, setOpen] = useState(false);
-  // Focus is tracked in state: the global `:focus-visible` rule and the layered utility
-  // variants fight over the trigger (the rule is unlayered, so it wins), and a plain
-  // conditional class is the one form that renders reliably.
-  const [focused, setFocused] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -149,35 +151,23 @@ export function Select({
     >
       <Popover.Trigger asChild>
         <button
+          id={id}
           ref={trigger}
           type="button"
           disabled={disabled}
           aria-label={ariaLabel}
+          aria-invalid={invalid || undefined}
+          aria-describedby={ariaDescribedBy}
           aria-haspopup="listbox"
           aria-expanded={open}
           aria-controls={open ? listId : undefined}
           onKeyDown={onKeyDown}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          // Inline, because the global unlayered `:focus-visible` rule and the utility
-          // cascade both outrank conditional classes here (the arbitrary variants were
-          // generated but lost). Inline styles win, and the ring stays the blue accent.
-          style={
-            focused
-              ? {
-                  borderColor: "var(--color-accent-2)",
-                  boxShadow: plain
-                    ? "0 0 0 2px rgba(12, 102, 228, 0.18)"
-                    : "0 0 0 2px rgba(12, 102, 228, 0.25)",
-                }
-              : undefined
-          }
           className={cx(
             plain
-              ? "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-full border border-transparent bg-transparent px-2 text-left text-small text-ink-soft hover:bg-surface-3 focus-visible:outline-none! outline-0!"
-              : control,
-            !plain && "flex items-center justify-between gap-2 text-left focus-visible:outline-none! outline-0!",
-            !plain && open && "border-[var(--color-accent-2)]",
+              ? "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-full border border-transparent bg-transparent px-2 text-left text-small text-ink-soft hover:bg-surface-3 focus-visible:border-[var(--color-focus-ring)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)]/20"
+              : cx(control, "flex items-center justify-between gap-2 text-left"),
+            !plain && open && "border-[var(--color-focus-ring)] ring-2 ring-[var(--color-focus-ring)]/25",
+            !plain && invalid && controlInvalid,
             className,
           )}
         >
@@ -194,11 +184,11 @@ export function Select({
           sideOffset={6}
           collisionPadding={12}
           sticky="always"
-          className="z-[70] max-w-[min(360px,calc(100vw-24px))] overflow-hidden rounded-[10px] border border-line-strong bg-surface shadow-[0_16px_40px_rgba(16,18,20,0.18)] focus:outline-none"
+          className="popover-panel z-[var(--z-popover-portal)] max-w-[min(360px,calc(100vw-24px))] overflow-hidden rounded-[var(--radius-overlay)] border border-[var(--color-line-strong)] bg-surface shadow-[var(--shadow-popover)] focus:outline-none"
           style={{ width: "min(360px, max(220px, var(--radix-popover-trigger-width)))" }}
         >
           {options.length > 4 ? (
-            <div className="flex items-center gap-2 border-b border-line bg-surface px-2.5 py-2 focus-within:border-accent-text focus-within:ring-2 focus-within:ring-[var(--color-accent-text)]/20">
+            <div className="flex items-center gap-2 border-b border-line bg-surface px-2.5 py-2 focus-within:border-[var(--color-focus-ring)] focus-within:ring-2 focus-within:ring-[var(--color-focus-ring)]/20">
               <MagnifyingGlass size={14} aria-hidden className="text-faint" />
               <input
                 autoFocus
@@ -211,7 +201,7 @@ export function Select({
                 placeholder="filter…"
                 aria-label={`filter ${ariaLabel}`}
                 aria-controls={listId}
-                className="h-6 w-full bg-transparent text-small text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none! outline-0!"
+                className="h-6 w-full bg-transparent text-small text-fg placeholder:text-faint focus:outline-none focus-visible:outline-none"
               />
               <X
                 size={13}
@@ -250,7 +240,7 @@ export function Select({
                         onMouseEnter={() => setActive(index)}
                         onClick={() => choose(option)}
                         className={cx(
-                          "flex w-full items-center gap-2 px-3 py-1.5 text-left text-small focus-visible:outline-none! outline-0!",
+                          "flex w-full items-center gap-2 px-3 py-1.5 text-left text-small focus-visible:outline-none",
                           index === active && "bg-[var(--color-selected)]",
                           option.value === value ? "font-medium text-fg" : "text-fg",
                           option.disabled && "cursor-not-allowed text-faint",

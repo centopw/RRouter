@@ -19,12 +19,14 @@ export default function Register() {
   const [params] = useSearchParams();
   const next = safeNext(params.get("next"));
   const [link, setLink] = useState("");
+  const [touched, setTouched] = useState(false);
   const token = inviteToken(link);
   const invalid = link.trim() !== "" && token.length < 8;
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (!token) return;
+    setTouched(true);
+    if (!token || invalid) return;
     const suffix = next !== "/" ? `?next=${encodeURIComponent(next)}` : "";
     navigate(`/invite/${encodeURIComponent(token)}${suffix}`, { replace: true });
   };
@@ -41,12 +43,13 @@ export default function Register() {
             label="Invitation link"
             htmlFor="register-link"
             hint="Looks like …/invite/abc123. The email and role come from the invitation."
-            problem={invalid ? "that does not look like an invitation link" : null}
+            problem={touched && invalid ? "that does not look like an invitation link" : null}
           >
             <AuthInput
               id="register-link"
               value={link}
               onChange={setLink}
+              onBlur={() => setTouched(true)}
               autoComplete="off"
               ariaLabel="invitation link"
               disabled={false}

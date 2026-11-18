@@ -1,5 +1,6 @@
 import { useId, type CSSProperties } from "react";
 import { cx } from "../lib/cx";
+import { useReducedMotion } from "../lib/media";
 
 export type BrandMarkState = "idle" | "dispatch" | "burst" | "failover" | "error";
 
@@ -15,7 +16,7 @@ export function BrandMark({
   state = "idle",
   angleDeg = 0,
   color,
-  surface = "light",
+  surface,
   decorative = false,
   className,
   ariaLabel = "RRouter — One endpoint. Smarter routing.",
@@ -26,27 +27,54 @@ export function BrandMark({
   angleDeg?: number;
   /** Egress colour for the switch arc; defaults to the mark's cyan. */
   color?: string;
+  /** Pin to light/dark palette; omit to follow the active theme tokens. */
   surface?: "light" | "dark";
   decorative?: boolean;
   className?: string;
   ariaLabel?: string;
 }) {
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  const reducedMotion = useReducedMotion();
   const p = `rrb${uid}`;
   const id = (name: string) => `${p}-${name}`;
   const cls = (name: string) => `${p}-${name}`;
   const arc = state === "error" ? "#EF4444" : state === "failover" ? "#10B981" : color ?? "#00B8FF";
 
-  const vars = {
-    "--rr-r-top": surface === "light" ? "#F8FAFC" : "#FFFFFF",
-    "--rr-r-mid": surface === "light" ? "#CBD5E1" : "#E2E9F7",
-    "--rr-r-bot": surface === "light" ? "#94A3B8" : "#B2C1E2",
-    "--rr-wm-top": surface === "light" ? "#1C2B42" : "#FFFFFF",
-    "--rr-wm-bot": surface === "light" ? "#44546F" : "#E7ECF7",
-    "--rr-tag-muted": surface === "light" ? "#626F86" : "#BCC8E0",
-  } as CSSProperties;
+  const vars = (surface === "light"
+    ? {
+        "--rr-r-top": "#F8FAFC",
+        "--rr-r-mid": "#CBD5E1",
+        "--rr-r-bot": "#94A3B8",
+        "--rr-wm-top": "#1C2B42",
+        "--rr-wm-bot": "#44546F",
+        "--rr-tag-muted": "#5A667C",
+      }
+    : surface === "dark"
+      ? {
+          "--rr-r-top": "#FFFFFF",
+          "--rr-r-mid": "#E2E9F7",
+          "--rr-r-bot": "#B2C1E2",
+          "--rr-wm-top": "#FFFFFF",
+          "--rr-wm-bot": "#E7ECF7",
+          "--rr-tag-muted": "#BCC8E0",
+        }
+      : {
+          "--rr-r-top": "var(--comp-brand-r-top, #F8FAFC)",
+          "--rr-r-mid": "var(--comp-brand-r-mid, #CBD5E1)",
+          "--rr-r-bot": "var(--comp-brand-r-bot, #94A3B8)",
+          "--rr-wm-top": "var(--comp-brand-wm-top, #1C2B42)",
+          "--rr-wm-bot": "var(--comp-brand-wm-bot, #44546F)",
+          "--rr-tag-muted": "var(--comp-brand-tag-muted, #5A667C)",
+        }) as CSSProperties;
 
-  const css = `
+  const staticCss = `
+    .${cls("s-top")},.${cls("s-bot")},.${cls("s-mid")},.${cls("r-body")},.${cls("r-leg")},.${cls("dg")},.${cls("t1")},.${cls("t2")},.${cls("dot")}{opacity:1;transform:none;animation:none}
+    #${id("logo")}[data-state="idle"] .${cls("s-top")},
+    #${id("logo")}[data-state="idle"] .${cls("s-bot")}{opacity:.78}
+    .${cls("spk")},.${cls("tip-glow")},.${cls("pk-top")},.${cls("pk-mid")},.${cls("pk-bot")},.${cls("r-glint")},.${cls("wm-glint")}{opacity:0;animation:none}
+  `;
+
+  const animatedCss = `
     .${cls("s-top")}{opacity:0;transform-box:fill-box;transform-origin:100% 50%;animation:sIn .52s cubic-bezier(.22,1.25,.36,1) 0s forwards}
     .${cls("s-bot")}{opacity:0;transform-box:fill-box;transform-origin:100% 50%;animation:sIn .52s cubic-bezier(.22,1.25,.36,1) .09s forwards}
     .${cls("s-mid")}{opacity:0;transform-box:fill-box;transform-origin:100% 50%;animation:aIn .58s cubic-bezier(.22,1.28,.36,1) .18s forwards}
@@ -115,6 +143,7 @@ export function BrandMark({
     @keyframes failoverSpark{0%{opacity:0;transform:scale(.2)}28%{opacity:1;transform:translate(15px,17px) scale(1)}100%{opacity:0;transform:translate(26px,31px) scale(.2)}}
     @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.${cls("s-top")},.${cls("s-bot")},.${cls("s-mid")},.${cls("r-body")},.${cls("r-leg")},.${cls("dg")},.${cls("t1")},.${cls("t2")},.${cls("dot")}{opacity:1!important;transform:none!important}.${cls("spk")},.${cls("tip-glow")},.${cls("pk-top")},.${cls("pk-mid")},.${cls("pk-bot")},.${cls("r-glint")},.${cls("wm-glint")}{opacity:0!important}}
   `;
+  const css = reducedMotion ? staticCss : animatedCss;
 
   return (
     <svg
@@ -236,7 +265,9 @@ export function BrandMark({
             style={{
               transformOrigin: "306px 128.5px",
               transform: `rotate(${angleDeg}deg)`,
-              transition: "transform .28s cubic-bezier(.22,1,.36,1),opacity .2s,stroke .2s",
+              transition: reducedMotion
+                ? "none"
+                : "transform .28s cubic-bezier(.22,1,.36,1),opacity .2s,stroke .2s",
             }}
           />
           <g pointerEvents="none">

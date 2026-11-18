@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   AlertBanner,
+  Badge,
   Button,
   Card,
+  Dot,
   ErrorNote,
   FilterChip,
   Segmented,
@@ -170,6 +172,24 @@ export default function Activity() {
   const selectedRow = selected
     ? { ...selected, model: splitModel(selected.provider, selected.model).name }
     : null;
+  const selectedIndex =
+    selectedId === null ? -1 : logRows.findIndex((row) => row.id !== null && row.id === selectedId);
+  const stepSelected = (delta: -1 | 1) => {
+    if (selectedIndex < 0) return;
+    const nextIndex = selectedIndex + delta;
+    const target = logRows[nextIndex];
+    if (!target || target.id === null) return;
+    if (nextIndex >= 8 && !showAll) setShowAll(true);
+    setSelectedId(target.id);
+  };
+
+  const degradedConnections = useMemo(
+    () =>
+      (connections.data ?? []).filter(
+        (c) => c.backoff_level > 0 || (c.is_active && Boolean(c.last_error?.trim())),
+      ),
+    [connections.data],
+  );
 
   const errorRate = cur.requests > 0 ? (cur.errors / cur.requests) * 100 : 0;
   const prevErrorRate = prev.requests > 0 ? (prev.errors / prev.requests) * 100 : 0;
@@ -181,11 +201,27 @@ export default function Activity() {
 
   const incident = incidentOf(rows);
   const incidentRef = incident ? splitModel(incident.provider, incident.model).ref : null;
-  const dominant = incidentRef
-    ? dominantStatus(events.filter((e) => isFailure(e) && splitModel(e.provider, e.model).ref === incidentRef))
-    : null;
+  const incidentFailures = useMemo(
+    () =>
+      incidentRef
+        ? events.filter((e) => isFailure(e) && splitModel(e.provider, e.model).ref === incidentRef)
+        : [],
+    [events, incidentRef],
+  );
+  const dominant = incidentRef ? dominantStatus(incidentFailures) : null;
   const showIncident = incident !== null && incidentRef !== dismissedIncident;
   const providerKnown = incident !== null && incident.provider !== "";
+  const incidentConnectionId = useMemo(() => {
+    if (!incident || !providerKnown) return null;
+    const fromEvent = incidentFailures.find((e) => e.connection_id)?.connection_id;
+    if (fromEvent) return fromEvent;
+    const matching = (connections.data ?? []).filter((c) => c.provider === incident.provider);
+    const degradedMatch = matching.find(
+      (c) => c.backoff_level > 0 || (c.is_active && Boolean(c.last_error?.trim())),
+    );
+    if (degradedMatch) return degradedMatch.id;
+    return matching.length === 1 ? (matching[0]?.id ?? null) : null;
+  }, [incident, providerKnown, incidentFailures, connections.data]);
   // The Logs page filters on the server and pages through every match, unlike the
   // 200-row Activity log, so an older incident is still fully reachable here.
   const failingLogHref = incident
@@ -193,7 +229,7 @@ export default function Activity() {
         const query = new URLSearchParams({
           status: "errors",
           range: rangeId === "30d" ? "all" : rangeId,
-          model: incident.model,
+          model: incidentRef ?? incident.model,
         });
         if (incident.provider) query.set("provider", incident.provider);
         return `/activity/logs?${query.toString()}`;
@@ -288,14 +324,23 @@ export default function Activity() {
                 View failing requests
               </Button>
               {providerKnown ? (
-                <Button variant="quiet" onClick={() => navigate("/providers")}>
+                <Button
+                  variant="quiet"
+                  onClick={() =>
+                    navigate(
+                      incidentConnectionId
+                        ? `/providers?inspect=${encodeURIComponent(incidentConnectionId)}`
+                        : "/providers",
+                    )
+                  }
+                >
                   Open providers
                 </Button>
               ) : null}
             </>
           }
         >
-          <p>
+          <p className="tnum">
             {incident.errors} of its {incident.requests} requests{" "}
             {dominant !== null
               ? `returned ${dominant} ${statusText(dominant)}`
@@ -308,6 +353,49 @@ export default function Activity() {
               : "No provider was recorded for these requests, so they failed before dispatch. Check the model id clients send and that a connection serves it."}
           </p>
         </AlertBanner>
+      ) : null}
+
+      {isAdmin && showPanels && degradedConnections.length > 0 ? (
+        <section
+          aria-label="Upstream health"
+          className="mb-5 rounded-[var(--radius-card)] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-4 py-3"
+        >
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <div className="flex items-center gap-2 text-small font-semibold text-[var(--color-warn-ink)]">
+              <Dot tone="warn" />
+              <span>Upstream health</span>
+              <span className="font-normal text-muted tnum">
+                {degradedConnections.length}{" "}
+                {degradedConnections.length === 1 ? "connection degraded" : "connections degraded"}
+              </span>
+            </div>
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              {degradedConnections.map((c) => {
+                const label = c.name ? `${c.name} (${c.provider})` : c.provider;
+                return (
+                  <Link
+                    key={c.id}
+                    to={`/providers?inspect=${encodeURIComponent(c.id)}`}
+                    title={c.last_error ?? undefined}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-warn-line)] bg-surface px-2.5 py-1 text-caption font-medium text-fg transition-colors hover:border-[var(--color-warn)] hover:bg-surface-2"
+                  >
+                    <span className="max-w-[180px] truncate">{label}</span>
+                    {c.backoff_level > 0 ? (
+                      <Badge tone="warn">
+                        <span className="font-mono tnum">backoff {c.backoff_level}</span>
+                      </Badge>
+                    ) : (
+                      <Badge tone="neg">error</Badge>
+                    )}
+                    <span aria-hidden className="text-faint">
+                      →
+                    </span>
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        </section>
       ) : null}
 
       <div className="space-y-5">
@@ -369,11 +457,11 @@ export default function Activity() {
                         note={
                           slowest ? (
                             <>
-                              <span>
+                              <span className="tnum">
                                 Slowest: {slowest.model} {ms(slowest.avg_latency_ms)}
                               </span>
                               {latencyDelta ? (
-                                <span className={latencyDelta.up ? "text-warn" : "text-muted"}>
+                                <span className={cx("tnum", latencyDelta.up ? "text-warn" : "text-muted")}>
                                   {latencyDelta.text}
                                 </span>
                               ) : null}
@@ -518,7 +606,7 @@ export default function Activity() {
               <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-6 py-4">
                 <div className="flex flex-wrap items-baseline gap-2">
                   <Heading level={2} className="text-lead font-semibold">Models</Heading>
-                  <span className="text-small text-faint">
+                  <span className="text-small text-faint tnum">
                     {rows.length} in use · ranked by tokens
                   </span>
                 </div>
@@ -596,14 +684,14 @@ export default function Activity() {
                       setKeyFilter(null);
                     }}
                   >
-                    All {events.length}
+                    All <span className="tnum">{events.length}</span>
                   </FilterChip>
                   <FilterChip
                     on={errorsOnly}
                     bad={failedEvents.length > 0}
                     onClick={() => setErrorsOnly((v) => !v)}
                   >
-                    Errors {failedEvents.length}
+                    Errors <span className="tnum">{failedEvents.length}</span>
                   </FilterChip>
                   {modelFilter ? (
                     <FilterChip
@@ -680,6 +768,15 @@ export default function Activity() {
                 keyNames={keyNames}
                 providerName={providerOf(selectedRow)}
                 onClose={() => setSelectedId(null)}
+                onPrev={selectedIndex > 0 ? () => stepSelected(-1) : null}
+                onNext={
+                  selectedIndex >= 0 && selectedIndex < logRows.length - 1
+                    ? () => stepSelected(1)
+                    : null
+                }
+                positionLabel={
+                  selectedIndex >= 0 ? `${selectedIndex + 1} / ${logRows.length}` : undefined
+                }
               />
             ) : null}
           </>
@@ -894,7 +991,7 @@ function LiveStamp({ at, waiting }: { at: number; waiting: boolean }) {
         : `Live · updated ${secs}s ago`;
 
   return (
-    <span className="inline-flex items-center gap-2 text-small text-muted">
+    <span className="inline-flex items-center gap-2 text-small text-muted tnum">
       <span
         aria-hidden
         className={cx(

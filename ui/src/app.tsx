@@ -1,34 +1,30 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
 import {
   Pulse,
-  ArrowsLeftRight,
   ChatCircleText,
   GearSix,
   Key,
   MagnifyingGlass,
+  Moon,
   Plugs,
-  RocketLaunch,
+  Rows,
   SidebarSimple,
   SignOut,
   SquaresFour,
+  Sun,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
-import { useAuthState, useHealth, useIsAdmin, useModels, useSignOut, useSystem, useUpdateStatus } from "./lib/queries";
+import { useFeatureFlag } from "./lib/flags";
+import { useAuthState, useHealth, useIsAdmin, useSignOut, useSystem, useUpdateStatus } from "./lib/queries";
+import { CommandPalette, type PaletteNavItem } from "./components/command-palette";
 import { Button, CopyChip, Dot, cx } from "./components/ui";
 import { BrandMark } from "./components/brand-mark";
 import { uptime } from "./lib/format";
 
-type NavItem = {
-  to: string;
-  label: string;
-  icon: React.ReactNode;
-  group: string;
-  /** Hidden from members and viewers; the matching route is guarded too. */
-  adminOnly?: boolean;
-};
+type Theme = "light" | "dark";
+type Density = "compact" | "comfortable";
 
 type NavTab = {
   to: string;
@@ -54,6 +50,14 @@ type NavSection = {
   label: string;
   icon: React.ReactNode;
   tabs: NavTab[];
+  /** Additional route prefixes that keep this sidebar item highlighted (e.g. `/routing/*`). */
+  matchPrefixes?: string[];
+};
+
+type NavCadenceGroup = {
+  id: "monitor" | "routing" | "govern";
+  label: string;
+  sections: NavSection[];
 };
 
 const glyph = (Icon: typeof Pulse) => <Icon size={17} weight="regular" aria-hidden />;
@@ -69,106 +73,163 @@ type Brand = {
 const DEFAULT_NAME = "RRouter";
 
 /**
- * The surfaces, each with tabs. The sidebar shows the surface; the tab strip shows the
- * pages. Models, Providers and Quick start are standalone: one page, so no strip. Daily pages come
- * first, rare configuration stays under System.
+ * The sidebar groups the 6 hubs into 3 operator cadence tiers:
+ * MONITOR & TEST, ROUTING & UPSTREAMS, GOVERN & SYSTEM.
  */
-const SECTIONS: NavSection[] = [
+const NAV_GROUPS: NavCadenceGroup[] = [
   {
-    id: "activity",
-    to: "/activity",
-    label: "Activity",
-    icon: glyph(Pulse),
-    tabs: [
-      { to: "/activity", label: "Activity", end: true },
-      { to: "/activity/logs", label: "Logs", adminOnly: true },
-      { to: "/activity/audit", label: "Audit", adminOnly: true },
+    id: "monitor",
+    label: "MONITOR & TEST",
+    sections: [
+      {
+        id: "activity",
+        to: "/activity",
+        label: "Activity",
+        icon: glyph(Pulse),
+        tabs: [
+          { to: "/activity", label: "Activity", end: true },
+          { to: "/activity/logs", label: "Logs", adminOnly: true },
+        ],
+      },
+      {
+        id: "playground",
+        to: "/playground",
+        label: "Playground",
+        icon: glyph(ChatCircleText),
+        tabs: [
+          { to: "/playground/chat", label: "Playground", adminOnly: true },
+          { to: "/playground/templates", label: "Templates" },
+          { to: "/playground/evals", label: "Evals" },
+        ],
+      },
     ],
-  },
-  {
-    id: "playground",
-    to: "/playground",
-    label: "Playground",
-    icon: glyph(ChatCircleText),
-    tabs: [
-      { to: "/playground/chat", label: "Playground", adminOnly: true },
-      { to: "/playground/templates", label: "Templates" },
-      { to: "/playground/evals", label: "Evals" },
-    ],
-  },
-  {
-    id: "models",
-    to: "/models",
-    label: "Models",
-    icon: glyph(SquaresFour),
-    tabs: [{ to: "/models", label: "Models", end: true }],
-  },
-  {
-    id: "providers",
-    to: "/providers",
-    label: "Providers",
-    icon: glyph(Plugs),
-    tabs: [{ to: "/providers", label: "Providers", end: true }],
-  },
-  {
-    id: "quickstart",
-    to: "/quickstart",
-    label: "Quick start",
-    icon: glyph(RocketLaunch),
-    tabs: [{ to: "/quickstart", label: "Quick start", end: true }],
   },
   {
     id: "routing",
-    to: "/routing",
-    label: "Routing",
-    icon: glyph(ArrowsLeftRight),
-    tabs: [
-      { to: "/routing/presets", label: "Presets", adminOnly: true },
-      { to: "/routing/aliases", label: "Aliases", adminOnly: true },
-      { to: "/routing/combos", label: "Combos", adminOnly: true },
+    label: "ROUTING & UPSTREAMS",
+    sections: [
+      {
+        id: "providers",
+        to: "/providers",
+        label: "Providers",
+        icon: glyph(Plugs),
+        tabs: [{ to: "/providers", label: "Providers", end: true }],
+      },
+      {
+        id: "models",
+        to: "/models",
+        label: "Models & Routing",
+        icon: glyph(SquaresFour),
+        matchPrefixes: ["/models", "/routing"],
+        tabs: [
+          { to: "/models", label: "Catalog", end: true },
+          { to: "/routing/presets", label: "Presets", adminOnly: true },
+          { to: "/routing/combos", label: "Combos", adminOnly: true },
+          { to: "/routing/aliases", label: "Aliases", adminOnly: true },
+          { to: "/routing/topology", label: "Topology" },
+        ],
+      },
     ],
   },
   {
-    id: "access",
-    to: "/access",
-    label: "Access",
-    icon: glyph(Key),
-    tabs: [
-      { to: "/access/keys", label: "API Keys", adminOnly: true },
-      { to: "/access/teams", label: "Teams" },
-      { to: "/access/users", label: "Users", adminOnly: true },
-    ],
-  },
-  {
-    id: "system",
-    to: "/system",
-    label: "System",
-    icon: glyph(GearSix),
-    tabs: [
-      { to: "/system/health", label: "Health", adminOnly: true },
-      { to: "/system/webhooks", label: "Webhooks", adminOnly: true },
-      { to: "/system/logs", label: "System logs", adminOnly: true },
-      { to: "/system/settings", label: "Settings", adminOnly: true },
+    id: "govern",
+    label: "GOVERN & SYSTEM",
+    sections: [
+      {
+        id: "access",
+        to: "/access",
+        label: "Access",
+        icon: glyph(Key),
+        tabs: [
+          { to: "/access/keys", label: "API Keys", adminOnly: true },
+          { to: "/access/teams", label: "Teams" },
+          { to: "/access/users", label: "Users", adminOnly: true },
+          { to: "/access/audit", label: "Audit", adminOnly: true },
+        ],
+      },
+      {
+        id: "system",
+        to: "/system",
+        label: "System",
+        icon: glyph(GearSix),
+        tabs: [
+          { to: "/system/diagnostics", label: "Diagnostics", adminOnly: true },
+          { to: "/system/health", label: "Health", adminOnly: true },
+          { to: "/system/logs", label: "System logs", adminOnly: true },
+          { to: "/system/webhooks", label: "Webhooks", adminOnly: true },
+          { to: "/system/settings", label: "Settings", adminOnly: true },
+        ],
+      },
     ],
   },
 ];
 
-function visibleTabs(section: NavSection, isAdmin: boolean) {
-  return section.tabs.filter((tab) => isAdmin || !tab.adminOnly);
+const SECTIONS: NavSection[] = NAV_GROUPS.flatMap((group) => group.sections);
+
+function resolveSection(id: SectionId): NavSection | undefined {
+  // `/routing/*` shares the unified Models & Routing hub.
+  const target = id === "routing" ? "models" : id;
+  return SECTIONS.find((candidate) => candidate.id === target);
+}
+
+function visibleTabs(section: NavSection, isAdmin: boolean, unifiedDiagnostics = true) {
+  return section.tabs.filter(
+    (tab) => (isAdmin || !tab.adminOnly) && (unifiedDiagnostics || tab.to !== "/system/diagnostics"),
+  );
 }
 
 /** Never the section root: a role with no visible tab would redirect to itself. */
-function sectionDefault(section: NavSection, isAdmin: boolean) {
-  return visibleTabs(section, isAdmin)[0]?.to ?? "/models";
+function sectionDefault(section: NavSection, isAdmin: boolean, unifiedDiagnostics = true) {
+  return visibleTabs(section, isAdmin, unifiedDiagnostics)[0]?.to ?? "/models";
 }
 
 /** A first run (no accounts, no keys) lands on the wizard once; the flag is set by the
  *  wizard itself when the operator skips or finishes, so this never fights a choice. */
 const SETUP_DISMISSED = "rrouter:setup-dismissed";
 const SIDEBAR_COLLAPSED = "rrouter:sidebar-collapsed";
+const THEME_KEY = "rrouter:theme";
+const DENSITY_KEY = "rrouter:density";
+
+function readInitialTheme(): Theme {
+  try {
+    const stored = window.localStorage.getItem(THEME_KEY);
+    if (stored === "dark" || stored === "light") return stored;
+  } catch {
+    // Storage unavailable; fall back to document dataset or light.
+  }
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+function readInitialDensity(): Density {
+  try {
+    const stored = window.localStorage.getItem(DENSITY_KEY);
+    if (stored === "compact" || stored === "comfortable") return stored;
+  } catch {
+    // Storage unavailable.
+  }
+  return document.documentElement.dataset.density === "compact" ? "compact" : "comfortable";
+}
+
+function findActiveSearchInput(root: HTMLElement | null): HTMLInputElement | null {
+  if (!root) return null;
+  const selector = [
+    'input[data-search-input]:not(:disabled)',
+    'input[type="search"]:not(:disabled)',
+    'input[placeholder*="search" i]:not(:disabled)',
+    'input[placeholder*="filter" i]:not(:disabled)',
+    'input[aria-label*="search" i]:not(:disabled)',
+    'input[aria-label*="filter" i]:not(:disabled)',
+  ].join(", ");
+  const candidates = root.querySelectorAll<HTMLInputElement>(selector);
+  for (const input of candidates) {
+    if (input.getClientRects().length > 0) return input;
+  }
+  return null;
+}
 
 export function Shell() {
   const isAdmin = useIsAdmin();
+  const unifiedDiagnostics = useFeatureFlag("unifiedDiagnostics");
   const health = useHealth();
   // `/api/system` is admin surface; asking as a reader would only produce a 403 toast.
   const system = useSystem(isAdmin);
@@ -196,6 +257,32 @@ export function Shell() {
   const navigate = useNavigate();
   const location = useLocation();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [theme, setTheme] = useState<Theme>(readInitialTheme);
+  const [density, setDensity] = useState<Density>(readInitialDensity);
+  const mainRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.classList.toggle("dark", theme === "dark");
+    try {
+      window.localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      // Storage unavailable; keep in-memory choice.
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.dataset.density = density;
+    try {
+      window.localStorage.setItem(DENSITY_KEY, density);
+    } catch {
+      // Storage unavailable; keep in-memory choice.
+    }
+  }, [density]);
+
+  const toggleTheme = () => setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  const toggleDensity = () => setDensity((prev) => (prev === "compact" ? "comfortable" : "compact"));
+
   // The rail fades its ends only when the list actually scrolls, so a short nav has no
   // unexplained gradient. The gutter keeps labels from shifting when it grows.
   const navRef = useRef<HTMLElement | null>(null);
@@ -249,22 +336,48 @@ export function Shell() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen((v) => !v);
+        return;
+      }
+      if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey && !paletteOpen) {
+        const target = e.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.tagName === "SELECT" ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
+        if (document.querySelector('[role="dialog"]')) return;
+        const searchInput = findActiveSearchInput(mainRef.current);
+        if (searchInput) {
+          e.preventDefault();
+          searchInput.focus();
+          searchInput.select?.();
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [paletteOpen]);
 
-  /** The rail shows surfaces; ⌘K and the tab strips show the pages inside them. */
-  const sections = useMemo(
+  /** The rail shows cadence groups & hubs; ⌘K and the tab strips show the pages inside them. */
+  const groups = useMemo(
     () =>
-      SECTIONS.map((section) => ({
-        ...section,
-        tabs: visibleTabs(section, isAdmin),
-      })).filter((section) => section.tabs.length > 0),
-    [isAdmin],
+      NAV_GROUPS.map((group) => ({
+        ...group,
+        sections: group.sections
+          .map((section) => ({
+            ...section,
+            tabs: visibleTabs(section, isAdmin, unifiedDiagnostics),
+          }))
+          .filter((section) => section.tabs.length > 0),
+      })).filter((group) => group.sections.length > 0),
+    [isAdmin, unifiedDiagnostics],
   );
-  const nav = useMemo(
+  const sections = useMemo(() => groups.flatMap((group) => group.sections), [groups]);
+  const nav = useMemo<PaletteNavItem[]>(
     () =>
       sections.flatMap((section) =>
         section.tabs.map((tab) => ({
@@ -345,6 +458,7 @@ export function Shell() {
               ) : (
                 <BrandMark
                   decorative
+                  surface={theme}
                   className="h-[30px] w-[49px] select-none transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
                 />
               )}
@@ -365,7 +479,7 @@ export function Shell() {
                   className="h-[30px] w-auto max-w-[52px] shrink-0 select-none object-contain"
                 />
               ) : (
-                <BrandMark decorative className="h-[30px] w-[49px] shrink-0 select-none" />
+                <BrandMark decorative surface={theme} className="h-[30px] w-[49px] shrink-0 select-none" />
               )}
               <span className="min-w-0 flex-1 truncate text-lead font-semibold tracking-[-0.01em] text-fg">
                 {name}
@@ -394,22 +508,51 @@ export function Shell() {
           style={{ maskImage: navFade, WebkitMaskImage: navFade }}
           aria-label="Dashboard"
         >
-          <ul className="space-y-0.5">
-            {sections.map((section) => (
-              <li key={section.id}>
-                <NavSectionLink section={section} variant="sidebar" collapsed={collapsed} />
-              </li>
-            ))}
-          </ul>
+          {groups.map((group, groupIndex) => (
+            <div
+              key={group.id}
+              className={
+                groupIndex > 0
+                  ? collapsed
+                    ? "mt-2 border-t border-line pt-2"
+                    : "mt-4"
+                  : undefined
+              }
+            >
+              {!collapsed ? (
+                <div className="px-2.5 pb-1 text-caption font-semibold uppercase tracking-[0.08em] text-faint">
+                  {group.label}
+                </div>
+              ) : null}
+              <ul className="space-y-0.5">
+                {group.sections.map((section) => (
+                  <li key={section.id}>
+                    <NavSectionLink section={section} variant="sidebar" collapsed={collapsed} />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
         </nav>
 
         <UpdateMarker collapsed={collapsed} />
         <SessionFooter collapsed={collapsed} />
 
         {collapsed ? (
-          <div className="flex justify-center border-t border-line py-3" title={running ? "gateway running" : "gateway unreachable"}>
-            <RunningDot running={running} />
-            <span className="sr-only">{running ? "Gateway running" : "Gateway unreachable"}</span>
+          <div className="flex flex-col items-center gap-2 border-t border-line py-3">
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+              title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+              className="flex h-8 w-8 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg"
+            >
+              {theme === "dark" ? <Sun size={15} aria-hidden /> : <Moon size={15} aria-hidden />}
+            </button>
+            <div title={running ? "gateway running" : "gateway unreachable"}>
+              <RunningDot running={running} />
+              <span className="sr-only">{running ? "Gateway running" : "Gateway unreachable"}</span>
+            </div>
           </div>
         ) : (
           <SidebarFooter
@@ -418,6 +561,10 @@ export function Shell() {
             uptimeSecs={health.data?.uptime_secs ?? 0}
             version={health.data?.version}
             note={brand.footer_text}
+            theme={theme}
+            onToggleTheme={toggleTheme}
+            density={density}
+            onToggleDensity={toggleDensity}
           />
         )}
       </aside>
@@ -433,7 +580,7 @@ export function Shell() {
               className="h-6 w-6 shrink-0 select-none object-contain"
             />
           ) : (
-            <BrandMark decorative className="h-6 w-10 shrink-0 select-none" />
+            <BrandMark decorative surface={theme} className="h-6 w-10 shrink-0 select-none" />
           )}
           <span className="text-body font-semibold text-fg">{name}</span>
           <span className="flex items-center gap-1.5">
@@ -461,6 +608,7 @@ export function Shell() {
       </header>
 
       <main
+        ref={mainRef}
         id="main-content"
         tabIndex={-1}
         className="main-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 focus:outline-none min-[820px]:px-10 min-[820px]:pb-14 min-[820px]:pt-8"
@@ -476,7 +624,14 @@ export function Shell() {
         </div>
       </main>
 
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} nav={nav} />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        nav={nav}
+        isAdmin={isAdmin}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
     </div>
   );
 }
@@ -626,16 +781,24 @@ function SidebarFooter({
   uptimeSecs,
   version,
   note,
+  theme,
+  onToggleTheme,
+  density,
+  onToggleDensity,
 }: {
   endpoint: string;
   running: boolean;
   uptimeSecs: number;
   version?: string;
   note?: string;
+  theme: Theme;
+  onToggleTheme: () => void;
+  density: Density;
+  onToggleDensity: () => void;
 }) {
   return (
     <div className="border-t border-line px-3 py-3">
-      <div className="rounded-[8px] border border-line bg-surface-2 px-2.5 py-2">
+      <div className="rounded-[var(--radius-card)] border border-line bg-surface-2 px-2.5 py-2">
         <div className="text-caption font-semibold uppercase tracking-[0.12em] text-faint">Endpoint</div>
         <div className="mt-1 flex min-w-0">
           <CopyChip value={endpoint} label="endpoint" className="w-full" />
@@ -646,9 +809,40 @@ function SidebarFooter({
             {running ? `Running · up ${uptime(uptimeSecs)}` : "unreachable"}
           </span>
         </div>
-        <div className="mt-0.5 truncate text-caption text-faint">
+        <div className="mt-0.5 truncate text-caption text-faint tnum">
           v{version ?? "—"} · {note?.trim() || "MIT"}
         </div>
+        <Link
+          to="/quickstart"
+          className="mt-2 flex items-center justify-between gap-1 border-t border-line/70 pt-2 text-caption font-medium text-accent-text hover:underline"
+        >
+          <span className="truncate">Connect a client tool (Quick start)</span>
+          <span aria-hidden>→</span>
+        </Link>
+      </div>
+      <div className="mt-2 flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onToggleTheme}
+          aria-pressed={theme === "dark"}
+          aria-label={`Theme: ${theme}. Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-input)] border border-line bg-surface px-2 text-caption font-medium text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg"
+        >
+          {theme === "dark" ? <Moon size={13} aria-hidden /> : <Sun size={13} aria-hidden />}
+          <span>{theme === "dark" ? "Dark" : "Light"}</span>
+        </button>
+        <button
+          type="button"
+          onClick={onToggleDensity}
+          aria-pressed={density === "compact"}
+          aria-label={`Density: ${density}. Switch to ${density === "compact" ? "comfortable" : "compact"} density`}
+          title={`Switch to ${density === "compact" ? "comfortable" : "compact"} density`}
+          className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-input)] border border-line bg-surface px-2 text-caption font-medium text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg"
+        >
+          <Rows size={13} aria-hidden />
+          <span>{density === "compact" ? "Compact" : "Comfortable"}</span>
+        </button>
       </div>
     </div>
   );
@@ -666,11 +860,14 @@ function NavSectionLink({
 }) {
   const location = useLocation();
   const isAdmin = useIsAdmin();
-  const active =
-    location.pathname === section.to || location.pathname.startsWith(`${section.to}/`);
+  const unifiedDiagnostics = useFeatureFlag("unifiedDiagnostics");
+  const prefixes = section.matchPrefixes ?? [section.to];
+  const active = prefixes.some(
+    (prefix) => location.pathname === prefix || location.pathname.startsWith(`${prefix}/`),
+  );
   return (
     <Link
-      to={sectionDefault(section, isAdmin)}
+      to={sectionDefault(section, isAdmin, unifiedDiagnostics)}
       aria-current={active ? "page" : undefined}
       title={variant === "sidebar" && collapsed ? section.label : undefined}
       aria-label={variant === "sidebar" && collapsed ? section.label : undefined}
@@ -717,9 +914,13 @@ function NavSectionLink({
 /** Section root opens the first tab the current role can use. */
 export function SectionIndex({ section: id }: { section: SectionId }) {
   const isAdmin = useIsAdmin();
-  const section = SECTIONS.find((candidate) => candidate.id === id);
+  const unifiedDiagnostics = useFeatureFlag("unifiedDiagnostics");
+  if (id === "routing") {
+    return <Navigate to={isAdmin ? "/routing/presets" : "/routing/topology"} replace />;
+  }
+  const section = resolveSection(id);
   if (!section) return <Navigate to="/activity" replace />;
-  const tabs = visibleTabs(section, isAdmin);
+  const tabs = visibleTabs(section, isAdmin, unifiedDiagnostics);
   // No tab for this role: land somewhere real. Redirecting to the section root loops.
   if (tabs.length === 0) return <Navigate to="/models" replace />;
   return <Navigate to={tabs[0]?.to ?? "/models"} replace />;
@@ -727,10 +928,11 @@ export function SectionIndex({ section: id }: { section: SectionId }) {
 
 export function SectionLayout({ section: id }: { section: SectionId }) {
   const isAdmin = useIsAdmin();
-  const section = SECTIONS.find((candidate) => candidate.id === id);
+  const unifiedDiagnostics = useFeatureFlag("unifiedDiagnostics");
+  const section = resolveSection(id);
   if (!section) return <Outlet />;
-  const tabs = visibleTabs(section, isAdmin);
-  // Standalone pages (Models, Providers) get no one-item tab strip.
+  const tabs = visibleTabs(section, isAdmin, unifiedDiagnostics);
+  // Standalone pages (Providers) get no one-item tab strip.
   if (tabs.length <= 1) return <Outlet />;
   return (
     <>
@@ -768,96 +970,6 @@ export function SectionLayout({ section: id }: { section: SectionId }) {
       </nav>
       <Outlet />
     </>
-  );
-}
-
-function CommandPalette({ open, onClose, nav }: { open: boolean; onClose: () => void; nav: NavItem[] }) {
-  const [query, setQuery] = useState("");
-  const navigate = useNavigate();
-  const models = useModels();
-
-  useEffect(() => {
-    if (open) setQuery("");
-  }, [open]);
-
-  const results = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    // Enough rows that the standalone Models and Providers pages are reachable without
-    // typing, not buried behind seven admin-only tabs.
-    const pages = nav.filter((n) => !q || n.label.toLowerCase().includes(q)).slice(0, 8);
-    const modelHits = (models.data ?? [])
-      .filter((m) => q && m.ref.toLowerCase().includes(q))
-      .slice(0, 6);
-    return { pages, modelHits };
-  }, [nav, query, models.data]);
-
-  const go = (path: string) => {
-    navigate(path);
-    onClose();
-  };
-
-  return (
-    <Dialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/70" />
-        <Dialog.Content className="fixed left-1/2 top-[14vh] z-50 w-full max-w-xl -translate-x-1/2 overflow-hidden rounded-[var(--radius-card)] border border-line-strong bg-surface shadow-2xl focus:outline-none">
-          <Dialog.Title className="sr-only">Jump to a page or model</Dialog.Title>
-          <Dialog.Description className="sr-only">
-            Search dashboard pages and models.
-          </Dialog.Description>
-          <input
-            autoFocus
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Jump to a page or model…"
-            aria-label="Search pages and models"
-            className="h-11 w-full border-b border-line bg-transparent px-4 text-lead text-fg placeholder:text-faint focus:outline-none"
-          />
-          <div className="max-h-[50vh] overflow-y-auto p-2">
-            {results.pages.length > 0 ? (
-              <Section title="Pages">
-                {results.pages.map((p) => (
-                  <button
-                    key={p.to}
-                    onClick={() => go(p.to)}
-                    className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-body text-muted hover:bg-surface-2 hover:text-fg"
-                  >
-                    {p.icon}
-                    {p.label}
-                  </button>
-                ))}
-              </Section>
-            ) : null}
-            {results.modelHits.length > 0 ? (
-              <Section title="Models">
-                {results.modelHits.map((m) => (
-                  <button
-                    key={m.ref}
-                    onClick={() => go(`/models?q=${encodeURIComponent(m.ref)}`)}
-                    className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-body text-muted hover:bg-surface-2 hover:text-fg"
-                  >
-                    <span className="truncate">{m.ref}</span>
-                    <span className="text-caption text-faint">{m.provider}</span>
-                  </button>
-                ))}
-              </Section>
-            ) : null}
-            {results.pages.length === 0 && results.modelHits.length === 0 ? (
-              <div className="px-3 py-6 text-center text-body text-faint">no matches</div>
-            ) : null}
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="mb-1">
-      <div className="px-2 py-1 text-caption uppercase tracking-[0.1em] text-faint">{title}</div>
-      {children}
-    </div>
   );
 }
 

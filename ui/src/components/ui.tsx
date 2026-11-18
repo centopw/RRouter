@@ -1,27 +1,45 @@
-/** Atomic component barrel. Each component lives in its own module. */
+/** Unified UI primitive barrel (all 26 atoms and 13 molecules). */
 export { cx } from "../lib/cx";
+
+// Atoms (26 modules)
+export { Badge, type BadgeSize, type BadgeTone } from "./atoms/Badge";
 export { Button } from "./atoms/Button";
-export { Badge } from "./atoms/Badge";
-export { Dot } from "./atoms/Dot";
-export { Segmented } from "./atoms/Segmented";
-export { FilterChip } from "./atoms/FilterChip";
-export { Input } from "./atoms/Input";
-export { Select } from "./atoms/Select";
-export { statusText, StatusPill } from "./atoms/StatusPill";
+export { Checkbox } from "./atoms/Checkbox";
+export { CopyButton } from "./atoms/CopyButton";
 export { CopyChip } from "./atoms/CopyChip";
 export { CopyIconButton } from "./atoms/CopyIconButton";
+export { Divider } from "./atoms/Divider";
+export { Dot, type DotTone } from "./atoms/Dot";
+export { FilterChip } from "./atoms/FilterChip";
+export { Grid } from "./atoms/Grid";
+export { Heading } from "./atoms/Heading";
+export { IconButton } from "./atoms/IconButton";
+export { Inline } from "./atoms/Inline";
+export { control, Input, type ControlSize } from "./atoms/Input";
+export { SectionLabel } from "./atoms/SectionLabel";
+export { Segmented } from "./atoms/Segmented";
+export { Select } from "./atoms/Select";
+export { Stack, type StackProps } from "./atoms/Stack";
+export { statusText, StatusPill } from "./atoms/StatusPill";
+export { TabPanel, TabStrip } from "./atoms/TabStrip";
+export { Text } from "./atoms/Text";
+export { Textarea } from "./atoms/Textarea";
+export { Toggle } from "./atoms/Toggle";
 export { useCopy } from "./atoms/useCopy";
-export { CopyButton } from "./atoms/CopyButton";
+export type { Gap } from "./atoms/layout";
+export type { TextVariant, Tone } from "./atoms/typography";
+
+// Molecules (13 modules)
+export { AlertBanner, type AlertTone } from "./molecules/AlertBanner";
 export { Card } from "./molecules/Card";
-export { PageHeader } from "./molecules/PageHeader";
-export { Tabs } from "./molecules/Tabs";
-export { TabStrip, TabPanel } from "./atoms/TabStrip";
-export { Disclosure } from "./molecules/Disclosure";
-export { Field } from "./molecules/Field";
 export { CardFooter } from "./molecules/CardFooter";
+export { CardHeader } from "./molecules/CardHeader";
+export { ConfirmDialog } from "./molecules/ConfirmDialog";
+export { Disclosure } from "./molecules/Disclosure";
 export { EmptyState } from "./molecules/EmptyState";
 export { ErrorNote } from "./molecules/ErrorNote";
-export { CardHeader } from "./molecules/CardHeader";
-export { AlertBanner } from "./molecules/AlertBanner";
-export { Modal } from "./molecules/Modal";
-export { ConfirmDialog } from "./molecules/ConfirmDialog";
+export { Field } from "./molecules/Field";
+export { Modal, type ModalWidth } from "./molecules/Modal";
+export { PageHeader } from "./molecules/PageHeader";
+export { PageLayout, type PageDensity, type PageLayoutVariant } from "./molecules/PageLayout";
+export { Tabs } from "./molecules/Tabs";

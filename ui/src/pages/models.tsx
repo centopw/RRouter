@@ -1,6 +1,5 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
 import {
   AlertBanner,
   Button,
@@ -12,9 +11,11 @@ import {
 } from "../components/ui";
 import { DataTable, PaginationBar } from "../components/table";
 import { ConnectionCard } from "../components/connection-card";
+import { useFeatureFlag } from "../lib/flags";
 import { effectiveGroups, groupForEntry, layoutFor, useLayoutDraft } from "../lib/layout-draft";
 import { usePhone, useReducedMotion } from "../lib/media";
 import { compareModels } from "../lib/models";
+import { useUrlFilterState } from "../lib/url-state";
 import {
   qk,
   useActivatePreset,
@@ -49,6 +50,7 @@ import {
   AddMenu,
   ComboCreateDialog,
   PresetControls,
+  PresetManagerDrawer,
   SaveAsNewDialog,
   type ComboCreatePayload,
 } from "./models/preset-header";
@@ -87,12 +89,42 @@ function providerOfRow(row: UnifiedRow): string {
 
 export default function Models() {
   const isAdmin = useIsAdmin();
-  const [params, setParams] = useSearchParams();
+  const presetDrawerEnabled = useFeatureFlag("presetManagerDrawer");
   const client = useQueryClient();
   const phone = usePhone();
   const reduceMotion = useReducedMotion();
 
   // ---- URL -------------------------------------------------------------------------
+  const {
+    params,
+    setParams,
+    values: urlFilters,
+    searchDraft: draft,
+    setSearchDraft: setDraft,
+    appliedSearch,
+    setFilters,
+    resetFilters,
+  } = useUrlFilterState({
+    defaults: {
+      q: "",
+      provider: ALL,
+      kind: "all",
+      status: "routed",
+      custom: "0",
+      size: String(DEFAULT_SIZE),
+      page: "1",
+      preset: "",
+    },
+    searchKey: "q",
+    debounceMs: 200,
+    pageKey: "page",
+    isDefault: (key, value) => {
+      if (key === "size") return Number(value) === DEFAULT_SIZE;
+      if (key === "page") return Number(value) === 1;
+      return false;
+    },
+  });
+
   // A pre-unification bookmark (`?view=`, `?ipage=`, `?dpage=`) is rewritten once into the
   // filter vocabulary instead of keeping two view states that must be reconciled.
   useEffect(() => {
@@ -100,44 +132,15 @@ export default function Models() {
     if (mapLegacyView(next)) setParams(next, { replace: true });
   }, [params, setParams]);
 
-  const setFilters = useCallback(
-    (patch: Record<string, string | null>, replace = false) => {
-      const next = new URLSearchParams(params);
-      for (const [key, value] of Object.entries(patch)) {
-        const defaulted =
-          value === null ||
-          value === "" ||
-          (key === "provider" && value === ALL) ||
-          (key === "status" && value === "routed") ||
-          (key === "kind" && value === "all") ||
-          (key === "size" && Number(value) === DEFAULT_SIZE) ||
-          (key === "page" && Number(value) === 1) ||
-          (key === "custom" && value === "0");
-        if (defaulted) next.delete(key);
-        else next.set(key, value);
-      }
-      setParams(next, { replace });
-    },
-    [params, setParams],
-  );
+  const urlQuery = urlFilters.q;
+  const appliedQuery = appliedSearch.trim().toLowerCase();
 
-  const urlQuery = params.get("q") ?? "";
-  const [draft, setDraft] = useState(urlQuery);
-  useEffect(() => setDraft(urlQuery), [urlQuery]);
-  // One history entry per pause, not per keystroke: typing replaces, navigation pushes.
-  useEffect(() => {
-    if (draft === urlQuery) return;
-    const timer = window.setTimeout(() => setFilters({ q: draft, page: "1" }, true), 200);
-    return () => window.clearTimeout(timer);
-  }, [draft, urlQuery, setFilters]);
-  const appliedQuery = useDeferredValue(urlQuery).trim().toLowerCase();
-
-  const requestedProvider = params.get("provider") ?? ALL;
-  const rawKind = params.get("kind");
+  const requestedProvider = urlFilters.provider;
+  const rawKind = urlFilters.kind;
   const requestedKind: KindKey = KINDS.includes(rawKind as KindKey)
     ? (rawKind as KindKey)
     : "all";
-  const customOnly = params.get("custom") === "1";
+  const customOnly = urlFilters.custom === "1";
   const requestedStatus = useMemo(() => statusesOf(params), [params]);
   const size = sizeOf(params);
 
@@ -145,8 +148,14 @@ export default function Models() {
   const models = useModels();
   const providers = useModelProviders();
   const presets = usePresetIndex(isAdmin);
+  const requestedPresetId = urlFilters.preset || null;
+  const validRequestedPreset =
+    requestedPresetId &&
+    (!presets.data || presets.data.data.some((preset) => preset.id === requestedPresetId))
+      ? requestedPresetId
+      : null;
   const presetId = isAdmin
-    ? (params.get("preset") ||
+    ? (validRequestedPreset ||
       presets.data?.active_id ||
       presets.data?.default_id ||
       presets.data?.data[0]?.id ||
@@ -174,6 +183,7 @@ export default function Models() {
   );
 
   const [copyOpen, setCopyOpen] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
   const [comboOpen, setComboOpen] = useState(false);
   const [editing, setEditing] = useState<Model | null>(null);
@@ -518,6 +528,59 @@ export default function Models() {
     setGroupsOpen(true);
   };
 
+  const reorderRow = useRef(layoutDraft.reorder);
+  reorderRow.current = layoutDraft.reorder;
+
+  const groupRowsById = useMemo(() => {
+    const map = new Map<string, UnifiedRow[]>();
+    if (!dragEnabled) return map;
+    for (const row of boardRows) {
+      const id = groupOf(row.ref);
+      const bucket = map.get(id);
+      if (bucket) bucket.push(row);
+      else map.set(id, [row]);
+    }
+    return map;
+  }, [dragEnabled, boardRows, groupOf]);
+
+  const canMoveTop = useCallback(
+    (ref: string) => {
+      if (!dragEnabled) return false;
+      const list = groupRowsById.get(groupOf(ref));
+      return Boolean(list && list.length > 1 && list[0]?.ref !== ref);
+    },
+    [dragEnabled, groupRowsById, groupOf],
+  );
+
+  const canMoveBottom = useCallback(
+    (ref: string) => {
+      if (!dragEnabled) return false;
+      const list = groupRowsById.get(groupOf(ref));
+      return Boolean(list && list.length > 1 && list[list.length - 1]?.ref !== ref);
+    },
+    [dragEnabled, groupRowsById, groupOf],
+  );
+
+  const onMoveTop = useCallback(
+    (ref: string) => {
+      if (!dragEnabled) return;
+      const list = groupRowsById.get(groupOf(ref));
+      const first = list?.[0];
+      if (first && first.ref !== ref) reorderRow.current(ref, first.ref);
+    },
+    [dragEnabled, groupRowsById, groupOf],
+  );
+
+  const onMoveBottom = useCallback(
+    (ref: string) => {
+      if (!dragEnabled) return;
+      const list = groupRowsById.get(groupOf(ref));
+      const last = list?.[list.length - 1];
+      if (last && last.ref !== ref) reorderRow.current(ref, last.ref);
+    },
+    [dragEnabled, groupRowsById, groupOf],
+  );
+
   // ---- columns and row controls ----------------------------------------------------
   const columns = useUnifiedColumns({
     model: {
@@ -531,6 +594,10 @@ export default function Models() {
       onDelete: setDeleting,
       hide: editable ? hideRow.current : undefined,
       hideFor: (ref) => entryByRef.has(ref),
+      onMoveTop: dragEnabled ? onMoveTop : undefined,
+      onMoveBottom: dragEnabled ? onMoveBottom : undefined,
+      canMoveTop: dragEnabled ? canMoveTop : undefined,
+      canMoveBottom: dragEnabled ? canMoveBottom : undefined,
       groups: isAdmin && hasPreset ? groupChoices : undefined,
       groupOf,
       onMoveGroup: (ref, group) => layoutDraft.assignGroup(ref, group),
@@ -555,6 +622,10 @@ export default function Models() {
     onEdit: setEditing,
     onDelete: setDeleting,
     onHide: (ref) => hideRow.current(ref),
+    onMoveTop: dragEnabled ? onMoveTop : undefined,
+    onMoveBottom: dragEnabled ? onMoveBottom : undefined,
+    canMoveTop: dragEnabled ? canMoveTop : undefined,
+    canMoveBottom: dragEnabled ? canMoveBottom : undefined,
   };
 
   const controls: LayoutControls | undefined = hasPreset
@@ -596,15 +667,7 @@ export default function Models() {
     customOnly ||
     (statusAware && statusParam(requestedStatus) !== null);
   const clearFilters = () => {
-    setDraft("");
-    setFilters({
-      q: null,
-      provider: null,
-      status: null,
-      kind: null,
-      custom: null,
-      page: null,
-    });
+    resetFilters(["q", "provider", "status", "kind", "custom", "page"]);
   };
   const showStatus = (status: StatusKey) =>
     setFilters({ status: statusParam(new Set<StatusKey>([status])), page: "1" });
@@ -689,6 +752,7 @@ export default function Models() {
                   busy={activatePreset.isPending || createPreset.isPending}
                   onSelect={selectPreset}
                   onSaveAsNew={() => setCopyOpen(true)}
+                  onManagePresets={presetDrawerEnabled ? () => setManageOpen(true) : undefined}
                 />
               ) : null}
               <AddMenu
@@ -999,6 +1063,27 @@ export default function Models() {
           }
         }}
       />
+
+      {isAdmin && presets.data && presetDrawerEnabled ? (
+        <PresetManagerDrawer
+          open={manageOpen}
+          onClose={() => setManageOpen(false)}
+          presets={presets.data.data}
+          activePresetId={presetId}
+          defaultId={presets.data.default_id ?? ""}
+          draft={hasPreset ? layoutDraft : undefined}
+          busy={activatePreset.isPending || createPreset.isPending}
+          onSelectPreset={(id) => {
+            selectPreset(id);
+            setManageOpen(false);
+          }}
+          onDeletedPreset={(id) => {
+            if (urlFilters.preset === id) {
+              setFilters({ preset: null, page: "1" }, true);
+            }
+          }}
+        />
+      ) : null}
 
       <GroupManager
         open={groupsOpen}

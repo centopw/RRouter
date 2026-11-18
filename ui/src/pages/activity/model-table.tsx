@@ -134,7 +134,7 @@ function ModelName({ ref_, on }: { ref_: string; on: boolean }) {
       className="min-w-0 truncate text-left"
     >
       {provider ? <span className="font-mono text-small text-faint">{provider}/</span> : null}
-      <span className="text-fg">{id}</span>
+      <span className="font-mono text-small font-medium text-fg">{id}</span>
     </span>
   );
 }

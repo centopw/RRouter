@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { CaretDown } from "@phosphor-icons/react";
 import {
   Badge,
@@ -101,7 +102,7 @@ export default function Evals() {
       width: "9rem",
       className: "hidden lg:table-cell",
       render: (suite) => (
-        <span className="whitespace-nowrap text-muted">{when(suite.updated_at)}</span>
+        <span className="whitespace-nowrap text-muted tnum">{when(suite.updated_at)}</span>
       ),
     },
     ...(isAdmin
@@ -114,10 +115,10 @@ export default function Evals() {
             render: (suite: EvalSuite) => (
               <span className="flex justify-end gap-1.5">
                 <Button variant="quiet" onClick={() => setEditing(suite)}>
-                  edit
+                  Edit
                 </Button>
                 <Button variant="danger" onClick={() => setDeleting(suite)}>
-                  delete
+                  Delete
                 </Button>
               </span>
             ),
@@ -198,6 +199,7 @@ export default function Evals() {
             columns={columns}
             rows={rows}
             rowKey={(suite) => suite.id}
+            selectedKey={current?.id}
             loading={suites.isLoading}
             scrollLabel="Eval suites"
           />
@@ -223,7 +225,9 @@ function SuiteWorkspace({ suite, isAdmin }: { suite: EvalSuite; isAdmin: boolean
   const contextValue = contextDraft ?? savedContext;
   const contextDirty = contextValue.trim() !== savedContext.trim();
 
-  const [model, setModel] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const modelParam = searchParams.get("model");
+  const [model, setModel] = useState(() => modelParam?.trim() ?? "");
   const [judge, setJudge] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [runId, setRunId] = useState<string | null>(null);
@@ -251,11 +255,26 @@ function SuiteWorkspace({ suite, isAdmin }: { suite: EvalSuite; isAdmin: boolean
   }, [detail.data?.runs.length]);
 
   useEffect(() => {
-    if (model !== "" || orderedModels.length === 0) return;
+    if (!modelParam || models.isLoading) return;
+    const trimmed = modelParam.trim();
+    if (trimmed) {
+      const match =
+        orderedModels.find((m) => m.ref === trimmed) ??
+        orderedModels.find((m) => m.id === trimmed);
+      if (match) setModel(match.ref);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete("model");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelParam, models.isLoading, models.data]);
+
+  useEffect(() => {
+    if (model !== "" || modelParam || orderedModels.length === 0) return;
     const first = orderedModels.find((entry) => entry.enabled && entry.available) ?? orderedModels[0];
     if (first) setModel(first.ref);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, models.data]);
+  }, [model, modelParam, models.data]);
 
   const saveContext = () => {
     setContextProblem(null);
@@ -368,7 +387,7 @@ function SuiteWorkspace({ suite, isAdmin }: { suite: EvalSuite; isAdmin: boolean
       key: "when",
       title: "Started",
       width: "10rem",
-      render: (row) => <span className="whitespace-nowrap text-muted">{when(row.created_at)}</span>,
+      render: (row) => <span className="whitespace-nowrap text-muted tnum">{when(row.created_at)}</span>,
     },
     {
       key: "model",
@@ -727,7 +746,7 @@ function ResultRow({ result, expected }: { result: EvalResult; expected: string 
             <span className="block truncate font-mono text-small text-fg" title={result.case_input}>
               {result.case_input}
             </span>
-            <span className="mt-0.5 block text-caption text-faint">
+            <span className="mt-0.5 block text-caption text-faint tnum">
               {result.case_name ? `${result.case_name} · ` : ""}
               {result.latency_ms === null ? "no latency" : `${result.latency_ms} ms`}
             </span>

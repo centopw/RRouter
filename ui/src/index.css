@@ -1,63 +1,440 @@
 @import "tailwindcss";
 
-/* Brand tokens (RRouter brand guidelines). Every component references these
-   names, never a raw hex, so a palette change stays a one-file edit. */
+/* ==========================================================================
+   RRouter 3-Tier Design Token Architecture
+   Tier 1: Primitives (--rr-*) — raw palette, geometry, timing, elevation scales
+   Tier 2: Semantic (--sem-* + mapped --color-*, --shadow-*, --provider-*)
+           Cool-Slate Light (:root default) & Obsidian-Slate Dark ([data-theme="dark"], .dark)
+   Tier 3: Component (--comp-*) — per-component contracts referencing Tier 2
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* ------------------------------------------------------------------------
+     Tier 1: Primitives (--rr-*)
+     ------------------------------------------------------------------------ */
+  --rr-white: #ffffff;
+  --rr-black: #000000;
+
+  /* Cool-Slate Neutrals */
+  --rr-slate-25: #fafbfd;
+  --rr-slate-50: #f5f7fa;
+  --rr-slate-100: #eef1f5;
+  --rr-slate-150: #e5e9f0;
+  --rr-slate-200: #d8dee6;
+  --rr-slate-300: #b8c2d0;
+  --rr-slate-400: #8590a2;
+  --rr-slate-500: #5a667c;
+  --rr-slate-600: #4a576e;
+  --rr-slate-700: #3b475e;
+  --rr-slate-800: #1c2b42;
+  --rr-slate-900: #171c26;
+
+  /* Obsidian-Slate Neutrals */
+  --rr-obsidian-950: #0d1117;
+  --rr-obsidian-900: #131822;
+  --rr-obsidian-850: #161c26;
+  --rr-obsidian-800: #1c2432;
+  --rr-obsidian-750: #232d3e;
+  --rr-obsidian-700: #2b364a;
+  --rr-obsidian-650: #354359;
+  --rr-obsidian-500: #64718a;
+  --rr-obsidian-400: #8c99af;
+  --rr-obsidian-300: #a6b3c7;
+  --rr-obsidian-200: #cad3e2;
+  --rr-obsidian-50: #eef2f7;
+  --rr-obsidian-25: #f4f7fb;
+
+  /* Brand & Interactive Blues */
+  --rr-blue-50: #e9f2ff;
+  --rr-blue-200: #b2d0ff;
+  --rr-blue-300: #69afff;
+  --rr-blue-400: #58a6ff;
+  --rr-blue-600: #0c66e4;
+  --rr-blue-700: #0958d9;
+  --rr-blue-850: #1d3c6a;
+  --rr-blue-900: #15253d;
+  --rr-blue-950: #12233c;
+
+  /* Positive (Emerald) */
+  --rr-green-50: #e6f9ef;
+  --rr-green-200: #9fd9bb;
+  --rr-green-300: #86efac;
+  --rr-green-400: #4ade80;
+  --rr-green-600: #1b7f4c;
+  --rr-green-700: #16653e;
+  --rr-green-800: #115232;
+  --rr-green-900: #1e5b3c;
+  --rr-green-950: #10281c;
+  --rr-green-fill-dark: #238636;
+
+  /* Warning (Amber) */
+  --rr-amber-50: #fff5e0;
+  --rr-amber-200: #f2c88b;
+  --rr-amber-300: #fcd379;
+  --rr-amber-400: #f5b041;
+  --rr-amber-600: #b45309;
+  --rr-amber-700: #964200;
+  --rr-amber-800: #703100;
+  --rr-amber-900: #6b4714;
+  --rr-amber-950: #2b1d09;
+  --rr-amber-fill-dark: #d97706;
+
+  /* Negative (Crimson) */
+  --rr-red-50: #ffeceb;
+  --rr-red-200: #f4b7b2;
+  --rr-red-300: #ffa8a1;
+  --rr-red-400: #ff7b72;
+  --rr-red-600: #c9372c;
+  --rr-red-700: #b42318;
+  --rr-red-800: #891c14;
+  --rr-red-900: #6e2829;
+  --rr-red-950: #2d1215;
+  --rr-red-fill-dark: #b92b27;
+
+  /* Scrims */
+  --rr-scrim-drawer-light: rgba(15, 23, 42, 0.38);
+  --rr-scrim-modal-light: rgba(15, 23, 42, 0.48);
+  --rr-scrim-drawer-dark: rgba(4, 7, 13, 0.62);
+  --rr-scrim-modal-dark: rgba(4, 7, 13, 0.72);
+
+  /* Motion Scale */
+  --duration-instant: 75ms;
+  --duration-micro: 140ms;
+  --duration-standard: 220ms;
+  --duration-drawer: 300ms;
+  --ease-out-snappy: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-quick: cubic-bezier(0.4, 0, 1, 1);
+  --ease-spring-subtle: cubic-bezier(0.22, 1.15, 0.36, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0, 1);
+
+  /* Z-index Ladder */
+  --z-sticky-header: 10;
+  --z-sticky-col: 20;
+  --z-sticky-header-col: 30;
+  --z-popover: 40;
+  --z-drawer: 50;
+  --z-modal: 50;
+  --z-command: 60;
+  --z-popover-portal: 70;
+  --z-toast: 75;
+  --z-skip-link: 80;
+
+  /* ------------------------------------------------------------------------
+     Tier 2: Semantic Tokens — Cool-Slate Light (Default)
+     ------------------------------------------------------------------------ */
+  --sem-bg: var(--rr-slate-50);
+  --sem-sidebar: var(--rr-white);
+  --sem-surface: var(--rr-white);
+  --sem-surface-2: var(--rr-slate-25);
+  --sem-surface-3: var(--rr-slate-100);
+  --sem-row-hover: var(--rr-slate-50);
+  --sem-selected: var(--rr-blue-50);
+  --sem-rule: var(--rr-slate-150);
+  --sem-line: var(--rr-slate-200);
+  --sem-line-strong: var(--rr-slate-400); /* #8590a2 (>= 3.2:1 on white) */
+
+  --sem-fg: var(--rr-slate-900);
+  --sem-ink-soft: var(--rr-slate-700);
+  --sem-muted: var(--rr-slate-600);
+  --sem-faint: var(--rr-slate-500);
+
+  --sem-accent: var(--rr-slate-800);
+  --sem-accent-text: var(--rr-blue-700);
+  --sem-accent-ink: var(--rr-white);
+  --sem-accent-2: var(--rr-blue-600);
+  --sem-info: var(--rr-blue-700);
+  --sem-info-tint: var(--rr-blue-50);
+  --sem-info-line: var(--rr-blue-200);
+  --sem-nav-accent: var(--rr-blue-700); /* #0958d9 (>= 5.4:1 on selected) */
+  --sem-focus-ring: var(--rr-blue-700); /* #0958d9 (>= 6.1:1 on surface) */
+
+  --sem-pos: var(--rr-green-700);
+  --sem-pos-fill: var(--rr-green-600);
+  --sem-pos-tint: var(--rr-green-50);
+  --sem-pos-line: var(--rr-green-200);
+  --sem-pos-ink: var(--rr-green-800);
+
+  --sem-warn: var(--rr-amber-700);
+  --sem-warn-fill: var(--rr-amber-600);
+  --sem-warn-tint: var(--rr-amber-50);
+  --sem-warn-line: var(--rr-amber-200);
+  --sem-warn-ink: var(--rr-amber-800);
+
+  --sem-neg: var(--rr-red-700);
+  --sem-neg-fill: var(--rr-red-600);
+  --sem-neg-tint: var(--rr-red-50);
+  --sem-neg-line: var(--rr-red-200);
+  --sem-neg-ink: var(--rr-red-800);
+
+  --sem-scrim-drawer: var(--rr-scrim-drawer-light);
+  --sem-scrim-modal: var(--rr-scrim-modal-light);
+
+  --sem-shadow-panel: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 1px rgba(15, 23, 42, 0.03);
+  --sem-shadow-popover: 0 12px 32px -4px rgba(15, 23, 42, 0.14), 0 4px 10px -2px rgba(15, 23, 42, 0.08);
+  --sem-shadow-modal: 0 24px 64px -8px rgba(15, 23, 42, 0.22), 0 8px 24px -4px rgba(15, 23, 42, 0.10);
+  --sem-shadow-sticky-col: -8px 0 16px -8px rgba(15, 23, 42, 0.10);
+
+  /* Categorical Series (Cool-Slate Light, all >= 4.7:1 on white) */
+  --sem-series-1: #0958d9;
+  --sem-series-2: #6649c4;
+  --sem-series-3: #b34d00;
+  --sem-series-4: #bf2669;
+  --sem-series-5: #0e7490;
+  --sem-series-6: #5a667c;
+
+  /* Theme-aware Provider Brand Tokens (all 18 providers, >= 4.7:1 on light surfaces) */
+  --provider-anthropic: #a84624;
+  --provider-claude: #a84624;
+  --provider-openai: #0a6e54;
+  --provider-codex: #0a6e54;
+  --provider-opencode: #171c26;
+  --provider-opencode-go: #b54217;
+  --provider-github: #181717;
+  --provider-gemini: #185abc;
+  --provider-google-antigravity: #185abc;
+  --provider-antigravity: #185abc;
+  --provider-openrouter: #4f46e5;
+  --provider-xai: #171c26;
+  --provider-mistral: #bd3800;
+  --provider-ollama: #171c26;
+  --provider-deepseek: #2a4ae0;
+  --provider-groq: #bd311b;
+  --provider-together: #0a54c2;
+  --provider-cerebras: #b54319;
+
+  /* ------------------------------------------------------------------------
+     Tier 3: Component Tokens (--comp-*)
+     ------------------------------------------------------------------------ */
+  --comp-page-gap: 20px;
+  --comp-button-primary-bg: var(--color-accent);
+  --comp-button-primary-fg: var(--color-accent-ink);
+  --comp-button-primary-hover: var(--color-fg);
+  --comp-button-secondary-bg: var(--color-surface);
+  --comp-button-secondary-border: var(--color-line-strong);
+  --comp-button-danger-bg: var(--color-neg-tint);
+  --comp-button-danger-border: var(--color-neg-line);
+  --comp-button-danger-fg: var(--color-neg-ink);
+  --comp-input-bg: var(--color-surface);
+  --comp-input-border: var(--color-line-strong);
+  --comp-input-focus-border: var(--color-focus-ring);
+  --comp-card-bg: var(--color-surface);
+  --comp-card-border: var(--color-line);
+  --comp-card-radius: var(--radius-surface);
+  --comp-popover-bg: var(--color-surface);
+  --comp-popover-border: var(--color-line-strong);
+  --comp-popover-shadow: var(--shadow-popover);
+  --comp-popover-radius: var(--radius-overlay);
+  --comp-modal-bg: var(--color-surface);
+  --comp-modal-border: var(--color-line);
+  --comp-modal-shadow: var(--shadow-modal);
+  --comp-modal-radius: var(--radius-overlay);
+  --comp-table-row-hover: var(--color-row-hover);
+  --comp-table-row-selected: var(--color-selected);
+  --comp-table-row-height-compact: 36px;
+  --comp-table-row-height-comfortable: 48px;
+  --comp-sidebar-bg: var(--color-sidebar);
+  --comp-sidebar-active-bg: var(--color-selected);
+  --comp-sidebar-active-bar: var(--color-nav-accent);
+  --comp-toast-shadow: var(--shadow-popover);
+  --comp-brand-r-top: #f8fafc;
+  --comp-brand-r-mid: #cbd5e1;
+  --comp-brand-r-bot: #94a3b8;
+  --comp-brand-wm-top: #1c2b42;
+  --comp-brand-wm-bot: #44546f;
+  --comp-brand-tag-muted: #5a667c;
+}
+
+/* ==========================================================================
+   Tier 2 Override: Obsidian-Slate Dark ([data-theme="dark"] and .dark)
+   ========================================================================== */
+[data-theme="dark"],
+.dark {
+  color-scheme: dark;
+
+  --sem-bg: var(--rr-obsidian-950);
+  --sem-sidebar: var(--rr-obsidian-900);
+  --sem-surface: var(--rr-obsidian-850);
+  --sem-surface-2: var(--rr-obsidian-800);
+  --sem-surface-3: var(--rr-obsidian-750);
+  --sem-row-hover: var(--rr-obsidian-800);
+  --sem-selected: var(--rr-blue-900);
+  --sem-rule: var(--rr-obsidian-700);
+  --sem-line: var(--rr-obsidian-650);
+  --sem-line-strong: var(--rr-obsidian-500); /* #64718a (>= 3.4:1 on surface) */
+
+  --sem-fg: var(--rr-obsidian-25);
+  --sem-ink-soft: var(--rr-obsidian-200);
+  --sem-muted: var(--rr-obsidian-300);
+  --sem-faint: var(--rr-obsidian-400);
+
+  --sem-accent: var(--rr-obsidian-50);
+  --sem-accent-text: var(--rr-blue-400);
+  --sem-accent-ink: var(--rr-obsidian-950);
+  --sem-accent-2: var(--rr-blue-400);
+  --sem-info: var(--rr-blue-300);
+  --sem-info-tint: var(--rr-blue-950);
+  --sem-info-line: var(--rr-blue-850);
+  --sem-nav-accent: var(--rr-blue-400); /* #58a6ff (>= 6.1:1 on selected) */
+  --sem-focus-ring: var(--rr-blue-300); /* #69afff (>= 7.4:1 on surface) */
+
+  --sem-pos: var(--rr-green-400);
+  --sem-pos-fill: var(--rr-green-fill-dark);
+  --sem-pos-tint: var(--rr-green-950);
+  --sem-pos-line: var(--rr-green-900);
+  --sem-pos-ink: var(--rr-green-300);
+
+  --sem-warn: var(--rr-amber-400);
+  --sem-warn-fill: var(--rr-amber-fill-dark);
+  --sem-warn-tint: var(--rr-amber-950);
+  --sem-warn-line: var(--rr-amber-900);
+  --sem-warn-ink: var(--rr-amber-300);
+
+  --sem-neg: var(--rr-red-400);
+  --sem-neg-fill: var(--rr-red-fill-dark);
+  --sem-neg-tint: var(--rr-red-950);
+  --sem-neg-line: var(--rr-red-900);
+  --sem-neg-ink: var(--rr-red-300);
+
+  --sem-scrim-drawer: var(--rr-scrim-drawer-dark);
+  --sem-scrim-modal: var(--rr-scrim-modal-dark);
+
+  --sem-shadow-panel: 0 1px 3px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  --sem-shadow-popover: 0 16px 40px -4px rgba(0, 0, 0, 0.56), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --sem-shadow-modal: 0 24px 64px -8px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --sem-shadow-sticky-col: -10px 0 18px -6px rgba(0, 0, 0, 0.48);
+
+  /* Categorical Series (Obsidian-Slate Dark, all >= 6.4:1 on dark surface) */
+  --sem-series-1: #58a6ff;
+  --sem-series-2: #a799f7;
+  --sem-series-3: #f59e0b;
+  --sem-series-4: #f472b6;
+  --sem-series-5: #22d3ee;
+  --sem-series-6: #94a3b8;
+
+  /* Theme-aware Provider Brand Tokens (all 18 providers, >= 5.6:1 on dark surfaces) */
+  --provider-anthropic: #f0906e;
+  --provider-claude: #f0906e;
+  --provider-openai: #34d399;
+  --provider-codex: #34d399;
+  --provider-opencode: #e2e8f0;
+  --provider-opencode-go: #fb923c;
+  --provider-github: #e6edf3;
+  --provider-gemini: #6ba5ff;
+  --provider-google-antigravity: #6ba5ff;
+  --provider-antigravity: #6ba5ff;
+  --provider-openrouter: #9396ff;
+  --provider-xai: #e2e8f0;
+  --provider-mistral: #ff7f45;
+  --provider-ollama: #e2e8f0;
+  --provider-deepseek: #7c96ff;
+  --provider-groq: #ff7c66;
+  --provider-together: #5ea4ff;
+  --provider-cerebras: #fa8d64;
+
+  --comp-brand-r-top: #ffffff;
+  --comp-brand-r-mid: #e2e9f7;
+  --comp-brand-r-bot: #b2c1e2;
+  --comp-brand-wm-top: #ffffff;
+  --comp-brand-wm-bot: #e7ecf7;
+  --comp-brand-tag-muted: #bcc8e0;
+}
+
+[data-density="compact"] {
+  --comp-page-gap: 16px;
+}
+
+[data-density="comfortable"] {
+  --comp-page-gap: 24px;
+}
+
+/* ==========================================================================
+   Tailwind v4 @theme Bridge (preserves all --color-*, --radius-*, --shadow-*,
+   --text-*, --font-*, and --motion-* utilities in both light & dark modes)
+   ========================================================================== */
 @theme {
-  /* Atlassian-inspired light system (dashboard redesign). Restrained, high-contrast,
-     flat: near-black nav and primary ink, white surfaces, a single muted navy accent,
-     hairline borders instead of shadows. Components reference tokens only. */
-  --color-bg: #f8f8f8;
-  --color-sidebar: #ffffff;
-  --color-surface: #ffffff;
-  --color-surface-2: #f8f8f8;
-  --color-surface-3: #f1f2f4;
-  --color-row-hover: #f4f5f7;
-  --color-selected: #e9f2ff;
-  --color-rule: #ebecf0;
-  --color-line: #dfe1e6;
-  --color-line-strong: #b3b9c4;
+  /* Surfaces & Borders */
+  --color-bg: var(--sem-bg);
+  --color-sidebar: var(--sem-sidebar);
+  --color-surface: var(--sem-surface);
+  --color-surface-2: var(--sem-surface-2);
+  --color-surface-3: var(--sem-surface-3);
+  --color-row-hover: var(--sem-row-hover);
+  --color-selected: var(--sem-selected);
+  --color-rule: var(--sem-rule);
+  --color-line: var(--sem-line);
+  --color-line-strong: var(--sem-line-strong);
 
   /* Type */
-  --color-fg: #292a2e;
-  --color-ink-soft: #44546f;
-  --color-muted: #44546f;
-  --color-faint: #626f86;
+  --color-fg: var(--sem-fg);
+  --color-ink-soft: var(--sem-ink-soft);
+  --color-muted: var(--sem-muted);
+  --color-faint: var(--sem-faint);
 
-  /* Brand */
-  --color-accent: #1c2b42;
-  --color-accent-text: #1c2b42;
-  --color-accent-ink: #ffffff;
-  --color-accent-2: #0c66e4;
-  --color-info: #0c66e4;
-  /* Selected navigation indicator: readable on the near-black rail. */
-  --color-nav-accent: #579dff;
+  /* Brand & Focus */
+  --color-accent: var(--sem-accent);
+  --color-accent-text: var(--sem-accent-text);
+  --color-accent-ink: var(--sem-accent-ink);
+  --color-accent-2: var(--sem-accent-2);
+  --color-info: var(--sem-info);
+  --color-info-tint: var(--sem-info-tint);
+  --color-info-line: var(--sem-info-line);
+  --color-nav-accent: var(--sem-nav-accent);
+  --color-focus-ring: var(--sem-focus-ring);
 
-  /* Semantic — status only. Tints are pill and callout fills. */
-  --color-pos: #216e4e;
-  --color-pos-tint: #dcfff1;
-  --color-warn: #a54800;
-  --color-warn-tint: #fff3e0;
-  --color-warn-line: #f5cdb0;
-  --color-warn-ink: #7a3b00;
-  --color-neg: #ae2a19;
-  --color-neg-fill: #c9372c;
-  --color-neg-tint: #ffeceb;
-  --color-neg-line: #f5c0bb;
-  --color-neg-ink: #8e2a20;
+  /* Semantic Status */
+  --color-pos: var(--sem-pos);
+  --color-pos-fill: var(--sem-pos-fill);
+  --color-pos-tint: var(--sem-pos-tint);
+  --color-pos-line: var(--sem-pos-line);
+  --color-pos-ink: var(--sem-pos-ink);
 
-  /* Shape: cards 8, inputs 4, buttons pill, badges pill. */
+  --color-warn: var(--sem-warn);
+  --color-warn-fill: var(--sem-warn-fill);
+  --color-warn-tint: var(--sem-warn-tint);
+  --color-warn-line: var(--sem-warn-line);
+  --color-warn-ink: var(--sem-warn-ink);
+
+  --color-neg: var(--sem-neg);
+  --color-neg-fill: var(--sem-neg-fill);
+  --color-neg-tint: var(--sem-neg-tint);
+  --color-neg-line: var(--sem-neg-line);
+  --color-neg-ink: var(--sem-neg-ink);
+
+  /* Overlay Scrims */
+  --color-scrim-drawer: var(--sem-scrim-drawer);
+  --color-scrim-modal: var(--sem-scrim-modal);
+
+  /* Canonical Shape Scale (5 radii + backward-compatible card/input aliases) */
+  --radius-xs: 2px;
+  --radius-control: 4px;
+  --radius-surface: 8px;
+  --radius-overlay: 12px;
+  --radius-pill: 9999px;
   --radius-card: 8px;
   --radius-input: 4px;
-  --font-sans:
-    "Charlie Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
-    "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
-  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  /* Type scale: every surface uses one of these steps, never a one-off px size.
-     A global type change is an edit here, not a sweep through pages. */
+  /* Elevation Shadows */
+  --shadow-panel: var(--sem-shadow-panel);
+  --shadow-popover: var(--sem-shadow-popover);
+  --shadow-modal: var(--sem-shadow-modal);
+  --shadow-sticky-col: var(--sem-shadow-sticky-col);
+
+  /* Typography */
+  --font-sans:
+    "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono:
+    "JetBrains Mono Variable", "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo,
+    Consolas, monospace;
+
+  /* Type Scale */
   --text-hero: 44px;
   --text-hero--line-height: 1.05;
   --text-hero--letter-spacing: -0.03em;
+  --text-kpi: 34px;
+  --text-kpi--line-height: 1;
+  --text-kpi--letter-spacing: -0.025em;
   --text-display: 30px;
   --text-display--line-height: 1.15;
   --text-display--letter-spacing: -0.02em;
@@ -78,10 +455,9 @@
   --text-caption: 11px;
   --text-caption--line-height: 1.4;
 
-  /* Motion: snappy feedback, measured transitions, ease-out. Popovers and page changes
-     sit in the 120–160ms band the audits asked for; nothing animates layout. */
-  --motion-fast: 75ms;
-  --motion-pop: 140ms;
+  /* Legacy Motion Aliases mapped onto the 3-tier duration scale */
+  --motion-fast: var(--duration-instant);
+  --motion-pop: var(--duration-micro);
   --motion-page: 160ms;
   --motion-base: 400ms;
   --motion-slow: 500ms;
@@ -92,66 +468,90 @@
    order, never used for status. `static` because the chart tints segments through
    inline styles, which Tailwind's usage scan cannot see. */
 @theme static {
-  --color-series-1: #0c66e4;
-  --color-series-2: #6e5dc6;
-  --color-series-3: #e56910;
-  --color-series-4: #c9372c;
-  --color-series-5: #1c2b42;
-  --color-series-6: #626f86; /* "other" */
+  --color-series-1: var(--sem-series-1);
+  --color-series-2: var(--sem-series-2);
+  --color-series-3: var(--sem-series-3);
+  --color-series-4: var(--sem-series-4);
+  --color-series-5: var(--sem-series-5);
+  --color-series-6: var(--sem-series-6);
 }
 
+/* ==========================================================================
+   Base Document Rules (layered so utility overrides always win cleanly)
+   ========================================================================== */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    height: 100dvh;
+    overflow: hidden;
+  }
 
-html,
-body,
-#root {
-  height: 100%;
-  /* The shell owns the viewport: only <main> scrolls, so the document never grows a
-     second scrollbar and nothing shifts when a page gets shorter or taller. */
-  height: 100dvh;
-  overflow: hidden;
+  ::selection {
+    background: var(--color-accent);
+    color: var(--color-accent-ink);
+  }
+
+  body {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button,
+  a,
+  input,
+  select,
+  textarea,
+  [role="button"],
+  [role="switch"],
+  summary {
+    transition-duration: var(--duration-instant);
+    transition-timing-function: var(--ease-standard);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="switch"]:not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [role="switch"]:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-focus-ring);
+    outline-offset: 2px;
+  }
+
+  /* A heading focused for screen readers is not an interactive control. */
+  h1[tabindex="-1"]:focus,
+  h1[tabindex="-1"]:focus-visible {
+    outline: none;
+  }
+
+  input[type="number"] {
+    appearance: textfield;
+    -moz-appearance: textfield;
+  }
+
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
 }
 
-/* System selection colors follow the OS accent (often graphite), which can paint black on
-   near-black text. Pin both colors so selected text is always readable. */
-::selection {
-  background: var(--color-accent);
-  color: var(--color-accent-ink);
-}
-
-body {
-  background: var(--color-bg);
-  color: var(--color-fg);
-  font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-}
-
-/* Interaction feedback: fast hover/press, measured layout transitions, ease-out. */
-button,
-a,
-input,
-select,
-textarea,
-[role="button"],
-[role="switch"],
-summary {
-  transition-duration: var(--motion-fast);
-  transition-timing-function: var(--ease-standard);
-}
-
-/* A control that does something is a pointer; a disabled one says so. */
-button:not(:disabled),
-[role="button"]:not([aria-disabled="true"]),
-[role="switch"]:not(:disabled),
-summary {
-  cursor: pointer;
-}
-button:disabled,
-[role="switch"]:disabled,
-[aria-disabled="true"] {
-  cursor: not-allowed;
-}
-
+/* ==========================================================================
+   Surface Patterns, Scrollports & Component Motion
+   ========================================================================== */
 .route-grid {
   background-image: radial-gradient(circle, var(--color-rule) 1px, transparent 1px);
   background-size: 22px 22px;
@@ -174,13 +574,24 @@ button:disabled,
   animation: route-flow 1.1s linear infinite;
 }
 
-.live-dot {
+@keyframes rrouter-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.live-dot,
+.pulse {
   animation: rrouter-pulse 2s ease-in-out infinite;
 }
 
 @keyframes drawer-in {
   from {
-    transform: translateX(16px);
+    transform: translateX(24px);
     opacity: 0;
   }
   to {
@@ -190,7 +601,81 @@ button:disabled,
 }
 
 .drawer-panel {
-  animation: drawer-in var(--motion-fast) var(--ease-standard);
+  animation: drawer-in var(--duration-drawer) var(--ease-out-snappy);
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes dialog-out {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.97) translateY(2px);
+  }
+}
+
+.dialog-panel {
+  animation: dialog-in var(--duration-standard) var(--ease-out-snappy);
+}
+
+.dialog-panel[data-state="closed"] {
+  animation: dialog-out var(--duration-micro) var(--ease-in-quick) forwards;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+}
+
+.toast-root[data-state="open"] {
+  animation: toast-in var(--duration-standard) var(--ease-out-snappy);
+}
+
+.toast-root[data-state="closed"] {
+  animation: toast-out var(--duration-micro) var(--ease-in-quick) forwards;
+}
+
+.toast-root[data-swipe="move"] {
+  transform: translateX(var(--radix-toast-swipe-move-x));
+  transition: none;
+}
+
+.toast-root[data-swipe="cancel"] {
+  transform: translateX(0);
+  transition: transform var(--duration-micro) var(--ease-out-snappy);
+}
+
+.toast-root[data-swipe="end"] {
+  animation: toast-out var(--duration-micro) var(--ease-in-quick) forwards;
 }
 
 /* Popovers and page changes: opacity + a sub-pixel transform, nothing that reflows. */
@@ -206,7 +691,7 @@ button:disabled,
 }
 
 .popover-panel {
-  animation: popover-in var(--motion-pop) var(--ease-standard);
+  animation: popover-in var(--duration-micro) var(--ease-out-snappy);
   transform-origin: var(--radix-popover-content-transform-origin, top right);
 }
 
@@ -222,11 +707,10 @@ button:disabled,
 }
 
 .page-enter {
-  animation: page-in var(--motion-page) var(--ease-standard);
+  animation: page-in var(--motion-page) var(--ease-out-snappy);
 }
 
-/* The rail scrolls with the wheel and the keyboard, but never draws a scrollbar: the
-   10px gutter it reserved read as a permanent second scrollbar in the shell. */
+/* Scrollports */
 .nav-scroll,
 .tab-strip {
   scrollbar-width: none;
@@ -239,31 +723,11 @@ button:disabled,
   display: none;
 }
 
-/* The one content scrollport. Reserving the gutter keeps the page from shifting when a
-   route is short enough not to scroll and the next one is not. */
 .main-scroll {
   scrollbar-gutter: stable;
   overscroll-behavior: contain;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-  .popover-panel,
-  .page-enter,
-  .drawer-panel,
-  .route-edge,
-  .live-dot,
-  .pulse {
-    animation: none !important;
-  }
-}
 /* Numeric readouts line up in tables and metric cards. */
 .tnum {
   font-variant-numeric: tabular-nums;
@@ -274,50 +738,47 @@ button:disabled,
   width: 10px;
   height: 10px;
 }
+
 ::-webkit-scrollbar-thumb {
   background: var(--color-line);
   border-radius: 999px;
   border: 3px solid var(--color-bg);
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 
-:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
-}
-
-/* A heading focused for screen readers is not an interactive control. */
-h1[tabindex="-1"]:focus,
-h1[tabindex="-1"]:focus-visible {
-  outline: none;
-}
-
-/* The traffic chart shows the peak bucket's tooltip until the chart is touched;
-   hovering any column (including the peak) takes over from CSS alone. */
-@keyframes rrouter-pulse {
-  0%,
-  100% {
-    opacity: 1;
+/* Accessibility: eliminate decorative, loop, and spatial motion under reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
   }
-  50% {
-    opacity: 0.35;
+
+  .popover-panel,
+  .page-enter,
+  .drawer-panel,
+  .dialog-panel,
+  .toast-root,
+  .toast-root[data-state="open"],
+  .toast-root[data-state="closed"],
+  .toast-root[data-swipe="end"],
+  .route-edge,
+  .live-dot,
+  .pulse {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
   }
-}
-.pulse {
-  animation: rrouter-pulse 2s ease-in-out infinite;
-}
 
-/* Number fields: no spinner. Chromium paints a black square for the inner spin button on
-   a dark surface, and the value is free text here (0 means unlimited). */
-input[type="number"] {
-  appearance: textfield;
-  -moz-appearance: textfield;
-}
-
-input[type="number"]::-webkit-outer-spin-button,
-input[type="number"]::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
+  .route-edge {
+    stroke-dasharray: none !important;
+  }
 }

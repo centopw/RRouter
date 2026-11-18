@@ -80,7 +80,7 @@ export default function Webhooks() {
           <div className="max-w-[420px] truncate font-mono text-small text-fg" title={row.url}>
             {row.url}
           </div>
-          <div className="mt-0.5 text-caption text-faint">
+          <div className="mt-0.5 text-caption text-faint tnum">
             {row.updated_at ? `updated ${when(row.updated_at)}` : `added ${when(row.created_at)}`}
           </div>
         </div>
@@ -245,7 +245,7 @@ export default function Webhooks() {
           role="alert"
           className="mb-4 rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-body text-fg"
         >
-          <span className="font-medium">
+          <span className="font-medium tnum">
             {unready.length === 1
               ? "1 enabled endpoint cannot deliver"
               : `${unready.length} enabled endpoints cannot deliver`}
@@ -361,7 +361,7 @@ const attemptColumns: Array<Column<WebhookAttempt>> = [
     key: "when",
     title: "Queued",
     width: "10rem",
-    render: (row) => <span className="whitespace-nowrap text-muted">{when(row.created_at)}</span>,
+    render: (row) => <span className="whitespace-nowrap text-muted tnum">{when(row.created_at)}</span>,
   },
   {
     key: "type",
@@ -418,7 +418,7 @@ const attemptColumns: Array<Column<WebhookAttempt>> = [
       ) : row.delivered_at ? (
         <span className="whitespace-nowrap text-caption text-pos">delivered</span>
       ) : row.next_attempt_at ? (
-        <span className="whitespace-nowrap text-caption text-muted">
+        <span className="whitespace-nowrap text-caption text-muted tnum">
           {when(row.next_attempt_at)}
         </span>
       ) : (
@@ -441,7 +441,7 @@ function QueueHealth({ status, error }: { status?: WebhookStatus; error: boolean
   if (dead > 0) {
     return (
       <Badge tone="neg" title="deliveries that exhausted their retries">
-        {dead} dead
+        <span className="tnum">{dead} dead</span>
       </Badge>
     );
   }

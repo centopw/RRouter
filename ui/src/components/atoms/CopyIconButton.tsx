@@ -21,7 +21,7 @@ export function CopyIconButton({
       aria-label={done ? "Copied" : label}
       title={done ? "Copied" : label}
       className={cx(
-        "inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-faint transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-text",
+        "inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-control)] text-faint transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-focus-ring)]",
         className,
       )}
     >

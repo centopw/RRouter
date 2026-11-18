@@ -27,7 +27,7 @@ import {
 } from "./unified-rows";
 
 const CHIP =
-  "shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.06em] text-muted";
+  "shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-caption uppercase tracking-[0.06em] text-muted";
 
 /**
  * A member disclosure is local page state keyed by the combo ref: it survives a status or
@@ -87,6 +87,10 @@ export type ModelActions = {
   onDelete: (model: Model) => void;
   /** Hide/restore is an entry operation; absent on rows the preset never stored. */
   onHide: (ref: string) => void;
+  onMoveTop?: (ref: string) => void;
+  onMoveBottom?: (ref: string) => void;
+  canMoveTop?: (ref: string) => boolean;
+  canMoveBottom?: (ref: string) => boolean;
 };
 
 /** Group and `/v1` are draft writes; absent when no preset is loaded for this caller. */
@@ -223,7 +227,7 @@ function BoardTable({
                   "sticky top-0 z-20 border-b border-line bg-surface px-4 py-2.5 text-small font-semibold text-ink-soft",
                   column.align === "right" ? "text-right" : "text-left",
                   column.key === "actions" &&
-                    "sticky right-0 z-30 border-l border-line bg-surface shadow-[-8px_0_8px_-8px_rgba(28,43,66,0.16)]",
+                    "sticky right-0 z-30 border-l border-line bg-surface shadow-[var(--shadow-sticky-col)]",
                   column.className,
                 )}
               >
@@ -277,7 +281,7 @@ function RowCells({ row, columns }: { row: UnifiedRow; columns: Array<Column<Uni
           "border-b border-[var(--color-rule)] px-4 py-2.5 align-middle text-fg",
           column.align === "right" && "text-right tnum",
           column.key === "actions" &&
-            "sticky right-0 z-10 border-l border-line bg-surface shadow-[-8px_0_8px_-8px_rgba(28,43,66,0.16)] group-hover:bg-[var(--color-row-hover)]",
+            "sticky right-0 z-10 border-l border-line bg-surface shadow-[var(--shadow-sticky-col)] group-hover:bg-[var(--color-row-hover)]",
           column.className,
         );
         if (column.key === "model") {
@@ -478,6 +482,10 @@ function UnifiedCard({
           onHide={
             row.entry && controls?.editable ? (ref) => onHide(ref) : undefined
           }
+          onMoveTop={actions.onMoveTop ? () => actions.onMoveTop!(row.ref) : undefined}
+          onMoveBottom={actions.onMoveBottom ? () => actions.onMoveBottom!(row.ref) : undefined}
+          canMoveTop={actions.canMoveTop ? actions.canMoveTop(row.ref) : undefined}
+          canMoveBottom={actions.canMoveBottom ? actions.canMoveBottom(row.ref) : undefined}
           groups={controls?.editable ? controls.groups : undefined}
           currentGroup={controls?.groupOf(row.ref)}
           onMoveGroup={
@@ -508,12 +516,20 @@ function UnifiedCard({
           </Button>
         ) : null}
         {row.kind === "model" ? null : (
-          <Link
-            to={row.kind === "alias" ? "/routing/aliases" : "/routing/combos"}
-            className="inline-flex h-8 items-center rounded-full px-2 text-small text-accent-text underline underline-offset-2"
-          >
-            edit {row.kind}
-          </Link>
+          <>
+            <Link
+              to={`/playground/chat?model=${encodeURIComponent(row.name)}`}
+              className="inline-flex h-8 items-center rounded-full px-2 text-small text-accent-text underline underline-offset-2"
+            >
+              Test in Playground →
+            </Link>
+            <Link
+              to={`${row.kind === "alias" ? "/routing/aliases" : "/routing/combos"}?edit=${encodeURIComponent(row.name)}`}
+              className="inline-flex h-8 items-center rounded-full px-2 text-small text-accent-text underline underline-offset-2"
+            >
+              edit {row.kind}
+            </Link>
+          </>
         )}
       </div>
       {controlsRow}

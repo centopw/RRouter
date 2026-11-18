@@ -1,47 +1,26 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Copy, PencilSimple, Plus, Star, Trash } from "@phosphor-icons/react";
-import {
-  Badge,
-  Button,
-  ConfirmDialog,
-  EmptyState,
-  ErrorNote,
-  Field,
-  Input,
-  Modal,
-  PageHeader,
-} from "../components/ui";
+import { Badge, Button, EmptyState, ErrorNote, Modal, PageHeader } from "../components/ui";
 import { IconButton } from "../components/atoms";
 import { DataTable, type Column } from "../components/table";
 import { when } from "../lib/format";
-import {
-  useCreatePreset,
-  useDeletePreset,
-  useDuplicatePreset,
-  useMakeDefaultPreset,
-  useModelProviders,
-  usePatchPreset,
-  usePresetIndex,
-  usePresetLayout,
-} from "../lib/queries";
+import { useModelProviders, usePresetIndex, usePresetLayout } from "../lib/queries";
 import { groupsOf } from "../lib/layout-draft";
 import type { LayoutItem, ModelProvider, PresetSummary } from "../lib/api";
+import {
+  PresetDefaultDialog,
+  PresetDeleteDialog,
+  PresetFormModal,
+  sortPresets,
+  usePresetCrud,
+} from "./models/preset-header";
 
 const quietLink =
   "inline-flex h-8 shrink-0 items-center justify-center whitespace-nowrap rounded-full border border-line bg-surface px-3.5 text-body text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text";
 
 const primaryLink =
   "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-full border border-transparent bg-accent px-3.5 text-body font-semibold text-[var(--color-accent-ink)] transition-colors hover:bg-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text";
-
-const textareaClass =
-  "w-full resize-y rounded-[var(--radius-input)] border border-line-strong bg-surface px-2.5 py-2 text-body text-fg placeholder:text-faint hover:border-[var(--color-fg)]/40 focus:border-[var(--color-accent-text)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-text)]/25";
-
-/** What the name dialog is doing; the endpoint differs, the fields mostly do not. */
-type FormState =
-  | { kind: "create" }
-  | { kind: "edit"; preset: PresetSummary }
-  | { kind: "duplicate"; preset: PresetSummary };
 
 type GroupRow = {
   id: string;
@@ -98,102 +77,21 @@ export default function Presets() {
   const presets = usePresetIndex();
   const providers = useModelProviders();
 
-  const createPreset = useCreatePreset();
-  const patchPreset = usePatchPreset();
-  const duplicatePreset = useDuplicatePreset();
-  const makeDefaultPreset = useMakeDefaultPreset();
-  const deletePreset = useDeletePreset();
-
-  const [form, setForm] = useState<FormState | null>(null);
-  const [formName, setFormName] = useState("");
-  const [formDescription, setFormDescription] = useState("");
-  const [deleting, setDeleting] = useState<PresetSummary | null>(null);
-  const [defaultTarget, setDefaultTarget] = useState<PresetSummary | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const crud = usePresetCrud({
+    onDeleted: (deletedId) => {
+      if (selectedId === deletedId) setSelectedId(null);
+    },
+  });
 
   const layout = usePresetLayout(selectedId);
 
-  const rows = useMemo(
-    () =>
-      [...(presets.data?.data ?? [])].sort(
-        (a, b) => Number(b.is_default) - Number(a.is_default) || a.name.localeCompare(b.name),
-      ),
-    [presets.data],
-  );
+  const rows = useMemo(() => sortPresets(presets.data?.data ?? []), [presets.data]);
   const selected = rows.find((preset) => preset.id === selectedId) ?? null;
   const providerName = useMemo(
     () => new Map((providers.data ?? []).map((p: ModelProvider) => [p.id, p.display] as const)),
     [providers.data],
   );
-
-  const openForm = (next: FormState) => {
-    createPreset.reset();
-    patchPreset.reset();
-    duplicatePreset.reset();
-    setForm(next);
-    setFormName(next.kind === "create" ? "" : next.preset.name);
-    setFormDescription(next.kind === "edit" ? (next.preset.description ?? "") : "");
-  };
-
-  const closeForm = () => {
-    setForm(null);
-    setFormName("");
-    setFormDescription("");
-  };
-
-  const formNameValue = formName.trim();
-  const formError = createPreset.error ?? patchPreset.error ?? duplicatePreset.error;
-  const formPending =
-    createPreset.isPending || patchPreset.isPending || duplicatePreset.isPending;
-
-  const submitForm = () => {
-    if (!form || formNameValue === "") return;
-    const description = formDescription.trim();
-    if (form.kind === "create") {
-      createPreset.mutate(
-        { name: formNameValue, ...(description ? { description } : {}) },
-        { onSuccess: closeForm },
-      );
-      return;
-    }
-    if (form.kind === "edit") {
-      patchPreset.mutate(
-        {
-          id: form.preset.id,
-          patch: { name: formNameValue, description: description === "" ? null : description },
-        },
-        { onSuccess: closeForm },
-      );
-      return;
-    }
-    duplicatePreset.mutate(
-      { id: form.preset.id, name: formNameValue },
-      { onSuccess: closeForm },
-    );
-  };
-
-  const formTitle =
-    form?.kind === "create"
-      ? "New preset"
-      : form?.kind === "edit"
-        ? "Rename preset"
-        : "Duplicate preset";
-  const formDescriptionText =
-    form?.kind === "create"
-      ? "A preset is a routing plan: the models it lists, their order, and their groups. The plan starts empty and merges the live catalog; Models is the editor."
-      : form?.kind === "edit"
-        ? "The name and description of a routing plan. Neither changes its layout or revision."
-        : "A copy of the same routing plan under a new name. The copy starts with the same groups and order.";
-
-  const openDelete = (preset: PresetSummary) => {
-    deletePreset.reset();
-    setDeleting(preset);
-  };
-
-  const openDefault = (preset: PresetSummary) => {
-    makeDefaultPreset.reset();
-    setDefaultTarget(preset);
-  };
 
   const groups: GroupRow[] = useMemo(() => {
     const document = layout.data?.layout;
@@ -320,12 +218,15 @@ export default function Presets() {
           <Link to={`/models?preset=${encodeURIComponent(preset.id)}`} className={quietLink}>
             Open
           </Link>
-          <IconButton label={`Rename ${preset.name}`} onClick={() => openForm({ kind: "edit", preset })}>
+          <IconButton
+            label={`Rename ${preset.name}`}
+            onClick={() => crud.openForm({ kind: "edit", preset })}
+          >
             <PencilSimple size={15} aria-hidden />
           </IconButton>
           <IconButton
             label={`Duplicate ${preset.name}`}
-            onClick={() => openForm({ kind: "duplicate", preset })}
+            onClick={() => crud.openForm({ kind: "duplicate", preset })}
           >
             <Copy size={15} aria-hidden />
           </IconButton>
@@ -337,13 +238,13 @@ export default function Presets() {
                 ? "This preset is already the default"
                 : "New keys and callers without a preference fall back to the default"
             }
-            onClick={() => openDefault(preset)}
+            onClick={() => crud.openDefault(preset)}
           >
             <Star size={15} aria-hidden />
           </IconButton>
           <IconButton
             label={`Delete ${preset.name}`}
-            onClick={() => openDelete(preset)}
+            onClick={() => crud.openDelete(preset)}
             className="hover:bg-[var(--color-neg-tint)] hover:text-[var(--color-neg-ink)]"
           >
             <Trash size={15} aria-hidden />
@@ -363,7 +264,7 @@ export default function Presets() {
         title="Presets"
         subtitle="A preset is a routing plan: which models appear, in what order, and in which groups. Models is the editor; this page owns the lifecycle."
         actions={
-          <Button variant="primary" arrow={false} onClick={() => openForm({ kind: "create" })}>
+          <Button variant="primary" arrow={false} onClick={() => crud.openForm({ kind: "create" })}>
             <Plus size={15} aria-hidden />
             New preset
           </Button>
@@ -375,9 +276,9 @@ export default function Presets() {
           <ErrorNote error={presets.error} onRetry={() => void presets.refetch()} />
         </div>
       ) : null}
-      {makeDefaultPreset.error ? (
+      {crud.defaultError ? (
         <div className="mb-4">
-          <ErrorNote error={makeDefaultPreset.error} />
+          <ErrorNote error={crud.defaultError} />
         </div>
       ) : null}
 
@@ -393,7 +294,11 @@ export default function Presets() {
           empty={
             <div className="flex flex-col items-center gap-2">
               <span>No presets yet. Create one to start a routing plan.</span>
-              <Button variant="primary" arrow={false} onClick={() => openForm({ kind: "create" })}>
+              <Button
+                variant="primary"
+                arrow={false}
+                onClick={() => crud.openForm({ kind: "create" })}
+              >
                 <Plus size={15} aria-hidden />
                 New preset
               </Button>
@@ -402,72 +307,20 @@ export default function Presets() {
         />
       </div>
 
-      <Modal
-        open={form !== null}
-        onClose={closeForm}
-        title={formTitle}
-        description={formDescriptionText}
-        variant="dialog"
-        footer={
-          <>
-            <Button onClick={closeForm} disabled={formPending}>
-              cancel
-            </Button>
-            <Button
-              variant="primary"
-              arrow={false}
-              disabled={formPending || formNameValue === ""}
-              onClick={submitForm}
-            >
-              {formPending
-                ? "working…"
-                : form?.kind === "create"
-                  ? "Create preset"
-                  : form?.kind === "edit"
-                    ? "Save changes"
-                    : "Duplicate preset"}
-            </Button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-4">
-          {formError ? <ErrorNote error={formError} /> : null}
-          <Field
-            label="Name"
-            hint={
-              form?.kind === "duplicate"
-                ? `A new name for the copy of ${form.preset.name}.`
-                : "Shown in the preset switcher on Models."
-            }
-          >
-            <Input
-              value={formName}
-              onChange={setFormName}
-              autoFocus
-              placeholder="e.g. Production"
-              ariaLabel="Preset name"
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && formNameValue !== "" && !formPending) {
-                  event.preventDefault();
-                  submitForm();
-                }
-              }}
-            />
-          </Field>
-          {form?.kind === "create" || form?.kind === "edit" ? (
-            <Field label="Description" hint="Optional. What this plan is for and who should use it.">
-              <textarea
-                value={formDescription}
-                onChange={(event) => setFormDescription(event.target.value)}
-                placeholder="e.g. Fallback chain for production traffic"
-                aria-label="Preset description"
-                rows={3}
-                className={textareaClass}
-              />
-            </Field>
-          ) : null}
-        </div>
-      </Modal>
+      <PresetFormModal
+        form={crud.form}
+        title={crud.formTitle}
+        descriptionText={crud.formDescriptionText}
+        name={crud.formName}
+        onNameChange={crud.setFormName}
+        description={crud.formDescription}
+        onDescriptionChange={crud.setFormDescription}
+        nameValue={crud.formNameValue}
+        pending={crud.formPending}
+        error={crud.formError}
+        onClose={crud.closeForm}
+        onSubmit={crud.submitForm}
+      />
 
       <Modal
         open={selected !== null}
@@ -478,7 +331,7 @@ export default function Presets() {
         footer={
           selected ? (
             <>
-              <Button onClick={() => setSelectedId(null)}>close</Button>
+              <Button onClick={() => setSelectedId(null)}>Close</Button>
               <Link to={`/models?preset=${encodeURIComponent(selected.id)}`} className={primaryLink}>
                 Open in Models <span aria-hidden>→</span>
               </Link>
@@ -543,7 +396,7 @@ export default function Presets() {
                 <section className="min-w-0">
                   <div className="mb-2 flex items-baseline justify-between gap-3">
                     <h3 className="text-small font-semibold text-ink-soft">Groups</h3>
-                    <span className="text-caption text-faint">
+                    <span className="text-caption text-faint tnum">
                       {groups.length} group{groups.length === 1 ? "" : "s"}
                     </span>
                   </div>
@@ -606,75 +459,20 @@ export default function Presets() {
         )}
       </Modal>
 
-      <Modal
-        open={defaultTarget !== null}
-        onClose={() => setDefaultTarget(null)}
-        title="Make this preset the default?"
-        description="New keys and callers without a preference fall back to the default plan."
-        variant="dialog"
-        footer={
-          <>
-            <Button onClick={() => setDefaultTarget(null)} disabled={makeDefaultPreset.isPending}>
-              cancel
-            </Button>
-            <Button
-              variant="primary"
-              arrow={false}
-              disabled={makeDefaultPreset.isPending}
-              onClick={() => {
-                if (!defaultTarget) return;
-                makeDefaultPreset.mutate(defaultTarget.id, {
-                  onSuccess: () => setDefaultTarget(null),
-                });
-              }}
-            >
-              {makeDefaultPreset.isPending ? "working…" : "Make default"}
-            </Button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-3">
-          {makeDefaultPreset.error ? <ErrorNote error={makeDefaultPreset.error} /> : null}
-          <p className="text-body leading-relaxed text-ink-soft">
-            <span className="font-semibold text-fg">{defaultTarget?.name}</span> becomes the
-            instance default. The current default keeps its layout and stays available; only
-            the fallback changes.
-          </p>
-        </div>
-      </Modal>
+      <PresetDefaultDialog
+        target={crud.defaultTarget}
+        busy={crud.defaultPending}
+        error={crud.defaultError}
+        onClose={crud.closeDefault}
+        onConfirm={crud.confirmDefault}
+      />
 
-      <ConfirmDialog
-        open={deleting !== null}
-        title="Delete this preset?"
-        confirmLabel="Delete preset"
-        busy={deletePreset.isPending}
-        error={deletePreset.error}
-        message={
-          <>
-            <span className="font-semibold text-fg">{deleting?.name}</span> and its saved order,
-            groups and visibility are removed. Models keep routing through the default preset.
-            {deleting?.is_default ? (
-              <span className="mt-2 block">
-                This is the default preset, and the gateway refuses to delete it. Make another
-                preset the default first.
-              </span>
-            ) : null}
-          </>
-        }
-        onClose={() => {
-          setDeleting(null);
-          deletePreset.reset();
-        }}
-        onConfirm={() => {
-          const target = deleting;
-          if (!target) return;
-          deletePreset.mutate(target.id, {
-            onSuccess: () => {
-              if (selectedId === target.id) setSelectedId(null);
-              setDeleting(null);
-            },
-          });
-        }}
+      <PresetDeleteDialog
+        target={crud.deleting}
+        busy={crud.deletePending}
+        error={crud.deleteError}
+        onClose={crud.closeDelete}
+        onConfirm={crud.confirmDelete}
       />
     </>
   );

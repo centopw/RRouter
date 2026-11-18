@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Badge,
   Button,
   Card,
   CardHeader,
   ConfirmDialog,
+  Dot,
   EmptyState,
   ErrorNote,
   Field,
@@ -19,6 +21,7 @@ import { compact, parseUsd, usd, usdInput, when } from "../lib/format";
 import {
   useAddTeamMember,
   useAuthState,
+  useConnections,
   useCreateTeam,
   useDeleteTeam,
   useIsAdmin,
@@ -28,7 +31,7 @@ import {
   useTeams,
   useUpdateTeam,
 } from "../lib/queries";
-import type { BudgetWindow, KeyResult, Team, TeamMember } from "../lib/api";
+import type { BudgetWindow, Connection, KeyResult, Team, TeamMember } from "../lib/api";
 
 /**
  * Teams: the tenancy unit above a gateway key.
@@ -48,6 +51,7 @@ const ROLES: ReadonlyArray<{ id: string; label: string }> = [
 export default function Teams() {
   const isAdmin = useIsAdmin();
   const teams = useTeams();
+  const connections = useConnections();
   const remove = useDeleteTeam();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -56,6 +60,17 @@ export default function Teams() {
 
   const rows = teams.data ?? [];
   const current = rows.find((team) => team.id === selectedId) ?? rows[0] ?? null;
+
+  const connectionsByTeam = useMemo(() => {
+    const map = new Map<string, Connection[]>();
+    for (const connection of connections.data ?? []) {
+      if (!connection.team_id) continue;
+      const list = map.get(connection.team_id) ?? [];
+      list.push(connection);
+      map.set(connection.team_id, list);
+    }
+    return map;
+  }, [connections.data]);
 
   const columns: Array<Column<Team>> = [
     {
@@ -79,6 +94,38 @@ export default function Teams() {
       title: "Members",
       width: "7rem",
       render: (team) => <span className="text-muted tnum">{team.members}</span>,
+    },
+    {
+      key: "upstreams",
+      title: "Assigned provider connections",
+      render: (team) => {
+        const teamConns = connectionsByTeam.get(team.id) ?? [];
+        const activeCount = teamConns.filter((c) => c.is_active).length;
+        return (
+          <div className="flex flex-wrap items-center gap-2 text-small">
+            {teamConns.length === 0 ? (
+              <Badge tone="warn" title="Team keys fail with 'no eligible upstream' until a provider connection is assigned">
+                <span className="font-mono tnum">0</span> assigned
+              </Badge>
+            ) : (
+              <Badge tone={activeCount > 0 ? "pos" : "warn"}>
+                <span className="font-mono tnum">
+                  {activeCount}/{teamConns.length}
+                </span>{" "}
+                active
+              </Badge>
+            )}
+            {isAdmin ? (
+              <Link
+                to={`/providers?team=${encodeURIComponent(team.id)}`}
+                className="whitespace-nowrap text-caption font-medium text-[var(--color-accent-text)] hover:underline"
+              >
+                {teamConns.length === 0 ? "Assign →" : "View →"}
+              </Link>
+            ) : null}
+          </div>
+        );
+      },
     },
     {
       key: "budget",
@@ -107,7 +154,7 @@ export default function Teams() {
             render: (team: Team) => (
               <span className="flex items-center justify-end gap-1.5">
                 <Button variant="quiet" onClick={() => setRenaming(team)}>
-                  rename
+                  Rename
                 </Button>
                 <Button
                   variant="danger"
@@ -116,7 +163,7 @@ export default function Teams() {
                     setDeleting(team);
                   }}
                 >
-                  delete
+                  Delete
                 </Button>
               </span>
             ),
@@ -200,13 +247,19 @@ export default function Teams() {
             columns={columns}
             rows={rows}
             rowKey={(team) => team.id}
+            selectedKey={current?.id}
             loading={teams.isLoading}
           />
         )}
       </Card>
 
       {current ? (
-        <TeamDetail key={current.id} team={current} isAdmin={isAdmin} />
+        <TeamDetail
+          key={current.id}
+          team={current}
+          isAdmin={isAdmin}
+          assignedConnections={connectionsByTeam.get(current.id) ?? []}
+        />
       ) : null}
     </>
   );
@@ -242,9 +295,11 @@ function BudgetCell({ team }: { team: Team }) {
 function TeamDetail({
   team,
   isAdmin,
+  assignedConnections,
 }: {
   team: Team;
   isAdmin: boolean;
+  assignedConnections: Connection[];
 }) {
   const members = useTeamMembers(team.id);
   const me = useAuthState().data?.user;
@@ -334,7 +389,7 @@ function TeamDetail({
       title: "Since",
       width: "9rem",
       render: (member) => (
-        <span className="whitespace-nowrap text-muted">{when(member.created_at)}</span>
+        <span className="whitespace-nowrap text-muted tnum">{when(member.created_at)}</span>
       ),
     },
     ...(canManageMembers
@@ -391,7 +446,7 @@ function TeamDetail({
           key.budget_micros > 0 ? usd(key.budget_micros) : null,
         ].filter((part): part is string => part !== null);
         return (
-          <span className="text-small text-muted">
+          <span className="text-small text-muted tnum">
             {parts.length > 0 ? parts.join(" · ") : <span className="text-faint">unlimited</span>}
           </span>
         );
@@ -460,20 +515,90 @@ function TeamDetail({
         </div>
         {isAdmin ? (
           <div className="flex items-center justify-between gap-3 border-t border-line px-6 py-3">
-            <span className="text-caption text-faint">
+            <span className="text-caption text-faint tnum">
               {team.spend.requests} requests · {compact(team.spend.tokens)} tokens ·{" "}
               {usd(team.spend.cost_micros)} this window
             </span>
             <Button variant="primary" onClick={save} disabled={update.isPending}>
-              {update.isPending ? "saving…" : "save budget"}
+              {update.isPending ? "Saving…" : "Save budget"}
             </Button>
           </div>
         ) : (
-          <div className="border-t border-line px-6 py-3 text-caption text-faint">
+          <div className="border-t border-line px-6 py-3 text-caption text-faint tnum">
             {team.spend.requests} requests · {compact(team.spend.tokens)} tokens ·{" "}
             {usd(team.spend.cost_micros)} this window
           </div>
         )}
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Assigned provider connections"
+          action={
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-caption text-faint tnum">
+                {assignedConnections.filter((c) => c.is_active).length} active of{" "}
+                {assignedConnections.length} assigned
+              </span>
+              {isAdmin ? (
+                <Link
+                  to={`/providers?team=${encodeURIComponent(team.id)}`}
+                  className="text-caption font-medium text-[var(--color-accent-text)] hover:underline"
+                >
+                  Manage in Providers →
+                </Link>
+              ) : null}
+            </div>
+          }
+        />
+        <div className="px-6 pb-5">
+          {assignedConnections.filter((c) => c.is_active).length === 0 ? (
+            <div className="rounded-[var(--radius-card)] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3.5 py-2.5 text-small text-[var(--color-warn-ink)]">
+              <span className="font-medium">No active provider connections assigned.</span>{" "}
+              Team-scoped keys will fail with <span className="font-mono">no eligible upstream</span>{" "}
+              until at least one active connection is assigned to this team.
+              {isAdmin ? (
+                <>
+                  {" "}
+                  <Link
+                    to={`/providers?team=${encodeURIComponent(team.id)}`}
+                    className="font-medium underline"
+                  >
+                    Assign provider connections →
+                  </Link>
+                </>
+              ) : null}
+            </div>
+          ) : (
+            <ul className="divide-y divide-[var(--color-rule)]">
+              {assignedConnections.map((c) => (
+                <li key={c.id} className="flex flex-wrap items-center gap-2.5 py-2 text-body">
+                  <Dot tone={!c.is_active ? "muted" : c.backoff_level > 0 ? "warn" : "pos"} />
+                  <span className="min-w-0 flex-1 truncate font-medium text-fg">
+                    {c.name ?? c.email ?? c.provider}
+                  </span>
+                  <span className="font-mono text-caption text-faint">{c.provider}</span>
+                  {c.backoff_level > 0 ? (
+                    <Badge tone="warn">
+                      <span className="font-mono tnum">backoff {c.backoff_level}</span>
+                    </Badge>
+                  ) : null}
+                  <Badge tone={c.is_active ? "pos" : "neutral"}>
+                    {c.is_active ? "active" : "disabled"}
+                  </Badge>
+                  {isAdmin ? (
+                    <Link
+                      to={`/providers?inspect=${encodeURIComponent(c.id)}`}
+                      className="text-caption text-[var(--color-accent-text)] hover:underline"
+                    >
+                      Inspect →
+                    </Link>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </Card>
 
       <Card>

@@ -166,7 +166,7 @@ export function Metric({
       <div className="mt-2 flex items-center gap-1.5 text-caption">
         {delta !== null && delta !== undefined ? (
           <>
-            <span className={up ? "text-pos" : "text-neg"}>
+            <span className={cx("tnum", up ? "text-pos" : "text-neg")}>
               {up ? "↑" : "↓"} {pct(Math.abs(delta))}
             </span>
             <span className="text-faint">vs prev period</span>
@@ -200,7 +200,7 @@ export function Readout({
       <div className="text-body text-muted">{label}</div>
       <div
         className={cx(
-          "mt-2 min-w-0 break-words font-mono text-[clamp(1.5rem,2vw,2rem)] font-medium leading-none tracking-[-0.02em] tnum",
+          "mt-2 min-w-0 break-words text-[length:var(--text-kpi)] font-mono font-medium leading-none tracking-[-0.025em] tnum",
           tone === "neg" ? "text-neg" : "text-fg",
         )}
       >
@@ -210,7 +210,9 @@ export function Readout({
         {dot ? <Dot tone={dot} /> : null}
         {note}
         {delta ? (
-          <span className={delta.up && tone === "neg" ? "text-neg" : "text-muted"}>{delta.text}</span>
+          <span className={cx("tnum", delta.up && tone === "neg" ? "text-neg" : "text-muted")}>
+            {delta.text}
+          </span>
         ) : null}
       </div>
     </div>
@@ -384,7 +386,7 @@ function Tooltip({
   unit: TrafficUnit;
 }) {
   return (
-    <div className="w-[208px] rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-left shadow-xl">
+    <div className="w-[208px] rounded-[var(--radius-surface)] border border-line bg-surface-2 px-3 py-2.5 text-left shadow-[var(--shadow-popover)]">
       <div className="text-caption text-faint">{bucket.full}</div>
       <div className="mt-1 text-body font-medium text-fg tnum">
         {amount(bucket.total, unit, false)} {unit}

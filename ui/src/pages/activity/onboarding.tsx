@@ -11,7 +11,7 @@ export function Onboarding({ baseUrl, canAdmin = true }: { baseUrl: string; canA
   // A reader can see that the gateway is idle but cannot add a provider or mint a key,
   // so those steps lose their link rather than leading to a page that redirects away.
   const providerLink = canAdmin ? { to: "/providers", cta: "Open Providers" } : {};
-  const keyLink = canAdmin ? { to: "/keys", cta: "Open API Keys" } : {};
+  const keyLink = canAdmin ? { to: "/access/keys", cta: "Open API Keys" } : {};
   return (
     <section className="rounded-[var(--radius-card)] border border-line bg-surface px-8 py-10">
       <div className="mx-auto max-w-[560px] text-center">

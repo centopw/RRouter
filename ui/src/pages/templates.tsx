@@ -107,14 +107,18 @@ export default function Templates() {
       key: "version",
       title: "version",
       width: "90px",
-      render: (row) => <Badge tone="neutral">v{row.version}</Badge>,
+      render: (row) => (
+        <Badge tone="neutral">
+          <span className="font-mono tnum">v{row.version}</span>
+        </Badge>
+      ),
     },
     {
       key: "updated",
       title: "updated",
       width: "150px",
       render: (row) => (
-        <span className="text-small text-muted" title={when(row.updated_at)}>
+        <span className="text-small text-muted tnum" title={when(row.updated_at)}>
           {ago(row.updated_at)}
         </span>
       ),
@@ -129,16 +133,16 @@ export default function Templates() {
             <>
               <Button
                 variant="ghost"
-                onClick={() => navigate(`/playground?template=${encodeURIComponent(row.id)}`)}
+                onClick={() => navigate(`/playground/chat?template=${encodeURIComponent(row.id)}`)}
                 title="load this prompt into the Playground and open it"
               >
-                open
+                Open
               </Button>
               <Button
                 variant="quiet"
                 onClick={() => open({ id: row.id, name: row.name, body: row.body })}
               >
-                edit
+                Edit
               </Button>
             </>
           ) : null}
@@ -147,11 +151,11 @@ export default function Templates() {
             onClick={() => setHistoryOf(row)}
             title="every body revision, newest first"
           >
-            history
+            History
           </Button>
           {isAdmin ? (
             <Button variant="danger" onClick={() => del(row)}>
-              delete
+              Delete
             </Button>
           ) : null}
         </span>
@@ -213,7 +217,7 @@ export default function Templates() {
         <CardHeader
           title="Saved templates"
           action={
-            <span className="text-caption text-faint">
+            <span className="text-caption text-faint tnum">
               {rows ? `${rows.length} ${rows.length === 1 ? "template" : "templates"}` : null}
             </span>
           }
@@ -246,18 +250,18 @@ export default function Templates() {
 
       {draft ? (
         <Modal
-          title={draft.id === null ? "new template" : "edit template"}
+          title={draft.id === null ? "New template" : "Edit template"}
           open
           onClose={() => setDraft(null)}
           footer={
             <>
-              <Button onClick={() => setDraft(null)}>cancel</Button>
+              <Button onClick={() => setDraft(null)}>Cancel</Button>
               <Button
                 variant="primary"
                 disabled={create.isPending || update.isPending}
                 onClick={save}
               >
-                {create.isPending || update.isPending ? "saving…" : "save"}
+                {create.isPending || update.isPending ? "Saving…" : "Save"}
               </Button>
             </>
           }
@@ -293,7 +297,7 @@ export default function Templates() {
             ) : null}
 
             {draft.id !== null ? (
-              <p className="font-mono text-caption text-faint">
+              <p className="font-mono text-caption text-faint tnum">
                 editing v{
                   rows?.find((row) => row.id === draft.id)?.version ?? "?"
                 } · a name change alone keeps the version
@@ -331,10 +335,10 @@ function TemplateHistory({
 
   return (
     <Modal
-      title={`history — ${template.name}`}
+      title={`History — ${template.name}`}
       open
       onClose={onClose}
-      footer={<Button onClick={onClose}>close</Button>}
+      footer={<Button onClick={onClose}>Close</Button>}
     >
       <p className="mb-3 text-small text-faint">
         Newest first. Restore copies that body into the editor; saving it publishes a new
@@ -359,9 +363,9 @@ function TemplateHistory({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="flex items-center gap-2">
                   <Badge tone={version.version === template.version ? "pos" : "neutral"}>
-                    v{version.version}
+                    <span className="font-mono tnum">v{version.version}</span>
                   </Badge>
-                  <span className="text-caption text-faint" title={when(version.created_at)}>
+                  <span className="text-caption text-faint tnum" title={when(version.created_at)}>
                     {when(version.created_at)} · {ago(version.created_at)}
                   </span>
                   {version.version === template.version ? (
@@ -369,7 +373,7 @@ function TemplateHistory({
                   ) : null}
                 </span>
                 <Button variant="ghost" onClick={() => onRestore(version)}>
-                  restore
+                  Restore
                 </Button>
               </div>
               <p className="mt-1.5 max-h-24 overflow-hidden whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-muted">

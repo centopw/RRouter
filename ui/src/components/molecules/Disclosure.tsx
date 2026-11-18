@@ -16,7 +16,7 @@ export function Disclosure({
   contentClassName?: string;
 }) {
   return (
-    <Accordion.Root type="single" collapsible className={cx("rounded-lg border border-line bg-surface", className)}>
+    <Accordion.Root type="single" collapsible className={cx("rounded-[var(--radius-surface)] border border-line bg-surface", className)}>
       <Accordion.Item value="content">
         <Accordion.Header>
           <Accordion.Trigger className="group flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-small font-medium text-fg">
@@ -24,7 +24,7 @@ export function Disclosure({
             <CaretDown
               size={13}
               aria-hidden
-              className="shrink-0 text-faint transition-transform group-data-[state=open]:rotate-180"
+              className="shrink-0 text-faint transition-transform duration-[var(--duration-micro)] group-data-[state=open]:rotate-180"
             />
           </Accordion.Trigger>
         </Accordion.Header>

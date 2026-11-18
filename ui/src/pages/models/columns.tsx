@@ -26,6 +26,10 @@ export type ModelColumnsOptions = {
   hide?: (ref: string) => void;
   /** Whether this row can be hidden: an entry must exist in the preset. */
   hideFor?: (ref: string) => boolean;
+  onMoveTop?: (ref: string) => void;
+  onMoveBottom?: (ref: string) => void;
+  canMoveTop?: (ref: string) => boolean;
+  canMoveBottom?: (ref: string) => boolean;
   groups?: Array<DraftGroup & { implicit?: boolean }>;
   groupOf?: (ref: string) => string | undefined;
   onMoveGroup?: (ref: string, group: string | null) => void;
@@ -42,6 +46,10 @@ export function useModelColumns({
   onDelete,
   hide,
   hideFor,
+  onMoveTop,
+  onMoveBottom,
+  canMoveTop,
+  canMoveBottom,
   groups,
   groupOf,
   onMoveGroup,
@@ -59,7 +67,7 @@ export function useModelColumns({
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               <span className="sr-only">Model </span>
               {/* The badge never shrinks: a truncated provider reads as a different one. */}
-              <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.06em] text-muted">
+              <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-caption uppercase tracking-[0.06em] text-muted">
                 {m.provider}
               </span>
               <span
@@ -172,6 +180,10 @@ export function useModelColumns({
               onEdit={() => onEdit(m)}
               onDelete={() => onDelete(m)}
               onHide={hide && (!hideFor || hideFor(m.ref)) ? () => hide(m.ref) : undefined}
+              onMoveTop={onMoveTop ? () => onMoveTop(m.ref) : undefined}
+              onMoveBottom={onMoveBottom ? () => onMoveBottom(m.ref) : undefined}
+              canMoveTop={canMoveTop ? canMoveTop(m.ref) : undefined}
+              canMoveBottom={canMoveBottom ? canMoveBottom(m.ref) : undefined}
               groups={movable}
               currentGroup={groupOf?.(m.ref)}
               onMoveGroup={
@@ -195,6 +207,10 @@ export function useModelColumns({
     onDelete,
     hide,
     hideFor,
+    onMoveTop,
+    onMoveBottom,
+    canMoveTop,
+    canMoveBottom,
     groups,
     groupOf,
     onMoveGroup,

@@ -1,11 +1,12 @@
 import * as RadixCheckbox from "@radix-ui/react-checkbox";
-import { Check } from "@phosphor-icons/react";
+import { Check, Minus } from "@phosphor-icons/react";
 import type { Ref } from "react";
 import { cx } from "../../lib/cx";
 
 /** Radix Checkbox with the dashboard's square control and an optional clickable label. */
 export function Checkbox({
   checked,
+  indeterminate = false,
   onChange,
   label,
   ariaLabel,
@@ -14,6 +15,7 @@ export function Checkbox({
   rootRef,
 }: {
   checked: boolean;
+  indeterminate?: boolean;
   onChange: (next: boolean) => void;
   /** Visible label: rendered beside the control and used as its accessible name. */
   label?: string;
@@ -26,21 +28,26 @@ export function Checkbox({
   const control = (
     <RadixCheckbox.Root
       ref={rootRef}
-      checked={checked}
+      checked={indeterminate ? "indeterminate" : checked}
       onCheckedChange={(next) => onChange(next === true)}
       disabled={disabled}
       aria-label={ariaLabel ?? label}
       className={cx(
-        "flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border bg-surface text-white transition-colors",
+        "flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border bg-surface text-[var(--color-accent-ink)] transition-colors",
         "data-[state=checked]:border-accent data-[state=checked]:bg-accent",
-        "data-[state=unchecked]:border-line-strong data-[state=unchecked]:hover:border-fg/50",
-        "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text",
+        "data-[state=indeterminate]:border-accent data-[state=indeterminate]:bg-accent",
+        "data-[state=unchecked]:border-[var(--color-line-strong)] data-[state=unchecked]:hover:border-fg/50",
+        "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]",
         "disabled:cursor-not-allowed disabled:opacity-50",
         className,
       )}
     >
       <RadixCheckbox.Indicator>
-        <Check size={11} weight="bold" aria-hidden />
+        {indeterminate ? (
+          <Minus size={11} weight="bold" aria-hidden />
+        ) : (
+          <Check size={11} weight="bold" aria-hidden />
+        )}
       </RadixCheckbox.Indicator>
     </RadixCheckbox.Root>
   );
@@ -50,7 +57,7 @@ export function Checkbox({
       className={cx("flex cursor-pointer items-center gap-2 text-small", disabled && "cursor-not-allowed opacity-60")}
       onClick={(event) => {
         if ((event.target as HTMLElement).closest('[role="checkbox"]')) return;
-        if (!disabled) onChange(!checked);
+        if (!disabled) onChange(indeterminate ? true : !checked);
       }}
     >
       {control}

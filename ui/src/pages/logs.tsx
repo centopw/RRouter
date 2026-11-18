@@ -12,7 +12,8 @@ import {
   type UsageFilters,
 } from "../lib/queries";
 import { download, saveBlob, type Model, type UsageEvent } from "../lib/api";
-import { cacheLabel, RequestDetailDialog } from "./activity/request-log";
+import { cacheLabel } from "./activity/request-log";
+import { RequestInspectorDrawer } from "../components/request-inspector-drawer";
 
 /** Incident review: every request newest first, filtered on the server, paged backwards on demand. */
 
@@ -79,6 +80,18 @@ export default function Logs() {
     () => new Map((keys.data ?? []).map((k) => [k.id, k.name ?? "—"] as const)),
     [keys.data],
   );
+  const providerById = useMemo(
+    () => new Map((connections.data ?? []).map((c) => [c.id, c.name ?? c.provider] as const)),
+    [connections.data],
+  );
+
+  const selectedIndex =
+    selectedId === null ? -1 : loaded.findIndex((r) => rowKey(r) === selectedId);
+  const stepSelected = (delta: -1 | 1) => {
+    if (selectedIndex < 0) return;
+    const target = loaded[selectedIndex + delta];
+    if (target) setSelectedId(rowKey(target));
+  };
 
   const providers = useMemo(
     () => [...new Set((connections.data ?? []).map((c) => c.provider))].sort(),
@@ -271,7 +284,7 @@ export default function Logs() {
                   keyNames={keyNames}
                 />
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-6 py-2.5 text-small text-faint">
-                  <span>{loaded.length} loaded</span>
+                  <span className="tnum">{loaded.length} loaded</span>
                   {usage.hasNextPage ? (
                     <Button variant="quiet" onClick={() => void usage.fetchNextPage()} disabled={usage.isFetchingNextPage}>
                       {usage.isFetchingNextPage ? "Loading…" : "Load older"}
@@ -285,13 +298,26 @@ export default function Logs() {
           )}
         </div>
       </Card>
-      {selected ? (
-        <RequestDetailDialog
-          row={selected}
-          baseUrl={baseUrl}
-          onClose={() => setSelectedId(null)}
-        />
-      ) : null}
+      <RequestInspectorDrawer
+        open={selected !== null}
+        row={selected}
+        baseUrl={baseUrl}
+        keyNames={keyNames}
+        providerName={
+          selected
+            ? ((selected.connection_id ? providerById.get(selected.connection_id) : undefined) ??
+              selected.provider)
+            : undefined
+        }
+        onClose={() => setSelectedId(null)}
+        onPrev={selectedIndex > 0 ? () => stepSelected(-1) : null}
+        onNext={
+          selectedIndex >= 0 && selectedIndex < loaded.length - 1
+            ? () => stepSelected(1)
+            : null
+        }
+        positionLabel={selectedIndex >= 0 ? `${selectedIndex + 1} / ${loaded.length}` : undefined}
+      />
     </div>
   );
 }
@@ -311,7 +337,7 @@ function LogTable({
 }) {
   if (rows.length === 0) return null;
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto" data-log-table>
       <div role="table" aria-label="request logs" className="min-w-[760px]">
         <div
           role="row"
@@ -343,6 +369,7 @@ function LogTable({
               key={key}
               role="row"
               tabIndex={0}
+              aria-selected={selected}
               aria-label={`open request ${key}`}
               onClick={() => onSelect(key)}
               onKeyDown={(event) => {
@@ -353,19 +380,21 @@ function LogTable({
               }}
               className={cx(
                 GRID,
-                "cursor-pointer border-b border-[var(--color-rule)] px-6 py-2.5 text-body last:border-0",
-                selected ? "bg-[var(--color-surface-2)]" : "hover:bg-[var(--color-row-hover)]",
+                "cursor-pointer border-b border-[var(--color-rule)] px-6 py-2.5 text-body last:border-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text",
+                selected
+                  ? "bg-[var(--color-selected)] shadow-[inset_2px_0_0_var(--color-fg)]"
+                  : "hover:bg-[var(--color-row-hover)]",
               )}
             >
               <span role="cell" className="flex flex-col" title={new Date(row.ts * 1000).toLocaleString()}>
-                <span className="font-mono text-small text-fg">
+                <span className="font-mono text-small text-fg tnum">
                   {new Date(row.ts * 1000).toLocaleTimeString(undefined, {
                     hour: "2-digit",
                     minute: "2-digit",
                     second: "2-digit",
                   })}
                 </span>
-                <span className="text-caption text-faint">{ago(row.ts)}</span>
+                <span className="text-caption text-faint tnum">{ago(row.ts)}</span>
               </span>
               <span role="cell" className="min-w-0 truncate font-mono text-small">
                 <span className="text-faint">{provider ?? row.provider}/</span>
@@ -381,9 +410,16 @@ function LogTable({
                 {failed ? "—" : cacheLabel(row)}
               </span>
               <span role="cell">
-                <button type="button" onClick={() => onSelect(key)} className="block">
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onSelect(key);
+                  }}
+                  className="block"
+                >
                   <Badge tone={failed ? "neg" : "pos"} title={row.error ?? undefined}>
-                    <span className="font-mono">{row.status || "err"}</span>
+                    <span className="font-mono tnum">{row.status || "err"}</span>
                   </Badge>
                 </button>
               </span>
@@ -393,8 +429,11 @@ function LogTable({
               <span role="cell">
                 <button
                   type="button"
-                  onClick={() => onSelect(key)}
-                  className="font-mono text-caption text-faint hover:text-fg"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onSelect(key);
+                  }}
+                  className="font-mono text-caption text-faint tnum hover:text-fg"
                   title={row.request_id || undefined}
                 >
                   {row.request_id ? row.request_id.slice(0, 8) : "—"}

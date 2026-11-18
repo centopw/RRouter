@@ -118,18 +118,25 @@ export function UpdateCard() {
       <Card className="mt-5">
         <CardHeader
           title="Software updates"
-          action={<Badge tone="neutral">v{status.current_version}</Badge>}
+          action={
+            <Badge tone="neutral">
+              <span className="font-mono tnum">v{status.current_version}</span>
+            </Badge>
+          }
         />
         <Stack gap="lg" className="px-5 pb-5">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-small">
             <span className="text-muted">
               {newer ? "latest" : "last seen"}{" "}
-              <span className="font-mono text-fg">
+              <span className="font-mono text-fg tnum">
                 {status.latest_version ? `v${status.latest_version}` : "—"}
               </span>
             </span>
             <span className="text-muted">
-              checked <span className="text-fg">{status.checked_at ? when(status.checked_at) : "never"}</span>
+              checked{" "}
+              <span className="text-fg tnum">
+                {status.checked_at ? when(status.checked_at) : "never"}
+              </span>
             </span>
             {newer ? (
               <Badge tone="accent">

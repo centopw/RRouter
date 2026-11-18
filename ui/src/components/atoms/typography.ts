@@ -2,6 +2,7 @@
  *  layout primitives can reuse the same class maps. */
 export type TextVariant =
   | "hero"
+  | "kpi"
   | "display"
   | "title"
   | "subtitle"
@@ -13,6 +14,7 @@ export type TextVariant =
 
 export const TYPE: Record<TextVariant, string> = {
   hero: "text-hero",
+  kpi: "text-kpi",
   display: "text-display",
   title: "text-title",
   subtitle: "text-subtitle",

@@ -1,86 +1,25 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Button, CopyButton, ErrorNote, Field, Input, Select, cx } from "../../components/ui";
+import {
+  Button,
+  CopyButton,
+  Disclosure,
+  ErrorNote,
+  Field,
+  Input,
+  Select,
+  cx,
+} from "../../components/ui";
 import {
   api,
   type Connection,
   type ModelProvider,
   type OAuthProvider,
-  type OAuthStart,
 } from "../../lib/api";
-import { qk, useOAuthStatus } from "../../lib/queries";
-import { Disclosure } from "../../components/ui";
+import { formatOAuthClock, useOAuthFlow } from "../../lib/oauth";
+import { qk } from "../../lib/queries";
 
 /** Step 1, sub-screens: browser sign-in (PKCE), device code, and a pasted API key. */
-
-type SignInDone = {
-  id: string;
-  provider: string;
-  name: string | null;
-  warning: string | null;
-};
-
-/**
- * One `/start` call, cancelled if the screen unmounts before the exchange completes.
- * A fresh mount (retry) starts a new exchange; the parent remounts with a new key.
- */
-function useSignInStart(providerId: string) {
-  const [start, setStart] = useState<OAuthStart | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const startId = useRef<string | null>(null);
-  const settled = useRef(false);
-
-  useEffect(() => {
-    let live = true;
-    api
-      .post<OAuthStart>(`/api/oauth/${providerId}/start`)
-      .then((s) => {
-        if (!live) {
-          void api.del<{ cancelled: boolean }>(`/api/oauth/${providerId}/${s.id}`).catch(() => {});
-          return;
-        }
-        startId.current = s.id;
-        setStart(s);
-      })
-      .catch((e: unknown) => {
-        if (live) setError(e);
-      });
-    return () => {
-      live = false;
-      const id = startId.current;
-      if (id && !settled.current) {
-        void api.del<{ cancelled: boolean }>(`/api/oauth/${providerId}/${id}`).catch(() => {});
-      }
-    };
-  }, [providerId]);
-
-  return { start, error, settled };
-}
-
-/** Shared last leg: `complete` the exchange, refresh the caches, hand over the id. */
-function useCompleteSignIn(
-  provider: OAuthProvider,
-  settled: RefObject<boolean>,
-  onConnected: (id: string, label: string) => void,
-  onFail: (error: unknown) => void,
-) {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => api.post<SignInDone>(`/api/oauth/${provider.id}/complete`, { id }),
-    onSuccess: (result) => {
-      settled.current = true;
-      void client.invalidateQueries({ queryKey: qk.connections });
-      void client.invalidateQueries({ queryKey: qk.modelProviders });
-      void client.invalidateQueries({ queryKey: qk.models });
-      void client.invalidateQueries({ queryKey: qk.system });
-      onConnected(result.id, result.name ?? provider.display);
-    },
-    onError: (error: unknown) => {
-      settled.current = true;
-      onFail(error);
-    },
-  });
-}
 
 /** Navigate the popup opened by the click; fall back to a direct tab when blocked. */
 function openAuthorize(url: string, popup: Window | null): "popup" | "tab" | "blocked" {
@@ -103,13 +42,18 @@ export function PkceStep({
   onConnected: (id: string, label: string) => void;
   onFail: (error: unknown) => void;
 }) {
-  const { start, error: startError, settled } = useSignInStart(provider.id);
-  const [finished, setFinished] = useState(false);
   const [tab, setTab] = useState<"opened" | "blocked" | null>(null);
   const opened = useRef(false);
-  const complete = useCompleteSignIn(provider, settled, onConnected, onFail);
 
-  const challenge = start?.challenge.kind === "pkce" ? start.challenge : null;
+  const flow = useOAuthFlow({
+    provider,
+    manual: false,
+    onStartError: onFail,
+    onComplete: (result) => onConnected(result.id, result.name ?? provider.display),
+    onCompleteError: onFail,
+  });
+
+  const challenge = flow.challenge?.kind === "pkce" ? flow.challenge : null;
 
   useEffect(() => {
     if (!challenge || opened.current) return;
@@ -118,23 +62,8 @@ export function PkceStep({
     setTab(result === "blocked" ? "blocked" : "opened");
   }, [challenge, popup]);
 
-  useEffect(() => {
-    if (startError) {
-      settled.current = true;
-      onFail(startError);
-    }
-  }, [startError, onFail, settled]);
-
-  const status = useOAuthStatus(provider.id, finished ? null : (start?.id ?? null), 2_000);
-
-  useEffect(() => {
-    if (!start || finished || complete.isPending) return;
-    if (status.data?.pending !== false) return;
-    setFinished(true);
-    complete.mutate(start.id);
-  }, [start, status.data?.pending, finished, complete]);
-
   const approveUrl = challenge?.authorize_url ?? null;
+  const approved = flow.status.data?.pending === false;
 
   return (
     <div className="mt-7">
@@ -145,7 +74,11 @@ export function PkceStep({
       >
         <span aria-hidden className="pulse inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-pos" />
         <span className="text-lead">
-          {startError ? "Could not start the sign-in" : !start ? "Starting the sign-in…" : "Waiting for approval…"}
+          {flow.startError
+            ? "Could not start the sign-in"
+            : !flow.start
+              ? "Starting the sign-in…"
+              : "Waiting for approval…"}
         </span>
         <span className="ml-auto rounded-full border border-line px-2.5 py-[1px] text-small text-muted">
           Browser sign-in
@@ -159,10 +92,10 @@ export function PkceStep({
           label="Tab opened"
           detail={tab === "blocked" ? "blocked by the browser" : undefined}
         />
-        <Connector done={status.data?.pending === false} />
-        <Stage n={2} state={status.data?.pending === false ? "done" : "current"} label="Approve access" />
+        <Connector done={approved} />
+        <Stage n={2} state={approved ? "done" : "current"} label="Approve access" />
         <Connector done={false} />
-        <Stage n={3} state={status.data?.pending === false ? "current" : "upcoming"} label="Connected" />
+        <Stage n={3} state={approved ? "current" : "upcoming"} label="Connected" />
       </ol>
 
       <div className="mt-7 flex flex-col gap-2">
@@ -191,11 +124,11 @@ export function PkceStep({
         </p>
       </div>
 
-      {status.isError || complete.isError ? (
+      {flow.status.isError || flow.isCompleteError ? (
         <div className="mt-4">
           <ErrorNote
-            error={status.isError ? status.error : complete.error}
-            onRetry={() => void status.refetch()}
+            error={flow.status.isError ? flow.status.error : flow.completeError}
+            onRetry={() => void flow.status.refetch()}
           />
         </div>
       ) : null}
@@ -262,47 +195,19 @@ export function DeviceStep({
   onFail: (error: unknown) => void;
   onNewCode: () => void;
 }) {
-  const { start, error: startError, settled } = useSignInStart(provider.id);
-  const [finished, setFinished] = useState(false);
-  const complete = useCompleteSignIn(provider, settled, onConnected, onFail);
-  const challenge = start?.challenge.kind === "device_code" ? start.challenge : null;
+  const flow = useOAuthFlow({
+    provider,
+    manual: false,
+    stopOnExpire: true,
+    onStartError: onFail,
+    onComplete: (result) => onConnected(result.id, result.name ?? provider.display),
+    onCompleteError: onFail,
+  });
 
-  const [remaining, setRemaining] = useState<number | null>(null);
-  const total = useRef(0);
+  const challenge = flow.challenge?.kind === "device_code" ? flow.challenge : null;
+  const pollDisplaySeconds = challenge ? flow.pollSeconds : 5;
 
-  useEffect(() => {
-    if (!challenge) return;
-    total.current = Math.max(challenge.expires_in, 1);
-    setRemaining(challenge.expires_in);
-    const timer = window.setInterval(() => {
-      setRemaining((prev) => (prev === null ? null : Math.max(0, prev - 1)));
-    }, 1_000);
-    return () => window.clearInterval(timer);
-  }, [challenge]);
-
-  const expired = remaining !== null && remaining <= 0;
-  const intervalMs = Math.max(challenge?.interval ?? 5, 2) * 1_000;
-  const status = useOAuthStatus(
-    provider.id,
-    finished || expired ? null : (start?.id ?? null),
-    intervalMs,
-  );
-
-  useEffect(() => {
-    if (!start || finished || expired || complete.isPending) return;
-    if (status.data?.pending !== false) return;
-    setFinished(true);
-    complete.mutate(start.id);
-  }, [start, status.data?.pending, finished, expired, complete]);
-
-  useEffect(() => {
-    if (startError) {
-      settled.current = true;
-      onFail(startError);
-    }
-  }, [startError, onFail, settled]);
-
-  if (expired) {
+  if (flow.expired) {
     return (
       <div className="mt-7">
         <div
@@ -327,7 +232,7 @@ export function DeviceStep({
     <div className="mt-7">
       <div className="rounded-[var(--radius-card)] border border-line bg-surface px-6 py-7 text-center">
         <div className="text-body text-muted">Your code</div>
-        <div className="mt-2 select-all font-mono text-hero font-medium leading-none tracking-[0.14em] text-fg">
+        <div className="mt-2 select-all font-mono tnum text-hero font-medium leading-none tracking-[0.14em] text-fg">
           {challenge?.user_code ?? "————"}
         </div>
         <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
@@ -354,21 +259,27 @@ export function DeviceStep({
         className="mt-4 flex flex-wrap items-center gap-3 rounded-[var(--radius-card)] border border-line bg-surface px-5 py-4"
       >
         <span aria-hidden className="pulse inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-pos" />
-        <span className="text-lead">
-          {startError
+        <span className="text-lead tnum">
+          {flow.startError
             ? "Could not start the sign-in"
-            : !start
+            : !flow.start
               ? "Starting the sign-in…"
-              : `Checking every ${Math.round(intervalMs / 1_000)}s…`}
+              : `Checking every ${pollDisplaySeconds}s…`}
         </span>
         <span className="ml-auto font-mono text-small tnum text-muted">
-          {remaining === null ? "—" : `Expires in ${clock(remaining)}`}
+          {flow.remaining === null ? "—" : `Expires in ${formatOAuthClock(flow.remaining)}`}
         </span>
       </div>
       <div className="mt-2.5 h-[3px] overflow-hidden rounded-full bg-rule">
         <div
           className="h-full rounded-full bg-fg"
-          style={{ width: `${remaining === null ? 100 : Math.round((remaining / Math.max(total.current, 1)) * 100)}%` }}
+          style={{
+            width: `${
+              flow.remaining === null
+                ? 100
+                : Math.round((flow.remaining / Math.max(flow.totalSeconds, 1)) * 100)
+            }%`,
+          }}
         />
       </div>
 
@@ -380,11 +291,11 @@ export function DeviceStep({
         <Stage n={3} state="upcoming" label="Approve" />
       </ol>
 
-      {status.isError || complete.isError ? (
+      {flow.status.isError || flow.isCompleteError ? (
         <div className="mt-4">
           <ErrorNote
-            error={status.isError ? status.error : complete.error}
-            onRetry={() => void status.refetch()}
+            error={flow.status.isError ? flow.status.error : flow.completeError}
+            onRetry={() => void flow.status.refetch()}
           />
         </div>
       ) : null}
@@ -535,7 +446,7 @@ export function Stage({
       <span
         aria-hidden
         className={cx(
-          "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border font-mono text-caption",
+          "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border font-mono text-caption tnum",
           done && "border-fg bg-fg text-bg",
           state === "current" && "border-fg text-fg",
           state === "upcoming" && "border-line text-faint",
@@ -559,12 +470,6 @@ function Connector({ done }: { done: boolean }) {
   return (
     <li aria-hidden className={cx("h-px min-w-3 flex-[0_1_36px]", done ? "bg-fg" : "bg-line")} />
   );
-}
-
-function clock(secs: number): string {
-  const m = Math.floor(secs / 60);
-  const s = secs % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 /** One sentence from an unknown error, without leaking a stack trace. */

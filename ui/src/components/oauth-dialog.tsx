@@ -1,17 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useId, useState } from "react";
 import { CheckCircle } from "@phosphor-icons/react";
 import { Badge, Button, Dot, ErrorNote, Field, Modal, cx } from "./ui";
 import { ProviderIcon } from "./provider-icon";
-import { ApiError, api, type OAuthProvider, type OAuthStart } from "../lib/api";
-import { qk, useOAuthStatus } from "../lib/queries";
-
-type CompleteResult = {
-  id: string;
-  provider: string;
-  name: string | null;
-  warning: string | null;
-};
+import { type OAuthProvider } from "../lib/api";
+import { callbackErrorText, callbackProblem, useOAuthFlow } from "../lib/oauth";
 
 /**
  * Provider-specific copy, kept here so the shared flow stays generic. Antigravity is a
@@ -26,60 +18,6 @@ const PROVIDER_NOTES: Record<string, string> = {
   openrouter:
     "Sign in to OpenRouter to create an API key tied to that account. The key is stored as an API-key connection, so you can also add one manually under API key.",
 };
-
-/**
- * What is wrong with a pasted callback URL, before the gateway ever sees it.
- *
- * The gateway is still the authority (it owns the `state` it issued); this only catches the
- * three mistakes an operator on a VPS actually makes: pasting the authorize URL, pasting a
- * fragment of the address, or pasting a callback from a different sign-in.
- */
-function callbackProblem(value: string, redirect: string): string | null {
-  const raw = value.trim();
-  if (raw === "") return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return "That is not a full URL. Copy the address bar of the page the provider redirected to, including the query string.";
-  }
-  if (!parsed.searchParams.get("code") && !parsed.searchParams.get("error")) {
-    return "That URL has no authorization code (?code=…). Paste the callback address the provider redirected to, not the sign-in page.";
-  }
-  if (redirect && !raw.startsWith(redirect)) {
-    return `It should begin with the redirect URI this sign-in registered: ${redirect}`;
-  }
-  return null;
-}
-
-/** The `{error:{code}}` envelope the admin API uses, narrowed rather than asserted. */
-function apiErrorCode(error: unknown): string | null {
-  if (!(error instanceof ApiError)) return null;
-  const body = error.body;
-  if (!body || typeof body !== "object" || !("error" in body)) return null;
-  const inner = body.error;
-  if (!inner || typeof inner !== "object" || !("code" in inner)) return null;
-  return typeof inner.code === "string" ? inner.code : null;
-}
-
-/** Turn the gateway's manual-completion failure into one sentence an operator can act on. */
-function callbackErrorText(error: unknown): string {
-  const code = apiErrorCode(error) ?? "";
-  const message = error instanceof Error ? error.message : String(error);
-  if (code === "state_mismatch") {
-    return "That callback belongs to a different sign-in attempt. Copy the address from the browser tab that just approved this one.";
-  }
-  if (code === "signin_expired" || code === "expired" || code === "not_found") {
-    return "This sign-in expired or was cancelled. Start again to get a fresh URL.";
-  }
-  if (/denied|access_denied/i.test(message) || code === "authorization_denied") {
-    return "The provider reported that access was denied. Approve again, or pick a different account.";
-  }
-  if (code === "callback_invalid") {
-    return "The gateway could not read a code from that URL. Paste the complete callback address.";
-  }
-  return message;
-}
 
 /**
  * One in-flight sign-in. Owns its start request, its polling, and its cancellation.
@@ -101,102 +39,38 @@ export function OAuthDialog({
   /** The success panel's "view providers"; defaults to closing the dialog. */
   onViewProviders?: () => void;
 }) {
-  const client = useQueryClient();
   // PKCE always uses the paste-back flow. A device-code provider has no callback to
   // paste, and a build that predates manual completion falls back to the loopback UI.
   const manual = provider.flow === "pkce" && provider.manual !== false;
-  const [start, setStart] = useState<OAuthStart | null>(null);
-  const [startError, setStartError] = useState<unknown>(null);
   const [callback, setCallback] = useState("");
-  const [connected, setConnected] = useState<CompleteResult | null>(null);
-  const completing = useRef(false);
+  const callbackProblemId = useId();
 
-  // (Re)start whenever the mode changes: a manual attempt has a different challenge and a
-  // callback the gateway will only accept through the manual completion call.
   useEffect(() => {
-    let live = true;
-    let mine: string | null = null;
-    completing.current = false;
-    // A mode switch is a new attempt: neither mutation's previous failure applies to it.
-    complete.reset();
-    completeManual.reset();
-    setStart(null);
-    setStartError(null);
-    setConnected(null);
     setCallback("");
-    api
-      .post<OAuthStart>(
-        `/api/oauth/${provider.id}/start`,
-        manual ? { manual: true } : undefined,
-      )
-      .then((s) => {
-        if (!live) {
-          void api.del<{ cancelled: boolean }>(`/api/oauth/${provider.id}/${s.id}`).catch(() => {});
-          return;
-        }
-        mine = s.id;
-        setStart(s);
-      })
-      .catch((error) => {
-        if (live) setStartError(error);
-      });
-    return () => {
-      live = false;
-      if (mine && !completing.current) {
-        void api.del<{ cancelled: boolean }>(`/api/oauth/${provider.id}/${mine}`).catch(() => {});
-      }
-    };
   }, [provider.id, manual]);
 
-  const challenge = start?.challenge ?? null;
-  // The server echoes the mode it actually started. A build that ignored `manual` falls
-  // back to the loopback UI with a note instead of showing a paste box that cannot work.
-  const manualRefused =
-    manual && challenge !== null && (challenge.kind !== "pkce" || challenge.manual !== true);
-  const paste = manual && !manualRefused;
-  const pollSeconds = challenge?.kind === "device_code" ? Math.max(challenge.interval, 2) : 2;
-  // Manual mode never polls: the answer arrives by paste, so the status request would only
-  // ask the gateway about an attempt nobody is watching.
-  const status = useOAuthStatus(
-    provider.id,
-    !paste ? (start?.id ?? null) : null,
-    pollSeconds * 1000,
-  );
-
-  const settle = (result: CompleteResult) => {
-    completing.current = true;
-    void client.invalidateQueries({ queryKey: qk.connections });
-    void client.invalidateQueries({ queryKey: qk.modelProviders });
-    void client.invalidateQueries({ queryKey: qk.system });
-    setConnected(result);
-  };
-
-  const complete = useMutation({
-    mutationFn: (id: string) =>
-      api.post<CompleteResult>(`/api/oauth/${provider.id}/complete`, { id }),
-    onSuccess: settle,
+  const flow = useOAuthFlow({
+    provider,
+    manual,
+    stopOnExpire: false,
   });
 
-  const completeManual = useMutation({
-    mutationFn: ({ id, url }: { id: string; url: string }) =>
-      api.post<CompleteResult>(`/api/oauth/${provider.id}/complete`, {
-        id,
-        callback_url: url,
-      }),
-    onSuccess: settle,
-  });
-
-  // The server stops reporting pending once the provider callback has landed.
-  useEffect(() => {
-    if (paste || !start || status.data?.pending !== false || completing.current) return;
-    completing.current = true;
-    complete.mutate(start.id);
-  }, [paste, start, status.data?.pending, complete]);
+  const {
+    start,
+    startError,
+    challenge,
+    paste,
+    manualRefused,
+    pollSeconds,
+    status,
+    connected,
+    isCompleting,
+    isCompleteError,
+    completeError,
+  } = flow;
 
   const close = () => {
-    if (start && !completing.current) {
-      void api.del<{ cancelled: boolean }>(`/api/oauth/${provider.id}/${start.id}`).catch(() => {});
-    }
+    flow.cancel();
     onClose();
   };
 
@@ -206,7 +80,7 @@ export function OAuthDialog({
 
   const redirect = challenge?.kind === "pkce" ? challenge.redirect_uri : null;
   const problem = paste ? callbackProblem(callback, redirect ?? "") : null;
-  const manualError = completeManual.isError ? callbackErrorText(completeManual.error) : null;
+  const manualError = paste && isCompleteError ? callbackErrorText(completeError) : null;
 
   const finish = () => {
     if (connected) {
@@ -224,7 +98,7 @@ export function OAuthDialog({
         connected ? (
           <>
             <Button variant="quiet" onClick={finish}>
-              done
+              Done
             </Button>
             <Button
               variant="primary"
@@ -234,34 +108,34 @@ export function OAuthDialog({
                 else onClose();
               }}
             >
-              view providers
+              View providers
             </Button>
           </>
         ) : (
           <>
             <Button variant="quiet" onClick={close}>
-              cancel
+              Cancel
             </Button>
             <Button
               variant="primary"
               disabled={
                 paste
-                  ? !start || callback.trim() === "" || problem !== null || completeManual.isPending
-                  : !start || complete.isPending
+                  ? !start || callback.trim() === "" || problem !== null || isCompleting
+                  : !start || isCompleting
               }
               onClick={() => {
                 if (!start) return;
-                if (paste) completeManual.mutate({ id: start.id, url: callback.trim() });
-                else complete.mutate(start.id);
+                if (paste) flow.completeManual(callback);
+                else flow.complete();
               }}
             >
               {paste
-                ? completeManual.isPending
-                  ? "completing…"
+                ? isCompleting
+                  ? "Completing…"
                   : "Complete sign-in"
-                : complete.isPending
-                  ? "completing…"
-                  : "complete"}
+                : isCompleting
+                  ? "Completing…"
+                  : "Complete"}
             </Button>
           </>
         )
@@ -301,7 +175,7 @@ export function OAuthDialog({
                   ? "could not start the sign-in"
                   : !start
                     ? "starting…"
-                    : complete.isPending || completeManual.isPending
+                    : isCompleting
                       ? "exchanging the authorization code…"
                       : paste
                         ? "approve, then paste the callback"
@@ -324,7 +198,7 @@ export function OAuthDialog({
             ) : null}
 
             {startError ? <ErrorNote error={startError} /> : null}
-            {!paste && complete.isError ? <ErrorNote error={complete.error} /> : null}
+            {!paste && isCompleteError ? <ErrorNote error={completeError} /> : null}
 
             {manualRefused ? (
               <p role="status" className="text-caption leading-relaxed text-faint">
@@ -416,13 +290,14 @@ export function OAuthDialog({
                       placeholder="http://localhost:<port>/callback?code=…&state=…"
                       aria-label="pasted callback URL"
                       aria-invalid={problem !== null || undefined}
+                      aria-describedby={problem ? callbackProblemId : undefined}
                       className="w-full min-w-0 resize-y break-all rounded-[var(--radius-input)] border border-line-strong bg-surface px-2.5 py-2 font-mono text-small text-fg placeholder:text-faint focus:border-[var(--color-accent-text)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-text)]/25"
                     />
                   </Field>
                 ) : null}
 
                 {paste && problem ? (
-                  <p role="alert" className="text-caption leading-relaxed text-neg">
+                  <p id={callbackProblemId} role="alert" className="text-caption leading-relaxed text-neg">
                     {problem}
                   </p>
                 ) : null}
@@ -444,7 +319,7 @@ export function OAuthDialog({
               <>
                 <Field label="user code" hint={`expires in ${Math.round(challenge.expires_in / 60)} min`}>
                   <div className="flex min-w-0 items-center gap-2">
-                    <code className="min-w-0 rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-3 py-2 font-mono text-title tracking-[0.18em] text-fg">
+                    <code className="min-w-0 rounded-lg border border-line-strong bg-[var(--color-surface-2)] px-3 py-2 font-mono tnum text-title tracking-[0.18em] text-fg">
                       {challenge.user_code}
                     </code>
                     <Button onClick={() => copy(challenge.user_code)} ariaLabel="copy user code">

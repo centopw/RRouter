@@ -77,12 +77,12 @@ export default function SetupAdmin() {
       <AuthShell width={540}>
         <AuthCard>
           <AuthTitle
-            badge={<Badge tone="pos">Account created · 2 of 2</Badge>}
+            badge={<Badge tone="pos"><span className="tnum">Account created · 2 of 2</span></Badge>}
             title="Save your recovery codes"
             lead="There is no reset email on a self-hosted gateway. Each of these works once, and this is the only time they are shown."
           />
           <RecoveryCodes codes={codes} />
-          <div className="mt-5 rounded-[10px] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-small text-[var(--color-warn-ink)]">
+          <div className="mt-5 rounded-[var(--radius-card)] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-small text-[var(--color-warn-ink)]">
             These are shown only once.
           </div>
           <div className="mt-4">
@@ -106,7 +106,7 @@ export default function SetupAdmin() {
       <div className="grid gap-6 min-[880px]:grid-cols-[minmax(0,1fr)_320px]">
         <AuthCard>
           <AuthTitle
-            badge={<Badge tone="accent">First-time setup · 1 of 2</Badge>}
+            badge={<Badge tone="accent"><span className="tnum">First-time setup · 1 of 2</span></Badge>}
             title="Create the administrator account"
             lead="This is the first account on this RRouter. It becomes the owner, with full admin permission."
           />
@@ -166,6 +166,7 @@ export default function SetupAdmin() {
               onChange={setPassword}
               autoComplete="new-password"
               disabled={busy}
+              problem={failure?.field === "password" ? failure.message : null}
             />
             {failure && !failure.field ? <AuthNotice>{failure.message}</AuthNotice> : null}
             <AuthActions>

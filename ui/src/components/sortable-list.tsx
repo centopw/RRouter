@@ -153,7 +153,7 @@ export function SortableLayout({
 /** The drag preview for both list shapes. */
 export function DragPreview({ row }: { row: LayoutRow }) {
   return (
-    <div className="flex items-center gap-2 rounded-[var(--radius-card)] border border-line-strong bg-surface px-3 py-2 shadow-lg">
+    <div className="flex items-center gap-2 rounded-[var(--radius-card)] border border-line-strong bg-surface px-3 py-2 shadow-[var(--shadow-popover)]">
       <DotsSixVertical size={14} aria-hidden className="text-faint" />
       <span className="truncate font-mono text-small">{row.ref}</span>
       {row.model?.cost ? (
@@ -244,7 +244,7 @@ export function SortableTable({
                     column.align === "right" && "text-right",
                     column.className,
                     column.key === "actions" &&
-                      "sticky right-0 z-30 border-l border-line bg-surface shadow-[-8px_0_8px_-8px_rgba(28,43,66,0.16)]",
+                      "sticky right-0 z-30 border-l border-line bg-surface shadow-[var(--shadow-sticky-col)]",
                   )}
                 >
                   {column.srOnlyTitle ? (
@@ -330,7 +330,7 @@ function SortableTableRow({
           "border-b border-[var(--color-rule)] px-4 py-2.5 align-middle text-fg",
           column.align === "right" && "text-right tnum",
           column.key === "actions" &&
-            "sticky right-0 z-10 border-l border-line bg-surface shadow-[-8px_0_8px_-8px_rgba(28,43,66,0.16)] group-hover:bg-[var(--color-row-hover)]",
+            "sticky right-0 z-10 border-l border-line bg-surface shadow-[var(--shadow-sticky-col)] group-hover:bg-[var(--color-row-hover)]",
           column.className,
         );
         if (column.key === "model") {

@@ -60,10 +60,10 @@ export function ModelPicker({
         aria-label="filter models"
         placeholder="filter models"
         onChange={(e) => setQuery(e.target.value)}
-        className="h-8 w-full min-w-0 rounded-lg border border-line bg-surface-2 px-2.5 text-body text-fg placeholder:text-faint focus:border-[var(--color-accent)]/60 focus:outline-none"
+        className="h-8 w-full min-w-0 rounded-[var(--radius-input)] border border-line-strong bg-surface px-2.5 text-body text-fg placeholder:text-faint hover:border-[var(--color-fg)]/40 focus:border-[var(--color-accent-text)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-text)]/25 disabled:bg-surface-3 disabled:text-muted"
       />
 
-      <div className="overflow-hidden rounded-lg border border-line bg-surface-2">
+      <div className="overflow-hidden rounded-[var(--radius-card)] border border-line bg-surface-2">
         <div className="flex items-center gap-2 border-b border-line px-2.5 py-1.5 text-small text-fg">
           <Checkbox
             checked={selected.length === 0}

@@ -1,14 +1,24 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light dark" />
     <link rel="icon" href="/app/favicon.png" />
     <title>RRouter</title>
-    <script type="module" crossorigin src="/app/assets/index-BS0QH4uW.js"></script>
-    <link rel="modulepreload" crossorigin href="/app/assets/ui-CRG1ttnZ.js">
-    <link rel="stylesheet" crossorigin href="/app/assets/index-CCROo40K.css">
+    <script>
+      try {
+        var t = localStorage.getItem("rrouter:theme") === "dark" ? "dark" : "light";
+        document.documentElement.dataset.theme = t;
+        document.documentElement.classList.toggle("dark", t === "dark");
+      } catch (e) {
+        document.documentElement.dataset.theme = "light";
+      }
+    </script>
+    <script type="module" crossorigin src="/app/assets/index-d-q5fdZp.js"></script>
+    <link rel="modulepreload" crossorigin href="/app/assets/ui-Malxo1qv.js">
+    <link rel="modulepreload" crossorigin href="/app/assets/media-CI8wJcNz.js">
+    <link rel="stylesheet" crossorigin href="/app/assets/index-0Re9RpA4.css">
   </head>
   <body>
     <div id="root"></div>

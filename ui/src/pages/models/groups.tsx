@@ -222,7 +222,7 @@ export function GroupManager({
                               onAssign(candidate.ref, next ? group.id : null)
                             }
                           />
-                          <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.06em] text-muted">
+                          <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-caption uppercase tracking-[0.06em] text-muted">
                             {candidate.provider}
                           </span>
                           <span className="min-w-0 flex-1 truncate font-mono text-caption">

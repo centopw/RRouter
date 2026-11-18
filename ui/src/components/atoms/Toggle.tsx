@@ -30,14 +30,14 @@ export function Toggle({
         "before:absolute before:-inset-x-[10px] before:-inset-y-[15px] before:content-['']",
         small ? "h-4 w-7" : "h-6 w-11",
         "data-[state=checked]:border-accent data-[state=checked]:bg-accent",
-        // `line-strong` on white is 1.9:1; the off state's boundary needs 3:1 to be seen.
-        "data-[state=unchecked]:border-[var(--color-faint)] data-[state=unchecked]:bg-surface-3",
+        "data-[state=unchecked]:border-[var(--color-line-strong)] data-[state=unchecked]:bg-surface-3",
+        "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]",
       )}
     >
       <Switch.Thumb
         className={cx(
           "absolute left-0 top-1/2 -translate-y-1/2 rounded-full bg-[var(--color-muted)] transition-transform duration-150",
-          "data-[state=checked]:bg-white",
+          "data-[state=checked]:bg-[var(--color-accent-ink)]",
           small ? "h-2.5 w-2.5" : "h-4 w-4",
           small
             ? checked ? "translate-x-[13px]" : "translate-x-[3px]"

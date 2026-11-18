@@ -1,6 +1,17 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  cloneElement,
+  createContext,
+  isValidElement,
+  useContext,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import { Link } from "react-router-dom";
-import { Button, cx } from "./ui";
+import { Button, cx, useCopy } from "./ui";
 import { BrandMark } from "./brand-mark";
 import { passwordStrength, MIN_PASSWORD } from "../lib/auth";
 
@@ -42,7 +53,7 @@ export function AuthCard({ children, className }: { children: ReactNode; classNa
   return (
     <section
       className={cx(
-        "rounded-[8px] border border-line bg-surface px-6 py-8 shadow-[0_1px_2px_rgba(16,18,20,0.04)] min-[560px]:px-8",
+        "rounded-[var(--radius-card)] border border-line bg-surface px-6 py-8 shadow-[var(--shadow-panel)] min-[560px]:px-8",
         className,
       )}
     >
@@ -79,6 +90,14 @@ export function AuthTitle({
   );
 }
 
+type AuthFieldContextValue = {
+  id: string;
+  invalid: boolean;
+  describedBy: string | undefined;
+};
+
+const AuthFieldContext = createContext<AuthFieldContextValue | null>(null);
+
 /** A label, a control and an optional hint or error. */
 export function AuthField({
   label,
@@ -91,27 +110,46 @@ export function AuthField({
   label: string;
   hint?: ReactNode;
   problem?: string | null;
-  htmlFor: string;
+  htmlFor?: string;
   children: ReactNode;
   aside?: ReactNode;
 }) {
+  const autoId = useId();
+  const fieldId = htmlFor ?? autoId;
+  const hasProblem = Boolean(problem);
+  const messageId = hasProblem ? `${fieldId}-problem` : hint ? `${fieldId}-hint` : undefined;
+  const control =
+    isValidElement(children) && typeof children.type === "string"
+      ? cloneElement(children as ReactElement<Record<string, unknown>>, {
+          id: (children.props as { id?: string }).id ?? fieldId,
+          "aria-invalid": hasProblem || undefined,
+          "aria-describedby": messageId,
+        })
+      : children;
+
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-baseline justify-between gap-3">
-        <label htmlFor={htmlFor} className="text-body font-medium">
-          {label}
-        </label>
-        {aside}
+    <AuthFieldContext.Provider
+      value={{ id: fieldId, invalid: hasProblem, describedBy: messageId }}
+    >
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-baseline justify-between gap-3">
+          <label htmlFor={fieldId} className="text-body font-medium">
+            {label}
+          </label>
+          {aside}
+        </div>
+        {control}
+        {problem ? (
+          <span id={messageId} className="text-caption text-neg" role="alert">
+            {problem}
+          </span>
+        ) : hint ? (
+          <span id={messageId} className="text-caption leading-relaxed text-faint">
+            {hint}
+          </span>
+        ) : null}
       </div>
-      {children}
-      {problem ? (
-        <span className="text-caption text-neg" role="alert">
-          {problem}
-        </span>
-      ) : hint ? (
-        <span className="text-caption leading-relaxed text-faint">{hint}</span>
-      ) : null}
-    </div>
+    </AuthFieldContext.Provider>
   );
 }
 
@@ -122,33 +160,50 @@ export function AuthInput({
   type = "text",
   value,
   onChange,
+  onBlur,
   autoComplete,
   disabled,
   ariaLabel,
+  invalid,
+  ariaDescribedBy,
 }: {
-  id: string;
+  id?: string;
   /** Form field name, so a submit can read the DOM value rather than React state. */
   name?: string;
   type?: string;
   value: string;
   onChange: (value: string) => void;
+  onBlur?: () => void;
   autoComplete?: string;
   disabled?: boolean;
   ariaLabel?: string;
+  invalid?: boolean;
+  ariaDescribedBy?: string;
 }) {
+  const ctx = useContext(AuthFieldContext);
+  const resolvedId = id ?? ctx?.id;
+  const isInvalid = invalid ?? ctx?.invalid ?? false;
+  const describedBy = ariaDescribedBy ?? ctx?.describedBy;
+
   return (
     <input
-      id={id}
-      name={name ?? id}
+      id={resolvedId}
+      name={name ?? resolvedId}
       type={type}
       value={value}
       onChange={(event) => onChange(event.target.value)}
+      onBlur={onBlur}
       autoComplete={autoComplete}
       disabled={disabled}
       aria-label={ariaLabel}
+      aria-invalid={isInvalid || undefined}
+      aria-describedby={describedBy}
       className={cx(
-        "h-11 w-full rounded-[4px] border border-line-strong bg-surface px-3 text-lead text-fg",
-        "placeholder:text-faint hover:border-fg/40 focus:border-accent-text focus:outline-none",
+        "h-11 w-full rounded-[4px] border bg-surface px-3 text-lead text-fg",
+        isInvalid
+          ? "border-[var(--color-neg)] focus:border-[var(--color-neg)]"
+          : "border-line-strong hover:border-fg/40 focus:border-accent-text",
+        "placeholder:text-faint focus:outline-none",
         "focus-visible:ring-2 focus-visible:ring-accent-text focus-visible:ring-offset-2",
         "disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted",
       )}
@@ -169,9 +224,10 @@ export function PasswordField({
   autoComplete,
   disabled,
   aside,
+  problem,
   rules = true,
 }: {
-  id: string;
+  id?: string;
   name?: string;
   label: string;
   value: string;
@@ -179,32 +235,44 @@ export function PasswordField({
   autoComplete?: string;
   disabled?: boolean;
   aside?: ReactNode;
+  problem?: string | null;
   /** Set screens show the strength meter and the length rule; sign-in shows neither. */
   rules?: boolean;
 }) {
+  const autoId = useId();
+  const fieldId = id ?? autoId;
   const [shown, setShown] = useState(false);
   const meter = passwordStrength(value);
+  const hasProblem = Boolean(problem);
+  const problemId = hasProblem ? `${fieldId}-problem` : undefined;
+  const ruleId = rules ? `${fieldId}-rule` : undefined;
+  const describedBy = [problemId, ruleId].filter(Boolean).join(" ") || undefined;
+
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-3">
-        <label htmlFor={id} className="text-body font-medium">
+        <label htmlFor={fieldId} className="text-body font-medium">
           {label}
         </label>
         {aside}
       </div>
       <div className="relative">
         <input
-          id={id}
-          name={name ?? id}
+          id={fieldId}
+          name={name ?? fieldId}
           type={shown ? "text" : "password"}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           autoComplete={autoComplete}
           disabled={disabled}
+          aria-invalid={hasProblem || undefined}
+          aria-describedby={describedBy}
           className={cx(
-            "h-11 w-full rounded-[4px] border border-line-strong bg-surface pl-3 pr-16 text-lead text-fg",
-            "hover:border-fg/40 focus:border-accent-text focus:outline-none",
-            "focus-visible:ring-2 focus-visible:ring-accent-text focus-visible:ring-offset-2",
+            "h-11 w-full rounded-[4px] border bg-surface pl-3 pr-16 text-lead text-fg",
+            hasProblem
+              ? "border-[var(--color-neg)] focus:border-[var(--color-neg)]"
+              : "border-line-strong hover:border-fg/40 focus:border-accent-text",
+            "focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-text focus-visible:ring-offset-2",
             "disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted",
           )}
         />
@@ -217,27 +285,32 @@ export function PasswordField({
           {shown ? "hide" : "show"}
         </button>
       </div>
+      {problem ? (
+        <span id={problemId} className="text-caption text-neg" role="alert">
+          {problem}
+        </span>
+      ) : null}
       {rules ? (
         <>
-      <div className="flex items-center gap-2">
-        <div aria-hidden className="flex flex-1 gap-1">
-          {[0, 1, 2, 3].map((index) => (
-            <span
-              key={index}
-              className={cx(
-                "h-1 flex-1 rounded-full",
-                index < meter.filled ? "bg-accent" : "bg-rule",
-              )}
-            />
-          ))}
-        </div>
-        <span aria-hidden className="w-16 text-right text-caption text-muted">
-          {value.length > 0 ? meter.label : ""}
-        </span>
-      </div>
-      <span className="text-caption text-faint">
-        At least {MIN_PASSWORD} characters. No composition rules.
-      </span>
+          <div className="flex items-center gap-2">
+            <div aria-hidden className="flex flex-1 gap-1">
+              {[0, 1, 2, 3].map((index) => (
+                <span
+                  key={index}
+                  className={cx(
+                    "h-1 flex-1 rounded-full",
+                    index < meter.filled ? "bg-accent" : "bg-rule",
+                  )}
+                />
+              ))}
+            </div>
+            <span aria-hidden className="w-16 text-right text-caption text-muted">
+              {value.length > 0 ? meter.label : ""}
+            </span>
+          </div>
+          <span id={ruleId} className="text-caption text-faint">
+            At least {MIN_PASSWORD} characters. No composition rules.
+          </span>
         </>
       ) : null}
     </div>
@@ -270,6 +343,7 @@ export function AuthNotice({
  */
 export function RecoveryCodes({ codes }: { codes: string[] }) {
   const text = codes.join("\n");
+  const [copied, copy] = useCopy();
   const download = () => {
     const blob = new Blob([`${text}\n`], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
@@ -285,19 +359,15 @@ export function RecoveryCodes({ codes }: { codes: string[] }) {
         {codes.map((code) => (
           <code
             key={code}
-            className="rounded-[4px] border border-line bg-surface-2 px-2 py-1.5 text-center font-mono text-body tracking-wide"
+            className="rounded-[4px] border border-line bg-surface-2 px-2 py-1.5 text-center font-mono text-body tracking-wide tnum"
           >
             {code}
           </code>
         ))}
       </div>
       <div className="flex flex-wrap gap-2">
-        <Button
-          onClick={() => {
-            void navigator.clipboard?.writeText(text);
-          }}
-        >
-          Copy all
+        <Button onClick={() => copy(text)}>
+          {copied === text ? "Copied" : "Copy all"}
         </Button>
         <Button onClick={download}>Download .txt</Button>
         <Button onClick={() => window.print()}>Print</Button>

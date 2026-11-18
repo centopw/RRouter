@@ -52,6 +52,7 @@ function page(load: () => Promise<{ default: ComponentType }>) {
 
 // Route-level chunks: the shell and Activity land first, the rest on demand.
 const Activity = page(() => import("./pages/activity"));
+const Diagnostics = page(() => import("./pages/diagnostics"));
 const Health = page(() => import("./pages/health"));
 const SystemLogs = page(() => import("./pages/system-logs"));
 const Webhooks = page(() => import("./pages/webhooks"));
@@ -71,6 +72,9 @@ const Logs = page(() => import("./pages/logs"));
 const Users = page(() => import("./pages/users"));
 const Teams = page(() => import("./pages/teams"));
 const Audit = page(() => import("./pages/audit"));
+const Topology = page(() =>
+  import("./components/live-routing").then((m) => ({ default: m.LiveRoutingCard })),
+);
 const Account = page(() => import("./pages/account"));
 const SignIn = page(() => import("./pages/auth/sign-in"));
 const Register = page(() => import("./pages/auth/register"));
@@ -183,7 +187,7 @@ const router = createBrowserRouter(
               children: [
                 { index: true, element: <Activity /> },
                 { path: "logs", element: <AdminPage><Logs /></AdminPage> },
-                { path: "audit", element: <AdminPage><Audit /></AdminPage> },
+                { path: "audit", element: <Legacy to="/access/audit" /> },
               ],
             },
             {
@@ -219,6 +223,7 @@ const router = createBrowserRouter(
                 { path: "presets", element: <AdminPage><Presets /></AdminPage> },
                 { path: "aliases", element: <AdminPage><Aliases /></AdminPage> },
                 { path: "combos", element: <AdminPage><Combos /></AdminPage> },
+                { path: "topology", element: <Topology /> },
               ],
             },
             {
@@ -230,6 +235,7 @@ const router = createBrowserRouter(
                 { path: "quickstart", element: <Navigate to="/quickstart" replace /> },
                 { path: "teams", element: <Teams /> },
                 { path: "users", element: <AdminPage><Users /></AdminPage> },
+                { path: "audit", element: <AdminPage><Audit /></AdminPage> },
               ],
             },
             {
@@ -237,6 +243,7 @@ const router = createBrowserRouter(
               element: <SectionLayout section="system" />,
               children: [
                 { index: true, element: <SectionIndex section="system" /> },
+                { path: "diagnostics", element: <AdminPage><Diagnostics /></AdminPage> },
                 { path: "health", element: <AdminPage><Health /></AdminPage> },
                 { path: "webhooks", element: <AdminPage><Webhooks /></AdminPage> },
                 { path: "logs", element: <AdminPage><SystemLogs /></AdminPage> },
@@ -247,7 +254,8 @@ const router = createBrowserRouter(
             // Legacy URLs keep working, filters included; `/models` and `/providers` are
             // canonical, so only the old surfaces redirect.
             { path: "logs", element: <Navigate to="/activity/logs" replace /> },
-            { path: "audit", element: <Navigate to="/activity/audit" replace /> },
+            { path: "audit", element: <Legacy to="/access/audit" /> },
+            { path: "topology", element: <Legacy to="/routing/topology" /> },
             { path: "templates", element: <Navigate to="/playground/templates" replace /> },
             { path: "evals", element: <Navigate to="/playground/evals" replace /> },
             { path: "routing/models", element: <Legacy to="/models" /> },
@@ -261,6 +269,7 @@ const router = createBrowserRouter(
             { path: "keys", element: <Navigate to="/access/keys" replace /> },
             { path: "teams", element: <Navigate to="/access/teams" replace /> },
             { path: "users", element: <Navigate to="/access/users" replace /> },
+            { path: "diagnostics", element: <Navigate to="/system/diagnostics" replace /> },
             { path: "health", element: <Navigate to="/system/health" replace /> },
             { path: "webhooks", element: <Navigate to="/system/webhooks" replace /> },
             { path: "system-logs", element: <Navigate to="/system/logs" replace /> },

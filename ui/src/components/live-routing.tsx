@@ -8,11 +8,14 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { Link } from "react-router-dom";
 import { ArrowCounterClockwise, DotsSixVertical } from "@phosphor-icons/react";
-import { Button, Card, cx } from "./ui";
+import { Button, Card, PageHeader, cx } from "./ui";
 import { BrandMark, type BrandMarkState } from "./brand-mark";
 import { ProviderIcon, providerBrand } from "./provider-icon";
 import { ago } from "../lib/format";
+import { useReducedMotion } from "../lib/media";
+import { useConnections, useIsAdmin, useLiveUsage } from "../lib/queries";
 import type { UsageEvent } from "../lib/api";
 
 const LIVE_WINDOW_SECS = 15 * 60;
@@ -136,32 +139,112 @@ function loadStoredPositions(key: string): Record<string, Point> {
   }
 }
 
-function useReducedMotion(): boolean {
-  const [reduce, setReduce] = useState(false);
+function useDocumentTheme(): "light" | "dark" {
+  const read = () => {
+    const root = document.documentElement;
+    return root.dataset.theme === "dark" || root.classList.contains("dark") ? "dark" : "light";
+  };
+  const [theme, setTheme] = useState<"light" | "dark">(read);
   useEffect(() => {
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const update = () => setReduce(media.matches);
-    update();
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
+    const root = document.documentElement;
+    const observer = new MutationObserver(() => setTheme(read()));
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme", "class"] });
+    return () => observer.disconnect();
   }, []);
-  return reduce;
+  return theme;
+}
+
+function usePageVisible(): boolean {
+  const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
+  useEffect(() => {
+    const update = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+  return visible;
 }
 
 /**
  * The routing map is a real, persistent canvas: every provider card can be dragged or
  * nudged with the keyboard, and the layout is saved per browser. Edges are drawn from
  * the live event stream, so a quiet provider stays visible without pretending it moved.
+ *
+ * Mounted directly at `/routing/topology` without props (self-fetching live telemetry)
+ * or embedded inside Activity with shared query data.
  */
 export function LiveRoutingCard({
   events,
   providers,
   loading,
+  standalone,
+}: {
+  events?: UsageEvent[];
+  /** Providers with an active connection, so a quiet account still appears. */
+  providers?: string[];
+  loading?: boolean;
+  /** Expands canvas height and renders a PageHeader when mounted as a full page. */
+  standalone?: boolean;
+} = {}) {
+  if (events === undefined || providers === undefined) {
+    return <LiveRoutingStandalone standalone={standalone ?? true} />;
+  }
+  return (
+    <LiveRoutingCanvas
+      events={events}
+      providers={providers}
+      loading={loading}
+      standalone={standalone ?? false}
+    />
+  );
+}
+
+function LiveRoutingStandalone({ standalone }: { standalone: boolean }) {
+  const isAdmin = useIsAdmin();
+  const live = useLiveUsage(200);
+  const connections = useConnections(isAdmin);
+  const providerIds = useMemo(() => {
+    const seen = isAdmin
+      ? (connections.data ?? []).filter((c) => c.is_active).map((c) => c.provider)
+      : (live.data ?? []).map((event) => event.provider);
+    return [...new Set(seen)].sort();
+  }, [isAdmin, connections.data, live.data]);
+
+  return (
+    <>
+      <PageHeader
+        title="Topology"
+        subtitle="Live upstream routing map across active providers over the last 15 minutes."
+        actions={
+          isAdmin ? (
+            <Link
+              to="/providers"
+              className="inline-flex h-8 shrink-0 items-center justify-center rounded-full border border-line bg-surface px-3.5 text-body text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+            >
+              Manage providers →
+            </Link>
+          ) : undefined
+        }
+      />
+      <LiveRoutingCanvas
+        events={live.data ?? []}
+        providers={providerIds}
+        loading={live.isLoading || (isAdmin && connections.isLoading)}
+        standalone={standalone}
+      />
+    </>
+  );
+}
+
+function LiveRoutingCanvas({
+  events,
+  providers,
+  loading,
+  standalone,
 }: {
   events: UsageEvent[];
-  /** Providers with an active connection, so a quiet account still appears. */
   providers: string[];
   loading?: boolean;
+  standalone: boolean;
 }) {
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   const [stored, setStored] = useState<Record<string, Point>>(() =>
@@ -180,6 +263,9 @@ export function LiveRoutingCard({
     dy: number;
   } | null>(null);
   const reduceMotion = useReducedMotion();
+  const pageVisible = usePageVisible();
+  const theme = useDocumentTheme();
+  const animateLive = !reduceMotion && pageVisible;
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Math.floor(Date.now() / 1000)), 5_000);
@@ -301,7 +387,7 @@ export function LiveRoutingCard({
       observer.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [nodes.length, loading]);
+  }, [nodes.length, loading, events.length]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -442,9 +528,15 @@ export function LiveRoutingCard({
       </div>
 
       {loading && events.length === 0 ? (
-        <div aria-hidden className="h-[380px] animate-pulse bg-[var(--color-surface-2)]/40 max-[700px]:h-[440px]" />
+        <div
+          aria-hidden
+          className={cx(
+            "animate-pulse bg-[var(--color-surface-2)]/40",
+            standalone ? "h-[520px] max-[700px]:h-[480px]" : "h-[380px] max-[700px]:h-[440px]",
+          )}
+        />
       ) : nodes.length === 0 ? (
-        <div className="px-6 py-12 text-center text-body text-faint">
+        <div className={cx("px-6 text-center text-body text-faint", standalone ? "py-20" : "py-12")}>
           No provider traffic yet. The map fills in as requests arrive.
         </div>
       ) : (
@@ -453,7 +545,10 @@ export function LiveRoutingCard({
           role="region"
           aria-label="Live routing canvas. Drag provider cards to arrange them."
           aria-describedby="live-routing-help"
-          className="route-canvas relative h-[380px] touch-none overflow-hidden max-[700px]:h-[440px]"
+          className={cx(
+            "route-canvas relative touch-none overflow-hidden",
+            standalone ? "h-[520px] max-[700px]:h-[480px]" : "h-[380px] max-[700px]:h-[440px]",
+          )}
         >
           <div aria-hidden className="route-grid absolute inset-0" />
           <div
@@ -487,9 +582,9 @@ export function LiveRoutingCard({
                     strokeOpacity={flowing ? 0.9 : 0.45}
                     strokeLinecap="round"
                     vectorEffect="non-scaling-stroke"
-                    className={flowing && !reduceMotion ? "route-edge" : undefined}
+                    className={flowing && animateLive ? "route-edge" : undefined}
                   />
-                  {flowing && latestProvider === node.provider && !reduceMotion ? (
+                  {flowing && latestProvider === node.provider && animateLive ? (
                     <circle r="1.35" fill={failed ? "var(--color-neg)" : providerBrand(node.provider).color}>
                       <animateMotion
                         dur="1.25s"
@@ -504,15 +599,27 @@ export function LiveRoutingCard({
           </svg>
 
           <div
-            className="absolute left-1/2 z-20 -translate-x-1/2 -translate-y-1/2"
-            style={{ top: `${hubPoint.y}%` }}
+            className="absolute z-20"
+            style={
+              canvasSize.width > 0 && canvasSize.height > 0
+                ? {
+                    left: 0,
+                    top: 0,
+                    transform: `translate3d(${((hubPoint.x / 100) * canvasSize.width).toFixed(1)}px, ${((hubPoint.y / 100) * canvasSize.height).toFixed(1)}px, 0) translate3d(-50%, -50%, 0)`,
+                  }
+                : {
+                    left: `${hubPoint.x}%`,
+                    top: `${hubPoint.y}%`,
+                    transform: "translate3d(-50%, -50%, 0)",
+                  }
+            }
           >
-            <div className="flex w-[152px] flex-col items-center rounded-2xl border border-[var(--color-line-strong)] bg-surface/95 px-3 py-2.5 text-center shadow-[0_8px_24px_-12px_rgba(28,43,66,0.35)] backdrop-blur">
+            <div className="flex w-[152px] flex-col items-center rounded-2xl border border-[var(--color-line-strong)] bg-surface/95 px-3 py-2.5 text-center shadow-[var(--shadow-panel)] backdrop-blur">
               <BrandMark
                 state={brandState}
                 angleDeg={brandAngle}
                 color={latestFailed ? "#EF4444" : latestProvider ? providerBrand(latestProvider).color : undefined}
-                surface="light"
+                surface={theme}
                 decorative
                 className="h-11 w-[72px]"
               />
@@ -529,6 +636,9 @@ export function LiveRoutingCard({
             const brand = providerBrand(node.provider);
             const name = NAMES[node.provider] ?? node.provider;
             const isDragging = dragging === node.provider;
+            const hasSize = canvasSize.width > 0 && canvasSize.height > 0;
+            const px = (point.x / 100) * canvasSize.width;
+            const py = (point.y / 100) * canvasSize.height;
             return (
               <article
                 key={node.provider}
@@ -545,16 +655,31 @@ export function LiveRoutingCard({
                 onPointerCancel={endDrag}
                 onKeyDown={(event) => nudge(event, node.provider)}
                 className={cx(
-                  "absolute z-10 w-[168px] max-[760px]:w-[160px] -translate-x-1/2 -translate-y-1/2 select-none rounded-xl border bg-surface shadow-[0_2px_10px_rgba(28,43,66,0.08)] outline-none transition-[box-shadow,border-color] focus-visible:ring-2 focus-visible:ring-accent-text/40",
+                  "absolute z-10 w-[168px] max-[760px]:w-[160px] select-none rounded-xl border bg-surface shadow-[var(--shadow-panel)] outline-none focus-visible:ring-2 focus-visible:ring-accent-text/40",
                   flowing ? "border-[var(--color-line-strong)]" : "border-line",
                   node.errors > 0 && "border-[var(--color-neg-line)]",
-                  isDragging ? "cursor-grabbing shadow-[0_12px_28px_-14px_rgba(28,43,66,0.45)]" : "cursor-grab",
+                  isDragging
+                    ? "cursor-grabbing shadow-[var(--shadow-popover)]"
+                    : "cursor-grab",
                 )}
-                style={{
-                  left: `${point.x}%`,
-                  top: `${point.y}%`,
-                  transition: isDragging ? "none" : "left 180ms ease, top 180ms ease, box-shadow 120ms",
-                }}
+                style={
+                  hasSize
+                    ? {
+                        left: 0,
+                        top: 0,
+                        transform: `translate3d(${px.toFixed(1)}px, ${py.toFixed(1)}px, 0) translate3d(-50%, -50%, 0)`,
+                        transition:
+                          isDragging || reduceMotion
+                            ? "none"
+                            : "transform 180ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 120ms ease",
+                      }
+                    : {
+                        left: `${point.x}%`,
+                        top: `${point.y}%`,
+                        transform: "translate3d(-50%, -50%, 0)",
+                        transition: "none",
+                      }
+                }
               >
                 <div className="flex items-center gap-2 px-2.5 pt-2">
                   {/* Active providers read from the tile itself: the mark sits on a

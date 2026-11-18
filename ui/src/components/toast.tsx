@@ -63,31 +63,34 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               }}
               role={item.tone === "neg" ? "alert" : "status"}
               className={cx(
-                "pointer-events-auto flex items-start gap-2.5 rounded-[10px] border px-3.5 py-3 shadow-[0_12px_32px_rgba(16,18,20,0.16)]",
-                "data-[state=open]:animate-in data-[state=closed]:animate-out",
-                item.tone === "pos" && "border-[var(--color-pos)]/35 bg-[var(--color-pos-tint)] text-[var(--color-pos)]",
+                "toast-root pointer-events-auto flex items-start gap-2.5 rounded-[var(--radius-overlay)] border px-3.5 py-3 shadow-[var(--shadow-popover)]",
+                item.tone === "pos" && "border-[var(--color-pos-line)] bg-[var(--color-pos-tint)] text-[var(--color-pos-ink)]",
                 item.tone === "neg" && "border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)]",
-                item.tone === "info" && "border-line bg-surface text-fg",
+                item.tone === "info" && "border-line-strong bg-surface text-fg",
               )}
             >
               <Icon size={17} aria-hidden className="mt-0.5 shrink-0" />
               <div className="min-w-0 flex-1">
                 <ToastPrimitive.Title className="text-small font-semibold">{item.title}</ToastPrimitive.Title>
                 {item.detail ? (
-                  <ToastPrimitive.Description className="mt-0.5 break-words text-caption opacity-80">
+                  <ToastPrimitive.Description className="mt-0.5 break-words text-caption opacity-85">
                     {item.detail}
                   </ToastPrimitive.Description>
                 ) : null}
               </div>
               <ToastPrimitive.Close asChild>
-                <button type="button" aria-label="dismiss" className="shrink-0 opacity-60 hover:opacity-100">
+                <button
+                  type="button"
+                  aria-label="Dismiss notification"
+                  className="shrink-0 rounded-full p-0.5 opacity-60 hover:opacity-100"
+                >
                   <X size={13} aria-hidden />
                 </button>
               </ToastPrimitive.Close>
             </ToastPrimitive.Root>
           );
         })}
-        <ToastPrimitive.Viewport className="pointer-events-none fixed bottom-4 right-4 z-[80] flex w-[min(360px,calc(100vw-2rem))] flex-col gap-2 outline-none" />
+        <ToastPrimitive.Viewport className="pointer-events-none fixed bottom-4 right-4 z-[var(--z-toast)] flex w-[min(360px,calc(100vw-2rem))] flex-col gap-2 outline-none" />
       </ToastPrimitive.Provider>
     </ToastContext.Provider>
   );

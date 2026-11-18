@@ -1,4 +1,4 @@
-import { Badge } from "../atoms/Badge";
+import { Badge, type BadgeSize } from "../atoms/Badge";
 
 const STATUS_TEXT: Record<number, string> = {
   200: "OK",
@@ -24,11 +24,21 @@ export function statusText(status: number): string {
 }
 
 /** HTTP outcome as a pill: tinted by class, and always carrying the code in text. */
-export function StatusPill({ status, title }: { status: number; title?: string }) {
+export function StatusPill({
+  status,
+  title,
+  size = "sm",
+  className,
+}: {
+  status: number;
+  title?: string;
+  size?: BadgeSize;
+  className?: string;
+}) {
   const ok = status >= 200 && status < 400;
   return (
-    <Badge tone={ok ? "pos" : "neg"} title={title}>
-      <span className="font-mono">
+    <Badge tone={ok ? "pos" : "neg"} size={size} title={title} className={className}>
+      <span className="font-mono tnum">
         {status} {statusText(status)}
       </span>
     </Badge>

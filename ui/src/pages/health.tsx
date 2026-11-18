@@ -3,7 +3,7 @@ import { Badge, Card, CardHeader, Dot, ErrorNote, PageHeader } from "../componen
 import { useConnections, useHealth, useSystem } from "../lib/queries";
 import { uptime } from "../lib/format";
 
-export default function Health() {
+export function Health({ embedded = false }: { embedded?: boolean } = {}) {
   const health = useHealth();
   const system = useSystem();
   const connections = useConnections();
@@ -11,27 +11,52 @@ export default function Health() {
   const counts = system.data?.counts;
   const active = connections.data?.filter((c) => c.is_active).length ?? 0;
   const degraded = connections.data?.filter((c) => c.backoff_level > 0) ?? [];
+  const subtitle = "Process, storage, and provider state as the gateway itself reports it.";
+
+  const statusBadge = (
+    <Badge tone={health.isError ? "neg" : "pos"}>
+      <Dot tone={health.isError ? "neg" : "pos"} />
+      {health.isError ? "unreachable" : "serving"}
+    </Badge>
+  );
+
+  const setupLink = (
+    <Link
+      to="/setup"
+      className="inline-flex h-8 items-center rounded-full border border-line bg-surface-2 px-3 text-body text-fg transition-colors hover:border-line-strong hover:bg-surface-3"
+    >
+      Run setup again
+    </Link>
+  );
 
   return (
     <>
-      <PageHeader
-        title="Health"
-        subtitle="Process, storage, and provider state as the gateway itself reports it."
-        actions={
-          <>
-            <Link
-              to="/setup"
-              className="inline-flex h-8 items-center rounded-lg border border-line bg-surface-2 px-3 text-body text-fg hover:border-line-strong"
-            >
-              Run setup again
-            </Link>
-            <Badge tone={health.isError ? "neg" : "pos"}>
-              <Dot tone={health.isError ? "neg" : "pos"} />
-              {health.isError ? "unreachable" : "serving"}
-            </Badge>
-          </>
-        }
-      />
+      {embedded ? (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-body text-muted">{subtitle}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            {setupLink}
+            {statusBadge}
+          </div>
+        </div>
+      ) : (
+        <PageHeader
+          title="Health"
+          subtitle={subtitle}
+          actions={
+            <>
+              <Link
+                to="/system/logs"
+                className="inline-flex h-8 items-center rounded-full border border-line bg-surface px-3 text-body text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg"
+              >
+                System logs →
+              </Link>
+              {setupLink}
+              {statusBadge}
+            </>
+          }
+        />
+      )}
 
       {system.isError ? (
         <div className="mb-4">
@@ -43,7 +68,7 @@ export default function Health() {
         <Card className="px-5 py-4">
           <div className="text-small text-muted">Version</div>
           <div className="mt-1 text-subtitle font-semibold tnum">v{system.data?.version ?? "—"}</div>
-          <div className="mt-2 text-caption text-faint">
+          <div className="mt-2 text-caption text-faint tnum">
             uptime {system.data ? uptime(system.data.uptime_secs) : "—"}
           </div>
         </Card>
@@ -51,9 +76,9 @@ export default function Health() {
           <div className="text-small text-muted">Connections</div>
           <div className="mt-1 text-subtitle font-semibold tnum">
             {active}
-            <span className="text-body font-normal text-faint"> / {counts?.connections ?? 0} active</span>
+            <span className="text-body font-normal text-faint tnum"> / {counts?.connections ?? 0} active</span>
           </div>
-          <div className="mt-2 text-caption text-faint">
+          <div className="mt-2 text-caption text-faint tnum">
             {degraded.length === 0 ? "no provider backoff" : `${degraded.length} in backoff`}
           </div>
         </Card>
@@ -116,7 +141,11 @@ export default function Health() {
                   <Dot tone={!c.is_active ? "muted" : c.backoff_level > 0 ? "warn" : "pos"} />
                   <span className="min-w-0 flex-1 truncate">{c.name ?? c.provider}</span>
                   <span className="text-caption text-faint">{c.provider}</span>
-                  {c.backoff_level > 0 ? <Badge tone="warn">backoff {c.backoff_level}</Badge> : null}
+                  {c.backoff_level > 0 ? (
+                    <Badge tone="warn">
+                      <span className="font-mono tnum">backoff {c.backoff_level}</span>
+                    </Badge>
+                  ) : null}
                   <Badge tone={c.is_active ? "pos" : "neutral"}>{c.is_active ? "active" : "off"}</Badge>
                 </li>
               ))}
@@ -127,3 +156,5 @@ export default function Health() {
     </>
   );
 }
+
+export default Health;

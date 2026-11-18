@@ -154,7 +154,7 @@ export default function Setup() {
         <main className="min-w-0 flex-1 px-4 py-6 min-[820px]:px-14 min-[820px]:pb-16 min-[820px]:pt-12">
           <div className="mx-auto w-full max-w-[880px]">
             <MobileProgress step={step} />
-            <div className="mb-2.5 hidden text-body text-faint min-[820px]:block">
+            <div className="mb-2.5 hidden text-body text-faint tnum min-[820px]:block">
               Step {macro} of 3
             </div>
             <Heading level={1} className="text-title font-semibold tracking-[-0.02em] min-[820px]:text-display">
@@ -514,7 +514,7 @@ function ConnectedStep({
         <span className="ml-auto rounded-full border border-[var(--color-pos)]/35 bg-[var(--color-pos)]/10 px-2.5 py-0.5 text-small text-pos">
           Active
         </span>
-        <span className="rounded-full border border-line px-2.5 py-0.5 text-small text-muted">
+        <span className="rounded-full border border-line px-2.5 py-0.5 text-small text-muted tnum">
           Priority {(connection?.priority ?? 0) + 1}
         </span>
       </div>
@@ -546,7 +546,7 @@ function ConnectedStep({
       </div>
 
       <div className="mt-5">
-        <div className="text-body text-muted">
+        <div className="text-body text-muted tnum">
           {accountModels.length} models available
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -559,7 +559,7 @@ function ConnectedStep({
             </span>
           ))}
           {accountModels.length > 8 ? (
-            <span className="px-2.5 py-1 text-small text-faint">
+            <span className="px-2.5 py-1 text-small text-faint tnum">
               +{accountModels.length - 8} more
             </span>
           ) : null}
@@ -568,7 +568,7 @@ function ConnectedStep({
 
       <div className="mt-8 flex flex-wrap items-center gap-2 border-t border-line pt-6">
         <Button onClick={onAnother}>Connect another account</Button>
-        <Button variant="primary" onClick={onContinue} className="ml-auto">
+        <Button variant="primary" arrow onClick={onContinue} className="ml-auto">
           Continue
         </Button>
       </div>
@@ -654,7 +654,7 @@ function KeyCreatedStep({
       </p>
 
       <div className="mt-8 flex flex-wrap items-center gap-2 border-t border-line pt-6">
-        <Button variant="primary" onClick={onContinue} className="ml-auto">
+        <Button variant="primary" arrow onClick={onContinue} className="ml-auto">
           I've saved it somewhere else
         </Button>
       </div>
@@ -846,7 +846,7 @@ function DoneStep({
 
       <div className="mt-8 flex flex-wrap items-center gap-2 border-t border-line pt-6">
         <span className="text-small text-faint">Setup complete. You can reopen it from Health.</span>
-        <Button variant="primary" onClick={onActivity} className="ml-auto">
+        <Button variant="primary" arrow onClick={onActivity} className="ml-auto">
           Open Activity
         </Button>
       </div>
@@ -905,7 +905,7 @@ function Rail({
             <div className="flex flex-col items-center">
               <span
                 className={cx(
-                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border font-mono text-small",
+                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border font-mono text-small tnum",
                   done && "border-accent bg-accent text-[var(--color-accent-ink)]",
                   current && "border-accent text-accent-text",
                   !done && !current && "border-line text-muted",
@@ -934,7 +934,7 @@ function MobileProgress({ step }: { step: Step }) {
   const macro = MACRO[step];
   return (
     <div className="mb-5 min-[820px]:hidden">
-      <div className="mb-2 text-small text-faint">Step {macro} of 3</div>
+      <div className="mb-2 text-small text-faint tnum">Step {macro} of 3</div>
       <div className="flex gap-1">
         {[1, 2, 3].map((n) => (
           <span

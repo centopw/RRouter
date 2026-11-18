@@ -53,6 +53,10 @@ export function RowMenu({
   onEdit,
   onDelete,
   onHide,
+  onMoveTop,
+  onMoveBottom,
+  canMoveTop,
+  canMoveBottom,
   groups,
   currentGroup,
   onMoveGroup,
@@ -63,6 +67,10 @@ export function RowMenu({
   onDelete: () => void;
   /** Only while a preset is active: hides the row here, not from routing. */
   onHide?: () => void;
+  onMoveTop?: () => void;
+  onMoveBottom?: () => void;
+  canMoveTop?: boolean;
+  canMoveBottom?: boolean;
   /** Groups on this preset; omitted for callers without a layout. */
   groups?: Array<DraftGroup & { implicit?: boolean }>;
   currentGroup?: string;
@@ -132,10 +140,52 @@ export function RowMenu({
           className="popover-panel z-50 flex w-56 flex-col rounded-[var(--radius-card)] border border-line bg-surface p-1 shadow-lg focus:outline-none"
         >
           <Popover.Close asChild>
+            <Link
+              to={`/playground/chat?model=${encodeURIComponent(model.ref)}`}
+              role="menuitem"
+              tabIndex={-1}
+              className={item}
+            >
+              Test in Playground
+            </Link>
+          </Popover.Close>
+          <Popover.Close asChild>
             <button type="button" role="menuitem" tabIndex={-1} onClick={onEdit} className={item}>
               Edit limits and price
             </button>
           </Popover.Close>
+          {onMoveTop || onMoveBottom ? (
+            <div className="mt-1 border-t border-line pt-1">
+              {onMoveTop ? (
+                <Popover.Close asChild>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    disabled={canMoveTop === false}
+                    onClick={onMoveTop}
+                    className={cx(item, "w-full disabled:cursor-not-allowed disabled:text-faint")}
+                  >
+                    Move to top
+                  </button>
+                </Popover.Close>
+              ) : null}
+              {onMoveBottom ? (
+                <Popover.Close asChild>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    disabled={canMoveBottom === false}
+                    onClick={onMoveBottom}
+                    className={cx(item, "w-full disabled:cursor-not-allowed disabled:text-faint")}
+                  >
+                    Move to bottom
+                  </button>
+                </Popover.Close>
+              ) : null}
+            </div>
+          ) : null}
           {groups && onMoveGroup ? (
             <div className="mt-1 border-t border-line pt-1">
               <p className="px-2 py-1 text-caption text-faint">Move to group</p>
@@ -203,6 +253,10 @@ export function ModelCardBody({
   onEdit,
   onDelete,
   onHide,
+  onMoveTop,
+  onMoveBottom,
+  canMoveTop,
+  canMoveBottom,
   groups,
   currentGroup,
   onMoveGroup,
@@ -217,6 +271,10 @@ export function ModelCardBody({
   onEdit: (model: Model) => void;
   onDelete: (model: Model) => void;
   onHide?: (ref: string) => void;
+  onMoveTop?: () => void;
+  onMoveBottom?: () => void;
+  canMoveTop?: boolean;
+  canMoveBottom?: boolean;
   groups?: Array<DraftGroup & { implicit?: boolean }>;
   currentGroup?: string;
   onMoveGroup?: (group: string | null) => void;
@@ -226,7 +284,7 @@ export function ModelCardBody({
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.06em] text-muted">
+                <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-caption uppercase tracking-[0.06em] text-muted">
                   {m.provider}
                 </span>
                 <h3
@@ -293,6 +351,10 @@ export function ModelCardBody({
                     onEdit={() => onEdit(m)}
                     onDelete={() => onDelete(m)}
                     onHide={onHide ? () => onHide(m.ref) : undefined}
+                    onMoveTop={onMoveTop}
+                    onMoveBottom={onMoveBottom}
+                    canMoveTop={canMoveTop}
+                    canMoveBottom={canMoveBottom}
                     groups={groups}
                     currentGroup={currentGroup}
                     onMoveGroup={onMoveGroup}
