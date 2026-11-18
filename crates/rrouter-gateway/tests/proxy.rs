@@ -944,8 +944,14 @@ async fn anthropic_cache_markers_survive_the_gateway() {
         sent["cache_control"], body["cache_control"],
         "top-level breakpoint lost"
     );
+    // The subscription gate's identity block is prepended, so the client's own system
+    // block keeps its breakpoint one position later.
     assert_eq!(
-        sent["system"][0]["cache_control"]["type"], "ephemeral",
+        sent["system"][0]["text"],
+        rrouter_gateway::claude_code::IDENTITY
+    );
+    assert_eq!(
+        sent["system"][1]["cache_control"]["type"], "ephemeral",
         "system breakpoint lost"
     );
     assert_eq!(
@@ -1040,7 +1046,13 @@ async fn anthropic_non_streaming_round_trip() {
     assert_eq!(mock.paths(), vec!["/v1/messages".to_string()]);
     let seen = mock.seen();
     assert_eq!(seen[0]["model"], "sonnet-4-5");
-    assert_eq!(seen[0]["system"], "be terse");
+    // A string system widens to blocks with the Claude Code identity first, because the
+    // claude spec is the subscription gate's provider.
+    assert_eq!(
+        seen[0]["system"][0]["text"],
+        rrouter_gateway::claude_code::IDENTITY
+    );
+    assert_eq!(seen[0]["system"][1]["text"], "be terse");
 }
 
 #[tokio::test]
