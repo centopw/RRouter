@@ -607,10 +607,13 @@ async fn probe(
             spec.default_dialect,
         ),
     };
-    let body = match &project {
+    let mut body = match &project {
         Some(project) => rrouter_translate::google_cca::build_request(&req, &req.model, project)?,
         None => rrouter_translate::build_request(dialect, &req, spec.stream_only)?,
     };
+    // The probe must carry the same fingerprint a real request does, or a healthy
+    // subscription account answers the 429 the fingerprint exists to avoid.
+    crate::claude_code::inject_identity(spec, &mut body);
 
     let mut headers = axum::http::HeaderMap::new();
     for (name, value) in rrouter_auth::build_headers(spec, &creds)? {

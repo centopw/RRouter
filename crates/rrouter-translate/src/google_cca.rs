@@ -61,8 +61,17 @@ pub const PROD_HOST: &str = "https://cloudcode-pa.googleapis.com";
 pub const STREAM_PATH: &str = "/v1internal:streamGenerateContent?alt=sse";
 /// Buffered path.
 pub const NON_STREAM_PATH: &str = "/v1internal:generateContent";
-/// `userAgent` in the envelope and `User-Agent` on the wire.
-pub const USER_AGENT: &str = "antigravity/hub/2.24.0 darwin/arm64";
+/// `User-Agent` on the wire. The backend fingerprints the client on the
+/// `(aidev_client; os_type=…; arch=…; cl=…)` marker: without it the CCA host rejects the
+/// call, the same way the subscription gate turns away requests that are not the
+/// official client. The values stay fixed rather than following the gateway host, so a
+/// deployment moved to another architecture keeps one stable identity upstream.
+pub const USER_AGENT: &str =
+    "antigravity/hub/2.26.0 (aidev_client; os_type=darwin; arch=arm64; cl=1005016104)";
+
+/// `userAgent` inside the envelope. The desktop client sends the bare product name here
+/// and the long fingerprint only on the wire; the two are not the same string.
+pub const ENVELOPE_USER_AGENT: &str = "antigravity";
 /// `X-Goog-Api-Client` value the Antigravity desktop sends.
 pub const CLIENT_HEADER: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 /// Env override for the daily host (a deployment pin or a test server).
@@ -192,7 +201,7 @@ pub fn build_request_with(
 
     let mut envelope = Map::new();
     envelope.insert("model".into(), Value::from(model.to_string()));
-    envelope.insert("userAgent".into(), Value::from(USER_AGENT));
+    envelope.insert("userAgent".into(), Value::from(ENVELOPE_USER_AGENT));
     envelope.insert("requestType".into(), Value::from("agent"));
     envelope.insert("project".into(), Value::from(project.to_string()));
     envelope.insert("requestId".into(), Value::from(request_id.to_string()));
@@ -968,7 +977,7 @@ mod tests {
         let envelope =
             build_request_with(&request(), "gemini-3-pro", "proj-1", "agent-test").unwrap();
         assert_eq!(envelope["model"], "gemini-3-pro");
-        assert_eq!(envelope["userAgent"], USER_AGENT);
+        assert_eq!(envelope["userAgent"], ENVELOPE_USER_AGENT);
         assert_eq!(envelope["requestType"], "agent");
         assert_eq!(envelope["project"], "proj-1");
         assert_eq!(envelope["requestId"], "agent-test");

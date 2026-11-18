@@ -367,7 +367,9 @@ function AccountRow({
         selected && "bg-[var(--color-selected)]",
       )}
     >
-      <span className="flex min-w-0 items-center gap-2">
+      {/* Indented past the group row's caret so an account reads as the provider's child,
+          not as a sibling of it. */}
+      <span className="flex min-w-0 items-center gap-2 pl-5">
         <ProviderIcon provider={connection.provider} size={17} />
         <AccountCell connection={connection} display={display} custom={custom} />
         {custom ? (

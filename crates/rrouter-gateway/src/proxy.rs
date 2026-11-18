@@ -3074,6 +3074,11 @@ impl Attempt<'_> {
             rrouter_translate::build_request_with(dialect, &request, self.upstream_stream, &wire)?
         };
         drop_unsupported_sampling(&candidate.provider, &mut body);
+        // Anthropic's subscription models are gated on the request looking like Claude
+        // Code; the fingerprint is part of the body, so it belongs here and in the key.
+        if dialect == Dialect::AnthropicMessages {
+            crate::claude_code::inject_identity(self.provider(candidate)?, &mut body);
+        }
         Ok(body)
     }
 
