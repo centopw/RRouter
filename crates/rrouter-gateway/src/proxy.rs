@@ -4039,6 +4039,11 @@ fn spawn_latency(state: &AppState, connection: Uuid, latency_ms: u32) {
 }
 
 fn spawn_attempt(state: &AppState, rec: AttemptRecord) {
+    // Attempt traces are a debugging aid with their own switch; the console line and the
+    // counters above stay, so routing stays observable while the row is off.
+    if !crate::settings::record_attempts() {
+        return;
+    }
     let store = Arc::clone(&state.store);
     // The audit trail must never fail a request or delay the response.
     tokio::spawn(async move {

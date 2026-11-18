@@ -50,6 +50,11 @@ pub(crate) async fn audit(
     ip: &str,
     detail: &str,
 ) {
+    // The audit trail has its own switch. When it is off the webhook fan-out is off with
+    // it: both surfaces describe the same event, and one without the other is a lie.
+    if !crate::settings::record_audit() {
+        return;
+    }
     if let Err(e) = state
         .store
         .record_audit(kind, actor, Some(ip), Some(detail))

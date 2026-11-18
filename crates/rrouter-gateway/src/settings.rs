@@ -25,6 +25,17 @@ static RTK: AtomicBool = AtomicBool::new(true);
 /// up when an operator changes their mind.
 static CAPTURE_BODIES: AtomicBool = AtomicBool::new(false);
 
+/// Per-attempt traces, readable on the proxy path. Default on: the request drawer's
+/// fallback trail is the first thing an operator reaches for when a model misbehaves.
+static RECORD_ATTEMPTS: AtomicBool = AtomicBool::new(true);
+
+/// The security audit trail, readable on every mutating handler. Default on: turning it
+/// off is a deliberate trade of accountability for disk, never an accident.
+static RECORD_AUDIT: AtomicBool = AtomicBool::new(true);
+
+/// Ten years, the ceiling the environment knob already enforces.
+pub const MAX_RETENTION_DAYS: usize = 3650;
+
 pub fn rtk() -> bool {
     RTK.load(Ordering::Relaxed)
 }
@@ -34,12 +45,29 @@ pub fn capture_bodies() -> bool {
     CAPTURE_BODIES.load(Ordering::Relaxed)
 }
 
+/// Whether each dispatch attempt is written to `attempts`.
+pub fn record_attempts() -> bool {
+    RECORD_ATTEMPTS.load(Ordering::Relaxed)
+}
+
+/// Whether mutating handlers write their row to `audit_events`.
+pub fn record_audit() -> bool {
+    RECORD_AUDIT.load(Ordering::Relaxed)
+}
+
 pub fn defaults() -> Value {
     json!({
         "brand_name": "RRouter",
         "rtk": true,
         "system_logs": false,
         "capture_bodies": false,
+        "record_attempts": true,
+        "record_audit": true,
+        "usage_retention_days": 0,
+        "attempts_retention_days": null,
+        "capture_retention_days": null,
+        "audit_retention_days": null,
+        "system_log_retention_days": null,
     })
 }
 
@@ -57,6 +85,20 @@ pub async fn prime(state: &Arc<AppState>) -> Result<()> {
             .unwrap_or(false),
         Ordering::Relaxed,
     );
+    RECORD_ATTEMPTS.store(
+        stored
+            .get("record_attempts")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        Ordering::Relaxed,
+    );
+    RECORD_AUDIT.store(
+        stored
+            .get("record_audit")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        Ordering::Relaxed,
+    );
     crate::syslog::set_enabled(
         stored
             .get("system_logs")
@@ -64,6 +106,57 @@ pub async fn prime(state: &Arc<AppState>) -> Result<()> {
             .unwrap_or(false),
     );
     Ok(())
+}
+
+/// Switches the dashboard may flip; each must stay a boolean.
+const TOGGLE_KEYS: &[&str] = &[
+    "rtk",
+    "system_logs",
+    "capture_bodies",
+    "record_attempts",
+    "record_audit",
+];
+
+/// Retention knobs, in days. `null` (or absent) means "follow the usage window", which is
+/// the behaviour that existed before each store got its own answer.
+const RETENTION_KEYS: &[&str] = &[
+    "usage_retention_days",
+    "attempts_retention_days",
+    "capture_retention_days",
+    "audit_retention_days",
+    "system_log_retention_days",
+];
+
+/// How long each stored artifact is kept, resolved for one sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    pub usage_days: usize,
+    pub attempts_days: usize,
+    pub captures_days: usize,
+    pub audit_days: usize,
+    pub system_logs_days: usize,
+}
+
+/// Resolve the retention policy: the stored blob wins over the environment, and a store
+/// without its own number follows the usage window. `0` means keep until deleted by hand.
+pub async fn retention(state: &Arc<AppState>) -> Result<Retention> {
+    let stored = read_blob(state).await?.unwrap_or(Value::Null);
+    let usage_days = days_of(&stored, "usage_retention_days")
+        .unwrap_or(state.config.load().usage_retention_days);
+    Ok(Retention {
+        usage_days,
+        attempts_days: days_of(&stored, "attempts_retention_days").unwrap_or(usage_days),
+        captures_days: days_of(&stored, "capture_retention_days").unwrap_or(usage_days),
+        audit_days: days_of(&stored, "audit_retention_days").unwrap_or(usage_days),
+        system_logs_days: days_of(&stored, "system_log_retention_days").unwrap_or(0),
+    })
+}
+
+fn days_of(settings: &Value, key: &str) -> Option<usize> {
+    settings
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|days| usize::try_from(days).unwrap_or(usize::MAX).min(MAX_RETENTION_DAYS))
 }
 
 /// The stored settings merged over the defaults.
@@ -85,6 +178,7 @@ pub async fn merge(state: &Arc<AppState>, patch: Value) -> Result<Value> {
     let Value::Object(patch) = patch else {
         return Err(Error::BadRequest("settings must be a JSON object".into()));
     };
+    validate(&patch)?;
     let mut current = match load(state).await? {
         Value::Object(map) => map,
         _ => Map::new(),
@@ -101,9 +195,48 @@ pub async fn merge(state: &Arc<AppState>, patch: Value) -> Result<Value> {
     if let Some(logs) = current.get("system_logs").and_then(Value::as_bool) {
         crate::syslog::set_enabled(logs);
     }
+    if let Some(on) = current.get("record_attempts").and_then(Value::as_bool) {
+        RECORD_ATTEMPTS.store(on, Ordering::Relaxed);
+    }
+    if let Some(on) = current.get("record_audit").and_then(Value::as_bool) {
+        RECORD_AUDIT.store(on, Ordering::Relaxed);
+    }
     let merged = Value::Object(current);
     write_blob(state, &merged).await?;
     Ok(merged)
+}
+
+/// Refuse a patch the sweep cannot honour: a switch that is not a boolean, or a retention
+/// that is neither `null` nor a day count inside the ceiling. A silently clamped value
+/// would report a policy the gateway is not running.
+fn validate(patch: &Map<String, Value>) -> Result<()> {
+    for key in TOGGLE_KEYS {
+        match patch.get(*key) {
+            None | Some(Value::Bool(_)) => {}
+            Some(_) => {
+                return Err(Error::BadRequest(format!("{key} must be true or false")));
+            }
+        }
+    }
+    for key in RETENTION_KEYS {
+        match patch.get(*key) {
+            None | Some(Value::Null) => {}
+            Some(Value::Number(n)) => {
+                let days = n.as_u64().filter(|days| *days <= MAX_RETENTION_DAYS as u64);
+                if days.is_none() {
+                    return Err(Error::BadRequest(format!(
+                        "{key} must be a whole number of days between 0 and {MAX_RETENTION_DAYS}"
+                    )));
+                }
+            }
+            Some(_) => {
+                return Err(Error::BadRequest(format!(
+                    "{key} must be a whole number of days between 0 and {MAX_RETENTION_DAYS}, or null"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The `ui` settings object: `{brand: {...}, panels: [...]}` with defaults applied.
@@ -198,6 +331,42 @@ mod tests {
         assert_eq!(brand["brand_color"], "#000");
         assert_eq!(brand["footer_text"], Value::Null);
         assert!(brand.get("junk").is_none());
+    }
+
+    /// A retention the sweep cannot honour is refused rather than clamped: reporting a
+    /// policy the gateway is not running is worse than rejecting the write.
+    #[test]
+    fn retention_patches_are_validated() {
+        let ok = serde_json::json!({"usage_retention_days": 30, "audit_retention_days": null});
+        assert!(validate(ok.as_object().expect("object")).is_ok());
+
+        let negative = serde_json::json!({"usage_retention_days": -1});
+        assert!(validate(negative.as_object().expect("object")).is_err());
+
+        let past_ceiling = serde_json::json!({"capture_retention_days": MAX_RETENTION_DAYS + 1});
+        assert!(validate(past_ceiling.as_object().expect("object")).is_err());
+
+        let stringy = serde_json::json!({"audit_retention_days": "never"});
+        assert!(validate(stringy.as_object().expect("object")).is_err());
+
+        let wrong_toggle = serde_json::json!({"record_attempts": 1});
+        assert!(validate(wrong_toggle.as_object().expect("object")).is_err());
+    }
+
+    /// A store without its own number follows the usage window; `0` is kept, not turned
+    /// into a cutoff of "now".
+    #[test]
+    fn days_follow_usage_until_overridden() {
+        let stored = serde_json::json!({"attempts_retention_days": 7});
+        assert_eq!(days_of(&stored, "attempts_retention_days"), Some(7));
+        assert_eq!(days_of(&stored, "capture_retention_days"), None);
+        assert_eq!(days_of(&json!({"usage_retention_days": 0}), "usage_retention_days"), Some(0));
+        let capped = serde_json::json!({"usage_retention_days": 999_999});
+        assert_eq!(
+            days_of(&capped, "usage_retention_days"),
+            Some(MAX_RETENTION_DAYS),
+            "a stored value above the ceiling is read at the ceiling (validation only admits legal writes)"
+        );
     }
 
     /// Capture of request/response bodies is opt-in: the default blob says off and the

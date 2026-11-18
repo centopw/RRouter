@@ -295,6 +295,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/update/check", post(routes::updates::check))
         .route("/update/download", post(routes::updates::download))
         .route("/update/apply", post(routes::updates::apply))
+        .route(
+            "/settings/retention/sweep",
+            axum::routing::post(routes::settings::sweep_now),
+        )
         .route("/update/settings", put(routes::updates::settings))
         .route("/oauth/providers", get(routes::oauth::providers))
         .route("/oauth/{provider}/start", post(routes::oauth::start))

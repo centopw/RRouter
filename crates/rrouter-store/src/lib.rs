@@ -56,7 +56,7 @@ pub use store::{
     ApiKeyPatch, AttemptRecord, BudgetWindow, CacheEntry, CaptureRecord, Combo, ComboStrategy,
     Connection, ConnectionScope, ExhaustedAccounts, Guardrails, KeyKind, KeyModel, KeyScope,
     ModelAlias, ModelCost, ModelRow, PromptTemplate, PromptTemplateVersion, ProviderProfile,
-    PruneReport, QuotaPing, QuotaPingMode, SemanticCacheCandidate, SemanticCacheEntry,
+    QuotaPing, QuotaPingMode, SemanticCacheCandidate, SemanticCacheEntry,
     SemanticCacheScope, StatusFilter, Store, UsageBucket, UsageModelBucket, UsageQuery,
     UsageRecord, UsageSummary, UsageSummaryByConnection, API_KEY_PREFIX, MAX_API_KEY_NAME,
     MAX_COMBO_ROUTER_MODEL, MAX_CONNECTION_NAME, MAX_QUOTA_PING_MODEL,

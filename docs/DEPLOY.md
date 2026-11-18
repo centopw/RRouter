@@ -176,11 +176,17 @@ the backoff: it uses the redirect, keeps working, and reports `rate_limited_unti
 
 ## 5a. History growth
 
-`usage` and `attempts` keep every request. Set `RROUTER_USAGE_RETENTION_DAYS` (0 keeps
-everything) and a background sweep deletes older rows once a day, always drops expired cache
-entries, and runs `PRAGMA optimize`. The sweep logs
-`retention sweep deleted_usage=… deleted_attempts=… deleted_cache=…` at startup and every 24 h,
-so its effect is visible without guessing. Back up before lowering the value for the first time.
+Each store the gateway keeps has its own lifetime: usage and spend, attempt traces, captured
+bodies, the audit trail and the in-memory system log. `Settings → Runtime → Stored history` sets
+each one in days (0 keeps until deleted by hand, blank follows the usage window), switches
+attempt traces and the audit trail on or off, and runs the sweep immediately with **Run sweep
+now**. `RROUTER_USAGE_RETENTION_DAYS` seeds the usage window when the dashboard has not set one.
+
+A background sweep applies the policy once a day, always drops expired cache entries and expired
+sessions, and runs `PRAGMA optimize`. It logs one line per store
+(`retention sweep usage=… attempts=… captures=… audit=… system_logs=… cache=… sessions=…`), so its
+effect is visible without guessing. Switching a store off stops new writes immediately; it does
+not delete rows already stored. Back up before lowering a value for the first time.
 
 ## 6. What healthy looks like
 

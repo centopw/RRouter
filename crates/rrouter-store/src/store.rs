@@ -921,16 +921,6 @@ pub struct SemanticCacheCandidate {
     pub created_at: i64,
 }
 
-/// What one retention sweep removed. Counts are rows, not bytes.
-///
-/// `usage` and `attempts` are deleted by the same cutoff in one transaction, so the
-/// pair is the honest answer to "how much history did the retention knob discard?".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PruneReport {
-    pub usage: usize,
-    pub attempts: usize,
-}
-
 /// One request's stored bodies, written only while `capture_bodies` is on.
 ///
 /// `request_body` and `response_body` are text as it crossed the wire, capped by the
@@ -4141,32 +4131,32 @@ impl Store {
         Ok(true)
     }
 
-    /// Delete `usage` and `attempts` rows older than `cutoff` (unix seconds).
+    /// Delete `usage` rows older than `cutoff` (unix seconds).
     ///
-    /// One immediate transaction covers both tables: a sweep is either fully applied or
-    /// not at all, and no reader observes usage rows whose attempt trail already went.
-    /// Captured bodies are pruned by the same cutoff in the same transaction: capture is
-    /// an attachment to history, so its life is exactly the usage row's life.
+    /// `usage` is the accounting ledger: budgets, quotas and the activity page read it, so
+    /// its retention is the operator's call and nothing else is pruned with it. Attempt
+    /// trails, captured bodies and the audit trail have their own switches and cutoffs —
+    /// one store going quiet must not decide the life of another.
     /// Rows exactly at `cutoff` survive — retention is "keep this many days", inclusive
     /// at the boundary.
-    pub async fn prune_usage(&self, cutoff: i64) -> Result<PruneReport> {
-        let mut conn = self.conn();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(migrations::db_err)?;
-        let usage = tx
+    pub async fn prune_usage(&self, cutoff: i64) -> Result<usize> {
+        self.conn()
             .execute("DELETE FROM usage WHERE ts < ?1", params![cutoff])
-            .map_err(migrations::db_err)?;
-        let attempts = tx
+            .map_err(migrations::db_err)
+    }
+
+    /// Delete per-attempt traces older than `cutoff`, independently of their usage row.
+    pub async fn prune_attempts(&self, cutoff: i64) -> Result<usize> {
+        self.conn()
             .execute("DELETE FROM attempts WHERE ts < ?1", params![cutoff])
-            .map_err(migrations::db_err)?;
-        tx.execute(
-            "DELETE FROM request_captures WHERE ts < ?1",
-            params![cutoff],
-        )
-        .map_err(migrations::db_err)?;
-        tx.commit().map_err(migrations::db_err)?;
-        Ok(PruneReport { usage, attempts })
+            .map_err(migrations::db_err)
+    }
+
+    /// Delete captured request/response bodies older than `cutoff`.
+    pub async fn prune_captures(&self, cutoff: i64) -> Result<usize> {
+        self.conn()
+            .execute("DELETE FROM request_captures WHERE ts < ?1", params![cutoff])
+            .map_err(migrations::db_err)
     }
 
     /// Delete every response-cache row that can no longer be served at `now`.
@@ -5147,8 +5137,12 @@ mod capture_tests {
             block(store.record_usage(&usage(rid, ts))).expect("usage");
             block(store.record_capture_request(rid, ts, None, "body", 4, false)).expect("capture");
         }
-        let report = block(store.prune_usage(500)).expect("prune");
-        assert_eq!(report.usage, 1);
+        let usage = block(store.prune_usage(500)).expect("prune");
+        assert_eq!(usage, 1);
+        assert!(block(store.capture_by_request(old))
+            .expect("old")
+            .is_some(), "captures have their own switch");
+        assert_eq!(block(store.prune_captures(500)).expect("captures"), 1);
         assert!(block(store.capture_by_request(old)).expect("old").is_none());
         assert!(block(store.capture_by_request(kept))
             .expect("kept")

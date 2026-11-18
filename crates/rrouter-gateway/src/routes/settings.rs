@@ -66,3 +66,35 @@ fn patched_keys(patch: &serde_json::Value) -> String {
         keys.join(", ")
     }
 }
+
+/// `POST /api/settings/retention/sweep` — run the retention sweep now.
+///
+/// The daily sweep is invisible until tomorrow; an operator who just changed a retention
+/// knob needs to see what it will do. This runs the same code the scheduler runs and
+/// returns what each store dropped.
+pub async fn sweep_now(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+) -> Response {
+    let report = state.retention_sweep().await;
+    let actor = super::auth::actor(&state, &headers).await;
+    super::auth::audit(
+        &state,
+        "retention_swept",
+        Some(&actor),
+        &crate::auth::client_ip(&headers, peer.0),
+        &format!(
+            "usage {} · attempts {} · captures {} · audit {} · logs {} · cache {} · sessions {}",
+            report.usage,
+            report.attempts,
+            report.captures,
+            report.audit,
+            report.system_logs,
+            report.cache,
+            report.sessions
+        ),
+    )
+    .await;
+    ok_json(serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({})))
+}

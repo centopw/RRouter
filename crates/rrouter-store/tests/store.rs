@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use rrouter_store::{
     cache_key, window_start, AccountQuota, ApiKey, ApiKeyPatch, AttemptRecord, BudgetWindow,
     ComboStrategy, ConnectionScope, Credentials, Guardrails, KeyModel, KeyScope, ModelRow,
-    PruneReport, QuotaPing, QuotaPingMode, StatusFilter, Store, UsageQuery, UsageRecord,
+    QuotaPing, QuotaPingMode, StatusFilter, Store, UsageQuery, UsageRecord,
     API_KEY_PREFIX, KEY_FILE_NAME, MAX_CONNECTION_NAME,
 };
 use tokio::runtime::Runtime;
@@ -2433,14 +2433,11 @@ fn prune_usage_deletes_history_older_than_the_cutoff() {
             .expect("attempt");
         }
 
-        let report = s.prune_usage(200).await.expect("prune");
+        assert_eq!(s.prune_usage(200).await.expect("prune"), 1);
         assert_eq!(
-            report,
-            PruneReport {
-                usage: 1,
-                attempts: 1
-            },
-            "the report counts each table"
+            s.prune_attempts(200).await.expect("attempts"),
+            1,
+            "attempts are pruned by their own cutoff"
         );
 
         let remaining: Vec<i64> = s
@@ -2480,9 +2477,10 @@ fn prune_usage_deletes_history_older_than_the_cutoff() {
 
         assert_eq!(
             s.prune_usage(200).await.expect("second sweep"),
-            PruneReport::default(),
+            0,
             "a repeated sweep is a no-op"
         );
+        assert_eq!(s.prune_attempts(200).await.expect("attempts again"), 0);
         assert_eq!(
             s.recent_usage(&UsageQuery {
                 limit: 10,

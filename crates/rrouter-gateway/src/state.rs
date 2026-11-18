@@ -139,6 +139,18 @@ pub fn concurrency_for(max_concurrency: usize) -> Option<Arc<tokio::sync::Semaph
     })
 }
 
+/// Rows one retention sweep removed, per store. Counts are rows, not bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RetentionReport {
+    pub usage: usize,
+    pub attempts: usize,
+    pub captures: usize,
+    pub audit: usize,
+    pub system_logs: usize,
+    pub cache: usize,
+    pub sessions: usize,
+}
+
 impl AppState {
     /// Start the daily usage-retention sweep.
     ///
@@ -158,37 +170,90 @@ impl AppState {
         });
     }
 
-    /// One sweep: drop history past the retention cutoff, always drop expired cache
-    /// rows, then refresh planner statistics. A failed phase is logged and the next
-    /// pass retries; nothing here is visible to a client.
-    async fn retention_sweep(&self) {
+    /// One sweep: drop history past each store's own cutoff, always drop expired cache
+    /// rows, then refresh planner statistics. A failed phase is logged and the next pass
+    /// retries; nothing here is visible to a client.
+    ///
+    /// Returns what each phase removed so an operator can run the same sweep on demand
+    /// and see the effect of a retention change without waiting a day.
+    pub async fn retention_sweep(self: &Arc<Self>) -> RetentionReport {
         let now = crate::now_unix();
-        // One snapshot for the whole sweep: a reload mid-pass applies to the next pass.
-        let config = self.config.load();
-        let days = i64::try_from(config.usage_retention_days).unwrap_or(i64::MAX);
-        let (deleted_usage, deleted_attempts) = if days == 0 {
-            (0, 0)
-        } else {
-            let cutoff = now.saturating_sub(days.saturating_mul(SECS_PER_DAY));
-            if let Err(e) = self.store.prune_audit(cutoff).await {
-                tracing::warn!(error = %e, "audit retention delete failed");
-            }
-            match self.store.prune_usage(cutoff).await {
-                Ok(report) => (report.usage, report.attempts),
-                Err(e) => {
-                    tracing::warn!(error = %e, "usage retention delete failed");
-                    (0, 0)
+        let retention = match crate::settings::retention(self).await {
+            Ok(retention) => retention,
+            Err(e) => {
+                tracing::warn!(error = %e, "retention settings unreadable; using the defaults");
+                crate::settings::Retention {
+                    usage_days: self.config.load().usage_retention_days,
+                    attempts_days: self.config.load().usage_retention_days,
+                    captures_days: self.config.load().usage_retention_days,
+                    audit_days: self.config.load().usage_retention_days,
+                    system_logs_days: 0,
                 }
             }
         };
-        let deleted_cache = match self.store.prune_expired_cache(now).await {
+        let cutoff = |days: usize| {
+            let days = i64::try_from(days).unwrap_or(i64::MAX);
+            now.saturating_sub(days.saturating_mul(SECS_PER_DAY))
+        };
+        // Each store is independent: switching attempt traces off must not extend how long
+        // captured bodies live, and a failed delete in one phase never stops the others.
+        let mut report = RetentionReport::default();
+        if retention.usage_days > 0 {
+            report.usage = match self.store.prune_usage(cutoff(retention.usage_days)).await {
+                Ok(deleted) => deleted,
+                Err(e) => {
+                    tracing::warn!(error = %e, "usage retention delete failed");
+                    0
+                }
+            };
+        }
+        if retention.attempts_days > 0 {
+            report.attempts = match self
+                .store
+                .prune_attempts(cutoff(retention.attempts_days))
+                .await
+            {
+                Ok(deleted) => deleted,
+                Err(e) => {
+                    tracing::warn!(error = %e, "attempt retention delete failed");
+                    0
+                }
+            };
+        }
+        if retention.captures_days > 0 {
+            report.captures = match self
+                .store
+                .prune_captures(cutoff(retention.captures_days))
+                .await
+            {
+                Ok(deleted) => deleted,
+                Err(e) => {
+                    tracing::warn!(error = %e, "capture retention delete failed");
+                    0
+                }
+            };
+        }
+        if retention.audit_days > 0 {
+            report.audit = match self.store.prune_audit(cutoff(retention.audit_days)).await {
+                Ok(deleted) => deleted,
+                Err(e) => {
+                    tracing::warn!(error = %e, "audit retention delete failed");
+                    0
+                }
+            };
+        }
+        if retention.system_logs_days > 0 {
+            let cutoff_ms = cutoff(retention.system_logs_days).saturating_mul(1000);
+            report.system_logs = crate::syslog::prune_older_than(cutoff_ms);
+        }
+        report.cache = match self.store.prune_expired_cache(now).await {
             Ok(deleted) => deleted,
             Err(e) => {
                 tracing::warn!(error = %e, "expired cache delete failed");
                 0
             }
         };
-        let deleted_sessions = match self.store.prune_sessions(now).await {
+        report.sessions = match self.store.prune_sessions(now).await {
             Ok(deleted) => deleted,
             Err(e) => {
                 tracing::warn!(error = %e, "expired session delete failed");
@@ -199,12 +264,16 @@ impl AppState {
             tracing::warn!(error = %e, "pragma optimize failed");
         }
         tracing::info!(
-            deleted_usage,
-            deleted_attempts,
-            deleted_cache,
-            deleted_sessions,
+            usage = report.usage,
+            attempts = report.attempts,
+            captures = report.captures,
+            audit = report.audit,
+            system_logs = report.system_logs,
+            cache = report.cache,
+            sessions = report.sessions,
             "retention sweep"
         );
+        report
     }
 
     pub fn request_timeout(&self) -> std::time::Duration {

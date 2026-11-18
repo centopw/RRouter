@@ -61,6 +61,16 @@ pub fn remove(id: u64) -> bool {
     }
 }
 
+/// Drop entries older than `cutoff_ms`, returning how many left the ring. The buffer is
+/// in memory, so its retention is a bound on what the dashboard can still show, not on
+/// what is on disk.
+pub fn prune_older_than(cutoff_ms: i64) -> usize {
+    let mut buffer = RING.lock().unwrap_or_else(|e| e.into_inner());
+    let before = buffer.len();
+    buffer.retain(|entry| entry.ts >= cutoff_ms);
+    before - buffer.len()
+}
+
 pub fn push(level: &str, target: &str, message: String) {
     if !enabled() {
         return;
