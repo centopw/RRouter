@@ -2,6 +2,17 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.27.0 — 2026-11-18
+
+### Features
+
+- feat(ui): overhaul design system, navigation hubs, and modular page drawers ([`21be296`](https://github.com/centopw/RRouter/commit/21be2967171fb19795eed7629d572c21136e8112))
+- feat(models): per-member combo metadata and first-class combo rows ([`4c29869`](https://github.com/centopw/RRouter/commit/4c2986967f46174815cb12a7e4cff3e9552a89c7))
+
+### Documentation
+
+- docs(design): models/combo redesign plan and providers plan ([`b5d913a`](https://github.com/centopw/RRouter/commit/b5d913a98f087f943aa246ea042f65645d2f2d27))
+
 ## 0.26.0 — 2026-11-17
 
 ### Features
