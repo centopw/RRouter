@@ -2,6 +2,20 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.30.0 — 2026-11-18
+
+### Features
+
+- feat(ui): ask for a GitHub star in the sidebar and above every page ([`794805d`](https://github.com/centopw/RRouter/commit/794805d825826da46997385d8666f07294013f29))
+
+### Bug Fixes
+
+- fix(usage): attribute a failed request to the account that answered ([`996fccf`](https://github.com/centopw/RRouter/commit/996fccf5fc6b4be78bb856538d2e33e7ee9bfdd2))
+
+### Other Changes
+
+- chore(ui): rebuild the served bundle ([`e6877f4`](https://github.com/centopw/RRouter/commit/e6877f4a67b9f2995b92898047f3ea6a83c4c9aa))
+
 ## 0.29.1 — 2026-11-18
 
 ### Bug Fixes
