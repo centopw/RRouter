@@ -422,7 +422,10 @@ async fn openai_client_gets_cca_text_tools_usage_and_the_envelope() {
     assert_eq!(calls[0].uri, "/v1internal:generateContent");
     let sent = &calls[0].body;
     assert_eq!(sent["model"], "gemini-3-pro");
-    assert_eq!(sent["userAgent"], rrouter_translate::google_cca::ENVELOPE_USER_AGENT);
+    assert_eq!(
+        sent["userAgent"],
+        rrouter_translate::google_cca::ENVELOPE_USER_AGENT
+    );
     assert_eq!(sent["requestType"], "agent");
     assert_eq!(sent["project"], PROJECT);
     assert!(

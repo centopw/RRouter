@@ -20,9 +20,7 @@ pub const IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Cl
 /// An API-key connection to the same host is a different credential and takes no
 /// fingerprint.
 pub fn is_subscription(spec: &ProviderSpec) -> bool {
-    spec.id == "claude"
-        && spec.kind == ProviderKind::OAuth
-        && spec.auth == AuthStyle::Bearer
+    spec.id == "claude" && spec.kind == ProviderKind::OAuth && spec.auth == AuthStyle::Bearer
 }
 
 /// Ensure `body["system"]` opens with the identity block, in place.
@@ -84,7 +82,10 @@ mod tests {
     fn an_absent_system_becomes_the_identity_alone() {
         let mut body = json!({ "messages": [] });
         inject_identity(claude(), &mut body);
-        assert_eq!(body["system"], json!([{ "type": "text", "text": IDENTITY }]));
+        assert_eq!(
+            body["system"],
+            json!([{ "type": "text", "text": IDENTITY }])
+        );
     }
 
     #[test]
