@@ -2,6 +2,21 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.29.0 — 2026-11-18
+
+### Features
+
+- feat(ui): page every table, keep rows on one line, stop columns moving ([`060d5d6`](https://github.com/centopw/RRouter/commit/060d5d69693b9d4897d45218e8de8ff86599558b))
+- feat(logging): delete log rows and opt-in request/response capture ([`2522d62`](https://github.com/centopw/RRouter/commit/2522d62b11071a52824b6f636f88baa44d8209b6))
+
+### Bug Fixes
+
+- fix(audit): record the real client address for every audited handler ([`fa9378d`](https://github.com/centopw/RRouter/commit/fa9378dcd171ae51f3bf1cf41deae19c35cb3ea3))
+
+### Other Changes
+
+- chore(ui): rebuild the served bundle ([`dde05bf`](https://github.com/centopw/RRouter/commit/dde05bf8a119dbc450fa6a8e4e40420bdd9660f2))
+
 ## 0.28.0 — 2026-11-18
 
 ### Features
