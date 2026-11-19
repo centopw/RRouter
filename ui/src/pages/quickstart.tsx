@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import { ArrowRight } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -7,10 +7,12 @@ import {
   Button,
   Card,
   CopyButton,
-  CopyChip,
+  Field,
   Input,
+  Modal,
   PageHeader,
   Segmented,
+  Select,
   cx,
 } from "../components/ui";
 import { ConnectionCard } from "../components/connection-card";
@@ -167,6 +169,7 @@ const RECIPES: Recipe[] = [
       lang: "config.toml",
       code: {
         openai: lines(
+          "# Replace any existing model / model_provider lines; a second copy is a duplicate-key error.",
           `model = "${model}"`,
           'model_provider = "rrouter"',
           "",
@@ -184,10 +187,10 @@ const RECIPES: Recipe[] = [
       },
       steps: [
         "Open the Codex config file. Create it if it does not exist.",
-        "Merge the provider table and the top-level `model`/`model_provider` keys.",
+        "Replace the existing top-level `model` and `model_provider` lines, and any old `[model_providers.*]` block. Do not append a second copy: Codex rejects the file with `duplicate key`.",
         "Set `RROUTER_API_KEY` in the same shell, then start `codex`.",
       ],
-      note: "`base_url` is the `/v1` root; Codex appends `/responses`.",
+      note: "`base_url` is the `/v1` root; Codex appends `/responses`. A `model_provider` that already names `RRouter` must be replaced, not duplicated.",
     }),
   },
   {
@@ -437,39 +440,49 @@ function Step({
   number: number;
   title: string;
   body: string;
-  action: string;
-  onClick: () => void;
+  action?: string;
+  onClick?: () => void;
 }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="group flex h-full flex-col rounded-[var(--radius-card)] border border-line bg-surface p-5 text-left transition-colors hover:border-line-strong hover:bg-[var(--color-selected)]"
-    >
+  const content = (
+    <>
       <span className="flex h-7 w-7 items-center justify-center rounded-full border border-line-strong bg-surface-2 text-caption font-semibold text-fg tnum">
         {number}
       </span>
       <span className="mt-3 text-body font-semibold text-fg">{title}</span>
-      <span className="mt-1 flex-1 text-small leading-relaxed text-muted">{body}</span>
-      <span className="mt-3 inline-flex items-center gap-1 text-small font-medium text-[var(--color-accent-text)]">
-        {action} <ArrowRight size={13} aria-hidden className="transition-transform group-hover:translate-x-0.5" />
-      </span>
+      <span className="mt-1 flex-1 break-words text-small leading-relaxed text-muted">{body}</span>
+      {action && onClick ? (
+        <span className="mt-3 inline-flex items-center gap-1 text-small font-medium text-[var(--color-accent-text)]">
+          {action} <ArrowRight size={13} aria-hidden className="transition-transform group-hover:translate-x-0.5" />
+        </span>
+      ) : null}
+    </>
+  );
+  if (!onClick) {
+    return <div className="flex h-full flex-col p-5">{content}</div>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex h-full flex-col p-5 text-left transition-colors hover:bg-[var(--color-selected)]"
+    >
+      {content}
     </button>
   );
 }
 
 export default function QuickStart() {
   const isAdmin = useIsAdmin();
-  const navigate = useNavigate();
   const client = useQueryClient();
   const models = useModels();
   const [params, setParams] = useSearchParams();
   const detailRef = useRef<HTMLDivElement | null>(null);
-  const keyRef = useRef<HTMLDivElement | null>(null);
   const [initialOs] = useState(defaultOs);
   const [apiKey, setApiKey] = useState("");
   const [minted, setMinted] = useState<string | null>(null);
   const [creatingKey, setCreatingKey] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const origin = window.location.origin;
   const openai = `${origin}/v1`;
   const key = apiKey.trim() || "sk-rr-...";
@@ -483,15 +496,23 @@ export default function QuickStart() {
   const requestedOs = params.get("os") as OS | null;
   const os = requestedOs && OSES.includes(requestedOs) ? requestedOs : initialOs;
 
+  const availableModels = (models.data ?? []).filter((model) => model.enabled && model.available);
   const preferred =
     protocol === "anthropic"
       ? (ref: string) => ref.toLowerCase().includes("claude")
       : (ref: string) => /^openai\//i.test(ref) && /gpt|codex/i.test(ref);
+  const requestedModel = params.get("model");
   const example =
-    models.data?.find(
-      (model) => model.enabled && model.available && preferred(model.ref),
-    ) ?? models.data?.find((model) => model.enabled && model.available);
+    availableModels.find((model) => model.ref === requestedModel) ??
+    availableModels.find((model) => preferred(model.ref)) ??
+    availableModels[0];
   const modelRef = example?.ref ?? "provider/model";
+  const modelGroups = Array.from(new Set(availableModels.map((model) => model.provider))).map(
+    (provider) => ({
+      provider,
+      models: availableModels.filter((model) => model.provider === provider),
+    }),
+  );
   const content = guide.build({ origin, openai, key, model: modelRef });
   const code = content.code[protocol] ?? "";
   const env = content.env?.[os];
@@ -526,24 +547,10 @@ export default function QuickStart() {
       <PageHeader
         title="Quick start"
         subtitle="Create a key, pick a model, then open the guide for the tool you actually use."
-        actions={
-          isAdmin ? (
-            <Button
-              variant="primary"
-              onClick={() =>
-                keyRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
-              }
-            >
-              Create API key
-            </Button>
-          ) : (
-            <Badge>Ask an administrator for a key</Badge>
-          )
-        }
       />
 
       <Card className="scroll-mt-20">
-        <div ref={keyRef} className="px-5 py-4">
+        <div className="px-5 py-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
@@ -583,6 +590,33 @@ export default function QuickStart() {
                 : "Until you create or paste a key, the configs show sk-rr-... as a placeholder."}
           </p>
         </div>
+        <div className="grid divide-y divide-[var(--color-rule)] border-t border-line sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+          <Step
+            number={1}
+            title="API key"
+            body={
+              apiKey.trim()
+                ? minted !== null && minted === apiKey
+                  ? "Created and shown above. Copy it now; it is not shown again."
+                  : "Pasted above. It fills every config in the guide."
+                : "Create or paste one above. The plaintext is shown only once."
+            }
+          />
+          <Step
+            number={2}
+            title="Choose a model"
+            body={modelRef}
+            action="Choose model"
+            onClick={() => setModelOpen(true)}
+          />
+          <Step
+            number={3}
+            title="Configure a tool"
+            body={`${guide.name} · ${content.file ? "file + config" : "values to paste"}`}
+            action="Open guide"
+            onClick={() => setGuideOpen(true)}
+          />
+        </div>
       </Card>
 
       {creatingKey ? (
@@ -598,58 +632,63 @@ export default function QuickStart() {
         />
       ) : null}
 
-      <div className="mt-4 grid gap-4 sm:grid-cols-3">
-        <Step
-          number={1}
-          title="Create an API key"
-          body="The plaintext is shown once. Store it in the tool's secret field, not in a repository."
-          action={isAdmin ? "Create below" : "Paste your key"}
-          onClick={() =>
-            keyRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
-          }
-        />
-        <Step
-          number={2}
-          title="Choose a model"
-          body="Use the provider-qualified id from the Models page, for example provider/model."
-          action="Browse models"
-          onClick={() => navigate("/models")}
-        />
-        <Step
-          number={3}
-          title="Configure a tool"
-          body="Pick a platform below. Each guide names the file, the OS-specific path, and the wire format."
-          action="See tool guides"
-          onClick={() => document.getElementById("tool-guide")?.scrollIntoView({ behavior: "smooth" })}
-        />
-      </div>
-
       <div className="mt-4">
         <ConnectionCard showQuickStartLink={false} />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <Card className="overflow-hidden">
-          <div className="border-b border-line px-5 py-3.5">
-            <h2 className="text-lead font-semibold">Example model</h2>
-            <p className="mt-0.5 text-small text-muted">
-              Model IDs are provider-qualified. Copy the one you want to call.
-            </p>
-          </div>
-          <div className="px-5 py-4">
-            <CopyChip value={modelRef} label="example model" className="w-full" />
+      <Modal
+        open={modelOpen}
+        onClose={() => setModelOpen(false)}
+        title="Choose a model"
+        description="Only enabled models the gateway can serve are listed."
+        width="md"
+        variant="dialog"
+        footer={
+          <Button variant="primary" onClick={() => setModelOpen(false)}>
+            Done
+          </Button>
+        }
+      >
+        {availableModels.length ? (
+          <>
+            <Field
+              label="Model"
+              hint="The provider-qualified ref is what every config in the guide uses."
+            >
+              <Select
+                value={modelRef}
+                onChange={(ref) => update({ model: ref })}
+                ariaLabel="Model"
+              >
+                {modelGroups.map((group) => (
+                  <optgroup key={group.provider} label={group.provider}>
+                    {group.models.map((model) => (
+                      <option key={model.ref} value={model.ref}>
+                        {model.ref}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </Select>
+            </Field>
             <p className="mt-3 text-caption leading-relaxed text-faint">
               A bare model id may still route when it is unambiguous, but the qualified form
               is what the Models page and <code>/v1/models</code> advertise.
             </p>
-          </div>
-        </Card>
+          </>
+        ) : (
+          <p className="text-small leading-relaxed text-muted">
+            No enabled model is available yet. Ask an administrator to enable one on the
+            Models page.
+          </p>
+        )}
+      </Modal>
 
-        <Card className="overflow-hidden">
-          <div className="border-b border-line px-5 py-3.5">
-            <h2 className="text-lead font-semibold">Supported endpoints</h2>
-            <p className="mt-0.5 text-small text-muted">Same gateway, same key, three wire shapes.</p>
-          </div>
+      <Card className="mt-4 overflow-hidden">
+        <div className="border-b border-line px-5 py-3.5">
+          <h2 className="text-lead font-semibold">Supported endpoints</h2>
+          <p className="mt-0.5 text-small text-muted">Same gateway, same key, three wire shapes.</p>
+        </div>
           <div className="divide-y divide-[var(--color-rule)]">
             {[
               ["POST", "/v1/chat/completions", "OpenAI Chat Completions"],
@@ -674,26 +713,20 @@ export default function QuickStart() {
               </div>
             ))}
           </div>
-        </Card>
-      </div>
+      </Card>
 
-      <section id="tool-guide" className="mt-6 scroll-mt-4">
-        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-          <div>
-            <h2 className="text-heading font-semibold text-fg">Connect a tool</h2>
-            <p className="mt-0.5 text-small text-muted">
-              Pick one platform. The guide opens with its file, OS-specific path, and both
-              wire protocols where the tool supports them.
-            </p>
-          </div>
-          <Link
-            to="/providers"
-            className="text-small font-medium text-[var(--color-accent-text)] hover:underline"
-          >
-            Manage provider accounts →
-          </Link>
-        </div>
-
+      <Modal
+        open={guideOpen}
+        onClose={() => setGuideOpen(false)}
+        title="Configure a tool"
+        description="Pick a platform. The guide names the file, the OS-specific path, and the wire format."
+        width="xl"
+        footer={
+          <Button variant="primary" onClick={() => setGuideOpen(false)}>
+            Done
+          </Button>
+        }
+      >
         <div className="grid gap-3 lg:grid-cols-[230px_minmax(0,1fr)]">
           <div className="grid content-start gap-2 sm:grid-cols-2 lg:grid-cols-1">
             {RECIPES.map((recipe) => {
@@ -819,7 +852,7 @@ export default function QuickStart() {
             </Card>
           </div>
         </div>
-      </section>
+      </Modal>
 
       <Card className="mt-4 flex flex-wrap items-center justify-between gap-3 px-5 py-4">
         <div>
