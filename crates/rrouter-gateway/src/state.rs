@@ -143,6 +143,8 @@ pub fn concurrency_for(max_concurrency: usize) -> Option<Arc<tokio::sync::Semaph
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct RetentionReport {
     pub usage: usize,
+    /// Compression counters follow the usage cutoff; they have no switch of their own.
+    pub compression: usize,
     pub attempts: usize,
     pub captures: usize,
     pub audit: usize,
@@ -199,10 +201,21 @@ impl AppState {
         // captured bodies live, and a failed delete in one phase never stops the others.
         let mut report = RetentionReport::default();
         if retention.usage_days > 0 {
-            report.usage = match self.store.prune_usage(cutoff(retention.usage_days)).await {
+            let usage_cutoff = cutoff(retention.usage_days);
+            report.usage = match self.store.prune_usage(usage_cutoff).await {
                 Ok(deleted) => deleted,
                 Err(e) => {
                     tracing::warn!(error = %e, "usage retention delete failed");
+                    0
+                }
+            };
+            // Compression counters have no retention switch of their own: they describe a
+            // request and are meaningless once that request's ledger row is gone, so they
+            // follow the usage cutoff. A failure here never stops the rest of the sweep.
+            report.compression = match self.store.prune_compression(usage_cutoff).await {
+                Ok(deleted) => deleted,
+                Err(e) => {
+                    tracing::warn!(error = %e, "compression retention delete failed");
                     0
                 }
             };
@@ -265,6 +278,7 @@ impl AppState {
         }
         tracing::info!(
             usage = report.usage,
+            compression = report.compression,
             attempts = report.attempts,
             captures = report.captures,
             audit = report.audit,

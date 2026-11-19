@@ -676,6 +676,27 @@ export type UsageSummaryRow = {
  */
 export type UsageSummaryByConnection = UsageSummaryRow & { connection_id: string | null };
 
+/**
+ * `GET /api/compression/stats`: what compression removed over one window.
+ *
+ * `rtk_*` are the text bytes of the tool results the token saver saw and produced, not
+ * whole-request bytes. `rtk_saved_tokens_estimate` is derived at ~4 bytes per token,
+ * never a tokenizer run, so it is labelled as an estimate wherever it is shown. Caveman
+ * is a count of requests whose prompt the style instruction was appended to; its saving
+ * is on the reply and is not measured here.
+ */
+export type CompressionStats = {
+  hours: number;
+  /** Requests that changed at all: RTK removed something, or Caveman injected. */
+  requests: number;
+  rtk_requests: number;
+  rtk_before: number;
+  rtk_after: number;
+  rtk_saved: number;
+  rtk_saved_tokens_estimate: number;
+  caveman_requests: number;
+};
+
 export type UsageEvent = {
   /** Usage row id: what the master/detail list selects on. */
   id: number | null;

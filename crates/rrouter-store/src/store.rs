@@ -944,6 +944,37 @@ pub struct CaptureRecord {
     pub response_truncated: bool,
 }
 
+/// One request's compression result, written only when the body actually changed.
+///
+/// `rtk_before`/`rtk_after` are the text bytes of the tool results the token saver saw
+/// and produced — not the whole request — and both are `0` when it did not run or found
+/// nothing to drop. `caveman` says whether the style instruction was appended.
+/// Attribution follows the usage row: `team_id` is resolved from `key_id` at insert time,
+/// so one team filter serves both readers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompressionEvent {
+    /// Unix seconds.
+    pub ts: i64,
+    pub request_id: Option<Uuid>,
+    pub key_id: Option<Uuid>,
+    pub rtk_before: u64,
+    pub rtk_after: u64,
+    pub caveman: bool,
+}
+
+/// Aggregate over `compression_events`: how many requests changed, and by how much.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CompressionSummary {
+    /// Rows that recorded any change (RTK or Caveman).
+    pub requests: u64,
+    /// Rows where the token saver removed something (`rtk_before > 0`).
+    pub rtk_requests: u64,
+    pub rtk_before: u64,
+    pub rtk_after: u64,
+    /// Rows where the Caveman instruction was injected.
+    pub caveman_requests: u64,
+}
+
 /// One time bucket for one model: the traffic chart stacks these by model, so
 /// every segment is an honest server-side count rather than a client estimate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3683,6 +3714,66 @@ impl Store {
             .map_err(migrations::db_err)
     }
 
+    // ----- compression --------------------------------------------------------------
+    /// Append one compression row. Callers only write when the body changed, so a row's
+    /// presence is itself the signal that something was removed or injected.
+    ///
+    /// `team_id` is resolved from the key in the same statement, exactly like `usage`, so
+    /// attribution never depends on the caller having looked the key up.
+    pub async fn record_compression(&self, event: &CompressionEvent) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO compression_events \
+                 (ts, request_id, key_id, team_id, rtk_before, rtk_after, caveman) \
+                 VALUES (?1, ?2, ?3, (SELECT team_id FROM api_keys WHERE id = ?3), ?4, ?5, ?6)",
+                params![
+                    event.ts,
+                    event.request_id.map(|id| id.to_string()),
+                    event.key_id.map(|id| id.to_string()),
+                    sql_u64(event.rtk_before),
+                    sql_u64(event.rtk_after),
+                    event.caveman as i64,
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Totals over `compression_events`, optionally restricted to rows at or after
+    /// `since` (unix seconds) and to `teams`.
+    ///
+    /// `team_filter` works unchanged because this table carries the same `team_id`
+    /// column as `usage`; `None` is every team and `Some(&[])` is none.
+    pub async fn compression_summary(
+        &self,
+        since: Option<i64>,
+        teams: Option<&[Uuid]>,
+    ) -> Result<CompressionSummary> {
+        let (team_sql, team_args) = team_filter(teams, 2);
+        let mut args: Vec<SqlValue> = vec![since.into()];
+        args.extend(team_args);
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT count(*), \
+                        coalesce(sum(CASE WHEN rtk_before > 0 THEN 1 ELSE 0 END), 0), \
+                        coalesce(sum(rtk_before), 0), coalesce(sum(rtk_after), 0), \
+                        coalesce(sum(caveman), 0) \
+                 FROM compression_events WHERE (?1 IS NULL OR ts >= ?1) {team_sql}"
+            ))
+            .map_err(migrations::db_err)?;
+        stmt.query_row(params_from_iter(args), |r| {
+            Ok(CompressionSummary {
+                requests: r.get_u64(0)?,
+                rtk_requests: r.get_u64(1)?,
+                rtk_before: r.get_u64(2)?,
+                rtk_after: r.get_u64(3)?,
+                caveman_requests: r.get_u64(4)?,
+            })
+        })
+        .map_err(migrations::db_err)
+    }
+
     /// Most recent records first, ordered `(ts, id)` descending. Every filter in `query`
     /// is applied in one SQL statement, so a filtered walk over history pages correctly.
     ///
@@ -4157,6 +4248,21 @@ impl Store {
         self.conn()
             .execute(
                 "DELETE FROM request_captures WHERE ts < ?1",
+                params![cutoff],
+            )
+            .map_err(migrations::db_err)
+    }
+
+    /// Delete compression counters older than `cutoff`.
+    ///
+    /// Compression rows have no retention switch of their own: they are the same
+    /// request-shaped counters as `usage` and are meaningless once their request is gone,
+    /// so the sweep passes the usage cutoff. The caller wires it into the retention pass
+    /// next to [`Store::prune_usage`].
+    pub async fn prune_compression(&self, cutoff: i64) -> Result<usize> {
+        self.conn()
+            .execute(
+                "DELETE FROM compression_events WHERE ts < ?1",
                 params![cutoff],
             )
             .map_err(migrations::db_err)
@@ -5151,5 +5257,116 @@ mod capture_tests {
         assert!(block(store.capture_by_request(kept))
             .expect("kept")
             .is_some());
+    }
+}
+
+#[cfg(test)]
+mod compression_tests {
+    use std::future::Future;
+
+    use super::{CompressionEvent, Store};
+    use crate::BudgetWindow;
+    use uuid::Uuid;
+
+    fn block<F: Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    fn event(
+        ts: i64,
+        key: Option<Uuid>,
+        before: u64,
+        after: u64,
+        caveman: bool,
+    ) -> CompressionEvent {
+        CompressionEvent {
+            ts,
+            request_id: Some(Uuid::new_v4()),
+            key_id: key,
+            rtk_before: before,
+            rtk_after: after,
+            caveman,
+        }
+    }
+
+    /// Rows are summed per column, not per request: a request where RTK changed nothing
+    /// but Caveman injected still counts once as a request and once as a Caveman request.
+    #[test]
+    fn records_and_sums_compression() {
+        let store = Store::open_in_memory().expect("store");
+        block(store.record_compression(&event(100, None, 1000, 400, false))).expect("rtk");
+        block(store.record_compression(&event(200, None, 0, 0, true))).expect("caveman");
+        block(store.record_compression(&event(300, None, 800, 700, true))).expect("both");
+
+        let all = block(store.compression_summary(None, None)).expect("summary");
+        assert_eq!(all.requests, 3);
+        assert_eq!(all.rtk_requests, 2, "only rows where RTK removed something");
+        assert_eq!((all.rtk_before, all.rtk_after), (1800, 1100));
+        assert_eq!(all.caveman_requests, 2);
+
+        // `since` is inclusive and team scoping is a separate axis.
+        let recent = block(store.compression_summary(Some(200), None)).expect("recent");
+        assert_eq!(recent.requests, 2);
+        assert_eq!(recent.rtk_before, 800);
+
+        let none = block(store.compression_summary(None, Some(&[]))).expect("scoped to none");
+        assert_eq!(none, super::CompressionSummary::default());
+    }
+
+    /// Attribution is resolved at insert time from the key, exactly like `usage`, so a
+    /// team filter is a plain column test and never a join.
+    #[test]
+    fn team_comes_from_the_key_at_insert() {
+        let store = Store::open_in_memory().expect("store");
+        let alpha = block(store.create_team("alpha", 0, 0, BudgetWindow::Total)).expect("alpha");
+        let beta = block(store.create_team("beta", 0, 0, BudgetWindow::Total)).expect("beta");
+        let (_, alpha_key) =
+            block(store.create_api_key_in_team(Some("a"), Some(alpha.id))).expect("alpha key");
+        let (_, beta_key) =
+            block(store.create_api_key_in_team(Some("b"), Some(beta.id))).expect("beta key");
+        let (_, global_key) = block(store.create_api_key(Some("g"))).expect("global key");
+
+        block(store.record_compression(&event(100, Some(alpha_key.id), 100, 50, false)))
+            .expect("alpha row");
+        block(store.record_compression(&event(100, Some(beta_key.id), 10, 5, true)))
+            .expect("beta row");
+        block(store.record_compression(&event(100, Some(global_key.id), 1, 1, true)))
+            .expect("unowned row");
+
+        let only_alpha =
+            block(store.compression_summary(None, Some(&[alpha.id]))).expect("alpha scope");
+        assert_eq!(only_alpha.requests, 1);
+        assert_eq!(only_alpha.rtk_before, 100);
+        assert_eq!(only_alpha.caveman_requests, 0);
+
+        let both =
+            block(store.compression_summary(None, Some(&[alpha.id, beta.id]))).expect("both teams");
+        assert_eq!(both.requests, 2);
+        assert_eq!(both.rtk_before, 110);
+        assert_eq!(
+            block(store.compression_summary(None, None))
+                .expect("unscoped")
+                .requests,
+            3,
+            "an unscoped reader sees unowned rows too"
+        );
+    }
+
+    /// Compression rows follow the usage cutoff: one sweep deletes both tables.
+    #[test]
+    fn retention_prunes_compression_by_cutoff() {
+        let store = Store::open_in_memory().expect("store");
+        block(store.record_compression(&event(100, None, 10, 5, false))).expect("old");
+        block(store.record_compression(&event(10_000, None, 10, 5, false))).expect("kept");
+        assert_eq!(block(store.prune_compression(500)).expect("prune"), 1);
+        assert_eq!(
+            block(store.compression_summary(None, None))
+                .expect("summary")
+                .requests,
+            1
+        );
     }
 }

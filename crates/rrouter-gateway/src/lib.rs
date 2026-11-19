@@ -95,6 +95,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/usage/summary", get(routes::usage::summary))
         .route("/usage/series", get(routes::usage::series))
         .route("/usage/{request_id}", get(routes::usage::detail))
+        .route("/compression/stats", get(routes::compression::stats))
         .route("/models", get(routes::models::registry_list))
         // The preset library: metadata for every preset plus each account's active choice.
         // Mutations live on the admin router; activation is a session preference (below).

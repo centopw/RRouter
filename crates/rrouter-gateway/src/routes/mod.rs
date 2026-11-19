@@ -5,6 +5,7 @@ pub mod auth;
 pub mod batches;
 pub mod capabilities;
 pub mod combos;
+pub mod compression;
 pub mod connections;
 pub mod evals;
 pub mod explain;

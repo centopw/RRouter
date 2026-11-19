@@ -1121,6 +1121,33 @@ fn rtk_enabled(headers: &axum::http::HeaderMap) -> bool {
         .unwrap_or_else(crate::settings::rtk)
 }
 
+/// Record what this request's compression removed, off the response path.
+///
+/// Called once per request and only when the body actually changed, so a row's presence
+/// is the signal. Reporting must never cost a request: a failed write is a warning.
+fn record_compression(
+    state: &Arc<AppState>,
+    request_id: Uuid,
+    key_id: Option<Uuid>,
+    rtk: Option<&rrouter_rtk::Stats>,
+    caveman: bool,
+) {
+    let event = rrouter_store::CompressionEvent {
+        ts: crate::now_unix(),
+        request_id: Some(request_id),
+        key_id,
+        rtk_before: rtk.map_or(0, |s| s.before as u64),
+        rtk_after: rtk.map_or(0, |s| s.after as u64),
+        caveman,
+    };
+    let store = Arc::clone(&state.store);
+    tokio::spawn(async move {
+        if let Err(e) = store.record_compression(&event).await {
+            tracing::warn!(error = %e, "compression event not recorded");
+        }
+    });
+}
+
 fn record_rtk(stats: &rrouter_rtk::Stats) {
     crate::metrics::rtk(stats);
     tracing::info!(
@@ -1658,22 +1685,35 @@ async fn handle(
     admit_or_explain(state, &caller, &model, trace).await?;
     // Token Saver runs on the wire body after guardrails: same-dialect forwarding sends
     // this body unchanged, and the canonical parse is refreshed from the compressed text.
+    let mut rtk_stats: Option<rrouter_rtk::Stats> = None;
     if rtk_enabled(headers) {
         if let Some(stats) = rrouter_rtk::compress_source(&mut body, inbound) {
             record_rtk(&stats);
             canonical = rrouter_translate::parse_request(inbound, &body)?;
+            rtk_stats = Some(stats);
         }
     }
     // Caveman runs after RTK: the style instruction is appended to the prompt that will
     // actually be sent, and the canonical parse is refreshed from the rewritten body.
     // Injection is fail-open, so an unrecognised body simply stays as it was.
+    let mut caveman_injected = false;
     if caveman_enabled(headers) {
         let level = crate::settings::caveman_level();
         if rrouter_caveman::inject(&mut body, inbound, level) {
             crate::metrics::caveman();
             tracing::info!(level = level.as_str(), "caveman instruction injected");
             canonical = rrouter_translate::parse_request(inbound, &body)?;
+            caveman_injected = true;
         }
+    }
+    if rtk_stats.is_some() || caveman_injected {
+        record_compression(
+            state,
+            trace.request_id,
+            caller.key_id(),
+            rtk_stats.as_ref(),
+            caveman_injected,
+        );
     }
     let key_id = caller.key_id();
     // Routing preferences are read after authentication and after the wire body settled

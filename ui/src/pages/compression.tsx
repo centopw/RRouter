@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { compact, pct } from "../lib/format";
+import { useCompressionStats } from "../lib/queries";
 import {
   AlertBanner,
   Card,
   CardHeader,
   ErrorNote,
   PageHeader,
+  Segmented,
   Select,
   Toggle,
 } from "../components/ui";
@@ -17,6 +20,14 @@ import {
   type CompressionLevel,
   type CompressionSettings,
 } from "./settings/gateway-settings";
+
+/** Windows the effect readout offers; the id is both the control value and the label. */
+const EFFECT_RANGES = [
+  { id: "24", label: "24h", hours: 24 },
+  { id: "168", label: "7d", hours: 168 },
+  { id: "720", label: "30d", hours: 720 },
+] as const;
+type EffectRange = (typeof EFFECT_RANGES)[number]["id"];
 
 const LEVELS: ReadonlyArray<{ id: CompressionLevel; label: string; hint: string }> = [
   { id: "lite", label: "Lite", hint: "grammar intact, filler removed" },
@@ -29,6 +40,7 @@ export default function Compression() {
   const settings = useGatewaySettings();
   const client = useQueryClient();
   const [saving, setSaving] = useState<null | "rtk" | "caveman" | "level">(null);
+  const [range, setRange] = useState<EffectRange>("168");
   const [error, setError] = useState<unknown>(null);
 
   const stored = settings.data?.compression;
@@ -37,6 +49,15 @@ export default function Compression() {
   const level: CompressionLevel = stored?.caveman_level ?? "full";
   // One save at a time: the controls all write the same settings object.
   const busy = saving !== null || settings.isPending;
+
+  // The effect readout is its own query: changing the window never refetches the stored
+  // switch state, and the card reads the same endpoint the Activity line does.
+  const effectWindow = EFFECT_RANGES.find((option) => option.id === range) ?? EFFECT_RANGES[1];
+  const stats = useCompressionStats(effectWindow.hours);
+  const sum = stats.data;
+  // Percent removed is bytes-in-relative, so it is only defined once RTK removed bytes.
+  const savedPercent =
+    sum && sum.rtk_before > 0 ? pct((sum.rtk_saved * 100) / sum.rtk_before) : "—";
 
   /** PUT a partial object; the server deep-merges it into the stored settings. */
   const save = async (
@@ -101,6 +122,54 @@ export default function Compression() {
         </span>
         <span>provider</span>
       </div>
+
+      <Card className="mb-4">
+        <CardHeader
+          title="Effect"
+          action={
+            <Segmented
+              options={EFFECT_RANGES.map((option) => ({ id: option.id, label: option.label }))}
+              value={range}
+              onChange={(id) => setRange(id)}
+              ariaLabel="effect time range"
+            />
+          }
+        />
+        <div className="px-5 pb-5">
+          {/* The row reserves its height so switching windows never moves the cards below. */}
+          <dl className="grid min-h-[2.75rem] grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-5">
+            <div>
+              <dt className="text-caption text-faint">Requests compressed</dt>
+              <dd className="num mt-0.5 text-small text-fg">{compact(sum?.requests)}</dd>
+            </div>
+            <div>
+              <dt className="text-caption text-faint">Tool-result bytes</dt>
+              <dd className="num mt-0.5 text-small text-fg">
+                {sum ? `${compact(sum.rtk_before)} → ${compact(sum.rtk_after)}` : "—"}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-caption text-faint">Removed</dt>
+              <dd className="num mt-0.5 text-small text-fg">{savedPercent}</dd>
+            </div>
+            <div>
+              <dt className="text-caption text-faint">Est. tokens saved</dt>
+              <dd className="num mt-0.5 text-small text-fg">
+                {compact(sum?.rtk_saved_tokens_estimate)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-caption text-faint">Caveman requests</dt>
+              <dd className="num mt-0.5 text-small text-fg">{compact(sum?.caveman_requests)}</dd>
+            </div>
+          </dl>
+          <p className="mt-3 text-caption text-faint">
+            {stats.isError
+              ? "The effect readout could not be loaded; the switches below are unaffected."
+              : "Bytes and tokens here count tool-result text only, never the whole prompt. Tokens are estimated at ~4 bytes per token, not a tokenizer run. Caveman adds a small instruction — its saving is on the reply, so it is counted here, not measured."}
+          </p>
+        </div>
+      </Card>
 
       <Card>
         <CardHeader

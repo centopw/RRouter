@@ -12,14 +12,35 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 41;
+pub const SCHEMA_VERSION: i64 = 42;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
     V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40,
-    V41,
+    V41, V42,
 ];
+
+/// V42: what one inbound request's compression removed.
+///
+/// One row per request whose body actually changed: `rtk_before`/`rtk_after` are the
+/// bytes the token saver saw and produced (both 0 when it did not run or changed
+/// nothing) and `caveman` says whether the style instruction was injected. `team_id`
+/// is resolved at insert time from the key, exactly like `usage`, so one team filter
+/// serves both readers. The row is a counter, never a payload.
+const V42: &str = r#"
+CREATE TABLE IF NOT EXISTS compression_events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         INTEGER NOT NULL,
+  request_id TEXT,
+  key_id     TEXT,
+  team_id    TEXT,
+  rtk_before INTEGER NOT NULL DEFAULT 0,
+  rtk_after  INTEGER NOT NULL DEFAULT 0,
+  caveman    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_compression_ts ON compression_events(ts);
+"#;
 
 /// V41: opt-in capture of request and response bodies.
 ///

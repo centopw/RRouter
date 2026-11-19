@@ -16,11 +16,12 @@ import {
   cx,
   statusText,
 } from "../../components/ui";
-import { pct } from "../../lib/format";
+import { compact, pct } from "../../lib/format";
 import { modelRefFor } from "../../lib/model-ref";
 import { RANGES, incidentOf, rangeOf, type Incident, type RangeId } from "../../lib/activity";
 import {
   useAccountQuotas,
+  useCompressionStats,
   useConnections,
   useIsAdmin,
   useKeys,
@@ -100,6 +101,9 @@ export default function Activity() {
   // Per-model window totals: the only server-side source for incident detection and
   // for the model filter's options. Not rendered as a table — /usage owns aggregates.
   const summary = useUsageSummary(spec.hours, teamParam);
+  // Same window and team scope as the log below, so the summary line cannot drift from
+  // the range control. One query for the whole page; the line reads it once.
+  const compression = useCompressionStats(spec.hours, teamParam);
   // Key names and the provider roster come from admin surface. A reader gets the log
   // and the routing card instead of requests that would be refused.
   const isAdmin = useIsAdmin();
@@ -281,6 +285,22 @@ export default function Activity() {
           </>
         }
       />
+
+      {/* One line, no card: compression is context for the log below, not an event.
+          Hidden entirely until something was actually compressed in this window. */}
+      {compression.data && compression.data.requests > 0 ? (
+        <p className="mb-5 text-caption text-muted">
+          Compression saved ~{compact(compression.data.rtk_saved_tokens_estimate)} tokens across{" "}
+          {compact(compression.data.requests)} requests
+          {compression.data.rtk_before > 0
+            ? ` (${pct((compression.data.rtk_saved * 100) / compression.data.rtk_before)} of tool-result bytes removed)`
+            : ""}
+          {" · "}
+          <Link to="/compression" className="underline-offset-2 hover:text-fg hover:underline">
+            Compression
+          </Link>
+        </p>
+      ) : null}
 
       {incident && showPanels && showIncident ? (
         <div className="mb-5">

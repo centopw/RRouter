@@ -15,6 +15,7 @@ import {
   updateQuotaPing,
   type Alias,
   type Combo,
+  type CompressionStats,
   type Connection,
   type Health,
   type KeyModelMap,
@@ -110,6 +111,7 @@ export const qk = {
   summary: (hours: number | null) => ["usage-summary", hours ?? "all"] as const,
   summaryByConnection: (hours: number | null) =>
     ["usage-summary-connection", hours ?? "all"] as const,
+  compressionStats: (hours: number) => ["compression-stats", hours] as const,
   oauthProviders: ["oauth-providers"] as const,
   oauthStatus: (provider: string, id: string) => ["oauth-status", provider, id] as const,
 };
@@ -588,6 +590,20 @@ export function useUsageSummary(hours: number | null = null, teamId?: string) {
     queryKey: [...qk.summary(hours), teamId ?? ""] as const,
     queryFn: () =>
       list<UsageSummaryRow>(`/api/usage/summary${suffix === "" ? "" : `?${suffix}`}`),
+    refetchInterval: 15_000,
+  });
+}
+
+/**
+ * What compression removed over `hours`. One query per window and team scope; the page
+ * and the Activity summary line read the same endpoint, so their numbers cannot drift.
+ */
+export function useCompressionStats(hours: number, teamId?: string) {
+  const query = new URLSearchParams({ hours: String(hours) });
+  if (teamId) query.set("team_id", teamId);
+  return useQuery({
+    queryKey: [...qk.compressionStats(hours), teamId ?? ""] as const,
+    queryFn: () => api.get<CompressionStats>(`/api/compression/stats?${query}`),
     refetchInterval: 15_000,
   });
 }
