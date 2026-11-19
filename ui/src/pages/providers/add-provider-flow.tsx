@@ -130,6 +130,7 @@ type AddStep = "pick" | "credential";
 export function AddProviderFlow({
   open,
   initialCustomProtocol,
+  initialProvider = null,
   onClose,
   onChooseOAuth,
   subscriptionProviders,
@@ -139,6 +140,8 @@ export function AddProviderFlow({
 }: {
   open: boolean;
   initialCustomProtocol: "openai" | "anthropic" | null;
+  /** Deep link (`/providers?add=<id>`): open straight on this provider's credential step. */
+  initialProvider?: string | null;
   onClose: () => void;
   onChooseOAuth: (provider: OAuthProvider) => void;
   subscriptionProviders: Array<OAuthProvider & { display: string }>;
@@ -164,12 +167,17 @@ export function AddProviderFlow({
       setStep("credential");
       setKeyProvider(initialCustomProtocol);
       setCustomProtocol(initialCustomProtocol);
+    } else if (initialProvider) {
+      // Deep link: the provider is already chosen, so the flow starts on its key form.
+      setStep("credential");
+      setKeyProvider(initialProvider);
+      setCustomProtocol(null);
     } else {
       setStep("pick");
       setKeyProvider(null);
       setCustomProtocol(null);
     }
-  }, [open, initialCustomProtocol]);
+  }, [open, initialCustomProtocol, initialProvider]);
 
   const needle = query.trim().toLowerCase();
   const signIn = subscriptionProviders.filter((provider) => matchesProvider(needle, provider));

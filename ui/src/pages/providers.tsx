@@ -56,6 +56,8 @@ export default function Providers() {
   const [initialCustomProtocol, setInitialCustomProtocol] = useState<
     "openai" | "anthropic" | null
   >(null);
+  /** `/providers?add=<provider-id>` opens the credential step on that provider. */
+  const [initialProvider, setInitialProvider] = useState<string | null>(null);
   const [signIn, setSignIn] = useState<OAuthProvider | null>(null);
   const [notice, setNotice] = useState<ProviderNotice | null>(null);
   const [codesOpen, setCodesOpen] = useState(false);
@@ -132,6 +134,7 @@ export default function Providers() {
 
   const openAdd = () => {
     setInitialCustomProtocol(null);
+    setInitialProvider(null);
     setAdding(true);
     setNotice(null);
   };
@@ -145,6 +148,7 @@ export default function Providers() {
     if (custom !== "openai" && custom !== "anthropic") return;
     if (isAdmin) {
       setInitialCustomProtocol(custom);
+      setInitialProvider(null);
       setAdding(true);
       setNotice(null);
     }
@@ -154,6 +158,34 @@ export default function Providers() {
     next.delete("protocol");
     setParams(next, { replace: true });
   }, [params, setParams, isAdmin]);
+
+  // `?add=<provider-id>` opens the same add flow already on that provider's credential
+  // step. The catalog must be loaded first: an unknown id is refused rather than silently
+  // opening the fallback provider's form.
+  useEffect(() => {
+    const requested = params.get("add");
+    if (!requested || requested === "custom") return;
+    if (!providers.data) return;
+    // Only an API-key provider has a credential form to land on; an OAuth-only provider
+    // is not offered by this link, so the flow stays on the picker.
+    const found = providers.data.find((provider) => provider.id === requested);
+    if (isAdmin && found && found.kind !== "oauth") {
+      setInitialCustomProtocol(null);
+      setInitialProvider(requested);
+      setAdding(true);
+      setNotice(null);
+    } else if (isAdmin) {
+      setNotice({
+        tone: "neg",
+        text: found
+          ? `Provider ${requested} signs in with OAuth — connect it from the provider list.`
+          : `Provider ${requested} is not available in this build.`,
+      });
+    }
+    const next = new URLSearchParams(params);
+    next.delete("add");
+    setParams(next, { replace: true });
+  }, [params, setParams, isAdmin, providers.data]);
 
   const handleConnected = useCallback(
     (label: string, warning: string | null) => {
@@ -331,6 +363,7 @@ export default function Providers() {
       <AddProviderFlow
         open={adding}
         initialCustomProtocol={initialCustomProtocol}
+        initialProvider={initialProvider}
         onClose={() => setAdding(false)}
         onChooseOAuth={(provider) => {
           setSignIn(provider);
