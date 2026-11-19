@@ -268,6 +268,44 @@ as the client sent it, response as the client received it, including SSE frames 
 the values of `authorization`, `x-api-key`, `api-key` and `cookie` redacted. Captured rows
 are pruned with usage retention and deleted with their usage row.
 
+### Compression stats
+
+`GET /api/compression/stats?hours=&team_id=` aggregates the `compression_events` rows the
+proxy writes for each request whose body compression actually changed. The counters are
+tool-result text bytes, never whole-request bytes; the token figure is an estimate. See
+[Compression → Effectiveness](COMPRESSION.md#effectiveness).
+
+| Parameter | Default | Notes |
+| --- | --- | --- |
+| `hours` | `168` | window in hours, clamped to `1`–`8760`; a non-numeric value answers `400` |
+| `team_id` | none | a uuid, scoped exactly like `GET /api/usage/summary`: an admin may name any team, a reader only one they belong to (`403` otherwise) |
+
+```json
+{
+  "hours": 168,
+  "requests": 1204,
+  "rtk_requests": 1103,
+  "rtk_before": 18400000,
+  "rtk_after": 5100000,
+  "rtk_saved": 13300000,
+  "rtk_saved_tokens_estimate": 3325000,
+  "caveman_requests": 640
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `hours` | the window applied, after the clamp |
+| `requests` | rows recorded — RTK removed something, Caveman injected, or both |
+| `rtk_requests` | rows with `rtk_before > 0`, where the token saver dropped something |
+| `rtk_before`, `rtk_after` | tool-result text bytes the token saver saw and produced |
+| `rtk_saved` | `rtk_before - rtk_after`, saturating at zero |
+| `rtk_saved_tokens_estimate` | `rtk_saved / 4` — an estimate, not a tokenizer run |
+| `caveman_requests` | rows where the style instruction was appended |
+
+`rtk_requests` and `caveman_requests` are subsets of `requests` and do not sum to it. The
+rows have no retention setting of their own: they follow the usage cutoff.
+
 ## Health
 
 | Path | Meaning |

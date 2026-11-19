@@ -6,6 +6,13 @@ All notable changes. Dates are local; versions follow semver once tagged.
 
 ### Features
 
+- **Compression effectiveness.** Every request whose body compression changed now records
+  one row in `compression_events` (schema V42: request, key, team, RTK bytes in and out,
+  Caveman injected) and `GET /api/compression/stats?hours=&team_id=` aggregates them over
+  a window of up to a year. Counters are tool-result text bytes only; saved tokens are
+  estimated at ~4 bytes per token, never a tokenizer run. The rows follow usage retention.
+  The Compression page gains an Effect card (24h/7d/30d) and Activity a one-line readout,
+  shown only when the window has events. See [Compression → Effectiveness](docs/COMPRESSION.md#effectiveness).
 - **Compression page and Caveman.** Compression settings now live under one `compression`
   key (`rtk`, `caveman`, `caveman_level` of `lite`/`full`/`ultra`) and move to their own
   ROUTING → Compression page. RTK keeps its on-by-default behaviour and a legacy flat `rtk`
@@ -14,6 +21,16 @@ All notable changes. Dates are local; versions follow semver once tagged.
   bodies after RTK, fails open on unexpected shapes, is bypassable with
   `x-rrouter-caveman: off`, and is counted as `rrouter_caveman_injected_total`. See
   [Compression](docs/COMPRESSION.md).
+- **Capability catalog and live tryout.** ROUTING → Search, Rerank and Embeddings now list
+  every provider that serves the capability as a card with its connected state and active
+  account count, a Connect link that opens the add-provider flow on that provider
+  (`/providers?add=<id>`) and a Manage link for connected ones. Each card opens a drawer
+  holding a session-scoped gateway key, an editable model ref prefilled per capability, and
+  a tryout that calls `/v1/search`, `/v1/rerank` or `/v1/embeddings` for real, showing
+  status, latency, `x-request-id` and the body, plus a copyable curl with a
+  `$RROUTER_API_KEY` placeholder. Search offers `web` only; news and images are disabled
+  rather than silently dropped. See
+  [API → Capability defaults](docs/API.md#capability-defaults).
 - **Capability defaults.** Search, rerank and embeddings accept a stored provider/model
   default (`capability_defaults`, deep-merged by `PUT /api/settings`, null or a trimmed
   reference of at most 200 characters) used only when the request omits that field. New
