@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Graph, Moon, Plugs, Plus, Sun } from "@phosphor-icons/react";
+import { Graph, Plugs, Plus } from "@phosphor-icons/react";
 import { useNavigate } from "react-router-dom";
 import { cx } from "../lib/cx";
 import { useFeatureFlag } from "../lib/flags";
 import { useModels } from "../lib/queries";
-
-export type PaletteTheme = "light" | "dark";
 
 export type PaletteNavItem = {
   to: string;
@@ -37,15 +35,11 @@ export function CommandPalette({
   onClose,
   nav,
   isAdmin,
-  theme,
-  onToggleTheme,
 }: {
   open: boolean;
   onClose: () => void;
   nav: PaletteNavItem[];
   isAdmin: boolean;
-  theme: PaletteTheme;
-  onToggleTheme: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -105,17 +99,6 @@ export function CommandPalette({
         keywords: "map graph live upstream traffic",
         icon: iconGlyph(Graph),
         run: () => go("/routing/topology"),
-      },
-      {
-        id: "action-theme",
-        label: "Toggle theme",
-        hint: theme === "dark" ? "Switch to light" : "Switch to dark",
-        keywords: "dark light mode appearance color",
-        icon: theme === "dark" ? <Sun size={17} aria-hidden /> : <Moon size={17} aria-hidden />,
-        run: () => {
-          onToggleTheme();
-          onClose();
-        },
       },
     ];
 
@@ -183,7 +166,7 @@ export function CommandPalette({
 
     const all = [...actions, ...pages, ...modelHits];
     return { actions, pageGroups, pages, modelHits, all };
-  }, [nav, query, models.data, isAdmin, theme, showQuickActions, go, onToggleTheme, onClose]);
+  }, [nav, query, models.data, isAdmin, showQuickActions, go, onClose]);
 
   const clampedIndex =
     results.all.length === 0 ? -1 : Math.min(Math.max(0, activeIndex), results.all.length - 1);

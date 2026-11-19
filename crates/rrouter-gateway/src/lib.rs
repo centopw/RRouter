@@ -204,6 +204,9 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/models/test", post(routes::models::test))
         .route("/route/explain", post(routes::explain::explain))
+        // Which providers serve search, rerank and embeddings, plus the stored default
+        // for each. Admin-only: the account counts are operator data.
+        .route("/capabilities", get(routes::capabilities::list))
         .route(
             "/combos",
             get(routes::combos::list)

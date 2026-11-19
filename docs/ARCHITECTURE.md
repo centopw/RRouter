@@ -58,6 +58,7 @@ Request flow:
 | `rrouter-translate` | Chat ⇄ Responses ⇄ Anthropic, request and stream; native web-search adapters |
 | `rrouter-router` | aliases, combos, planning, breaker, dispatch |
 | `rrouter-rtk` | Token Saver: inbound tool-result compression |
+| `rrouter-caveman` | terse-output instruction appended to the inbound system prompt |
 | `rrouter-gateway` | HTTP surface, proxy, admin API, dashboard |
 | `rrouter-ui` | embedded Vite dashboard |
 

@@ -23,6 +23,8 @@ encryption key material and the dashboard all live inside the binary and one dat
   provider coverage, disabled models and grouped model boards.
 - **Native web search.** Route Anthropic, OpenAI/Codex, xAI or Gemini through their own
   hosted search tools and return one cited answer from `/v1/search`.
+- **Token trimming.** [RTK](docs/COMPRESSION.md) compresses noisy tool results on the way in
+  and Caveman asks for terse replies on the way out, both with a per-request bypass.
 - **Smart quota auto-ping.** Warm Claude/Codex subscription windows on reset, on a schedule,
   or with usage-aware staggered resets across accounts.
 
@@ -109,6 +111,7 @@ where it goes, not the protocol.
 | [Keys and limits](docs/KEYS.md) | Limits, teams, guardrails, PII redaction |
 | [Providers](docs/PROVIDERS.md) | OAuth/API-key support, endpoints, Antigravity |
 | [Caching](docs/CACHING.md) | Exact/semantic cache and prompt-cache preservation |
+| [Compression](docs/COMPRESSION.md) | RTK and Caveman, their settings, per-request headers |
 | [Observability](docs/OBSERVABILITY.md) | Request IDs, metrics, traces, dashboard |
 | [Security](docs/SECURITY.md) | Encryption, admin gate, accounts, audit |
 | [Configuration](docs/CONFIG.md) | Every environment variable |
@@ -130,8 +133,8 @@ where it goes, not the protocol.
   and PII redaction.
 - **Ops:** `/health`, `/ready`, Prometheus `/metrics`, request/attempt traces, audit and
   signed webhooks.
-- **Dashboard:** Activity, Logs, Playground, Models, Providers, Evals, Keys, Teams, Users,
-  Aliases, Combos, Webhooks, Settings.
+- **Dashboard:** Activity, Logs, Playground, Models, Providers, Compression, Search, Rerank,
+  Embeddings, Evals, Keys, Teams, Users, Aliases, Combos, Webhooks, Settings.
 
 ## Tests
 

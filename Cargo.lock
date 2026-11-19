@@ -1865,6 +1865,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rrouter-caveman"
+version = "0.31.0"
+dependencies = [
+ "rrouter-core",
+ "serde_json",
+]
+
+[[package]]
 name = "rrouter-core"
 version = "0.31.0"
 dependencies = [
@@ -1897,6 +1905,7 @@ dependencies = [
  "opentelemetry_sdk",
  "reqwest 0.12.28",
  "rrouter-auth",
+ "rrouter-caveman",
  "rrouter-core",
  "rrouter-router",
  "rrouter-rtk",

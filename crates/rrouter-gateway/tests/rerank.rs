@@ -561,3 +561,39 @@ async fn the_provider_key_never_appears_in_a_response() {
         );
     }
 }
+
+/// The dashboard's rerank page sends only the query and documents: the stored default is
+/// the routed ref, and the provider still receives its own bare model id.
+#[tokio::test]
+async fn a_missing_model_falls_back_to_the_stored_rerank_default() {
+    let mock = Mock::start(vec![(200, cohere_ok())]).await;
+    let h = harness(false);
+    h.connect("cohere", &mock, 0, "co-secret-key").await;
+
+    let mut body = request();
+    body.as_object_mut().expect("object").remove("model");
+    let (status, _, out) = h.post(body.clone(), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    assert_eq!(mock.hits(), 0);
+
+    rrouter_gateway::settings::merge(
+        &h.state,
+        json!({"capability_defaults": {"rerank": "cohere/rerank-v3.5"}}),
+    )
+    .await
+    .expect("store default");
+    let (status, _, out) = h.post(body, &[]).await;
+    let cleared = rrouter_gateway::settings::merge(
+        &h.state,
+        json!({"capability_defaults": {"rerank": null}}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    cleared.expect("clear default");
+    assert_eq!(
+        mock.seen()[0].1["model"],
+        json!("rerank-v3.5"),
+        "the provider receives its own id, not the routed ref"
+    );
+}

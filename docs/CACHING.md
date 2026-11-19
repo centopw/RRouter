@@ -24,7 +24,9 @@ A gateway can silently destroy provider prompt caching. RRouter avoids two commo
 
 - Same-dialect requests are forwarded as the client wrote them. Only routing fields are
   patched; Anthropic `cache_control` breakpoints and OpenAI Responses cache fields survive.
-  Cross-dialect requests still go through the canonical translator.
+  Cross-dialect requests still go through the canonical translator. RTK and Caveman run
+  before the cache key is computed, so an enabled method changes the key and the entry —
+  see [Compression](COMPRESSION.md).
 - Accounts are pinned per conversation: equal-priority connections are ordered by a hash of
   the conversation (model, system, first turn, `prompt_cache_key`), not round-robin. KV
   caches live on one upstream account.

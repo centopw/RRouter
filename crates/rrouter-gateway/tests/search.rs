@@ -712,3 +712,89 @@ async fn search_model_discovery_lists_only_connected_search_providers() {
     assert_eq!(data[0]["kind"], json!("webSearch"));
     assert_eq!(data[0]["default_model"], json!("claude-sonnet-4-5"));
 }
+
+/// `capability_defaults` is process-global, so the two tests that store and reset it must
+/// not overlap: without this lock the fallback test observes the capabilities test's
+/// default and its "no default" case answers 200 instead of 400.
+static SETTINGS_DEFAULTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The dashboard's search page names neither a model nor a provider: the stored default
+/// is the routed ref, and its provider expansion still fills in the native search model.
+#[tokio::test]
+async fn a_missing_model_falls_back_to_the_stored_search_default() {
+    let _defaults = SETTINGS_DEFAULTS.lock().await;
+    let mock = Mock::start(vec![(200, anthropic_ok())]).await;
+    let h = harness(false);
+    h.connect_oauth("claude", &mock, 0, "oauth-token").await;
+
+    let bare = || json!({"query": "What changed in Rust?", "max_results": 2});
+    let (status, _, out) = h.post(bare(), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    assert_eq!(mock.hits(), 0);
+
+    rrouter_gateway::settings::merge(
+        &h.state,
+        json!({"capability_defaults": {"search": "claude"}}),
+    )
+    .await
+    .expect("store default");
+    let (status, _, out) = h.post(bare(), &[]).await;
+    let cleared = rrouter_gateway::settings::merge(
+        &h.state,
+        json!({"capability_defaults": {"search": null}}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    cleared.expect("clear default");
+    assert_eq!(
+        mock.seen()[0].1["model"],
+        json!("claude-sonnet-4-5"),
+        "the provider id expanded to the native search model"
+    );
+}
+
+/// `GET /api/capabilities` is the dashboard's read: search providers carry the model they
+/// would use, the account count is active-only, and the stored defaults are echoed.
+#[tokio::test]
+async fn capabilities_lists_providers_and_echoes_the_stored_defaults() {
+    let _defaults = SETTINGS_DEFAULTS.lock().await;
+    let mock = Mock::start(vec![]).await;
+    let h = harness(false);
+    h.connect_oauth("claude", &mock, 0, "oauth-token").await;
+
+    rrouter_gateway::settings::merge(
+        &h.state,
+        json!({"capability_defaults": {"search": "claude"}}),
+    )
+    .await
+    .expect("store default");
+    let (status, _, body) = h.request("GET", "/api/capabilities", None, &[]).await;
+    let cleared = rrouter_gateway::settings::merge(
+        &h.state,
+        json!({"capability_defaults": {"search": null}}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    cleared.expect("clear default");
+    assert_eq!(body["defaults"]["search"], json!("claude"));
+    assert_eq!(body["defaults"]["rerank"], Value::Null);
+    assert_eq!(body["defaults"]["embeddings"], Value::Null);
+    let search = body["providers"]["search"].as_array().expect("search");
+    let claude = search
+        .iter()
+        .find(|row| row["provider"] == json!("claude"))
+        .expect("claude row");
+    assert_eq!(claude["default_model"], json!("claude-sonnet-4-5"));
+    assert_eq!(claude["connected"], json!(true));
+    assert_eq!(claude["accounts"], json!(1));
+    assert!(
+        body["providers"]["rerank"]
+            .as_array()
+            .expect("rerank")
+            .iter()
+            .all(|row| row["connected"] == json!(false)),
+        "no rerank connection exists: {body}"
+    );
+}

@@ -3,6 +3,7 @@
 pub mod audit;
 pub mod auth;
 pub mod batches;
+pub mod capabilities;
 pub mod combos;
 pub mod connections;
 pub mod evals;

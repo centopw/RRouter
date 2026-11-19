@@ -96,6 +96,8 @@ export const qk = {
   keyModels: (id: string) => ["key-models", id] as const,
   models: ["models"] as const,
   modelProviders: ["model-providers"] as const,
+  /** One read of the capability defaults + serving providers, shared by three pages. */
+  capabilities: ["capabilities"] as const,
   aliases: ["aliases"] as const,
   combos: ["combos"] as const,
   templates: ["templates"] as const,
@@ -379,11 +381,12 @@ export function useDeletePreset() {
   });
 }
 
-export function useModels() {
+export function useModels(enabled = true) {
   return useQuery({
     queryKey: qk.models,
     queryFn: () => list<Model>("/api/models"),
     staleTime: 30_000,
+    enabled,
   });
 }
 
@@ -1019,5 +1022,34 @@ export function useRevokeOtherSessions() {
   return useMutation({
     mutationFn: revokeOtherSessions,
     onSuccess: () => void client.invalidateQueries({ queryKey: qk.me }),
+  });
+}
+
+// ---------------------------------------------------------------- capability defaults
+
+/** The three `/v1` capabilities that can carry a stored default. */
+export type CapabilityName = "search" | "rerank" | "embeddings";
+
+/** One compiled provider that serves a capability, as `/api/capabilities` reports it. */
+export type CapabilityProvider = {
+  provider: string;
+  display: string;
+  default_model: string | null;
+  connected: boolean;
+  accounts: number;
+};
+
+/** Stored defaults plus the providers that can serve each capability. */
+export type Capabilities = {
+  defaults: Partial<Record<CapabilityName, string | null>>;
+  providers: Partial<Record<CapabilityName, CapabilityProvider[]>>;
+};
+
+/** One cached read shared by the Search, Rerank and Embeddings pages. */
+export function useCapabilities() {
+  return useQuery({
+    queryKey: qk.capabilities,
+    queryFn: () => api.get<Capabilities>("/api/capabilities"),
+    staleTime: 30_000,
   });
 }

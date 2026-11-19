@@ -3432,6 +3432,60 @@ async fn embeddings_record_usage_and_relay_malformed_bodies_unchanged() {
     assert_eq!(rows.len(), 1, "the unparseable body adds no row: {rows:?}");
 }
 
+/// The dashboard's embeddings page sends only the input: the stored default fills in the
+/// model, and the rewritten body reaches the upstream. With no default the existing
+/// "missing model" answer stands.
+#[tokio::test]
+async fn a_missing_model_falls_back_to_the_stored_embeddings_default() {
+    let mock = Mock::start(vec![MockReply::Json(
+        200,
+        json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+            "model": "text-embedding-3-small",
+            "usage": {"prompt_tokens": 3, "total_tokens": 3}
+        }),
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    let (key, _) = h.create_key().await;
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/embeddings")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {key}"))
+            .body(Body::from(json!({"input": "hello"}).to_string()))
+            .expect("request")
+    };
+
+    let res = h.router.clone().oneshot(request()).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(mock.hits(), 0);
+
+    rrouter_gateway::settings::merge(
+        &h.state,
+        json!({"capability_defaults": {"embeddings": "openai/text-embedding-3-small"}}),
+    )
+    .await
+    .expect("store default");
+    let res = h.router.clone().oneshot(request()).await.expect("oneshot");
+    let cleared = rrouter_gateway::settings::merge(
+        &h.state,
+        json!({"capability_defaults": {"embeddings": null}}),
+    )
+    .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    cleared.expect("clear default");
+    assert_eq!(
+        mock.seen()[0]["model"],
+        json!("openai/text-embedding-3-small"),
+        "the injected model is what the upstream receives"
+    );
+}
+
 /// `count_tokens` and `compact` are not chat requests: a row appears only when the
 /// upstream itself reports usage.
 #[tokio::test]
@@ -6498,6 +6552,60 @@ async fn token_saver_compresses_tool_results_and_can_be_bypassed() {
     assert!(
         tool.starts_with("src/main.rs:1:"),
         "bypass kept the raw dump"
+    );
+}
+
+// ------------------------------------------------------------- Caveman (compression)
+
+#[tokio::test]
+async fn caveman_injects_the_style_instruction_and_can_be_bypassed() {
+    let mock = Mock::start(vec![openai_reply("ok"), openai_reply("ok")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+
+    let (status, _) = h
+        .post_with(
+            "/v1/chat/completions",
+            openai_chat_body("gpt-4.1"),
+            &[("x-rrouter-caveman", "on")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let sent = mock.seen();
+    let system = sent[0]["messages"][0]["content"]
+        .as_str()
+        .expect("system content");
+    assert!(
+        system.starts_with("be terse"),
+        "the caller's instruction stays first: {system}"
+    );
+    assert!(
+        system.contains("Keep code, paths, commands, error text, URLs and identifiers verbatim."),
+        "the style instruction reached the upstream body: {system}"
+    );
+    assert_eq!(
+        sent[0]["messages"][1]["content"], "hello",
+        "user turns are untouched"
+    );
+
+    let (status, _) = h
+        .post_with(
+            "/v1/chat/completions",
+            openai_chat_body("gpt-4.1"),
+            &[("x-rrouter-caveman", "off")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let sent = mock.seen();
+    assert_eq!(
+        sent[1]["messages"][0]["content"], "be terse",
+        "the per-request bypass keeps the body as written"
+    );
+
+    let (_, _, metrics) = h.get_raw("/metrics").await;
+    assert!(
+        metric_value(&metrics, "rrouter_caveman_injected_total") >= 1,
+        "the injection is counted"
     );
 }
 

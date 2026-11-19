@@ -4,23 +4,23 @@ import {
   ArrowsSplit,
   ChartLineUp,
   ChatCircleText,
+  Cube,
+  Funnel,
   GearSix,
   GithubLogo,
   Heartbeat,
   Key,
   ListBullets,
   MagnifyingGlass,
-  Moon,
   Plugs,
   Pulse,
   RocketLaunch,
-  Rows,
   Scroll,
   SidebarSimple,
   SignOut,
+  SortAscending,
   SquaresFour,
   Stethoscope,
-  Sun,
   User,
   UsersThree,
   WebhooksLogo,
@@ -30,12 +30,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ADMIN_REQUIRED_EVENT, api, setAdminToken } from "./lib/api";
 import { useAuthState, useHealth, useIsAdmin, useSignOut, useSystem, useUpdateStatus } from "./lib/queries";
+import { useAppearance } from "./lib/appearance";
 import { CommandPalette, type PaletteNavItem } from "./components/command-palette";
 import { Button, Dot, cx } from "./components/ui";
 import { BrandMark } from "./components/brand-mark";
-
-type Theme = "light" | "dark";
-type Density = "compact" | "comfortable";
 
 /** A leaf route. The sidebar and the command palette both render this list, so a page
  *  can never exist in one and be missing from the other. */
@@ -111,6 +109,25 @@ const NAV_GROUPS: NavGroup[] = [
         icon: glyph(ArrowsSplit),
         matchPrefixes: ["/routing"],
       },
+      { to: "/compression", label: "Compression", icon: glyph(Funnel), adminOnly: true },
+      {
+        to: "/capability/search",
+        label: "Search",
+        icon: glyph(MagnifyingGlass),
+        adminOnly: true,
+      },
+      {
+        to: "/capability/rerank",
+        label: "Rerank",
+        icon: glyph(SortAscending),
+        adminOnly: true,
+      },
+      {
+        to: "/capability/embeddings",
+        label: "Embeddings",
+        icon: glyph(Cube),
+        adminOnly: true,
+      },
     ],
   },
   {
@@ -172,8 +189,6 @@ const SETUP_DISMISSED = "rrouter:setup-dismissed";
 const STAR_DISMISSED = "rrouter:star-dismissed";
 const REPO_URL = "https://github.com/centopw/RRouter";
 const SIDEBAR_COLLAPSED = "rrouter:sidebar-collapsed";
-const THEME_KEY = "rrouter:theme";
-const DENSITY_KEY = "rrouter:density";
 
 function readStarDismissed(): boolean {
   try {
@@ -181,26 +196,6 @@ function readStarDismissed(): boolean {
   } catch {
     return false;
   }
-}
-
-function readInitialTheme(): Theme {
-  try {
-    const stored = window.localStorage.getItem(THEME_KEY);
-    if (stored === "dark" || stored === "light") return stored;
-  } catch {
-    // Storage unavailable; fall back to document dataset or light.
-  }
-  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-}
-
-function readInitialDensity(): Density {
-  try {
-    const stored = window.localStorage.getItem(DENSITY_KEY);
-    if (stored === "compact" || stored === "comfortable") return stored;
-  } catch {
-    // Storage unavailable.
-  }
-  return document.documentElement.dataset.density === "compact" ? "compact" : "comfortable";
 }
 
 function findActiveSearchInput(root: HTMLElement | null): HTMLInputElement | null {
@@ -248,30 +243,11 @@ export function Shell() {
 
   const navigate = useNavigate();
   const location = useLocation();
+  const { theme } = useAppearance();
+  const version = health.data?.version;
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [starDismissed, setStarDismissed] = useState(readStarDismissed);
-  const [theme, setTheme] = useState<Theme>(readInitialTheme);
-  const [density, setDensity] = useState<Density>(readInitialDensity);
   const mainRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    try {
-      window.localStorage.setItem(THEME_KEY, theme);
-    } catch {
-      // Storage unavailable; keep in-memory choice.
-    }
-  }, [theme]);
-
-  useEffect(() => {
-    document.documentElement.dataset.density = density;
-    try {
-      window.localStorage.setItem(DENSITY_KEY, density);
-    } catch {
-      // Storage unavailable; keep in-memory choice.
-    }
-  }, [density]);
 
   const dismissStar = () => {
     setStarDismissed(true);
@@ -281,9 +257,6 @@ export function Shell() {
       // Storage unavailable; the in-memory choice still hides it for this session.
     }
   };
-
-  const toggleTheme = () => setTheme((prev) => (prev === "dark" ? "light" : "dark"));
-  const toggleDensity = () => setDensity((prev) => (prev === "compact" ? "comfortable" : "compact"));
 
   // The rail fades its ends only when the list actually scrolls, so a short nav has no
   // unexplained gradient. The gutter keeps labels from shifting when it grows.
@@ -530,28 +503,13 @@ export function Shell() {
 
         {collapsed ? (
           <div className="flex flex-col items-center gap-2 border-t border-line py-3">
-            <button
-              type="button"
-              onClick={toggleTheme}
-              aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-              title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-              className="flex h-8 w-8 items-center justify-center rounded-full text-faint hover:bg-surface-3 hover:text-fg"
-            >
-              {theme === "dark" ? <Sun size={15} aria-hidden /> : <Moon size={15} aria-hidden />}
-            </button>
             <div title={running ? "gateway running" : "gateway unreachable"}>
               <RunningDot running={running} />
               <span className="sr-only">{running ? "Gateway running" : "Gateway unreachable"}</span>
             </div>
           </div>
         ) : (
-          <SidebarFooter
-            note={brand.footer_text}
-            theme={theme}
-            onToggleTheme={toggleTheme}
-            density={density}
-            onToggleDensity={toggleDensity}
-          />
+          <SidebarFooter note={brand.footer_text} version={version} />
         )}
       </aside>
 
@@ -623,8 +581,6 @@ export function Shell() {
         onClose={() => setPaletteOpen(false)}
         nav={nav}
         isAdmin={isAdmin}
-        theme={theme}
-        onToggleTheme={toggleTheme}
       />
     </div>
   );
@@ -835,19 +791,7 @@ function SessionFooter({ collapsed }: { collapsed?: boolean }) {
   );
 }
 
-function SidebarFooter({
-  note,
-  theme,
-  onToggleTheme,
-  density,
-  onToggleDensity,
-}: {
-  note?: string;
-  theme: Theme;
-  onToggleTheme: () => void;
-  density: Density;
-  onToggleDensity: () => void;
-}) {
+function SidebarFooter({ note, version }: { note?: string; version?: string }) {
   return (
     <div className="border-t border-line px-3 py-3">
       {note?.trim() ? (
@@ -855,30 +799,8 @@ function SidebarFooter({
           {note.trim()}
         </div>
       ) : null}
-      <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={onToggleTheme}
-          aria-pressed={theme === "dark"}
-          aria-label={`Theme: ${theme}. Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-          title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-          className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-input)] border border-line bg-surface px-2 text-caption font-medium text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg"
-        >
-          {theme === "dark" ? <Moon size={13} aria-hidden /> : <Sun size={13} aria-hidden />}
-          <span>{theme === "dark" ? "Dark" : "Light"}</span>
-        </button>
-        <button
-          type="button"
-          onClick={onToggleDensity}
-          aria-pressed={density === "compact"}
-          aria-label={`Density: ${density}. Switch to ${density === "compact" ? "comfortable" : "compact"} density`}
-          title={`Switch to ${density === "compact" ? "comfortable" : "compact"} density`}
-          className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-input)] border border-line bg-surface px-2 text-caption font-medium text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg"
-        >
-          <Rows size={13} aria-hidden />
-          <span>{density === "compact" ? "Compact" : "Comfortable"}</span>
-        </button>
-      </div>
+      {/* Rendered only once the health query has answered: no placeholder width. */}
+      {version ? <div className="text-caption text-faint tnum">v{version}</div> : null}
     </div>
   );
 }

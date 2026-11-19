@@ -25,6 +25,8 @@ RRouter is one Rust binary with embedded SQLite and a compiled-in dashboard. Sta
 | [Model presets](MODEL_PRESETS.md) | Saved layouts, reorder/hide, revision conflicts |
 | [Keys and limits](KEYS.md) | Key limits, teams, guardrails, PII redaction |
 | [Caching](CACHING.md) | Exact cache, semantic cache, prompt-cache preservation |
+| [Compression](COMPRESSION.md) | RTK and Caveman methods, settings, per-request bypass |
+| [Capability defaults](API.md#capability-defaults) | Stored search/rerank/embeddings defaults and their fallback order |
 | [Providers](PROVIDERS.md) | OAuth/API-key support, endpoints, Antigravity |
 | [Observability](OBSERVABILITY.md) | Request IDs, metrics, traces, dashboard/Activity/Logs |
 | [Security](SECURITY.md) | Encryption, admin gate, accounts, audit |

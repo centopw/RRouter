@@ -188,6 +188,60 @@ the gateway.
 capabilities at runtime (`kind` is `webSearch`, and `default_model` is the provider-only
 default).
 
+## Capability defaults
+
+Search, rerank and embeddings each accept one stored default — a `provider` or
+`provider/model` ref, edited on the dashboard's Search, Rerank and Embeddings pages or with
+`PUT /api/settings`. It is used only when the client omits the field, and it never
+overrides a client value. Resolution order:
+
+```
+request model/provider  >  stored default  >  the endpoint's own 400
+```
+
+- `POST /v1/search` — the default applies only when the body has neither `model` nor
+  `provider`. Partial bodies are untouched, so `{"provider":"jina"}` keeps its own answer
+  and `{"model":123}` still fails validation.
+- `POST /v1/rerank` and `POST /v1/embeddings` — the default applies only when `model` is
+  absent (not `null`, not a non-string). The model it supplies is routed exactly like a
+  client-sent one: key mapping, allowlist, admission and planning all apply.
+- With no default stored, the endpoint answers as before: `400` for a missing model, and
+  `501` when the routed provider does not serve the endpoint (`/v1/search` with a provider
+  that has no native search surface, `/v1/rerank` with no plan candidate, `/v1/embeddings`
+  on a provider whose dialect is neither OpenAI Chat nor OpenAI Embeddings).
+
+A stored value must be a non-empty, already-trimmed string of at most 200 characters;
+`null` clears the slot. `PUT /api/settings` deep-merges the block, so naming one capability
+keeps the other two, and a number, empty, padded or over-long value answers `400`.
+
+```sh
+curl -s localhost:20128/api/capabilities -H "x-api-key: <admin token>"
+```
+
+```json
+{
+  "defaults": { "search": "claude", "rerank": null, "embeddings": "openai/text-embedding-3-small" },
+  "providers": {
+    "search": [
+      { "provider": "claude", "display": "Claude (Anthropic OAuth)", "default_model": "claude-sonnet-4-5", "connected": true, "accounts": 2 }
+    ],
+    "rerank": [
+      { "provider": "jina", "display": "Jina AI", "default_model": null, "connected": false, "accounts": 0 }
+    ],
+    "embeddings": [
+      { "provider": "openai", "display": "OpenAI", "default_model": null, "connected": true, "accounts": 1 }
+    ]
+  }
+}
+```
+
+`GET /api/capabilities` is admin-only. `providers.<capability>` mirrors the gates the
+request path applies, so a ref the page suggests can actually be served (see
+[Routing](ROUTING.md#capability-endpoints)): search by the compiled native-search list,
+rerank by `rerank_url` in a community manifest, embeddings by an OpenAI Chat or OpenAI
+Embeddings provider. `accounts` counts active connections (`connected` is `accounts > 0`);
+a disabled account keeps its row in the store but serves nothing, so it does not count.
+Rows are sorted by display name, then provider id.
 
 ## Admin
 

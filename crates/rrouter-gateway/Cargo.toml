@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 rrouter-core.workspace = true
 rrouter-rtk.workspace = true
+rrouter-caveman.workspace = true
 rrouter-translate.workspace = true
 rrouter-auth.workspace = true
 rrouter-store.workspace = true

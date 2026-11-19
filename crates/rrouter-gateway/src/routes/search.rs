@@ -110,8 +110,19 @@ async fn run(
     let caller = state.authenticate(headers).await?;
     // A malformed body is the client's fault, so it is a 400 rather than the 502 a JSON
     // failure maps to elsewhere.
-    let body: Value = serde_json::from_slice(raw)
+    let mut body: Value = serde_json::from_slice(raw)
         .map_err(|e| Error::BadRequest(format!("request body is not JSON: {e}")))?;
+    // The dashboard's search page sends only the query: the operator's stored default is
+    // the model to use. A client that named a model or a provider is never overridden.
+    if body.get("model").is_none() && body.get("provider").is_none() {
+        if let Some(default) =
+            crate::settings::capability_default(crate::settings::CapabilityDefault::Search)
+        {
+            if let Some(object) = body.as_object_mut() {
+                object.insert("model".to_string(), Value::String(default));
+            }
+        }
+    }
     let request = search::parse_request(&body)?;
     // The key's mapping and allowlist apply to the routed ref, exactly as they do for
     // chat. A provider id is expanded to its default search model before admission so

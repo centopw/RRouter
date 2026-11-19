@@ -2,6 +2,31 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## Unreleased
+
+### Features
+
+- **Compression page and Caveman.** Compression settings now live under one `compression`
+  key (`rtk`, `caveman`, `caveman_level` of `lite`/`full`/`ultra`) and move to their own
+  ROUTING → Compression page. RTK keeps its on-by-default behaviour and a legacy flat `rtk`
+  is still read, never written. The new Caveman method appends an idempotent terse-output
+  instruction to the system slot of OpenAI Chat, OpenAI Responses and Anthropic Messages
+  bodies after RTK, fails open on unexpected shapes, is bypassable with
+  `x-rrouter-caveman: off`, and is counted as `rrouter_caveman_injected_total`. See
+  [Compression](docs/COMPRESSION.md).
+- **Capability defaults.** Search, rerank and embeddings accept a stored provider/model
+  default (`capability_defaults`, deep-merged by `PUT /api/settings`, null or a trimmed
+  reference of at most 200 characters) used only when the request omits that field. New
+  admin `GET /api/capabilities` lists the defaults and the providers that serve each
+  capability; three dashboard pages (ROUTING → Search, Rerank, Embeddings) edit them with
+  advisory suggestions and accept free text. See
+  [API → Capability defaults](docs/API.md#capability-defaults).
+- **Appearance and runtime settings cleanup.** An Appearance settings tab now owns color
+  mode and display density (per browser, applied immediately), replacing the sidebar and
+  command-palette toggles. The sidebar footer shows the running app version from `/health`.
+  On Runtime, captured-body retention moves into the Request capture card, so Stored
+  history no longer edits the same setting; each card saves only its own keys.
+
 ## 0.31.0 — 2026-11-18
 
 ### Features

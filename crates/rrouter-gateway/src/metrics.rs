@@ -265,11 +265,18 @@ fn truncate(value: &str, max_chars: usize) -> &str {
 /// simply closed.
 static RTK_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static RTK_SAVED_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Requests whose inbound body gained the Caveman terse-style instruction.
+static CAVEMAN_INJECTED: AtomicU64 = AtomicU64::new(0);
 
 /// Record one compressed request and its byte saving.
 pub fn rtk(stats: &rrouter_rtk::Stats) {
     RTK_REQUESTS.fetch_add(1, Ordering::Relaxed);
     RTK_SAVED_BYTES.fetch_add(stats.saved() as u64, Ordering::Relaxed);
+}
+
+/// Record one request whose body gained the Caveman instruction.
+pub fn caveman() {
+    CAVEMAN_INJECTED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Unix seconds of the last successful models.dev sync; `0` means none in this process.
@@ -425,6 +432,14 @@ impl Registry {
         out.push_str(&format!(
             "rrouter_rtk_saved_bytes_total {}\n",
             RTK_SAVED_BYTES.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP rrouter_caveman_injected_total Requests augmented with the terse-output instruction.\n",
+        );
+        out.push_str("# TYPE rrouter_caveman_injected_total counter\n");
+        out.push_str(&format!(
+            "rrouter_caveman_injected_total {}\n",
+            CAVEMAN_INJECTED.load(Ordering::Relaxed)
         ));
 
         // models.dev sync: every line is exposed at its zero, so a scrape can tell "never

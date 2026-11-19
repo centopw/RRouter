@@ -1132,6 +1132,18 @@ fn record_rtk(stats: &rrouter_rtk::Stats) {
     );
 }
 
+/// Caveman: append the terse-output instruction to the canonical prompt. Headers may
+/// force it off per request (`x-rrouter-caveman: off|0|false`); otherwise the stored
+/// setting wins. Guardrails and RTK have already run, so the decision sees what the
+/// provider will.
+fn caveman_enabled(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-rrouter-caveman")
+        .and_then(|v| v.to_str().ok())
+        .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "off" | "0" | "false"))
+        .unwrap_or_else(crate::settings::caveman)
+}
+
 /// Plan for a JSON passthrough: the model is required, this key's mapping and limits
 /// apply, and only providers that serve the endpoint stay in the plan.
 async fn json_plan(
@@ -1649,6 +1661,17 @@ async fn handle(
     if rtk_enabled(headers) {
         if let Some(stats) = rrouter_rtk::compress_source(&mut body, inbound) {
             record_rtk(&stats);
+            canonical = rrouter_translate::parse_request(inbound, &body)?;
+        }
+    }
+    // Caveman runs after RTK: the style instruction is appended to the prompt that will
+    // actually be sent, and the canonical parse is refreshed from the rewritten body.
+    // Injection is fail-open, so an unrecognised body simply stays as it was.
+    if caveman_enabled(headers) {
+        let level = crate::settings::caveman_level();
+        if rrouter_caveman::inject(&mut body, inbound, level) {
+            crate::metrics::caveman();
+            tracing::info!(level = level.as_str(), "caveman instruction injected");
             canonical = rrouter_translate::parse_request(inbound, &body)?;
         }
     }
@@ -4856,7 +4879,21 @@ async fn embeddings_inner(
 ) -> Result<Response> {
     let caller = state.authenticate(headers).await?;
     trace.set_key(caller.key_id());
-    let body: Value = serde_json::from_slice(raw)?;
+    let mut body: Value = serde_json::from_slice(raw)?;
+    // The dashboard's embeddings page sends only the text: fill in the operator's stored
+    // default. The body is otherwise relayed verbatim, so only a rewritten body replaces
+    // the original bytes.
+    let mut rewritten = None;
+    if body.get("model").is_none() {
+        if let Some(default) =
+            crate::settings::capability_default(crate::settings::CapabilityDefault::Embeddings)
+        {
+            if let Some(object) = body.as_object_mut() {
+                object.insert("model".to_string(), Value::String(default));
+                rewritten = Some(serde_json::to_vec(&body)?);
+            }
+        }
+    }
     let requested = body
         .get("model")
         .and_then(Value::as_str)
@@ -4940,7 +4977,7 @@ async fn embeddings_inner(
         .http
         .post(&url)
         .headers(outbound)
-        .body(raw.to_vec())
+        .body(rewritten.unwrap_or_else(|| raw.to_vec()))
         .timeout(state.request_timeout())
         .send()
         .await;

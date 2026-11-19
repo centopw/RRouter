@@ -102,8 +102,19 @@ async fn run(
     let caller = state.authenticate(headers).await?;
     // A malformed body is the client's fault, so it is a 400 rather than the 502 a JSON
     // failure maps to elsewhere.
-    let body: Value = serde_json::from_slice(raw)
+    let mut body: Value = serde_json::from_slice(raw)
         .map_err(|e| Error::BadRequest(format!("request body is not JSON: {e}")))?;
+    // The dashboard's rerank page sends no model: the operator's stored default is the
+    // routed ref. A client-provided model always wins.
+    if body.get("model").is_none() {
+        if let Some(default) =
+            crate::settings::capability_default(crate::settings::CapabilityDefault::Rerank)
+        {
+            if let Some(object) = body.as_object_mut() {
+                object.insert("model".to_string(), Value::String(default));
+            }
+        }
+    }
     let request = rerank::parse_request(&body)?;
     // Per-key mapping first, then governance and planning, exactly as `/v1/embeddings`
     // does: the allowlist and the routed ref both see the model this key asked for.

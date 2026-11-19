@@ -4,6 +4,7 @@ import { cx } from "../../lib/cx";
 /** Leaves only: settings is one surface, so every tab is a normal page, never a section index. */
 const SECTIONS = [
   { to: "/settings/general", label: "General" },
+  { to: "/settings/appearance", label: "Appearance" },
   { to: "/settings/runtime", label: "Runtime" },
   { to: "/settings/profile", label: "Profile" },
   { to: "/settings/security", label: "Security" },

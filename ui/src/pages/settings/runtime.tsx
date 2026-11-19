@@ -8,6 +8,7 @@ import {
   Card,
   CardHeader,
   ErrorNote,
+  Field,
   Input,
   PageHeader,
   Select,
@@ -27,12 +28,13 @@ export default function RuntimeSettings() {
   const [connectionId, setConnectionId] = useState("");
   const [metadataBusy, setMetadataBusy] = useState<null | "sync" | "fetch">(null);
   const [metadataNote, setMetadataNote] = useState<string | null>(null);
-  const [savingRtk, setSavingRtk] = useState(false);
   const [savingCapture, setSavingCapture] = useState(false);
+  const [savingCaptureDays, setSavingCaptureDays] = useState(false);
   const [savingRetention, setSavingRetention] = useState(false);
   const [sweepBusy, setSweepBusy] = useState(false);
   const [sweepNote, setSweepNote] = useState<string | null>(null);
   const [draft, setDraft] = useState<RetentionDraft>(emptyDraft);
+  const [captureRetention, setCaptureRetention] = useState("");
   const [error, setError] = useState<unknown>(null);
 
   const counts = system.data?.counts;
@@ -70,24 +72,10 @@ export default function RuntimeSettings() {
     }
   };
 
-  const toggleRtk = async () => {
-    const next = !(settings.data?.rtk ?? true);
-    setSavingRtk(true);
-    setError(null);
-    try {
-      const saved = await api.put<Brand>("/api/settings", { ...(settings.data ?? {}), rtk: next });
-      client.setQueryData(GATEWAY_SETTINGS_KEY, saved);
-      await client.invalidateQueries({ queryKey: GATEWAY_SETTINGS_KEY });
-    } catch (e) {
-      setError(e);
-    } finally {
-      setSavingRtk(false);
-    }
-  };
-
   // The settings query is typed for the white-label fields; capture rides in the same
   // flat blob, so read it through a narrow view instead of widening the shared type.
-  const captureOn = (settings.data as (Brand & { capture_bodies?: boolean }) | undefined)?.capture_bodies ?? false;
+  const captureSettings = settings.data as (Brand & CaptureSettings) | undefined;
+  const captureOn = captureSettings?.capture_bodies ?? false;
 
   const toggleCapture = async (next: boolean) => {
     setSavingCapture(true);
@@ -107,19 +95,44 @@ export default function RuntimeSettings() {
   };
 
   const stored = settings.data as (Brand & HistorySettings) | undefined;
-  // Seed the draft once the blob arrives; a later save writes the same shape back.
+  // Seed each card's draft once the blob arrives; a later save writes only its own keys.
   const [seeded, setSeeded] = useState(false);
   if (!seeded && stored) {
     setSeeded(true);
     setDraft(draftFrom(stored));
+    setCaptureRetention(asText(captureSettings?.capture_retention_days));
   }
 
+  const captureDays = daysFrom(captureRetention);
+  const captureDaysDirty =
+    seeded && captureDays !== (captureSettings?.capture_retention_days ?? null);
+
+  /** Partial write: the capture card owns `capture_retention_days` alone, so a stale
+   *  copy of any other key can never be written back over a newer value. */
+  const saveCaptureDays = async () => {
+    setSavingCaptureDays(true);
+    setError(null);
+    try {
+      const saved = await api.put<Brand>("/api/settings", {
+        capture_retention_days: captureDays,
+      });
+      client.setQueryData(GATEWAY_SETTINGS_KEY, saved);
+      await client.invalidateQueries({ queryKey: GATEWAY_SETTINGS_KEY });
+    } catch (e) {
+      setError(e);
+    } finally {
+      setSavingCaptureDays(false);
+    }
+  };
+
+  /** Partial write: this card owns its own retention keys, so it never sends — and can
+   *  never clobber — the captured-body retention the capture card writes. */
   const saveRetention = async () => {
     const patch = patchFrom(draft);
     setSavingRetention(true);
     setError(null);
     try {
-      const saved = await api.put<Brand>("/api/settings", { ...(settings.data ?? {}), ...patch });
+      const saved = await api.put<Brand>("/api/settings", patch);
       client.setQueryData(GATEWAY_SETTINGS_KEY, saved);
       await client.invalidateQueries({ queryKey: GATEWAY_SETTINGS_KEY });
     } catch (e) {
@@ -152,7 +165,7 @@ export default function RuntimeSettings() {
     <>
       <PageHeader
         title="Runtime"
-        subtitle="Read-only facts about this process, plus registry and Token Saver maintenance."
+        subtitle="Read-only facts about this process, plus registry and runtime maintenance."
       />
 
       {system.isError ? (
@@ -243,31 +256,6 @@ export default function RuntimeSettings() {
 
       <Card className="mt-4">
         <CardHeader
-          title="Token Saver"
-          action={
-            <span className="text-caption text-faint">
-              RTK filters · error results are never touched
-            </span>
-          }
-        />
-        <div className="flex flex-wrap items-center justify-between gap-4 px-5 pb-5">
-          <p className="max-w-[62ch] text-small leading-relaxed text-muted">
-            Compresses noisy tool results (git diffs, grep matches, build logs) before they reach
-            the provider: repetition is collapsed and long dumps keep their head and tail with a
-            marker. A client can bypass it per request with{" "}
-            <code className="font-mono text-caption text-fg">x-rrouter-rtk: off</code>.
-          </p>
-          <Toggle
-            checked={settings.data?.rtk ?? true}
-            label="Token Saver"
-            disabled={savingRtk}
-            onChange={() => void toggleRtk()}
-          />
-        </div>
-      </Card>
-
-      <Card className="mt-4">
-        <CardHeader
           title="Request capture"
           action={
             <span className="text-caption text-faint">
@@ -284,7 +272,7 @@ export default function RuntimeSettings() {
             <code className="font-mono text-caption">api-key</code> and{" "}
             <code className="font-mono text-caption">cookie</code> are redacted before writing, but
             the conversation itself is kept in cleartext. Bodies are capped at 64 KiB each and
-            pruned with usage retention.
+            pruned on the captured-body retention below.
           </AlertBanner>
           <div className="flex flex-wrap items-center justify-between gap-4">
             <p className="max-w-[62ch] text-small leading-relaxed text-muted">
@@ -298,6 +286,40 @@ export default function RuntimeSettings() {
               onChange={(next) => void toggleCapture(next)}
             />
           </div>
+          <div className="flex flex-wrap items-end gap-4 border-t border-line pt-4">
+            <Field
+              className="w-[190px] shrink-0"
+              label="Keep captured bodies (days)"
+              hint="Blank follows the usage window; 0 keeps bodies until deleted by hand."
+            >
+              <Input
+                type="number"
+                size="sm"
+                mono
+                value={captureRetention}
+                onChange={setCaptureRetention}
+                placeholder="follow usage"
+                ariaLabel="captured bodies retention in days"
+                disabled={savingCaptureDays}
+              />
+            </Field>
+            <p className="mb-1 min-w-[200px] max-w-[52ch] flex-1 text-caption leading-snug text-faint">
+              Applies to captured bodies only, and only while capture is on: turning capture
+              off writes nothing new, and bodies already stored age out on this setting.
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3 border-t border-line px-5 py-3">
+          <Button
+            variant="primary"
+            disabled={!seeded || savingCaptureDays || !captureDaysDirty}
+            onClick={() => void saveCaptureDays()}
+          >
+            {savingCaptureDays ? "saving…" : "save captured-body retention"}
+          </Button>
+          {captureDaysDirty ? (
+            <span className="text-small text-faint">Unsaved changes</span>
+          ) : null}
         </div>
       </Card>
 
@@ -312,7 +334,7 @@ export default function RuntimeSettings() {
         />
         <div className="flex flex-col gap-4 px-5 pb-5">
           <p className="max-w-[70ch] text-small leading-relaxed text-muted">
-            Every store the gateway keeps has its own lifetime. A blank box follows the usage
+            Every store listed here has its own lifetime. A blank box follows the usage
             window; a switch turns the store off immediately (nothing new is written) without
             touching rows already there.
           </p>
@@ -342,12 +364,6 @@ export default function RuntimeSettings() {
                   }}
                   value={draft.attempts_retention_days}
                   onChange={(v) => setDraft({ ...draft, attempts_retention_days: v })}
-                />
-                <RetentionRow
-                  what="Captured bodies"
-                  detail="Prompt and response bodies, written only while Request capture is on."
-                  value={draft.capture_retention_days}
-                  onChange={(v) => setDraft({ ...draft, capture_retention_days: v })}
                 />
                 <RetentionRow
                   what="Audit trail"
@@ -402,13 +418,18 @@ function Row({ k, v }: { k: string; v: string }) {
   );
 }
 
+/** The capture half of the settings blob; the white-label type stays untouched. */
+type CaptureSettings = {
+  capture_bodies?: boolean;
+  capture_retention_days?: number | null;
+};
+
 /** The retention half of the settings blob; the white-label type stays untouched. */
 type HistorySettings = {
   record_attempts?: boolean;
   record_audit?: boolean;
   usage_retention_days?: number | null;
   attempts_retention_days?: number | null;
-  capture_retention_days?: number | null;
   audit_retention_days?: number | null;
   system_log_retention_days?: number | null;
 };
@@ -419,7 +440,6 @@ type RetentionDraft = {
   record_audit: boolean;
   usage_retention_days: string;
   attempts_retention_days: string;
-  capture_retention_days: string;
   audit_retention_days: string;
   system_log_retention_days: string;
 };
@@ -429,7 +449,6 @@ const emptyDraft: RetentionDraft = {
   record_audit: true,
   usage_retention_days: "0",
   attempts_retention_days: "",
-  capture_retention_days: "",
   audit_retention_days: "",
   system_log_retention_days: "",
 };
@@ -444,26 +463,26 @@ function draftFrom(stored: HistorySettings): RetentionDraft {
     record_audit: stored.record_audit ?? true,
     usage_retention_days: asText(stored.usage_retention_days) || "0",
     attempts_retention_days: asText(stored.attempts_retention_days),
-    capture_retention_days: asText(stored.capture_retention_days),
     audit_retention_days: asText(stored.audit_retention_days),
     system_log_retention_days: asText(stored.system_log_retention_days),
   };
 }
 
 /** A blank box becomes `null`: the store follows the usage window. */
+function daysFrom(value: string): number | null {
+  const trimmed = value.trim();
+  return trimmed === "" ? null : Math.max(0, Math.min(3650, Number(trimmed) || 0));
+}
+
+/** Stored history's own keys only; captured bodies are the capture card's to write. */
 function patchFrom(draft: RetentionDraft): HistorySettings {
-  const days = (value: string): number | null => {
-    const trimmed = value.trim();
-    return trimmed === "" ? null : Math.max(0, Math.min(3650, Number(trimmed) || 0));
-  };
   return {
     record_attempts: draft.record_attempts,
     record_audit: draft.record_audit,
-    usage_retention_days: days(draft.usage_retention_days),
-    attempts_retention_days: days(draft.attempts_retention_days),
-    capture_retention_days: days(draft.capture_retention_days),
-    audit_retention_days: days(draft.audit_retention_days),
-    system_log_retention_days: days(draft.system_log_retention_days),
+    usage_retention_days: daysFrom(draft.usage_retention_days),
+    attempts_retention_days: daysFrom(draft.attempts_retention_days),
+    audit_retention_days: daysFrom(draft.audit_retention_days),
+    system_log_retention_days: daysFrom(draft.system_log_retention_days),
   };
 }
 

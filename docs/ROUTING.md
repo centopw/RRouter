@@ -58,6 +58,24 @@ resolution, so a client can keep a stable name while the operator repoints it.
 Team-scoped keys are planned only from their own team's connections; shared instance-wide
 accounts are never eligible for a team key.
 
+## Capability endpoints
+
+`/v1/search`, `/v1/rerank` and `/v1/embeddings` route through the same planner — key
+mapping, allowlist, admission, priority, strategy and account failover — but only some
+providers can answer each one, so candidates that cannot are dropped.
+
+| Endpoint | A provider qualifies when | Refused otherwise |
+| --- | --- | --- |
+| `/v1/search` | the compiled native-search list names it: `claude`/`anthropic`, `openai`, `codex`, `xai`, `gemini`. A provider id alone expands to its default search model | `501` before any plan |
+| `/v1/rerank` | a community manifest declares `rerank_url` (`cohere`, `jina` today) | no plan candidate |
+| `/v1/embeddings` | its default dialect is OpenAI Chat or OpenAI Embeddings | `501` |
+
+Each endpoint falls back in the same order: a client's `model` (or, for search, `model` or
+`provider`) wins; otherwise the operator's stored default for that capability is used,
+routed exactly like a client ref; otherwise the endpoint keeps its own missing-model answer.
+See [API → Capability defaults](API.md#capability-defaults) and
+[Compression](COMPRESSION.md) for the input/output trimming that runs before the plan.
+
 ## Headers and traces
 
 Every `/v1` response carries `x-request-id` and `x-trace-id`. The request id links the usage

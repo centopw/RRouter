@@ -13,6 +13,7 @@ import "./index.css";
 import { SectionLayout, Shell } from "./app";
 import { ToastProvider } from "./components/toast";
 import { useIsAdmin } from "./lib/queries";
+import { AppearanceProvider } from "./lib/appearance";
 import { AuthGuard, RequireAdmin } from "./pages/auth/guard";
 
 const queryClient = new QueryClient({
@@ -61,6 +62,10 @@ const Keys = page(() => import("./pages/keys"));
 const QuickStart = page(() => import("./pages/quickstart"));
 const Aliases = page(() => import("./pages/aliases"));
 const Combos = page(() => import("./pages/combos"));
+const Compression = page(() => import("./pages/compression"));
+const CapabilitySearch = page(() => import("./pages/capability/search"));
+const CapabilityRerank = page(() => import("./pages/capability/rerank"));
+const CapabilityEmbeddings = page(() => import("./pages/capability/embeddings"));
 const Templates = page(() => import("./pages/templates"));
 const Evals = page(() => import("./pages/evals"));
 const Models = page(() => import("./pages/models"));
@@ -69,6 +74,7 @@ const Playground = page(() => import("./pages/playground"));
 const Usage = page(() => import("./pages/usage"));
 const SettingsLayout = page(() => import("./pages/settings/layout"));
 const SettingsGeneral = page(() => import("./pages/settings/general"));
+const SettingsAppearance = page(() => import("./pages/settings/appearance"));
 const SettingsRuntime = page(() => import("./pages/settings/runtime"));
 const SettingsProfile = page(() => import("./pages/settings/profile"));
 const SettingsSecurity = page(() => import("./pages/settings/security"));
@@ -180,7 +186,9 @@ const router = createBrowserRouter(
       path: "/",
       element: (
         <AuthGuard>
-          <Shell />
+          <AppearanceProvider>
+            <Shell />
+          </AppearanceProvider>
         </AuthGuard>
       ),
       errorElement: <RouteError />,
@@ -201,6 +209,13 @@ const router = createBrowserRouter(
               ],
             },
             { path: "usage", element: <Usage /> },
+            { path: "compression", element: <AdminPage><Compression /></AdminPage> },
+            { path: "capability/search", element: <AdminPage><CapabilitySearch /></AdminPage> },
+            { path: "capability/rerank", element: <AdminPage><CapabilityRerank /></AdminPage> },
+            {
+              path: "capability/embeddings",
+              element: <AdminPage><CapabilityEmbeddings /></AdminPage>,
+            },
             {
               path: "playground",
               element: <SectionLayout surface="playground" />,
@@ -259,6 +274,7 @@ const router = createBrowserRouter(
               children: [
                 { index: true, element: <Navigate to="/settings/general" replace /> },
                 { path: "general", element: <AdminPage><SettingsGeneral /></AdminPage> },
+                { path: "appearance", element: <SettingsAppearance /> },
                 { path: "runtime", element: <AdminPage><SettingsRuntime /></AdminPage> },
                 { path: "profile", element: <SettingsProfile /> },
                 { path: "security", element: <SettingsSecurity /> },
