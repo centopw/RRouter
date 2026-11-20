@@ -682,3 +682,113 @@ async fn route_explain_returns_the_planned_candidate_without_dispatching() {
     assert_eq!(data["candidates"][0]["dialect"], "google_code_assist");
     assert_eq!(mock.hits(), 0, "explain is a plan, not a dispatch");
 }
+
+/// A terminated account is named in the error and leaves rotation, so the next request for
+/// the same model never contacts it again. Before the taxonomy it was an opaque
+/// `Translation` error and the account was retried on every request.
+#[tokio::test]
+async fn a_suspended_account_is_named_in_the_error_and_leaves_rotation() {
+    let mock = Mock::start(vec![Reply::Json(
+        403,
+        json!({
+            "error": {
+                "code": 403,
+                "status": "TOS_VIOLATION",
+                "message": "The service has been disabled in this account for violation of our \
+                            Terms of Service."
+            }
+        }),
+    )])
+    .await;
+    let h = harness();
+    h.connect(&mock, PROJECT).await;
+    let request = json!({
+        "model": format!("{PROVIDER}/gemini-3-pro"),
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+
+    let (status, body) = h.post("/v1/chat/completions", request.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(
+        body["error"]["code"], "account_suspended",
+        "a client can branch on the class: {body}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("suspended")),
+        "the message names the suspension: {body}"
+    );
+
+    // The retirement write is off the request path; wait for it rather than racing it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let retired = loop {
+        let mut rows = h.state.store.list_connections(None).await.expect("list");
+        let row = rows.pop().expect("the account is still listed");
+        if !row.is_active {
+            break row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the refused account was never taken out of rotation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(
+        retired.refusal.as_deref(),
+        Some("account_suspended"),
+        "the row records that the provider, not an operator, retired it"
+    );
+    assert_eq!(retired.last_error_code, Some(403));
+
+    // The dead account is not a candidate any more, and the upstream is not asked again.
+    let (status, body) = h.post("/v1/chat/completions", request).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the suspended account was contacted once only"
+    );
+}
+
+/// Verification-required arrives on healthy accounts: it cools the account down for this
+/// request but must never retire it, so the next request still has a candidate.
+#[tokio::test]
+async fn a_verification_requirement_cools_the_account_without_retiring_it() {
+    let mock = Mock::start(vec![Reply::Json(
+        403,
+        json!({
+            "error": {
+                "code": 403,
+                "status": "VALIDATION_REQUIRED",
+                "message": "Verify your account to continue"
+            }
+        }),
+    )])
+    .await;
+    let h = harness();
+    h.connect(&mock, PROJECT).await;
+
+    let (status, body) = h
+        .post(
+            "/v1/chat/completions",
+            json!({
+                "model": format!("{PROVIDER}/gemini-3-pro"),
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+    assert_eq!(body["error"]["code"], "account_verification_required");
+
+    let rows = h.state.store.list_connections(None).await.expect("list");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].is_active,
+        "a verification requirement must not retire the account"
+    );
+    assert_eq!(
+        rows[0].refusal, None,
+        "only a permanent refusal is recorded against the row"
+    );
+}

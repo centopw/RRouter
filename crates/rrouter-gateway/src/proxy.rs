@@ -19,7 +19,9 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use rrouter_auth::{Credentials, ProviderSpec};
-use rrouter_core::{ChatRequest, ChatResponse, Dialect, Error, Part, Result, StreamEvent, Usage};
+use rrouter_core::{
+    ChatRequest, ChatResponse, Dialect, Error, Part, Refusal, Result, StreamEvent, Usage,
+};
 use rrouter_router::{Candidate, Plan, PlanRequest, ProviderPolicy};
 use rrouter_store::{AttemptRecord, ConnectionScope, Guardrails, UsageRecord};
 use serde_json::Value;
@@ -2714,6 +2716,22 @@ fn upstream_error(candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
     }
 }
 
+/// The error one upstream answer becomes.
+///
+/// Almost every answer is an ordinary [`Error::Upstream`], pass-through for the client.
+/// Cloud Code Assist can also refuse the *account* itself, which the dispatcher and the
+/// connection row must treat differently, so that class is read here — next to the body it
+/// comes from — and carried as [`Error::AccountRefused`].
+fn answered(candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
+    if is_google_cca(&candidate.provider) {
+        if let Some(refusal) = rrouter_translate::google_cca::refusal(Some(status), bytes) {
+            let detail = rrouter_translate::google_cca::refusal_detail(bytes);
+            return Error::account_refused(&candidate.provider, refusal, &detail);
+        }
+    }
+    upstream_error(candidate, status, bytes)
+}
+
 fn json_response(status: StatusCode, body: Value) -> Response {
     (status, axum::Json(body)).into_response()
 }
@@ -3012,6 +3030,11 @@ impl Attempt<'_> {
     /// Wrap an upstream failure, redacting the text first when the key opted in: a
     /// provider error often echoes part of the prompt, and this string is both stored on
     /// the usage row and returned to the client.
+    ///
+    /// A Cloud Code Assist answer that names an *account* refusal becomes
+    /// [`Error::AccountRefused`] instead of a generic upstream error: the dispatcher then
+    /// fails over without retrying this account, and [`RequestTrace::time`] retires a
+    /// permanently banned one.
     fn upstream_error(&self, candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
         if self.redact_pii {
             let text = String::from_utf8_lossy(bytes);
@@ -3019,10 +3042,10 @@ impl Attempt<'_> {
             if report.redacted {
                 crate::metrics::pii_redacted(crate::metrics::RedactStage::Output, &report);
                 let redacted = Bytes::from(redacted.into_owned());
-                return upstream_error(candidate, status, &redacted);
+                return answered(candidate, status, &redacted);
             }
         }
-        upstream_error(candidate, status, bytes)
+        answered(candidate, status, bytes)
     }
 
     fn provider(&self, candidate: &Candidate) -> Result<&'static ProviderSpec> {
@@ -3967,6 +3990,16 @@ impl RequestTrace {
                 Some(e.to_string()),
             ),
         });
+        // A permanent account refusal takes the connection out of rotation: the credential
+        // is dead at the provider, so leaving it routable pays for the same refusal on
+        // every later request and hides the cause from the operator. Fire and forget, like
+        // every other bookkeeping write on this path: retirement must never delay the
+        // failover that is already in progress.
+        if let Err(e) = &result {
+            if e.refusal().is_some_and(Refusal::is_permanent) {
+                retire_refused_account(state, &target, e);
+            }
+        }
         result
     }
 
@@ -4084,6 +4117,10 @@ impl RequestTrace {
 fn attempt_status(e: &Error) -> u16 {
     match e {
         Error::Upstream { status, .. } => *status,
+        // A refusal carries the provider's own status (403) and the attempt row is how an
+        // operator finds which account answered it, so it must not record 0 the way a
+        // translation failure does.
+        Error::AccountRefused { .. } => e.upstream_status(),
         _ => 0,
     }
 }
@@ -4097,6 +4134,38 @@ fn spawn_latency(state: &AppState, connection: Uuid, latency_ms: u32) {
             .await
         {
             tracing::warn!(error = %e, "latency sample failed");
+        }
+    });
+}
+
+/// Retire a permanently-refused account, off the request path.
+///
+/// The row keeps its credentials — an operator may appeal the ban or replace the sign-in —
+/// but `is_active = 0` takes it out of every model's candidate list and
+/// `connections.refusal` records *why*, so the dashboard can tell a provider suspension
+/// apart from an account somebody switched off by hand. The last error is stored with the
+/// provider's own wording, which is what makes the row actionable without grepping logs.
+fn retire_refused_account(state: &AppState, candidate: &Candidate, err: &Error) {
+    let Some(refusal) = err.refusal() else { return };
+    if !refusal.is_permanent() {
+        // Verification-required is a cooldown, not a death: the breaker already benched the
+        // account and it must come back without an operator touching the row.
+        return;
+    }
+    let store = Arc::clone(&state.store);
+    let connection = candidate.connection;
+    let detail = err.to_string();
+    let code = err.status();
+    tokio::spawn(async move {
+        if let Err(e) = store
+            .terminate_connection(connection, refusal.code(), Some(&detail), Some(code))
+            .await
+        {
+            tracing::warn!(
+                connection = %connection,
+                error = %e,
+                "could not retire a permanently refused account"
+            );
         }
     });
 }

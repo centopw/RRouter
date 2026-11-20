@@ -133,6 +133,7 @@ mod tests {
             last_error: None,
             last_error_code: None,
             last_error_at: None,
+            refusal: None,
             team_id: None,
             owner_user_id: None,
             created_at: 0,

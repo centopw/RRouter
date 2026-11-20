@@ -12,14 +12,30 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 42;
+pub const SCHEMA_VERSION: i64 = 43;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
     V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40,
-    V41, V42,
+    V41, V42, V43,
 ];
+
+/// V43: why a provider retired an account.
+///
+/// `refusal` is the class token (`account_suspended` today) of an upstream refusal of the
+/// *account*, or NULL when the provider has not refused it. It exists because `is_active`
+/// alone cannot say why an account is out of rotation: an operator switching an account off
+/// and a provider terminating it look identical, and only one of them should be undone by
+/// flipping `is_active` back. A refusal is never overwritten by routing bookkeeping — only
+/// [`Store::terminate_connection`] sets it, and re-enabling the account clears it.
+///
+/// `is_active` keeps its existing meaning (the operator's switch) and is set to 0 together
+/// with `refusal` by that same write, which is what removes the account from every model's
+/// candidate list: routing already filters on `is_active`, so no planner change is needed.
+const V43: &str = r#"
+ALTER TABLE connections ADD COLUMN refusal TEXT;
+"#;
 
 /// V42: what one inbound request's compression removed.
 ///
@@ -1537,6 +1553,35 @@ mod tests {
             (output, score, latency, error),
             (None, None, None, None),
             "a queued result has no answer yet"
+        );
+    }
+
+    /// v42 → v43: the refusal column lands NULL, so every existing account reads exactly as
+    /// before — routing as it did, with no provider verdict recorded against it.
+    #[test]
+    fn upgrades_from_v42_landing_v43_connection_refusal() {
+        let mut c = Connection::open_in_memory().expect("open");
+        at_version(&mut c, 42);
+        c.execute(
+            "INSERT INTO connections (id, provider, auth_type, data, created_at, updated_at) \
+             VALUES ('c', 'google-antigravity', 'oauth', X'00', 1, 1)",
+            [],
+        )
+        .expect("v42 connection");
+        assert!(!has_column(&c, "connections", "refusal"));
+        migrate(&mut c).expect("upgrade");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+        let (refusal, active): (Option<String>, i64) = c
+            .query_row(
+                "SELECT refusal, is_active FROM connections WHERE id = 'c'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!(
+            (refusal, active),
+            (None, 1),
+            "an upgraded account keeps routing and carries no refusal"
         );
     }
 

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures_util::StreamExt;
 
-use rrouter_core::{ChatResponse, Error, FinishReason, Usage};
+use rrouter_core::{ChatResponse, Error, FinishReason, Refusal, Usage};
 use rrouter_router::breaker::{BreakerState, ProbeTicket};
 use rrouter_router::dispatch::{AttemptOutcome, RetryPolicy};
 use rrouter_router::stream_dispatch::{byte_stream, collect_stream};
@@ -2283,6 +2283,59 @@ async fn streamed_model_rate_limit_does_not_block_a_sibling_model() {
     assert_eq!(collect_stream(stream).await.expect("body"), b"ok");
     assert!(breaker.check_model(connection, "a").is_some());
     assert!(breaker.check(connection).is_none());
+}
+
+/// An account-level refusal spends no retry on the refused account: the request fails
+/// over on the first answer, because waiting cannot change a verdict about the credential.
+/// The account is only benched by the breaker — for the permanent class the gateway is the
+/// one that retires the row, which no breaker can do.
+#[tokio::test]
+async fn an_account_refusal_fails_over_without_retrying_the_refused_account() {
+    for refusal in [Refusal::Terminated, Refusal::Verification] {
+        let plan = plan_of(2);
+        let refused = plan.candidates[0].connection;
+        let breaker = Arc::new(Breaker::new());
+        let dispatcher =
+            Dispatcher::with_shared_breaker(Arc::clone(&breaker)).with_retry_policy(RetryPolicy {
+                attempts: 3,
+                base: Duration::from_millis(1),
+                max: Duration::from_millis(2),
+                budget: None,
+            });
+        let seen: Arc<Mutex<Vec<Uuid>>> = Arc::default();
+        let outcome = dispatcher
+            .run(&plan, |candidate| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.lock().unwrap().push(candidate.connection);
+                    if candidate.connection == refused {
+                        Err(Error::account_refused("p", refusal, "verify your account"))
+                    } else {
+                        Ok(resp("m"))
+                    }
+                }
+            })
+            .await
+            .expect("the next candidate serves the request");
+        assert_eq!(outcome.candidate.connection, plan.candidates[1].connection);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![refused, plan.candidates[1].connection],
+            "a refused account is contacted once per request, never retried ({refusal:?})"
+        );
+        assert!(
+            breaker.check(refused).is_some(),
+            "one refusal benches the account ({refusal:?})"
+        );
+        // Only cooled down, never retired: the breaker's window is what brings it back, so
+        // a verification-required account is a candidate again once that window passes.
+        assert!(
+            breaker
+                .check_at(refused, Instant::now() + Duration::from_secs(301))
+                .is_none(),
+            "the account is eligible again after the cooldown ({refusal:?})"
+        );
+    }
 }
 
 /// Auth and server failures keep opening the connection-wide breaker.
