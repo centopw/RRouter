@@ -317,6 +317,20 @@ struct QoderPrepared {
     session_id: String,
 }
 
+/// The bearer token a prepared attempt will actually send.
+///
+/// The `401` recovery compares this with what the store holds: if they differ, a peer
+/// already rotated the credential while this request was in flight and the stored token is
+/// the answer, so the refresh endpoint must not be contacted again.
+fn sent_bearer(prepared: &Prepared) -> Option<&str> {
+    prepared
+        .headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+}
+
 fn google_cca_headers(
     spec: &ProviderSpec,
     creds: &Credentials,
@@ -1786,6 +1800,7 @@ async fn handle(
         strip_provider: policy.is_some(),
         client_headers: Some(headers),
         redact_pii,
+        recovered: Mutex::new(Vec::new()),
     };
 
     // Cache eligibility is decided once, before anything is sent: a non-streaming
@@ -2230,6 +2245,7 @@ async fn complete_traced(
         strip_provider: policy.is_some(),
         client_headers: client,
         redact_pii,
+        recovered: Mutex::new(Vec::new()),
     };
 
     if !upstream_stream {
@@ -3057,6 +3073,14 @@ struct Attempt<'a> {
     /// The paying key opted into PII redaction: provider error text is redacted before it
     /// is stored or returned, because an upstream error can echo the prompt.
     redact_pii: bool,
+    /// Connections whose credential this request has already refreshed after a `401`.
+    ///
+    /// One recovery per account per request, never per attempt: the dispatcher retries a
+    /// retryable failure on the same candidate, and a second forced refresh would rotate
+    /// the refresh token again — spending a single-use token twice is what takes the
+    /// connection down. A second account rejected in the same request is a different
+    /// credential and gets its own recovery.
+    recovered: Mutex<Vec<Uuid>>,
 }
 
 impl Attempt<'_> {
@@ -3248,14 +3272,31 @@ impl Attempt<'_> {
             .refresher
             .fresh(self.state.store.as_ref(), spec, candidate.connection)
             .await?;
-        if !custom_base_present(self.state, &candidate.provider, &creds) {
+        self.prepare_with(candidate, spec, &creds, trace).await
+    }
+
+    /// The rest of [`Self::prepare`], for a caller that already holds this attempt's
+    /// credentials.
+    ///
+    /// The `401` recovery path takes this entry point with the values the refresh returned
+    /// instead of re-entering [`Self::prepare`]: asking [`crate::state::AppState::refresher`]
+    /// again would consult the expiry, which a token endpoint that omits `expires_in`
+    /// leaves stale, and a second refresh there would rotate the token a second time.
+    async fn prepare_with(
+        &self,
+        candidate: &Candidate,
+        spec: &'static ProviderSpec,
+        creds: &Credentials,
+        trace: &AttemptTrace,
+    ) -> Result<Prepared> {
+        if !custom_base_present(self.state, &candidate.provider, creds) {
             return Err(Error::Unauthorized(format!(
                 "provider {} needs an account base URL",
                 candidate.provider
             )));
         }
         if is_google_cca(&candidate.provider) {
-            let project = cca_project(&creds)?;
+            let project = cca_project(creds)?;
             // A credential override is a deployment/test statement about where this
             // account goes; the env override applies only to the built-in daily host.
             let daily = match creds.base_url_override.as_deref() {
@@ -3273,7 +3314,7 @@ impl Attempt<'_> {
                     self.upstream_stream,
                 ));
             }
-            let mut headers = google_cca_headers(spec, &creds, self.client_headers)?;
+            let mut headers = google_cca_headers(spec, creds, self.client_headers)?;
             inject_trace_headers(&mut headers, trace);
             return Ok(Prepared {
                 urls,
@@ -3284,10 +3325,10 @@ impl Attempt<'_> {
             });
         }
         if is_qoder(&candidate.provider) {
-            return self.prepare_qoder(spec, &creds, candidate, trace).await;
+            return self.prepare_qoder(spec, creds, candidate, trace).await;
         }
         let (url, dialect) = endpoint(spec, creds.base_url_override.as_deref(), self.inbound);
-        let mut headers = outbound_headers(spec, &creds, self.client_headers)?;
+        let mut headers = outbound_headers(spec, creds, self.client_headers)?;
         // OpenCode Go rejects requests without a session id (`MissingSessionID`). The
         // affinity hash is stable for one conversation and unique across conversations,
         // which is exactly the routing/prompt-cache key OpenCode asks for.
@@ -3450,14 +3491,21 @@ impl Attempt<'_> {
     /// 400 is the upstream's answer, not another invitation to guess — and a repair that
     /// works is remembered per provider+connection, so the next request omits the field
     /// without paying for a probe.
+    ///
+    /// A failure keeps the upstream's status and body ([`Failure::answer`]) rather than only
+    /// the client-facing error: the credential-recovery step above needs the status to tell
+    /// a rejected bearer from every other refusal.
     async fn post_repairing(
         &self,
         candidate: &Candidate,
         prepared: &Prepared,
-    ) -> Result<reqwest::Response> {
+    ) -> std::result::Result<reqwest::Response, Box<Failure>> {
         let mut repair: Vec<&'static str> = Vec::new();
         loop {
-            let wire = self.outbound_dropping(candidate, prepared, &repair)?;
+            // A body that cannot be built never reached the upstream, so it carries no answer.
+            let wire = self
+                .outbound_dropping(candidate, prepared, &repair)
+                .map_err(|error| Box::new(Failure::transport(error)))?;
             let failure = match self.post_with_fallback(candidate, prepared, &wire).await {
                 Ok(resp) => {
                     self.state.envelope_drops.record(
@@ -3470,7 +3518,7 @@ impl Attempt<'_> {
                 Err(failure) => failure,
             };
             let Some(fields) = self.repairable(prepared, &failure, &repair) else {
-                return Err(failure.error);
+                return Err(failure);
             };
             repair.extend(fields);
         }
@@ -3501,6 +3549,112 @@ impl Attempt<'_> {
         (!fields.is_empty()).then_some(fields)
     }
 
+    /// One candidate's upstream response, including the credential-recovery resend.
+    ///
+    /// Every byte the client may see is produced from what this returns, so this is the one
+    /// place a rejected bearer can still be replaced: [`Self::post_repairing`] has read at
+    /// most the status line and an error body, and nothing has been forwarded.
+    async fn attempt_response(
+        &self,
+        candidate: &Candidate,
+        trace: &AttemptTrace,
+    ) -> Result<(reqwest::Response, Dialect)> {
+        let prepared = self.prepare(candidate, trace).await?;
+        let dialect = prepared.dialect;
+        match self.post_repairing(candidate, &prepared).await {
+            Ok(resp) => Ok((resp, dialect)),
+            Err(failure) => {
+                self.recover_rejection(candidate, &prepared, trace, failure)
+                    .await
+            }
+        }
+    }
+
+    /// Turn an upstream `401` on an OAuth connection into one refresh and one resend.
+    ///
+    /// Claude Code rotates the refresh token on use, so the moment the user's own install
+    /// refreshes, the bearer this gateway holds is dead while its expiry still looks fine.
+    /// Without this step a healthy account answers `401` until an operator re-authenticates
+    /// by hand; that is the "account looks broken" loop that spends a subscription.
+    ///
+    /// The recovery is deliberately one refresh and one resend:
+    /// * one, because a second `401` is the account's answer, not an invitation to try
+    ///   again, and every resend of a *rotating* refresh token risks invalidating the
+    ///   connection for good;
+    /// * pre-stream, because the retry replaces the whole response. [`Failure`] only exists
+    ///   below `200`: once a stream has started the status is already `200` and a mid-stream
+    ///   error is forwarded to the client as the upstream sent it, never retried;
+    /// * replayable, because the attempt rebuilds its body from the canonical request
+    ///   ([`Self::body_for`]) for every send, so the resend is the same request with a new
+    ///   bearer rather than a replay of the client's bytes.
+    ///
+    /// An API-key connection has no credential to renew, so its `401` is reported as-is.
+    async fn recover_rejection(
+        &self,
+        candidate: &Candidate,
+        prepared: &Prepared,
+        trace: &AttemptTrace,
+        failure: Box<Failure>,
+    ) -> Result<(reqwest::Response, Dialect)> {
+        let Some((status, _)) = failure.answer.as_ref() else {
+            // A transport failure carries no upstream verdict, so there is no rejection to
+            // recover from.
+            return Err(failure.error);
+        };
+        if *status != 401 {
+            return Err(failure.error);
+        }
+        let Ok(spec) = self.provider(candidate) else {
+            return Err(failure.error);
+        };
+        if !spec.is_oauth() || spec.refresh.is_none() || !self.claim_recovery(candidate.connection)
+        {
+            return Err(failure.error);
+        }
+
+        let creds = self
+            .state
+            .refresher
+            .fresh_after_rejection(
+                self.state.store.as_ref(),
+                spec,
+                candidate.connection,
+                sent_bearer(prepared),
+            )
+            .await?;
+        tracing::debug!(
+            provider = %candidate.provider,
+            connection = %candidate.connection,
+            "upstream rejected the bearer; retrying once with the refreshed credential"
+        );
+
+        let prepared = self.prepare_with(candidate, spec, &creds, trace).await?;
+        let dialect = prepared.dialect;
+        let resp = self
+            .post_repairing(candidate, &prepared)
+            .await
+            .map_err(|failure| failure.error)?;
+        Ok((resp, dialect))
+    }
+
+    /// Claim this request's one credential recovery for `connection`.
+    ///
+    /// The dispatcher retries a retryable failure on the same candidate, so without this the
+    /// same `401` would refresh twice in one request and spend the rotated refresh token —
+    /// the very way a connection is lost. Distinct accounts keep distinct entries: a second
+    /// account rejected in the same request is a different credential and is recovered.
+    fn claim_recovery(&self, connection: Uuid) -> bool {
+        let mut recovered = self
+            .recovered
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if recovered.contains(&connection) {
+            return false;
+        }
+        recovered.push(connection);
+        true
+    }
+
     /// Non-streaming attempt.
     async fn send_once(&self, candidate: Candidate) -> Result<ChatResponse> {
         self.trace
@@ -3515,11 +3669,10 @@ impl Attempt<'_> {
         candidate: Candidate,
         trace: std::sync::Arc<AttemptTrace>,
     ) -> Result<ChatResponse> {
-        let prepared = self.prepare(&candidate, &trace).await?;
-        let resp = self.post_repairing(&candidate, &prepared).await?;
+        let (resp, dialect) = self.attempt_response(&candidate, &trace).await?;
         let bytes = resp.bytes().await.map_err(transport_error)?;
         let value: Value = serde_json::from_slice(&bytes)?;
-        rrouter_translate::parse_response(prepared.dialect, &value)
+        rrouter_translate::parse_response(dialect, &value)
     }
 
     /// Streaming attempt. A non-2xx upstream fails before any byte is committed, so the
@@ -3537,9 +3690,7 @@ impl Attempt<'_> {
         candidate: Candidate,
         trace: std::sync::Arc<AttemptTrace>,
     ) -> Result<ByteStream> {
-        let prepared = self.prepare(&candidate, &trace).await?;
-        let resp = self.post_repairing(&candidate, &prepared).await?;
-        let dialect = prepared.dialect;
+        let (resp, dialect) = self.attempt_response(&candidate, &trace).await?;
         if dialect == Dialect::QoderAgent {
             return qoder_stream(resp).await;
         }
