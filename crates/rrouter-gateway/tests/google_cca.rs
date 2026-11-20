@@ -740,6 +740,14 @@ async fn a_suspended_account_is_named_in_the_error_and_leaves_rotation() {
         "the row records that the provider, not an operator, retired it"
     );
     assert_eq!(retired.last_error_code, Some(403));
+    assert!(
+        retired
+            .last_error
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Terms of Service")),
+        "the retirement keeps the provider's wording: {:?}",
+        retired.last_error
+    );
 
     // The dead account is not a candidate any more, and the upstream is not asked again.
     let (status, body) = h.post("/v1/chat/completions", request).await;
@@ -752,7 +760,9 @@ async fn a_suspended_account_is_named_in_the_error_and_leaves_rotation() {
 }
 
 /// Verification-required arrives on healthy accounts: it cools the account down for this
-/// request but must never retire it, so the next request still has a candidate.
+/// request but must never retire it, so the next request still has a candidate. The reason
+/// is still written down — the breaker that owns the cooldown is in memory, so the row is
+/// the only thing that explains the account after a restart.
 #[tokio::test]
 async fn a_verification_requirement_cools_the_account_without_retiring_it() {
     let mock = Mock::start(vec![Reply::Json(
@@ -781,14 +791,41 @@ async fn a_verification_requirement_cools_the_account_without_retiring_it() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
     assert_eq!(body["error"]["code"], "account_verification_required");
 
-    let rows = h.state.store.list_connections(None).await.expect("list");
-    assert_eq!(rows.len(), 1);
+    // The reason write is off the request path; wait for it rather than racing it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let row = loop {
+        let mut rows = h.state.store.list_connections(None).await.expect("list");
+        let row = rows.pop().expect("the account is still listed");
+        if row.last_error.is_some() {
+            break row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the verification requirement was never recorded on the row"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     assert!(
-        rows[0].is_active,
+        row.is_active,
         "a verification requirement must not retire the account"
     );
     assert_eq!(
-        rows[0].refusal, None,
+        row.refusal, None,
         "only a permanent refusal is recorded against the row"
     );
+    let reason = row.last_error.as_deref().expect("the reason is recorded");
+    assert!(
+        reason.starts_with("account_verification_required: "),
+        "the class token is what makes the row readable after a restart: {reason}"
+    );
+    assert!(
+        reason.contains("Verify your account to continue"),
+        "the provider's own wording rides along: {reason}"
+    );
+    assert_eq!(
+        row.last_error_code,
+        Some(403),
+        "the class's provider status, the number the breaker's window keys on"
+    );
+    assert!(row.last_error_at.is_some());
 }
