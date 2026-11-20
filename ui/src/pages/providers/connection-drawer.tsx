@@ -19,6 +19,7 @@ import {
   type ModelProvider,
   type Team,
 } from "../../lib/api";
+import { refusalView, reenableConsequence } from "../../lib/refusal";
 import {
   baseUrlProblem,
   connectionLabel,
@@ -122,6 +123,9 @@ export function ConnectionDrawer({
     baseProblem !== null;
 
   const currentTest = lastTest && lastTest.id === connection.id ? lastTest : null;
+  // `refusal` is the provider's own reason for retiring the account; `NULL`/absent is an
+  // operator disable, which is why only the former gets a badge and a consequence.
+  const refusal = refusalView(connection.refusal);
   const state = !connection.is_active
     ? { label: "disabled", dot: "muted" as const, text: "text-faint" }
     : connection.backoff_level > 0
@@ -212,10 +216,26 @@ export function ConnectionDrawer({
           {spec?.code ? <Badge tone="neutral">{spec.code}</Badge> : null}
           <span className="text-caption text-faint">{credentialShapeOf(connection)}</span>
           <span className="ml-auto flex items-center gap-1.5 text-caption">
-            <Dot tone={state.dot} />
-            <span className={state.text}>{state.label}</span>
+            {refusal ? (
+              <Badge tone={refusal.tone} title={refusal.title}>
+                {refusal.label}
+              </Badge>
+            ) : (
+              <>
+                <Dot tone={state.dot} />
+                <span className={state.text}>{state.label}</span>
+              </>
+            )}
           </span>
         </section>
+
+        {refusal ? (
+          <AlertBanner tone={refusal.tone} title={refusal.title} className="mb-0">
+            <p>{refusal.description}</p>
+            <p className="mt-1.5">{refusal.fix}</p>
+            <p className="mt-1.5 font-medium text-ink-soft">{reenableConsequence(refusal)}</p>
+          </AlertBanner>
+        ) : null}
 
         {connection.last_error ? (
           <AlertBanner tone="neg" title="Last upstream error" className="mb-0">
@@ -240,8 +260,17 @@ export function ConnectionDrawer({
               loading={toggling}
               disabled={toggling || busy}
               onClick={onToggle}
+              title={
+                !connection.is_active && refusal
+                  ? (reenableConsequence(refusal) ?? undefined)
+                  : undefined
+              }
             >
-              {connection.is_active ? "Disable account" : "Enable account"}
+              {connection.is_active
+                ? "Disable account"
+                : refusal
+                  ? "Re-enable refused account…"
+                  : "Enable account"}
             </Button>
             {currentTest ? (
               <span role="status" className="flex min-w-0 items-center gap-2 text-small tnum">

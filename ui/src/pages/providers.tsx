@@ -11,6 +11,7 @@ import {
 } from "../components/ui";
 import { type Connection, type OAuthProvider } from "../lib/api";
 import { apiCode } from "../lib/auth";
+import { refusalView, reenableConsequence } from "../lib/refusal";
 import {
   useAccountQuotas,
   useAccountSubscriptions,
@@ -62,12 +63,31 @@ export default function Providers() {
   const [notice, setNotice] = useState<ProviderNotice | null>(null);
   const [codesOpen, setCodesOpen] = useState(false);
   const [removing, setRemoving] = useState<Connection | null>(null);
+  /** The refused account whose re-enable is waiting on its consequence being read. */
+  const [reenabling, setReenabling] = useState<Connection | null>(null);
 
   const { invalidate, refreshRegistrySoon, remove, toggle, test, lastTest } =
     useConnectionMutations(setNotice);
   const testingId = test.isPending ? (test.variables ?? null) : null;
 
   const accounts = useMemo(() => connections.data ?? [], [connections.data]);
+
+  /**
+   * The one place a connection changes state, for the row menu and the drawer alike.
+   *
+   * Disabling is the same immediate toggle it always was. Re-enabling a *refused* account is
+   * not: it first shows the consequence that token carries, because re-enabling a suspended
+   * account, an unentitled credential or a rejected build gets the same refusal again. The
+   * request that follows is unchanged — `{ is_active: true }` on the same endpoint.
+   */
+  const requestToggle = (connection: Connection) => {
+    if (!connection.is_active && refusalView(connection.refusal)) {
+      toggle.reset();
+      setReenabling(connection);
+      return;
+    }
+    toggle.mutate({ id: connection.id, active: !connection.is_active });
+  };
 
   const displayOf = useCallback(
     (id: string) => providers.data?.find((p) => p.id === id)?.display ?? id,
@@ -122,6 +142,8 @@ export default function Providers() {
     () => (inspectId ? (accounts.find((account) => account.id === inspectId) ?? null) : null),
     [inspectId, accounts],
   );
+
+  const reenablingView = reenabling ? refusalView(reenabling.refusal) : null;
 
   useEffect(() => {
     if (!inspectId || !connections.isSuccess) return;
@@ -282,6 +304,39 @@ export default function Providers() {
         }}
       />
 
+      <ConfirmDialog
+        open={reenabling !== null}
+        title={reenablingView?.title ?? "Re-enable account"}
+        message={
+          reenablingView ? (
+            <>
+              <p className="font-medium text-fg">
+                {reenabling?.name ?? reenabling?.provider}
+              </p>
+              <p className="mt-1">{reenablingView.description}</p>
+              <p className="mt-2">{reenablingView.fix}</p>
+              <p className="mt-2 font-medium">{reenableConsequence(reenablingView)}</p>
+            </>
+          ) : null
+        }
+        confirmLabel="Re-enable anyway"
+        busy={toggle.isPending}
+        error={toggle.error}
+        onConfirm={() => {
+          if (!reenabling) return;
+          toggle.mutate(
+            { id: reenabling.id, active: true },
+            { onSuccess: () => setReenabling(null) },
+          );
+        }}
+        onClose={() => {
+          if (!toggle.isPending) {
+            toggle.reset();
+            setReenabling(null);
+          }
+        }}
+      />
+
       {notice ? (
         <div
           className={cx(
@@ -351,7 +406,7 @@ export default function Providers() {
           teamName={teamName}
           onConfigure={openInspect}
           onTest={(id) => test.mutate(id)}
-          onToggle={(c) => toggle.mutate({ id: c.id, active: !c.is_active })}
+          onToggle={requestToggle}
           onRemove={(c) => {
             remove.reset();
             setRemoving(c);
@@ -387,7 +442,7 @@ export default function Providers() {
           toggling={toggle.isPending && toggle.variables?.id === inspected.id}
           lastTest={lastTest}
           onTest={() => test.mutate(inspected.id)}
-          onToggle={() => toggle.mutate({ id: inspected.id, active: !inspected.is_active })}
+          onToggle={() => requestToggle(inspected)}
           onRemove={() => {
             remove.reset();
             setRemoving(inspected);
