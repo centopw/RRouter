@@ -284,7 +284,7 @@ impl Harness {
                     base_url_override: Some(mock.url()),
                     ..creds
                 },
-                Some(rrouter_translate::google_cca::USER_AGENT),
+                Some(rrouter_translate::google_cca::user_agent()),
             )
             .await
             .expect("connection");
@@ -442,7 +442,7 @@ async fn openai_client_gets_cca_text_tools_usage_and_the_envelope() {
     );
     assert_eq!(
         header(&calls[0].headers, "user-agent"),
-        rrouter_translate::google_cca::USER_AGENT
+        rrouter_translate::google_cca::user_agent()
     );
     assert_eq!(
         header(&calls[0].headers, "x-goog-api-client"),

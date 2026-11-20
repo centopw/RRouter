@@ -9,7 +9,7 @@
 //! ```json
 //! {
 //!   "model": "gemini-3-pro",
-//!   "userAgent": "antigravity/hub/2.24.0 darwin/arm64",
+//!   "userAgent": "antigravity",
 //!   "requestType": "agent",
 //!   "project": "<cloud project id>",
 //!   "requestId": "agent-<uuid>",
@@ -59,6 +59,8 @@
 //! Text, reasoning (`thought: true`), function calls and usage all arrive incrementally;
 //! the decoder folds them into the canonical [`StreamEvent`] vocabulary.
 
+use std::sync::OnceLock;
+
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
@@ -76,13 +78,127 @@ pub const PROD_HOST: &str = "https://cloudcode-pa.googleapis.com";
 pub const STREAM_PATH: &str = "/v1internal:streamGenerateContent?alt=sse";
 /// Buffered path.
 pub const NON_STREAM_PATH: &str = "/v1internal:generateContent";
-/// `User-Agent` on the wire. The backend fingerprints the client on the
-/// `(aidev_client; os_type=…; arch=…; cl=…)` marker: without it the CCA host rejects the
-/// call, the same way the subscription gate turns away requests that are not the
-/// official client. The values stay fixed rather than following the gateway host, so a
-/// deployment moved to another architecture keeps one stable identity upstream.
-pub const USER_AGENT: &str =
-    "antigravity/hub/2.26.0 (aidev_client; os_type=darwin; arch=arm64; cl=1005016104)";
+/// Product, build string and client id of the wire `User-Agent`. The backend fingerprints
+/// the whole marker, so these stay fixed rather than following this gateway's own version.
+/// Only the host tokens in the marker ([`client_identity`]) describe the machine.
+const USER_AGENT_PRODUCT: &str = "antigravity/hub/2.26.0";
+/// `cl=` component of the marker: the desktop client's build counter.
+const USER_AGENT_CLIENT_ID: &str = "1005016104";
+
+/// The host the Antigravity client declares, as both upstream surfaces observe it.
+///
+/// The backend sees one machine through two different fields: the wire `User-Agent`
+/// carries the `(aidev_client; os_type=…; arch=…; cl=…)` marker, and
+/// `v1internal:loadCodeAssist` / `v1internal:onboardUser` carry `metadata.platform`, a
+/// `ClientMetadata.Platform` enum value. Deriving them from separate places let a single
+/// client announce `os_type=darwin; arch=arm64` on the wire while telling project
+/// discovery `platform: 3` (Linux x64) — two layers of one client disagreeing about the
+/// machine, which is a stronger abuse signal than either value alone.
+///
+/// [`client_identity`] is the single source for both: the marker tokens below and
+/// [`Self::platform`] are resolved together from the same host pair, so they cannot
+/// disagree. Do not derive either value anywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientIdentity {
+    os_type: &'static str,
+    arch: &'static str,
+    platform: i32,
+}
+
+impl ClientIdentity {
+    /// `os_type=` token of the wire marker: `darwin`, `linux` or `windows`.
+    pub const fn os_type(&self) -> &'static str {
+        self.os_type
+    }
+
+    /// `arch=` token of the wire marker: `x86_64`, `arm64` or `aarch64`.
+    pub const fn arch(&self) -> &'static str {
+        self.arch
+    }
+
+    /// The `ClientMetadata.Platform` value naming the same host as [`Self::os_type`] and
+    /// [`Self::arch`]: 1 macOS x64, 2 macOS arm64, 3 Linux x64, 4 Linux arm64, 5 Windows.
+    pub const fn platform(&self) -> i32 {
+        self.platform
+    }
+
+    /// The wire `User-Agent` for this identity. Product and client id never vary; the
+    /// `os_type=` and `arch=` tokens are the host [`client_identity`] resolved.
+    pub fn user_agent(&self) -> String {
+        format!(
+            "{USER_AGENT_PRODUCT} (aidev_client; os_type={}; arch={}; cl={USER_AGENT_CLIENT_ID})",
+            self.os_type, self.arch
+        )
+    }
+}
+
+/// Identity of the host this build runs on: one read of `std::env::consts` feeding both
+/// the wire marker and the platform enum.
+pub fn client_identity() -> ClientIdentity {
+    identity_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// [`client_identity`]'s wire `User-Agent`, resolved once per process.
+///
+/// The string is sent on every CCA call and every catalogue/discovery request, and it is
+/// a pure function of the host, so it is cached. This replaces the former `USER_AGENT`
+/// constant, which hardcoded the macOS arm64 host and therefore contradicted
+/// [`ClientIdentity::platform`] on every other machine.
+pub fn user_agent() -> &'static str {
+    static WIRE: OnceLock<String> = OnceLock::new();
+    WIRE.get_or_init(|| client_identity().user_agent())
+}
+
+/// The fallback identity for a host `ClientMetadata.Platform` cannot name: Linux x64.
+///
+/// One documented constant, not a second rule: an unrecognized host (FreeBSD, a 32-bit
+/// ARM Linux, an architecture the enum has no member for) declares the Linux x64 identity
+/// on **both** layers, so it can never end up with a marker and an enum that disagree.
+/// The old `_ => 0` answered a value that is not a member of the enum at all.
+const FALLBACK_IDENTITY: ClientIdentity = ClientIdentity {
+    os_type: "linux",
+    arch: "x86_64",
+    platform: 3,
+};
+
+/// The one table both layers read: host `(OS, ARCH)` → marker tokens and platform code.
+///
+/// Every row names a real `ClientMetadata.Platform` member, so no supported host declares
+/// `0`. macOS keeps the desktop client's own `darwin`/`arm64` vocabulary because that
+/// spelling is the one upstream is known to accept; the other rows spell the Rust host
+/// names (`std::env::consts::OS`/`ARCH`), which is the value the enum is derived from.
+/// Windows has a single enum member and no arch distinction there, so every Windows host
+/// declares the x64 marker with it.
+fn identity_for(os: &'static str, arch: &'static str) -> ClientIdentity {
+    match (os, arch) {
+        ("macos", "x86_64") => ClientIdentity {
+            os_type: "darwin",
+            arch: "x86_64",
+            platform: 1,
+        },
+        ("macos", "aarch64") => ClientIdentity {
+            os_type: "darwin",
+            arch: "arm64",
+            platform: 2,
+        },
+        ("linux", "x86_64") => ClientIdentity {
+            os_type: "linux",
+            arch: "x86_64",
+            platform: 3,
+        },
+        ("linux", "aarch64") => ClientIdentity {
+            os_type: "linux",
+            arch: "aarch64",
+            platform: 4,
+        },
+        ("windows", _) => ClientIdentity {
+            os_type: "windows",
+            arch: "x86_64",
+            platform: 5,
+        },
+        _ => FALLBACK_IDENTITY,
+    }
+}
 
 /// `userAgent` inside the envelope. The desktop client sends the bare product name here
 /// and the long fingerprint only on the wire; the two are not the same string.
@@ -1126,6 +1242,93 @@ mod tests {
         req.max_tokens = Some(1024);
         req.temperature = Some(0.2);
         req
+    }
+
+    /// The wire marker is the machine this build runs on, not one fixed host.
+    ///
+    /// The format is pinned rather than the values: a refactor may change which host is
+    /// reported, never the marker shape, and never back to a hardcoded `darwin`.
+    #[test]
+    fn the_wire_marker_carries_the_resolved_host_tokens() {
+        let identity = client_identity();
+        let marker = user_agent();
+        assert_eq!(
+            marker,
+            format!(
+                "antigravity/hub/2.26.0 (aidev_client; os_type={}; arch={}; cl=1005016104)",
+                identity.os_type(),
+                identity.arch()
+            ),
+            "the marker is the resolved host, not a fixed arch"
+        );
+        assert!(
+            marker.starts_with("antigravity/hub/2.26.0 (aidev_client; "),
+            "{marker}"
+        );
+        assert!(marker.ends_with("; cl=1005016104)"), "{marker}");
+        assert_eq!(marker.matches("os_type=").count(), 1, "{marker}");
+        assert_eq!(marker.matches("arch=").count(), 1, "{marker}");
+        assert!(
+            !marker.contains("2.24.0"),
+            "the product version does not follow the host: {marker}"
+        );
+        if std::env::consts::OS != "macos" {
+            assert!(
+                !marker.contains("darwin"),
+                "a non-macOS host must not announce darwin: {marker}"
+            );
+        }
+        assert_eq!(user_agent(), marker, "the cached string is stable");
+    }
+
+    /// Every host pair the enum can name resolves to its own platform code and marker,
+    /// so the two layers of the client always describe the same machine.
+    #[test]
+    fn every_supported_host_has_one_identity() {
+        let rows = [
+            (("macos", "x86_64"), 1, "darwin", "x86_64"),
+            (("macos", "aarch64"), 2, "darwin", "arm64"),
+            (("linux", "x86_64"), 3, "linux", "x86_64"),
+            (("linux", "aarch64"), 4, "linux", "aarch64"),
+            (("windows", "x86_64"), 5, "windows", "x86_64"),
+            (("windows", "aarch64"), 5, "windows", "x86_64"),
+        ];
+        for ((os, arch), platform, os_type, arch_token) in rows {
+            let identity = identity_for(os, arch);
+            assert_eq!(identity.platform(), platform, "{os}/{arch}");
+            assert_eq!(identity.os_type(), os_type, "{os}/{arch}");
+            assert_eq!(identity.arch(), arch_token, "{os}/{arch}");
+            assert!(
+                identity
+                    .user_agent()
+                    .contains(&format!("os_type={os_type}; arch={arch_token}; cl=")),
+                "{}",
+                identity.user_agent()
+            );
+        }
+        assert_eq!(
+            identity_for(std::env::consts::OS, std::env::consts::ARCH),
+            client_identity(),
+            "the table is the only source the resolved identity reads"
+        );
+    }
+
+    /// A host the enum cannot name gets the documented fallback on both layers, never the
+    /// `0` that used to stand for "no idea" and is not an enum member at all.
+    #[test]
+    fn an_unnamed_host_declares_the_documented_fallback() {
+        let freebsd = identity_for("freebsd", "x86_64");
+        assert_eq!(
+            freebsd,
+            identity_for("redox", "aarch64"),
+            "one fallback identity, whatever the unrecognized host"
+        );
+        assert_eq!(
+            (freebsd.platform(), freebsd.os_type(), freebsd.arch()),
+            (3, "linux", "x86_64"),
+            "the fallback is a real ClientMetadata.Platform member"
+        );
+        assert!(freebsd.user_agent().contains("os_type=linux; arch=x86_64;"));
     }
 
     #[test]

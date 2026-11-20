@@ -631,7 +631,7 @@ async fn probe(
     if is_cca {
         headers.insert(
             axum::http::header::USER_AGENT,
-            axum::http::HeaderValue::from_static(rrouter_translate::google_cca::USER_AGENT),
+            axum::http::HeaderValue::from_static(rrouter_translate::google_cca::user_agent()),
         );
         headers.insert(
             "x-goog-api-client",
