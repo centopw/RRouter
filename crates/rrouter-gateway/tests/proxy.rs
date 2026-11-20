@@ -470,10 +470,12 @@ impl Harness {
     /// `refresh_token` doubles as the test's identity at the shared token endpoint, so
     /// counters cannot race another test's refresh.
     async fn connect_stale_oauth(&self, mock: &Mock, refresh_token: &str) -> uuid::Uuid {
-        // The token endpoint has to be up — and its process-wide override in place —
-        // before the request that will refresh: the environment is read once, on the first
-        // refresh this process performs.
+        // The token endpoint has to be up — and its override in place — before the request
+        // that will refresh. Forcing the shared endpoint sets the environment; the reload
+        // then installs it even though an earlier test in this process populated the
+        // override cache before the variable existed.
         LazyLock::force(&TOKEN_ENDPOINT);
+        rrouter_auth::reload_overrides();
         let creds = Credentials {
             access_token: Some(STALE_ACCESS_TOKEN.into()),
             refresh_token: Some(refresh_token.into()),
