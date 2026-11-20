@@ -4187,14 +4187,15 @@ impl RequestTrace {
                 Some(e.to_string()),
             ),
         });
-        // A permanent account refusal takes the connection out of rotation: the credential
-        // is dead at the provider, so leaving it routable pays for the same refusal on
-        // every later request and hides the cause from the operator. Fire and forget, like
-        // every other bookkeeping write on this path: retirement must never delay the
-        // failover that is already in progress.
+        // An account refusal is recorded on the connection row: a permanent one takes it out
+        // of rotation (the credential is dead at the provider, so leaving it routable pays for
+        // the same refusal on every later request and hides the cause from the operator), and
+        // a recoverable one — verification required — only records why it is cooling down, so
+        // the reason survives a restart. Fire and forget, like every other bookkeeping write
+        // on this path: neither may delay the failover that is already in progress.
         if let Err(e) = &result {
-            if e.refusal().is_some_and(Refusal::is_permanent) {
-                retire_refused_account(state, &target, e);
+            if let Some(refusal) = e.refusal() {
+                record_account_refusal(state, target.connection, refusal, &e.to_string());
             }
         }
         result
@@ -4335,42 +4336,60 @@ fn spawn_latency(state: &AppState, connection: Uuid, latency_ms: u32) {
     });
 }
 
-/// Retire a permanently-refused account, off the request path.
+/// Record an upstream refusal of an account on its row — the single write both refusal
+/// classes go through.
 ///
-/// The row keeps its credentials — an operator may appeal the ban or replace the sign-in —
-/// but `is_active = 0` takes it out of every model's candidate list and
-/// `connections.refusal` records *why*, so the dashboard can tell a provider suspension
-/// apart from an account somebody switched off by hand. The last error is stored with the
-/// provider's own wording, which is what makes the row actionable without grepping logs.
-fn retire_refused_account(state: &AppState, candidate: &Candidate, err: &Error) {
-    let Some(refusal) = err.refusal() else { return };
-    if !refusal.is_permanent() {
-        // Verification-required is a cooldown, not a death: the breaker already benched the
-        // account and it must come back without an operator touching the row. A stale client
-        // identity is not the account's fault either, so it stays in rotation as well.
-        return;
-    }
-    retire_connection(state, candidate.connection, refusal, &err.to_string());
-}
-
-/// The retirement write itself: `is_active = 0` plus `connections.refusal`.
+/// The classes need opposite persistence, so the branch lives here rather than at each
+/// carrier (the HTTP answer and the terminal error frame of a stream), where one of them
+/// could be forgotten:
 ///
-/// Called by both carriers a refusal can arrive on — the HTTP answer and the terminal error
-/// frame of a stream — so the row records the same class however the provider said it. The
-/// status stored is the class's own, never the wire's (see [`Refusal::upstream_status`]).
-fn retire_connection(state: &AppState, connection: Uuid, refusal: Refusal, detail: &str) {
+/// * **permanent** ([`Refusal::is_permanent`]) — the credential is dead at the provider, so
+///   the row is retired: `is_active = 0` plus `connections.refusal` carrying the class
+///   token. No later request changes that verdict; an operator re-enabling the row is the
+///   only way back, which is why the token must not be inferred from `is_active` alone.
+/// * **recoverable** ([`Refusal::Verification`]) — the account is healthy and only a human
+///   can clear the provider's prompt, so routing state stays exactly as it was
+///   (`is_active = 1`, `refusal` NULL) and the breaker alone owns the cooldown. Only the
+///   *reason* is persisted, because the breaker is in memory: without the row's
+///   `last_error`/`last_error_code`/`last_error_at` a restart leaves an operator staring at
+///   a healthy-looking account with no idea it needs a browser round-trip, or at an
+///   unexplained cooldown it cannot tell from a flake.
+/// * **our defect** ([`Refusal::ClientOutdated`]) — nothing about the account is wrong, so
+///   nothing is written; blaming the row for a stale client identity would hide a build
+///   problem behind an account problem.
+///
+/// Fire and forget, like every other bookkeeping write on this path: neither write may
+/// delay the failover that is already in progress. Recording the recoverable class is
+/// idempotent in the store, so the same refusal arriving on repeated requests costs one
+/// index probe and no write.
+fn record_account_refusal(state: &AppState, connection: Uuid, refusal: Refusal, detail: &str) {
     let store = Arc::clone(&state.store);
     let detail = detail.to_owned();
+    // The class's own status, never the wire's (see [`Refusal::upstream_status`]).
     let code = refusal.upstream_status();
     tokio::spawn(async move {
-        if let Err(e) = store
-            .terminate_connection(connection, refusal.code(), Some(&detail), Some(code))
-            .await
-        {
+        let outcome = if refusal.is_permanent() {
+            store
+                .terminate_connection(connection, refusal.code(), Some(&detail), Some(code))
+                .await
+        } else if matches!(refusal, Refusal::Verification) {
+            store
+                .record_connection_refusal_reason(
+                    connection,
+                    refusal.code(),
+                    Some(&detail),
+                    Some(code),
+                )
+                .await
+        } else {
+            return;
+        };
+        if let Err(e) = outcome {
             tracing::warn!(
                 connection = %connection,
+                refusal = refusal.code(),
                 error = %e,
-                "could not retire a permanently refused account"
+                "could not record an account refusal on the connection row"
             );
         }
     });
@@ -4756,23 +4775,22 @@ impl ResponseStream {
             },
         };
         // A refusal that arrived as an `event: error` frame cannot fail over — the stream is
-        // already the client's answer — but the account must still leave rotation for every
-        // later request, exactly like one refused before the stream opened.
+        // already the client's answer — but the account must still be recorded for every
+        // later request, exactly like one refused before the stream opened: retired when the
+        // class is permanent, its reason noted when it is a recoverable verification.
         if let Some(refusal) = self.inner.terminal_refusal {
-            if refusal.is_permanent() {
-                let detail = self
-                    .inner
-                    .terminal_error
-                    .as_ref()
-                    .map(|(_, message)| message.as_str())
-                    .unwrap_or_default();
-                retire_connection(
-                    &pending.state,
-                    pending.candidate.connection,
-                    refusal,
-                    detail,
-                );
-            }
+            let detail = self
+                .inner
+                .terminal_error
+                .as_ref()
+                .map(|(_, message)| message.as_str())
+                .unwrap_or_default();
+            record_account_refusal(
+                &pending.state,
+                pending.candidate.connection,
+                refusal,
+                detail,
+            );
         }
         record_once(
             &pending.state,
