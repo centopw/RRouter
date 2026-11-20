@@ -759,6 +759,7 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
              ALTER TABLE usage DROP COLUMN requested_model; ALTER TABLE usage DROP COLUMN finish_reason; \
              ALTER TABLE usage DROP COLUMN reasoning_effort; ALTER TABLE usage DROP COLUMN reasoning_tokens; \
              ALTER TABLE usage DROP COLUMN session_id; \
+             ALTER TABLE connections DROP COLUMN refusal; \
              PRAGMA user_version = 29;",
         )
         .expect("rewind to v29");

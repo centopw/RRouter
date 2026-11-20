@@ -7,6 +7,6 @@ pub mod sse;
 pub mod types;
 
 pub use dialect::Dialect;
-pub use error::{Error, Result};
+pub use error::{Error, Refusal, Result};
 pub use sse::SseCodec;
 pub use types::*;

@@ -44,6 +44,17 @@ All notable changes. Dates are local; versions follow semver once tagged.
   On Runtime, captured-body retention moves into the Request capture card, so Stored
   history no longer edits the same setting; each card saves only its own keys.
 
+### Bug Fixes
+
+- **Suspended Antigravity accounts leave rotation.** Cloud Code Assist refusals are now
+  classified instead of flattened into a translation error: a `TOS_VIOLATION` answer (or
+  the "service has been disabled in this account" wording) retires the connection —
+  `is_active = 0` plus the new `connections.refusal` token (schema V43) — so it stops being
+  a candidate for every model and the client gets a `403 account_suspended` naming the
+  suspension. A `VALIDATION_REQUIRED` / "Verify your account to continue" answer is
+  recoverable and never retires the account. Neither class is retried on the same account
+  within a request. See [Providers → Google Antigravity](docs/PROVIDERS.md#google-antigravity-cloud-code-assist).
+
 ## 0.31.0 — 2026-11-18
 
 ### Features

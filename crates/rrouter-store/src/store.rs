@@ -48,6 +48,12 @@ pub struct Connection {
     pub last_error: Option<String>,
     pub last_error_code: Option<u16>,
     pub last_error_at: Option<i64>,
+    /// Class token of an upstream refusal of this *account*
+    /// ([`rrouter_core::Refusal::code`]), or `None` when the provider has not refused it.
+    /// A non-`None` value always travels with `is_active = false`: the account was retired
+    /// by the provider, not switched off by an operator, and routing filters on
+    /// `is_active` so it stops being a candidate for every model.
+    pub refusal: Option<String>,
     /// Owning team. `None` means the account is shared/instance-wide: it serves global
     /// (non-team) keys and admin probes, and is deliberately **not** visible to any team
     /// scope — a team key must not spend an operator's shared account.
@@ -1526,6 +1532,40 @@ impl Store {
         Ok(())
     }
 
+    /// Retire a connection the provider permanently refused, with the class token and the
+    /// error it answered with.
+    ///
+    /// `is_active = 0` is what removes the account from routing — the planner only ever
+    /// considers active rows, for every model — and `refusal` records that a *provider*
+    /// decided this, so the dashboard can tell it apart from an operator switching an
+    /// account off. `backoff_level` is zeroed: a cooldown is meaningless on a row that no
+    /// longer routes. The credentials stay sealed in place, because the appeal path or a
+    /// replaced sign-in is an operator decision, taken by re-enabling the account.
+    pub async fn terminate_connection(
+        &self,
+        id: Uuid,
+        refusal: &str,
+        reason: Option<&str>,
+        code: Option<u16>,
+    ) -> Result<()> {
+        let conn = self.conn();
+        let now = now();
+        let mut stmt = conn
+            .prepare(
+                "UPDATE connections SET is_active = 0, refusal = ?2, backoff_level = 0, \
+                 last_error = ?3, last_error_code = ?4, last_error_at = ?5, updated_at = ?5 \
+                 WHERE id = ?1",
+            )
+            .map_err(migrations::db_err)?;
+        let n = stmt
+            .execute(params![id.to_string(), refusal, reason, code, now])
+            .map_err(migrations::db_err)?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("connection {id}")));
+        }
+        Ok(())
+    }
+
     /// Lower `priority` values are tried first by the planner; equal values round-robin.
     pub async fn set_connection_priority(&self, id: Uuid, priority: i32) -> Result<()> {
         let conn = self.conn();
@@ -1625,13 +1665,20 @@ impl Store {
     }
 
     /// Take a connection out of (or back into) routing without deleting its credentials.
+    ///
+    /// Re-enabling clears `refusal` as well as the cooldown: an operator who turns a
+    /// terminated account back on has appealed the ban or replaced the sign-in, so the
+    /// provider's verdict must not outlive that decision and lock the row out of routing
+    /// again.
     pub async fn set_connection_active(&self, id: Uuid, active: bool) -> Result<()> {
         let conn = self.conn();
+        let sql = if active {
+            "UPDATE connections SET is_active = 1, refusal = NULL, updated_at = ?2 WHERE id = ?1"
+        } else {
+            "UPDATE connections SET is_active = 0, updated_at = ?2 WHERE id = ?1"
+        };
         let n = conn
-            .execute(
-                "UPDATE connections SET is_active = ?2, updated_at = ?3 WHERE id = ?1",
-                params![id.to_string(), i64::from(active), now()],
-            )
+            .execute(sql, params![id.to_string(), now()])
             .map_err(migrations::db_err)?;
         if n == 0 {
             return Err(Error::NotFound(format!("connection {id}")));
@@ -1698,6 +1745,7 @@ impl Store {
             last_error: raw.last_error,
             last_error_code: raw.last_error_code,
             last_error_at: raw.last_error_at,
+            refusal: raw.refusal,
             team_id: raw.team_id,
             owner_user_id: raw.owner_user_id,
             created_at: raw.created_at,
@@ -4350,7 +4398,7 @@ impl CredentialStore for Store {
 
 const CONN_COLUMNS: &str = "id, provider, auth_type, name, email, priority, is_active, data, \
                             backoff_level, last_error, last_error_code, last_error_at, \
-                            created_at, updated_at, weight, team_id, owner_user_id";
+                            created_at, updated_at, weight, team_id, owner_user_id, refusal";
 
 /// Columns of a [`PromptTemplate`], in the order [`row_to_template`] reads them. Shared
 /// by every reader so a new column cannot desynchronize one query from the rest.
@@ -4434,6 +4482,7 @@ struct RawConnection {
     weight: u32,
     team_id: Option<Uuid>,
     owner_user_id: Option<Uuid>,
+    refusal: Option<String>,
 }
 
 /// `(sql, args)` restricting a `usage` scan to `teams`, with numbered placeholders that
@@ -4553,6 +4602,7 @@ fn row_to_connection(r: &Row<'_>) -> rusqlite::Result<RawConnection> {
         weight: (r.get::<_, i64>(14)?).clamp(i64::from(MIN_WEIGHT), i64::from(MAX_WEIGHT)) as u32,
         team_id: opt_uuid_col(r.get(15)?)?,
         owner_user_id: opt_uuid_col(r.get(16)?)?,
+        refusal: r.get(17)?,
     })
 }
 

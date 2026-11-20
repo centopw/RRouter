@@ -250,6 +250,7 @@ const UNDO_AFTER_V24: &str = "\
     ALTER TABLE usage DROP COLUMN reasoning_effort; ALTER TABLE usage DROP COLUMN reasoning_tokens; \
     ALTER TABLE usage DROP COLUMN session_id; \
     DROP INDEX IF EXISTS idx_connections_team; \
+    ALTER TABLE connections DROP COLUMN refusal; \
     ALTER TABLE connections DROP COLUMN owner_user_id; \
     ALTER TABLE connections DROP COLUMN team_id; \
     ALTER TABLE user_sessions DROP COLUMN user_agent; \
@@ -2288,6 +2289,71 @@ fn connection_crud_status_and_list_filter() {
         assert!(s.delete_connection(a.id).await.expect("del"));
         assert!(!s.delete_connection(a.id).await.expect("del again"));
         assert!(s.get_connection(a.id).await.expect("get").is_none());
+    });
+}
+
+/// A provider retirement is a different fact from an operator switching an account off:
+/// it leaves a refusal token behind, and only re-enabling the account clears it.
+#[test]
+fn a_terminated_connection_records_why_it_left_rotation() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let conn = s
+            .create_connection("google-antigravity", "oauth", creds("a"), None)
+            .await
+            .expect("connection");
+        assert_eq!(conn.refusal, None, "a fresh account has no refusal");
+        assert!(conn.is_active);
+
+        s.terminate_connection(
+            conn.id,
+            "account_suspended",
+            Some("upstream account suspended: disabled for a terms-of-service violation"),
+            Some(403),
+        )
+        .await
+        .expect("terminate");
+
+        let retired = s.get_connection(conn.id).await.expect("get").expect("row");
+        assert!(!retired.is_active, "a terminated account leaves routing");
+        assert_eq!(
+            retired.refusal.as_deref(),
+            Some("account_suspended"),
+            "the class is stored, not inferred from is_active"
+        );
+        assert_eq!(retired.last_error_code, Some(403));
+        assert!(
+            retired
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("terms-of-service")),
+            "the provider's own wording is what makes the row actionable"
+        );
+        assert_eq!(retired.backoff_level, 0, "a retired row needs no cooldown");
+        // It is still listed: an admin read is how an operator finds it again.
+        assert_eq!(s.list_connections(None).await.expect("list").len(), 1);
+
+        // Re-enabling is the operator's override and clears the verdict.
+        s.set_connection_active(conn.id, true)
+            .await
+            .expect("enable");
+        let back = s.get_connection(conn.id).await.expect("get").expect("row");
+        assert!(back.is_active);
+        assert_eq!(back.refusal, None);
+
+        // Disabling by hand is not a refusal, so it leaves the token alone (here: absent).
+        s.set_connection_active(conn.id, false)
+            .await
+            .expect("disable");
+        let off = s.get_connection(conn.id).await.expect("get").expect("row");
+        assert!(!off.is_active);
+        assert_eq!(off.refusal, None);
+
+        assert!(s
+            .terminate_connection(Uuid::new_v4(), "account_suspended", None, Some(403))
+            .await
+            .is_err());
     });
 }
 

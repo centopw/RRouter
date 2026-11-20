@@ -757,6 +757,13 @@ pub(crate) fn retry_wait(
     if err.is_rate_limited() {
         return None;
     }
+    // An account-level refusal is a fact about the credential, so the same candidate
+    // answers the same way however long this request waits: fail over instead of sleeping.
+    // A permanently refused account is retired by the gateway; a verification-required one
+    // is cooling down and becomes eligible again for a *later* request.
+    if err.refusal().is_some() {
+        return None;
+    }
     let wait = retry.delay(retries, retry_after(err), clock_fraction());
     within_budget(deadline, wait).then_some(wait)
 }
@@ -767,7 +774,10 @@ pub(crate) fn status_of(err: &Error) -> u16 {
     match err {
         Error::Upstream { status, .. } => *status,
         Error::Timeout(_) | Error::Transport(_) => 0,
-        _ => err.status(),
+        // A refusal records the provider's own 403 (see `Error::upstream_status`), so a
+        // verification-required account is benched for the auth-failure window instead of
+        // being probed again on the very next request.
+        _ => err.upstream_status(),
     }
 }
 

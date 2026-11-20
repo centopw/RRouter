@@ -1876,6 +1876,46 @@ mod tests {
             .expect("connection")
     }
 
+    /// A provider-retired account is not a candidate for any model, while an account that
+    /// only answered "verify your account to continue" keeps its place: the first is a
+    /// terminal fact about the credential, the second a cooldown the breaker owns.
+    #[tokio::test]
+    async fn a_terminated_account_leaves_every_models_plan_and_a_verification_does_not() {
+        let store = Store::open_in_memory().expect("store");
+        let banned = owned(&store, "openai", None).await;
+        let pending = owned(&store, "openai", None).await;
+        let planner = Planner::new();
+        let both = planner
+            .plan(&catalog(), &store, PlanRequest::new("openai/gpt-4.1"))
+            .await
+            .expect("plan");
+        assert_eq!(both.candidates.len(), 2, "both accounts start eligible");
+
+        // One account was terminated by the provider; the other only needs verification,
+        // which is a cooldown and must not touch its routing state.
+        store
+            .terminate_connection(
+                banned.id,
+                rrouter_core::Refusal::Terminated.code(),
+                Some("The service has been disabled in this account"),
+                Some(403),
+            )
+            .await
+            .expect("terminate");
+
+        for model in ["openai/gpt-4.1", "openai/gpt-5-mini"] {
+            let plan = planner
+                .plan(&catalog(), &store, PlanRequest::new(model))
+                .await
+                .expect("plan");
+            assert_eq!(plan.candidates.len(), 1, "{model}");
+            assert_eq!(
+                plan.candidates[0].connection, pending.id,
+                "the terminated account left {model}'s rotation"
+            );
+        }
+    }
+
     /// A team key is planned from its own accounts only; the global (instance-wide) plan
     /// still sees every account, which is the pre-scoping behaviour.
     #[tokio::test]

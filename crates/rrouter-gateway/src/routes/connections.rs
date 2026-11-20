@@ -49,6 +49,9 @@ pub struct ConnectionView {
     pub backoff_level: u32,
     pub last_error: Option<String>,
     pub last_error_code: Option<u16>,
+    /// Class token of a provider refusal that retired this account
+    /// (`account_suspended`), or `null` when the account left rotation for another reason.
+    pub refusal: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -79,6 +82,7 @@ impl From<&Connection> for ConnectionView {
             backoff_level: c.backoff_level,
             last_error: c.last_error.clone(),
             last_error_code: c.last_error_code,
+            refusal: c.refusal.clone(),
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
@@ -1109,6 +1113,7 @@ mod tests {
             last_error: None,
             last_error_code: None,
             last_error_at: None,
+            refusal: None,
             team_id: None,
             owner_user_id: None,
             created_at: 0,
@@ -1144,6 +1149,7 @@ mod tests {
             last_error: None,
             last_error_code: None,
             last_error_at: None,
+            refusal: None,
             team_id: None,
             owner_user_id: None,
             created_at: 0,
