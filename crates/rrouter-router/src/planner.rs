@@ -1892,7 +1892,9 @@ mod tests {
         assert_eq!(both.candidates.len(), 2, "both accounts start eligible");
 
         // One account was terminated by the provider; the other only needs verification,
-        // which is a cooldown and must not touch its routing state.
+        // which is a cooldown and must not touch its routing state. Recording that reason is
+        // what makes it observable after a restart, and it must not cost the account a place
+        // in any plan.
         store
             .terminate_connection(
                 banned.id,
@@ -1902,6 +1904,15 @@ mod tests {
             )
             .await
             .expect("terminate");
+        store
+            .record_connection_refusal_reason(
+                pending.id,
+                rrouter_core::Refusal::Verification.code(),
+                Some("upstream account needs verification: verify your account to continue"),
+                Some(403),
+            )
+            .await
+            .expect("record verification reason");
 
         for model in ["openai/gpt-4.1", "openai/gpt-5-mini"] {
             let plan = planner

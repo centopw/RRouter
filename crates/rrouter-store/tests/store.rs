@@ -2357,6 +2357,122 @@ fn a_terminated_connection_records_why_it_left_rotation() {
     });
 }
 
+/// A recoverable refusal — the provider asking for a browser round-trip — must be visible
+/// on the row after a restart *without* changing what the row means to routing: `is_active`
+/// and `refusal` are the permanent verdict's columns, so the reason lands in the last-error
+/// triple instead and the account stays a candidate for every model.
+#[test]
+fn a_recoverable_refusal_records_its_reason_and_keeps_routing() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let conn = s
+            .create_connection("google-antigravity", "oauth", creds("a"), None)
+            .await
+            .expect("connection");
+        let reason = "upstream account needs verification: verify your account to continue";
+
+        s.record_connection_refusal_reason(
+            conn.id,
+            "account_verification_required",
+            Some(reason),
+            Some(403),
+        )
+        .await
+        .expect("record");
+
+        let row = s.get_connection(conn.id).await.expect("get").expect("row");
+        assert!(
+            row.is_active,
+            "a verification prompt is a cooldown, not a retirement"
+        );
+        assert_eq!(
+            row.refusal, None,
+            "`refusal` is the permanent verdict's column and must stay NULL"
+        );
+        assert_eq!(
+            row.backoff_level, 0,
+            "the breaker owns the cooldown; this write must not touch it"
+        );
+        let stored = row
+            .last_error
+            .as_deref()
+            .expect("the reason survives a restart");
+        assert!(
+            stored.starts_with("account_verification_required: "),
+            "the token leads, so the class is readable without `refusal`: {stored}"
+        );
+        assert!(
+            stored.contains("verify your account to continue"),
+            "the provider's own wording makes the row actionable: {stored}"
+        );
+        assert_eq!(row.last_error_code, Some(403));
+        assert!(row.last_error_at.is_some());
+
+        // Still a candidate: routing selects from the active rows, and this one never left.
+        let listed = s
+            .list_connections(Some("google-antigravity"))
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].is_active, "the account still serves the planner");
+
+        // Idempotent: the same refusal arrives on every request behind the cooldown and must
+        // not rewrite the row. Timestamps are second-resolution, so one tick proves it.
+        let first = row.last_error_at;
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        s.record_connection_refusal_reason(
+            conn.id,
+            "account_verification_required",
+            Some(reason),
+            Some(403),
+        )
+        .await
+        .expect("record again");
+        let again = s.get_connection(conn.id).await.expect("get").expect("row");
+        assert_eq!(
+            again.last_error_at, first,
+            "an unchanged refusal must write nothing"
+        );
+        assert_eq!(
+            again.last_error, row.last_error,
+            "and must not pile the token up twice"
+        );
+
+        // Different wording is a different fact, so the guard only skips identical writes.
+        s.record_connection_refusal_reason(
+            conn.id,
+            "account_verification_required",
+            Some("verify with a phone number"),
+            Some(403),
+        )
+        .await
+        .expect("record changed");
+        let changed = s.get_connection(conn.id).await.expect("get").expect("row");
+        assert!(
+            changed
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("phone number")),
+            "a refreshed reason replaces the old one"
+        );
+        assert!(changed.last_error_at >= first);
+        assert!(changed.is_active, "a rewritten reason still keeps routing");
+
+        assert!(
+            s.record_connection_refusal_reason(
+                Uuid::new_v4(),
+                "account_verification_required",
+                Some("verify your account to continue"),
+                Some(403),
+            )
+            .await
+            .is_err(),
+            "an unknown row still fails like every other connection write"
+        );
+    });
+}
+
 // ----- response cache (phase 8) ------------------------------------------------------
 
 /// The table is a bounded, expiring key/value store: a hit is served until `expires_at`,

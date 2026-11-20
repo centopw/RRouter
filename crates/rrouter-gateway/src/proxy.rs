@@ -4187,14 +4187,15 @@ impl RequestTrace {
                 Some(e.to_string()),
             ),
         });
-        // A permanent account refusal takes the connection out of rotation: the credential
-        // is dead at the provider, so leaving it routable pays for the same refusal on
-        // every later request and hides the cause from the operator. Fire and forget, like
-        // every other bookkeeping write on this path: retirement must never delay the
-        // failover that is already in progress.
+        // An account refusal is recorded on the connection row: a permanent one takes it out
+        // of rotation (the credential is dead at the provider, so leaving it routable pays for
+        // the same refusal on every later request and hides the cause from the operator), and
+        // a recoverable one — verification required — only records why it is cooling down, so
+        // the reason survives a restart. Fire and forget, like every other bookkeeping write
+        // on this path: neither may delay the failover that is already in progress.
         if let Err(e) = &result {
-            if e.refusal().is_some_and(Refusal::is_permanent) {
-                retire_refused_account(state, &target, e);
+            if let Some(refusal) = e.refusal() {
+                record_account_refusal(state, target.connection, refusal, &e.to_string());
             }
         }
         result
@@ -4335,38 +4336,39 @@ fn spawn_latency(state: &AppState, connection: Uuid, latency_ms: u32) {
     });
 }
 
-/// Retire a permanently-refused account, off the request path.
+/// Record an upstream refusal of an account on its row — the single write both refusal
+/// classes go through.
 ///
-/// The row keeps its credentials — an operator may appeal the ban or replace the sign-in —
-/// but `is_active = 0` takes it out of every model's candidate list and
-/// `connections.refusal` records *why*, so the dashboard can tell a provider suspension
-/// apart from an account somebody switched off by hand. The last error is stored with the
-/// provider's own wording, which is what makes the row actionable without grepping logs.
-fn retire_refused_account(state: &AppState, candidate: &Candidate, err: &Error) {
-    let Some(refusal) = err.refusal() else { return };
-    if !refusal.is_permanent() {
-        // Verification-required is a cooldown, not a death: the breaker already benched the
-        // account and it must come back without an operator touching the row. A stale client
-        // identity is not the account's fault either, so it stays in rotation as well.
-        return;
-    }
-    retire_connection(state, candidate.connection, refusal, &err.to_string());
-}
-
-/// The retirement write itself: `is_active = 0` plus `connections.refusal`.
+/// The classes need opposite persistence, so the branch lives here rather than at each
+/// carrier (the HTTP answer and the terminal error frame of a stream), where one of them
+/// could be forgotten:
 ///
-/// Called by both carriers a refusal can arrive on — the HTTP answer and the terminal error
-/// frame of a stream — so the row records the same class however the provider said it. The
-/// status stored is the class's own, never the wire's (see [`Refusal::upstream_status`]).
+/// * **permanent** ([`Refusal::is_permanent`]) — the credential is dead at the provider, so
+///   the row is retired: `is_active = 0` plus `connections.refusal` carrying the class
+///   token. No later request changes that verdict; an operator re-enabling the row is the
+///   only way back, which is why the token must not be inferred from `is_active` alone.
+/// * **recoverable** ([`Refusal::Verification`]) — the account is healthy and only a human
+///   can clear the provider's prompt, so routing state stays exactly as it was
+///   (`is_active = 1`, `refusal` NULL) and the breaker alone owns the cooldown. Only the
+///   *reason* is persisted, because the breaker is in memory: without the row's
+///   `last_error`/`last_error_code`/`last_error_at` a restart leaves an operator staring at
+///   a healthy-looking account with no idea it needs a browser round-trip, or at an
+///   unexplained cooldown it cannot tell from a flake.
+/// * **our defect** ([`Refusal::ClientOutdated`]) — nothing about the account is wrong, so
+///   nothing is written; blaming the row for a stale client identity would hide a build
+///   problem behind an account problem.
 ///
-/// # Why this is retried off the request path instead of awaited
+/// The stored status is the class's own, never the wire's (see
+/// [`Refusal::upstream_status`]).
+///
+/// # Why this runs off the request path, with retries
 ///
 /// The stream carrier calls this from `Stream::poll_next` and from the body's `Drop`:
 /// neither has an async context to await a store write in, and blocking a runtime worker on
 /// SQLite to retire an account would stall every other request that worker serves. Awaiting
 /// would also change what the buffered carrier does — it calls this from inside the
 /// dispatcher's failover loop, where the next candidate is already being chosen — so the
-/// write is kept off both request paths, and the row means the same thing whatever carrier
+/// write stays off both request paths and the row means the same thing whichever carrier
 /// the refusal arrived on.
 ///
 /// One best-effort attempt is not enough, though. A busy or locked store would silently
@@ -4374,40 +4376,56 @@ fn retire_refused_account(state: &AppState, candidate: &Candidate, err: &Error) 
 /// and the next request would pay for the same refusal. The task therefore retries a
 /// bounded number of times and logs at `error` with the connection and class when it gives
 /// up, so a lost retirement is visible in the log instead of being inferred from traffic
-/// the provider keeps refusing.
+/// the provider keeps refusing. Recording the recoverable class is idempotent in the store,
+/// so a retry costs one index probe and no write.
 ///
 /// What this does *not* cover is a process death inside the retry window, which no
 /// fire-and-forget write can: closing that needs the verdict committed before the client
 /// sees the terminal frame, i.e. a durable marker the next boot replays.
-fn retire_connection(state: &AppState, connection: Uuid, refusal: Refusal, detail: &str) {
-    /// Attempts before the write is reported as lost. A SQLite `UPDATE` either lands on the
-    /// first try or fails on a transient lock, so a short window is enough.
-    const ATTEMPTS: u32 = 3;
-
+fn record_account_refusal(state: &AppState, connection: Uuid, refusal: Refusal, detail: &str) {
     let store = Arc::clone(&state.store);
     let detail = detail.to_owned();
+    // The class's own status, never the wire's (see [`Refusal::upstream_status`]).
     let code = refusal.upstream_status();
     tokio::spawn(async move {
+        /// Attempts before the write is reported as lost. A SQLite `UPDATE` either lands on
+        /// the first try or fails on a transient lock, so a short window is enough.
+        const ATTEMPTS: u32 = 3;
         for attempt in 1..=ATTEMPTS {
-            match store
-                .terminate_connection(connection, refusal.code(), Some(&detail), Some(code))
-                .await
-            {
+            let outcome = if refusal.is_permanent() {
+                store
+                    .terminate_connection(connection, refusal.code(), Some(&detail), Some(code))
+                    .await
+            } else if matches!(refusal, Refusal::Verification) {
+                store
+                    .record_connection_refusal_reason(
+                        connection,
+                        refusal.code(),
+                        Some(&detail),
+                        Some(code),
+                    )
+                    .await
+            } else {
+                // Nothing about the account is wrong: this build's client identity is stale.
+                return;
+            };
+            match outcome {
                 Ok(()) => return,
                 Err(e) if attempt == ATTEMPTS => tracing::error!(
                     connection = %connection,
                     refusal = refusal.code(),
                     attempts = ATTEMPTS,
                     error = %e,
-                    "could not retire a permanently refused account: the row stays active \
-                     and the account will be selected again"
+                    "could not record an account refusal: a permanently refused row stays \
+                     active and the account will be selected again"
                 ),
                 Err(e) => {
                     tracing::warn!(
                         connection = %connection,
+                        refusal = refusal.code(),
                         attempt,
                         error = %e,
-                        "retirement write failed; retrying"
+                        "refusal write failed; retrying"
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(25 * u64::from(attempt)))
                         .await;
@@ -4808,14 +4826,11 @@ impl ResponseStream {
             .inner
             .first_output
             .map(|at| at.saturating_duration_since(pending.started));
-        // A refusal that arrived as terminal error frame cannot fail over — the stream is
-        // already the client's answer — but the account must still leave rotation for every
-        // later request, exactly like one refused before the stream opened. That is the
-        // whole point of the classification being on the error rather than on the HTTP
-        // status: `GoogleCcaDecoder` (and Anthropic's decoder) raise
-        // [`Error::account_refused`] from inside the body, and this is the carrier that
-        // acts on it. A provider answers this way after a `200` has gone out, so nothing
-        // upstream of here has seen a verdict.
+        // A refusal that arrived as an `event: error` frame cannot fail over — the stream is
+        // already the client's answer — but the account must still be recorded for every
+        // later request, exactly like one refused before the stream opened: retired when the
+        // class is permanent, its reason noted when it is a recoverable verification, and
+        // left alone when the defect is this build's client identity.
         if let Some(refusal) = self.inner.terminal_refusal {
             // Bench first, for *every* class: the dispatcher's own bookkeeping only sees
             // the raw upstream bytes, and for it this body ended without an error — its
@@ -4832,24 +4847,18 @@ impl ResponseStream {
                 refusal.upstream_status(),
                 None,
             );
-            // Retirement is reserved for the permanent classes: a verification
-            // requirement clears once an operator acts, and a stale client identity is
-            // this build's defect, so both are cooled down by the breaker and stay
-            // routable (see [`Refusal::is_permanent`]).
-            if refusal.is_permanent() {
-                let detail = self
-                    .inner
-                    .terminal_error
-                    .as_ref()
-                    .map(|(_, message)| message.as_str())
-                    .unwrap_or_default();
-                retire_connection(
-                    &pending.state,
-                    pending.candidate.connection,
-                    refusal,
-                    detail,
-                );
-            }
+            let detail = self
+                .inner
+                .terminal_error
+                .as_ref()
+                .map(|(_, message)| message.as_str())
+                .unwrap_or_default();
+            record_account_refusal(
+                &pending.state,
+                pending.candidate.connection,
+                refusal,
+                detail,
+            );
         }
         // A stream a guardrail stopped is a refusal that happens to have a body: the row
         // says 403 with the reason the client read in the terminal error frame.
