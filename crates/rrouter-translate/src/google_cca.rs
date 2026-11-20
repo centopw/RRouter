@@ -1225,6 +1225,14 @@ impl GoogleCcaDecoder {
             .get("error")
             .or_else(|| value.get("response").and_then(|r| r.get("error")))
         {
+            // A refusal raised from inside the body is the account's lifecycle verdict
+            // arriving after the `200` that opened this stream. Nothing above the decoder
+            // has seen it and nothing can fail over — the client already has the response —
+            // but the gateway must still act on it exactly as it does on a `403` answer:
+            // `Wire::close_with_error` keeps the class and `ResponseStream::commit` benches
+            // the account and retires the row. Returning `Error::account_refused` here is
+            // what carries that verdict across that boundary; a plain `Translation` error
+            // would end the stream and leave a suspended account in rotation.
             return Err(error_from_value(error));
         }
         self.chunk(&value, out);
