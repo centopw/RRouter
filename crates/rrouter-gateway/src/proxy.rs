@@ -4358,20 +4358,61 @@ fn retire_refused_account(state: &AppState, candidate: &Candidate, err: &Error) 
 /// Called by both carriers a refusal can arrive on — the HTTP answer and the terminal error
 /// frame of a stream — so the row records the same class however the provider said it. The
 /// status stored is the class's own, never the wire's (see [`Refusal::upstream_status`]).
+///
+/// # Why this is retried off the request path instead of awaited
+///
+/// The stream carrier calls this from `Stream::poll_next` and from the body's `Drop`:
+/// neither has an async context to await a store write in, and blocking a runtime worker on
+/// SQLite to retire an account would stall every other request that worker serves. Awaiting
+/// would also change what the buffered carrier does — it calls this from inside the
+/// dispatcher's failover loop, where the next candidate is already being chosen — so the
+/// write is kept off both request paths, and the row means the same thing whatever carrier
+/// the refusal arrived on.
+///
+/// One best-effort attempt is not enough, though. A busy or locked store would silently
+/// leave a suspended account routable, which is precisely the state this exists to prevent,
+/// and the next request would pay for the same refusal. The task therefore retries a
+/// bounded number of times and logs at `error` with the connection and class when it gives
+/// up, so a lost retirement is visible in the log instead of being inferred from traffic
+/// the provider keeps refusing.
+///
+/// What this does *not* cover is a process death inside the retry window, which no
+/// fire-and-forget write can: closing that needs the verdict committed before the client
+/// sees the terminal frame, i.e. a durable marker the next boot replays.
 fn retire_connection(state: &AppState, connection: Uuid, refusal: Refusal, detail: &str) {
+    /// Attempts before the write is reported as lost. A SQLite `UPDATE` either lands on the
+    /// first try or fails on a transient lock, so a short window is enough.
+    const ATTEMPTS: u32 = 3;
+
     let store = Arc::clone(&state.store);
     let detail = detail.to_owned();
     let code = refusal.upstream_status();
     tokio::spawn(async move {
-        if let Err(e) = store
-            .terminate_connection(connection, refusal.code(), Some(&detail), Some(code))
-            .await
-        {
-            tracing::warn!(
-                connection = %connection,
-                error = %e,
-                "could not retire a permanently refused account"
-            );
+        for attempt in 1..=ATTEMPTS {
+            match store
+                .terminate_connection(connection, refusal.code(), Some(&detail), Some(code))
+                .await
+            {
+                Ok(()) => return,
+                Err(e) if attempt == ATTEMPTS => tracing::error!(
+                    connection = %connection,
+                    refusal = refusal.code(),
+                    attempts = ATTEMPTS,
+                    error = %e,
+                    "could not retire a permanently refused account: the row stays active \
+                     and the account will be selected again"
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        connection = %connection,
+                        attempt,
+                        error = %e,
+                        "retirement write failed; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(25 * u64::from(attempt)))
+                        .await;
+                }
+            }
         }
     });
 }
@@ -4613,6 +4654,14 @@ impl Wire {
     }
 
     /// Flush the redaction tail, then build one terminal error frame.
+    ///
+    /// The error is also kept, for two readers that only exist after the client already
+    /// has this frame: the usage row ([`Self::terminal_error`]) and the account's
+    /// lifecycle ([`Self::terminal_refusal`]). A refusal that arrives here is the
+    /// mid-stream carrier of the same verdict a `403` body carries on the buffered path —
+    /// the provider opened a `200` and reported the account's state inside the body — so
+    /// it must leave rotation through exactly the same store call, even though there is
+    /// no failover left to attempt.
     fn close_with_error(&mut self, err: Error) -> Bytes {
         self.terminal_error = Some((err.status(), err.to_string()));
         self.terminal_refusal = err.refusal();
@@ -4622,6 +4671,19 @@ impl Wire {
         };
         let frame = Bytes::from(error_frame(self.inbound, &err));
         tail.map_or(frame.clone(), |bytes| join(Some(bytes), frame))
+    }
+
+    /// Drop the upstream body while this response is still in the gateway's hands.
+    ///
+    /// The dispatcher wraps every streamed body in its own stream, and that wrapper settles
+    /// breaker accounting when it is dropped: "dropped without an error" is a successful
+    /// call. A mid-stream refusal is exactly that shape — a `200` whose error arrived in a
+    /// frame, not as a transport failure — so the wrapper would otherwise book the refused
+    /// account as healthy *after* the refusal was recorded. Hanging up here fixes the order
+    /// rather than the accounting: the wrapper settles first, then
+    /// [`ResponseStream::commit`] records the refusal, so the refusal is the last word.
+    fn hang_up(&mut self) {
+        self.incoming = Box::pin(futures_util::stream::empty());
     }
 }
 
@@ -4746,19 +4808,34 @@ impl ResponseStream {
             .inner
             .first_output
             .map(|at| at.saturating_duration_since(pending.started));
-        // A stream a guardrail stopped is a refusal that happens to have a body: the row
-        // says 403 with the reason the client read in the terminal error frame.
-        let (status, error) = match self.inner.blocked.as_deref() {
-            Some(message) => (403, Some(message)),
-            None => match self.inner.terminal_error.as_ref() {
-                Some((status, message)) => (*status, Some(message.as_str())),
-                None => (200, None),
-            },
-        };
-        // A refusal that arrived as an `event: error` frame cannot fail over — the stream is
+        // A refusal that arrived as terminal error frame cannot fail over — the stream is
         // already the client's answer — but the account must still leave rotation for every
-        // later request, exactly like one refused before the stream opened.
+        // later request, exactly like one refused before the stream opened. That is the
+        // whole point of the classification being on the error rather than on the HTTP
+        // status: `GoogleCcaDecoder` (and Anthropic's decoder) raise
+        // [`Error::account_refused`] from inside the body, and this is the carrier that
+        // acts on it. A provider answers this way after a `200` has gone out, so nothing
+        // upstream of here has seen a verdict.
         if let Some(refusal) = self.inner.terminal_refusal {
+            // Bench first, for *every* class: the dispatcher's own bookkeeping only sees
+            // the raw upstream bytes, and for it this body ended without an error — its
+            // `Committed` wrapper settles a success when the stream is dropped. A refusal
+            // must never be booked as a success, so hang up on the upstream body (that is
+            // where the wrapper settles) and record the class, with the status the
+            // provider answered with rather than the one the client sees. This mirrors the
+            // buffered path, where the dispatcher records the same number from
+            // `status_of`.
+            self.inner.hang_up();
+            pending.state.dispatcher.breaker().record_failure_for(
+                pending.candidate.connection,
+                &pending.candidate.model,
+                refusal.upstream_status(),
+                None,
+            );
+            // Retirement is reserved for the permanent classes: a verification
+            // requirement clears once an operator acts, and a stale client identity is
+            // this build's defect, so both are cooled down by the breaker and stay
+            // routable (see [`Refusal::is_permanent`]).
             if refusal.is_permanent() {
                 let detail = self
                     .inner
@@ -4774,6 +4851,15 @@ impl ResponseStream {
                 );
             }
         }
+        // A stream a guardrail stopped is a refusal that happens to have a body: the row
+        // says 403 with the reason the client read in the terminal error frame.
+        let (status, error) = match self.inner.blocked.as_deref() {
+            Some(message) => (403, Some(message)),
+            None => match self.inner.terminal_error.as_ref() {
+                Some((status, message)) => (*status, Some(message.as_str())),
+                None => (200, None),
+            },
+        };
         record_once(
             &pending.state,
             Recorded {

@@ -46,6 +46,16 @@ All notable changes. Dates are local; versions follow semver once tagged.
 
 ### Bug Fixes
 
+- **A refusal inside a `200` stream benches the account.** A Cloud Code Assist (or Claude)
+  refusal that arrived as an error frame in an already-open stream was classified and, for
+  the permanent classes, retired — but it was never booked against the breaker, and the
+  dispatcher's stream wrapper settled it as a *success* on drop. A `VALIDATION_REQUIRED`
+  account therefore kept being selected after it had just said it could not serve. The
+  terminal-error carrier now settles the upstream body first and records the refusal with
+  the provider's own status for every class, retiring only the permanent ones. The
+  retirement write is also retried (3 attempts) and logged at `error` when it is lost,
+  instead of a single best-effort attempt whose failure only appeared as traffic the
+  provider kept refusing.
 - **Suspended Antigravity accounts leave rotation.** Cloud Code Assist refusals are now
   classified instead of flattened into a translation error: a `TOS_VIOLATION` answer (or
   the "service has been disabled in this account" wording) retires the connection —

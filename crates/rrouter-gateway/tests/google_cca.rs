@@ -792,3 +792,146 @@ async fn a_verification_requirement_cools_the_account_without_retiring_it() {
         "only a permanent refusal is recorded against the row"
     );
 }
+
+// ------------------------------------------------------- refusals inside a 200 stream
+
+/// The one connection's id, whatever the store assigned it.
+async fn only_connection(h: &Harness) -> uuid::Uuid {
+    let rows = h.state.store.list_connections(None).await.expect("list");
+    assert_eq!(rows.len(), 1, "the harness registers exactly one account");
+    rows[0].id
+}
+
+/// Wait for a retirement that is written after the response was already handed over.
+///
+/// The stream has closed by the time the body is collected, so the write is in flight at
+/// most: poll for it rather than racing it.
+async fn retired_row(h: &Harness) -> rrouter_store::Connection {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows = h.state.store.list_connections(None).await.expect("list");
+        let row = rows
+            .into_iter()
+            .next()
+            .expect("the account is still listed");
+        if !row.is_active {
+            return row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the refused account was never retired"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A streaming request whose answer turns out to be a terminated account must end the
+/// same way the buffered answer does: the client reads the refusal, and the row leaves
+/// rotation for every later model.
+///
+/// cloudcode-pa opens the body (`200 text/event-stream`) and only then reports the
+/// account's state, so this refusal has no HTTP status of its own and the transport has
+/// already committed to serving a stream. There is no failover to attempt; what must not
+/// be lost is the *lifecycle* verdict, which arrives one frame too late for the dispatcher
+/// to see.
+#[tokio::test]
+async fn a_suspended_account_in_a_200_stream_is_named_and_leaves_rotation() {
+    let sse = concat!(
+        // One ordinary frame first: the refusal really is mid-stream, after output the
+        // client has already been sent.
+        "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}]}}]}}\n\n",
+        "data: {\"error\":{\"code\":403,\"status\":\"TOS_VIOLATION\",\"message\":",
+        "\"The service has been disabled in this account for violation of our Terms of Service.\"}}\n\n"
+    );
+    let mock = Mock::start(vec![Reply::Sse(sse.into())]).await;
+    let h = harness();
+    h.connect(&mock, PROJECT).await;
+    let connection = only_connection(&h).await;
+    let request = json!({
+        "model": format!("{PROVIDER}/gemini-3-pro"),
+        "stream": true,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+
+    let (status, body) = h.post_stream("/v1/chat/completions", request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "the 200 was already sent: {body}");
+    assert!(
+        body.contains("account_suspended"),
+        "the client reads the class in its terminal error frame: {body}"
+    );
+
+    let retired = retired_row(&h).await;
+    assert_eq!(
+        retired.refusal.as_deref(),
+        Some("account_suspended"),
+        "the row records that the provider, not an operator, retired it"
+    );
+    assert_eq!(
+        retired.last_error_code,
+        Some(403),
+        "the class's own status is recorded even though the wire said 200"
+    );
+    // The refusal is also the breaker's verdict: before this carrier recorded it, the
+    // dispatcher's stream wrapper settled the call as a success instead.
+    assert!(
+        !h.state.dispatcher.breaker().is_available(connection),
+        "a streamed refusal must never be booked as a healthy call"
+    );
+
+    // Out of rotation: the next request for the same model never contacts it again.
+    let (status, body) = h.post_stream("/v1/chat/completions", request).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the suspended account was contacted once only"
+    );
+}
+
+/// The same mid-stream carrier with the verification signal: a healthy, fully-quota'd
+/// account that must pass a check. It benches for this request and must stay routable —
+/// retiring it would take a fixable account out of rotation for good.
+#[tokio::test]
+async fn a_streamed_verification_requirement_benches_without_retiring() {
+    let sse = concat!(
+        "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}]}}]}}\n\n",
+        "data: {\"error\":{\"code\":403,\"status\":\"VALIDATION_REQUIRED\",\"message\":",
+        "\"Verify your account to continue\"}}\n\n"
+    );
+    let mock = Mock::start(vec![Reply::Sse(sse.into())]).await;
+    let h = harness();
+    h.connect(&mock, PROJECT).await;
+    let connection = only_connection(&h).await;
+
+    let (status, body) = h
+        .post_stream(
+            "/v1/chat/completions",
+            json!({
+                "model": format!("{PROVIDER}/gemini-3-pro"),
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the 200 was already sent: {body}");
+    assert!(
+        body.contains("account_verification_required"),
+        "the class reaches the client: {body}"
+    );
+
+    let rows = h.state.store.list_connections(None).await.expect("list");
+    assert!(
+        rows[0].is_active,
+        "a verification requirement must not retire the account"
+    );
+    assert_eq!(
+        rows[0].refusal, None,
+        "only a permanent refusal is recorded against the row"
+    );
+    // The bench is in-process only: this account is cooled down for every later request
+    // until the breaker's auth window expires, then becomes eligible again by itself.
+    assert!(
+        !h.state.dispatcher.breaker().is_available(connection),
+        "the streamed refusal must bench the account, not just the row"
+    );
+}
