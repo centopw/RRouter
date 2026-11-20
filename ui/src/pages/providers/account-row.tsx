@@ -12,6 +12,7 @@ import {
   type ModelProvider,
 } from "../../lib/api";
 import { compact, usd } from "../../lib/format";
+import { refusalView, type RefusalView } from "../../lib/refusal";
 import {
   barFill,
   barText,
@@ -89,7 +90,9 @@ export function AccountCell({
   );
 }
 
-type AccountState = { label: string; tone: "muted" | "warn" | "neg" };
+type AccountState =
+  | { kind: "refusal"; refusal: RefusalView }
+  | { label: string; tone: "muted" | "warn" | "neg"; kind: "text" };
 
 const DOT_TONE = { muted: "muted", warn: "warn", neg: "neg" } as const;
 const STATE_TEXT = {
@@ -98,20 +101,30 @@ const STATE_TEXT = {
   neg: "text-[var(--color-neg)]",
 } as const;
 
-/** The one status readout an account gets: what stops it routing, else that it is ready. */
+/**
+ * The one status readout an account gets: what stops it routing, else that it is ready.
+ *
+ * A provider refusal comes first and reads as its own badge, because it is not the same fact
+ * as a disable: the account was retired by the provider and an operator toggle cannot undo it.
+ * Only a `refusal` of `NULL` keeps the plain muted “disabled”.
+ */
 function stateOf(
   connection: Connection,
   quota: AccountQuotaRow | undefined,
   planPercent: number | null,
   providers?: ModelProvider[],
 ): AccountState {
-  if (!connection.is_active) return { label: "disabled", tone: "muted" };
+  const refusal = refusalView(connection.refusal);
+  if (refusal) return { kind: "refusal", refusal };
+  if (!connection.is_active) return { kind: "text", label: "disabled", tone: "muted" };
   if (connection.backoff_level > 0)
-    return { label: `backoff ${connection.backoff_level}`, tone: "warn" };
-  if (needsBaseUrlOverride(connection, providers)) return { label: "no endpoint", tone: "warn" };
-  if (quota?.exhausted) return { label: "over quota", tone: "neg" };
-  if (planPercent !== null && planPercent >= 90) return { label: "plan at limit", tone: "warn" };
-  return { label: "ready", tone: "muted" };
+    return { kind: "text", label: `backoff ${connection.backoff_level}`, tone: "warn" };
+  if (needsBaseUrlOverride(connection, providers))
+    return { kind: "text", label: "no endpoint", tone: "warn" };
+  if (quota?.exhausted) return { kind: "text", label: "over quota", tone: "neg" };
+  if (planPercent !== null && planPercent >= 90)
+    return { kind: "text", label: "plan at limit", tone: "warn" };
+  return { kind: "text", label: "ready", tone: "muted" };
 }
 
 type QuotaView = {
@@ -311,7 +324,16 @@ function ConnectionMenu({
             {scope} · priority {connection.priority} · weight {connection.weight}
           </div>
           {entry(testing ? "Testing…" : "Test", onTest, false, testing)}
-          {entry(connection.is_active ? "Disable" : "Enable", onToggle)}
+          {/* A refused account is not a bare toggle: the label names the state, and the page
+              confirms the re-enable with the consequence the token carries. */}
+          {entry(
+            connection.is_active
+              ? "Disable"
+              : refusalView(connection.refusal)
+                ? "Re-enable refused account…"
+                : "Enable",
+            onToggle,
+          )}
           <div className="my-1 border-t border-line" role="separator" />
           {entry("Remove…", onRemove, true)}
         </Popover.Content>
@@ -404,10 +426,21 @@ function AccountRow({
       <PlanCell view={view} />
 
       <span className="flex min-w-0 items-center gap-1.5 text-caption">
-        <Dot tone={DOT_TONE[state.tone]} />
-        <span className={cx("truncate", STATE_TEXT[state.tone])} title={`${label}: ${state.label}`}>
-          {state.label}
-        </span>
+        {state.kind === "refusal" ? (
+          <Badge
+            tone={state.refusal.tone}
+            title={`${state.refusal.title}. ${state.refusal.description} ${state.refusal.fix}`}
+          >
+            {state.refusal.label}
+          </Badge>
+        ) : (
+          <>
+            <Dot tone={DOT_TONE[state.tone]} />
+            <span className={cx("truncate", STATE_TEXT[state.tone])} title={`${label}: ${state.label}`}>
+              {state.label}
+            </span>
+          </>
+        )}
       </span>
 
       <span className="flex items-center justify-end gap-1">
@@ -452,6 +485,7 @@ function ProviderHeader({
   const counts = [
     `${group.connections.length} account${group.connections.length === 1 ? "" : "s"}`,
     `${group.enabled} enabled`,
+    group.refused > 0 ? `${group.refused} refused` : null,
     group.backoff > 0 ? `${group.backoff} in backoff` : null,
     group.overQuota > 0 ? `${group.overQuota} over quota` : null,
   ]
