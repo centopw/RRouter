@@ -31,6 +31,21 @@
 //! [`without_fields`] rebuilds the envelope without exactly the fields it named, so the
 //! gateway repairs the account that rejected it instead of guessing for all of them.
 //!
+//! The repair is **subtractive**: whatever it drops is missing from that account's later
+//! requests, with no re-add and no alert. It may therefore only ever remove a member whose
+//! absence still leaves a valid request, and [`DROPPABLE`] holds exactly one name —
+//! `sessionId`.
+//!
+//! Identity is *not* repairable. `model`, `userAgent`, `requestType`, `project` and
+//! `requestId` are what makes the call this account's call; an envelope without them still
+//! parses, so nothing fails loudly while every later request runs under a partial identity.
+//! An upstream answering `Unknown name "userAgent"` is saying the envelope shape is wrong
+//! for this account or model version — not that `userAgent` is optional. Those names are
+//! kept in a separate [`REQUIRED`] bucket: they are never dropped, [`EnvelopeRejection`]
+//! reports them as [`UnrepairableEnvelope`] so the caller can surface them, and
+//! [`rejected_fields`] — the repair-only view — reports nothing for such an answer, so a
+//! caller that ignores the distinction still cannot mutilate an envelope.
+//!
 //! # Responses
 //!
 //! Every buffered body and every SSE `data:` payload wraps the Gemini response:
@@ -372,97 +387,236 @@ fn gemini_schema(schema: &mut Value) {
 // Envelope repair
 // ---------------------------------------------------------------------------
 
-/// Top-level envelope keys a rejected-field repair may drop. `request` is deliberately
-/// absent: it carries the translated conversation, so dropping a member of it would
-/// answer a different question instead of the same one in an older envelope shape.
-const DROPPABLE: [&str; 6] = [
-    "model",
-    "userAgent",
-    "requestType",
-    "project",
-    "requestId",
-    "sessionId",
-];
+/// Top-level envelope keys a rejected-field repair may drop, and the whole of that set.
+///
+/// The repair is subtractive and remembered per account: whatever is dropped here is absent
+/// from every later request until the process restarts, with no re-add and no alert. A name
+/// may only be listed when the envelope without it is still a valid request. `sessionId` is
+/// the sole such member — undocumented, derived locally (see [`session_id`]), and omitted
+/// by the desktop client on hosts that do not know it.
+///
+/// Identity keys are in [`REQUIRED`] and are never droppable. `request` is deliberately
+/// absent from both: it carries the translated conversation, so dropping a member of it
+/// would answer a different question instead of the same one in an older envelope shape.
+const DROPPABLE: [&str; 1] = ["sessionId"];
 
-/// Top-level envelope fields an upstream rejected, in the order the body named them.
+/// Top-level keys that make the envelope a valid request for this account.
+///
+/// A `400` naming one of these is not a repair instruction. Dropping it would still produce
+/// an envelope the upstream parses, so the account would keep serving traffic under a
+/// partial identity — the failure this list exists to prevent. The correct reading is that
+/// the envelope shape is wrong for this account or model version, which is what
+/// [`EnvelopeRejection::error`] reports.
+const REQUIRED: [&str; 5] = ["model", "userAgent", "requestType", "project", "requestId"];
+
+/// One `400 INVALID_ARGUMENT`'s verdict on the envelope, split by what repair may do.
 ///
 /// Google's protobuf parser answers an undocumented envelope member with
 /// `{"error": {"status": "INVALID_ARGUMENT", "message": "Invalid JSON payload received.
 /// Unknown name \"sessionId\": Cannot find field.", "details": [{"@type":
 /// "type.googleapis.com/google.rpc.BadRequest", "fieldViolations": [{"field": "sessionId",
 /// …}]}]}}`. Both carriers are read because the violation path is sometimes the enclosing
-/// object rather than the offending name. Only [`DROPPABLE`] survives the filter — every
-/// field under `request` is ignored — so a malformed or unrelated 400 can never make the
-/// caller strip part of the conversation.
-pub fn rejected_fields(body: &[u8]) -> Vec<&'static str> {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return Vec::new();
-    };
-    let Some(error) = value.get("error") else {
-        return Vec::new();
-    };
-    let details = error
-        .get("details")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let bad_request = error.get("status").and_then(Value::as_str) == Some("INVALID_ARGUMENT")
-        || details.iter().any(|detail| {
-            detail
-                .get("@type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind.ends_with("BadRequest"))
-        });
-    if !bad_request {
-        return Vec::new();
-    }
-    let mut fields: Vec<&'static str> = Vec::new();
-    for detail in details {
-        let violations = detail
-            .get("fieldViolations")
+/// object rather than the offending name.
+///
+/// Two buckets, because the two answers call for opposite actions:
+///
+/// * [`droppable`](Self::droppable) — optional members the upstream does not know. Removing
+///   them yields a valid request, so the resend drops them ([`without_fields`]).
+/// * [`required`](Self::required) — identity members the upstream does not know. Removing
+///   them yields a request that still parses but is no longer this account's request, so
+///   nothing in this bucket is ever dropped: [`fields_to_drop`](Self::fields_to_drop) is
+///   empty whenever the bucket is non-empty, and [`error`](Self::error) hands the caller an
+///   [`UnrepairableEnvelope`].
+///
+/// A mixed answer is fatal as a whole: dropping the optional member and resending would
+/// retry the same broken identity, so `required` wins.
+///
+/// Every name under `request` is ignored, in both buckets: a malformed or unrelated `400`
+/// can never make the caller strip part of the conversation.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EnvelopeRejection {
+    droppable: Vec<&'static str>,
+    required: Vec<&'static str>,
+}
+
+impl EnvelopeRejection {
+    /// Read a `400` body. A body that is not JSON, carries no `error`, or is not an
+    /// `INVALID_ARGUMENT`/`BadRequest` names nothing at all.
+    pub fn parse(body: &[u8]) -> Self {
+        let mut rejection = Self::default();
+        let Ok(value) = serde_json::from_slice::<Value>(body) else {
+            return rejection;
+        };
+        let Some(error) = value.get("error") else {
+            return rejection;
+        };
+        let details = error
+            .get("details")
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        for violation in violations {
-            if let Some(field) = violation.get("field").and_then(Value::as_str) {
-                named_field(&mut fields, field);
-            }
-            if let Some(text) = violation.get("description").and_then(Value::as_str) {
-                named_in_text(&mut fields, text);
+        let bad_request = error.get("status").and_then(Value::as_str) == Some("INVALID_ARGUMENT")
+            || details.iter().any(|detail| {
+                detail
+                    .get("@type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.ends_with("BadRequest"))
+            });
+        if !bad_request {
+            return rejection;
+        }
+        for detail in details {
+            let violations = detail
+                .get("fieldViolations")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            for violation in violations {
+                if let Some(field) = violation.get("field").and_then(Value::as_str) {
+                    named_field(&mut rejection, field);
+                }
+                if let Some(text) = violation.get("description").and_then(Value::as_str) {
+                    named_in_text(&mut rejection, text);
+                }
             }
         }
+        if let Some(message) = error.get("message").and_then(Value::as_str) {
+            named_in_text(&mut rejection, message);
+        }
+        rejection
     }
-    if let Some(message) = error.get("message").and_then(Value::as_str) {
-        named_in_text(&mut fields, message);
+
+    /// Optional members the upstream refused: exactly what the resend may omit.
+    pub fn droppable(&self) -> &[&'static str] {
+        &self.droppable
     }
-    fields
+
+    /// Identity members the upstream refused. Non-empty means "do not repair".
+    pub fn required(&self) -> &[&'static str] {
+        &self.required
+    }
+
+    /// The fields a resend may omit. Empty when the answer named an identity member, or
+    /// named nothing this envelope may drop.
+    pub fn fields_to_drop(&self) -> &[&'static str] {
+        if self.required.is_empty() {
+            &self.droppable
+        } else {
+            &[]
+        }
+    }
+
+    /// Whether the body named no member this builder knows about.
+    pub fn is_empty(&self) -> bool {
+        self.droppable.is_empty() && self.required.is_empty()
+    }
+
+    /// The typed failure for an answer that named an identity member, or `None` when the
+    /// answer is repairable (or says nothing).
+    pub fn error(&self) -> Option<UnrepairableEnvelope> {
+        (!self.required.is_empty()).then(|| UnrepairableEnvelope {
+            fields: self.required.clone(),
+        })
+    }
+
+    /// File one name in the bucket that decides what happens to it next.
+    fn note(&mut self, name: &str) {
+        if let Some(known) = optional_key(name) {
+            push_unique(&mut self.droppable, known);
+        } else if let Some(known) = required_key(name) {
+            push_unique(&mut self.required, known);
+        }
+    }
+}
+
+/// A `400` that named an identity field: the envelope is wrong for this account.
+///
+/// This is deliberately not a repair instruction and deliberately not a drop. The caller
+/// must not resend the same envelope with the field removed, because that partial envelope
+/// is accepted: the account would keep serving traffic that no longer identifies it, which
+/// is worse than a visible failure. Surface it — it is the upstream's own answer with the
+/// fields named — and treat the account/model pair as misconfigured until the envelope for
+/// it is fixed. [`EnvelopeRejection::error`] is the only constructor, so nothing can build
+/// one for a repairable answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrepairableEnvelope {
+    fields: Vec<&'static str>,
+}
+
+impl UnrepairableEnvelope {
+    /// The identity fields the upstream refused, in the order the body named them.
+    pub fn fields(&self) -> &[&'static str] {
+        &self.fields
+    }
+
+    /// The upstream's answer, kept as a pass-through `400` so clients see it exactly as the
+    /// gateway already reports an unrepairable `400` — nothing is retried and nothing is
+    /// rewritten.
+    pub fn into_error(self) -> Error {
+        Error::Upstream {
+            provider: "google-antigravity".into(),
+            status: 400,
+            body: self.to_string(),
+            payload: None,
+        }
+    }
+}
+
+impl std::fmt::Display for UnrepairableEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "google code assist rejected required envelope field(s) `{}`: the envelope shape \
+             is wrong for this account or model version, and repair never drops identity \
+             fields",
+            self.fields.join("`, `")
+        )
+    }
+}
+
+impl std::error::Error for UnrepairableEnvelope {}
+
+/// Top-level envelope fields an upstream rejected **and repair may remove**, in the order
+/// the body named them.
+///
+/// This is the repair-only view of [`EnvelopeRejection`]: identity members (`model`,
+/// `userAgent`, `requestType`, `project`, `requestId`) are reported as empty here and show
+/// up in [`EnvelopeRejection::required`] instead, so a caller that only asks "what may I
+/// drop?" can never strip one. Nothing under `request` is ever reported.
+pub fn rejected_fields(body: &[u8]) -> Vec<&'static str> {
+    EnvelopeRejection::parse(body).fields_to_drop().to_vec()
 }
 
 /// The envelope without `fields`, so a resend omits exactly what the upstream refused.
-/// A non-object passes through untouched: there is nothing to repair.
+///
+/// A non-object passes through untouched: there is nothing to repair. Names outside
+/// [`DROPPABLE`] are ignored even when a caller passes them, so the subtractive path has a
+/// second gate: a stale list (the gateway remembers repairs per account in memory) or a
+/// future caller's mistake cannot remove `model`/`userAgent`/`requestType`/`project`/
+/// `requestId`, and `request` itself can never be removed.
 pub fn without_fields(envelope: Value, fields: &[&str]) -> Value {
     let Value::Object(mut envelope) = envelope else {
         return envelope;
     };
     for field in fields {
-        envelope.remove(*field);
+        if DROPPABLE.contains(field) {
+            envelope.remove(*field);
+        }
     }
     Value::Object(envelope)
 }
 
-/// Note `field` when it names a droppable top-level key: `sessionId`, `$.sessionId` and
+/// Note `field` when it names a top-level key: `sessionId`, `$.sessionId` and
 /// `sessionId.contents` all name the top-level `sessionId`.
-fn named_field(fields: &mut Vec<&'static str>, field: &str) {
+fn named_field(rejection: &mut EnvelopeRejection, field: &str) {
     let path = field.trim().trim_start_matches("$.").trim_matches('"');
     let name = path.split('.').next().unwrap_or_default().trim();
-    if let Some(known) = droppable(name) {
-        push_unique(fields, known);
-    }
+    rejection.note(name);
 }
 
 /// Note fields named in the parser's own wording: `Unknown name "sessionId"` and
 /// `Unknown name sessionId: Cannot find field.`
-fn named_in_text(fields: &mut Vec<&'static str>, text: &str) {
+fn named_in_text(rejection: &mut EnvelopeRejection, text: &str) {
     const MARKER: &str = "Unknown name";
     let mut rest = text;
     while let Some(at) = rest.find(MARKER) {
@@ -474,14 +628,16 @@ fn named_in_text(fields: &mut Vec<&'static str>, text: &str) {
                 .next()
                 .unwrap_or_default(),
         };
-        if let Some(known) = droppable(name.trim()) {
-            push_unique(fields, known);
-        }
+        rejection.note(name.trim());
     }
 }
 
-fn droppable(name: &str) -> Option<&'static str> {
+fn optional_key(name: &str) -> Option<&'static str> {
     DROPPABLE.iter().copied().find(|known| *known == name)
+}
+
+fn required_key(name: &str) -> Option<&'static str> {
+    REQUIRED.iter().copied().find(|known| *known == name)
 }
 
 fn push_unique(fields: &mut Vec<&'static str>, field: &'static str) {
@@ -1267,10 +1423,20 @@ mod tests {
                 "fieldViolations": [{"field": "$.requestId.foo"}, {"field": "sessionId"}]
             }]
         }});
+        let rejection = EnvelopeRejection::parse(by_violation.to_string().as_bytes());
         assert_eq!(
-            rejected_fields(by_violation.to_string().as_bytes()),
-            ["requestId", "sessionId"],
-            "a path names its first segment; duplicates collapse"
+            rejection.required(),
+            ["requestId"],
+            "a path names its first segment, and requestId is identity"
+        );
+        assert_eq!(
+            rejection.droppable(),
+            ["sessionId"],
+            "the optional member is still recognised next to it"
+        );
+        assert!(
+            rejection.fields_to_drop().is_empty(),
+            "a mixed answer drops nothing: the envelope is wrong for this account"
         );
 
         let by_message = json!({"error": {
@@ -1299,10 +1465,15 @@ mod tests {
                 ]
             }]
         }});
-        assert_eq!(
-            rejected_fields(inner.to_string().as_bytes()),
-            ["userAgent"],
+        let rejection = EnvelopeRejection::parse(inner.to_string().as_bytes());
+        assert!(
+            rejection.droppable().is_empty(),
             "nothing under request and nothing outside the allowlist is ever dropped"
+        );
+        assert_eq!(
+            rejection.required(),
+            ["userAgent"],
+            "an identity field is reported, never repaired"
         );
 
         let not_invalid = json!({"error": {
@@ -1313,6 +1484,122 @@ mod tests {
         assert!(rejected_fields(not_invalid.to_string().as_bytes()).is_empty());
         assert!(rejected_fields(b"not json").is_empty());
         assert!(rejected_fields(b"{}").is_empty());
+    }
+
+    #[test]
+    fn an_identity_violation_is_a_typed_error_not_a_drop() {
+        for identity in ["userAgent", "requestId", "model", "requestType", "project"] {
+            let body = json!({"error": {
+                "code": 400,
+                "status": "INVALID_ARGUMENT",
+                "message": format!("Invalid JSON payload received. Unknown name \"{identity}\": Cannot find field."),
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.BadRequest",
+                    "fieldViolations": [{"field": identity}]
+                }]
+            }});
+            let rejection = EnvelopeRejection::parse(body.to_string().as_bytes());
+            assert!(
+                rejected_fields(body.to_string().as_bytes()).is_empty(),
+                "repair must not be offered a field the envelope cannot lose: {identity}"
+            );
+            assert!(rejection.droppable().is_empty(), "{identity}");
+            assert_eq!(rejection.required(), [identity]);
+            assert!(!rejection.is_empty());
+
+            let error = rejection.error().expect("an identity refusal is fatal");
+            assert_eq!(error.fields(), [identity]);
+            let mapped = error.clone().into_error();
+            assert_eq!(
+                mapped.status(),
+                400,
+                "the upstream answer is passed through"
+            );
+            assert!(mapped.to_string().contains(identity), "{mapped}");
+        }
+    }
+
+    #[test]
+    fn a_violation_under_request_is_ignored() {
+        let body = json!({"error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT",
+            "message": "Invalid JSON payload received. Unknown name \"request.contents\": Cannot find field.",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.BadRequest",
+                "fieldViolations": [
+                    {"field": "request.contents"},
+                    {"field": "request.generationConfig.topP"}
+                ]
+            }]
+        }});
+        let rejection = EnvelopeRejection::parse(body.to_string().as_bytes());
+        assert!(rejection.is_empty(), "{rejection:?}");
+        assert!(rejection.fields_to_drop().is_empty());
+        assert!(rejection.error().is_none());
+        assert!(rejected_fields(body.to_string().as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn mixed_violations_drop_nothing_and_report_the_identity_field() {
+        let body = json!({"error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.BadRequest",
+                "fieldViolations": [{"field": "sessionId"}, {"field": "userAgent"}]
+            }]
+        }});
+        let rejection = EnvelopeRejection::parse(body.to_string().as_bytes());
+        assert_eq!(rejection.droppable(), ["sessionId"]);
+        assert_eq!(rejection.required(), ["userAgent"]);
+        assert!(
+            rejection.fields_to_drop().is_empty(),
+            "a broken identity makes the whole answer fatal"
+        );
+        assert_eq!(
+            rejection.error().map(|error| error.fields().to_vec()),
+            Some(vec!["userAgent"])
+        );
+
+        let envelope = build_request_with(&request(), "gemini-3-pro", "proj-1", "agent-test")
+            .expect("envelope");
+        assert_eq!(
+            without_fields(envelope.clone(), rejection.fields_to_drop()),
+            envelope,
+            "the resend is the envelope untouched"
+        );
+    }
+
+    #[test]
+    fn without_fields_refuses_identity_even_when_asked() {
+        let envelope = build_request_with(&request(), "gemini-3-pro", "proj-1", "agent-test")
+            .expect("envelope");
+        let repaired = without_fields(
+            envelope.clone(),
+            &[
+                "model",
+                "userAgent",
+                "requestType",
+                "project",
+                "requestId",
+                "request",
+                "sessionId",
+            ],
+        );
+        assert!(
+            repaired.get("sessionId").is_none(),
+            "the optional member goes"
+        );
+        for identity in REQUIRED {
+            assert!(
+                repaired.get(identity).is_some(),
+                "repair cannot strip {identity}: {repaired}"
+            );
+        }
+        assert!(repaired.get("request").is_some(), "{repaired}");
+        assert_eq!(repaired["model"], envelope["model"]);
+        assert_eq!(repaired["requestId"], envelope["requestId"]);
     }
 
     #[test]
