@@ -31,6 +31,16 @@
 //! [`without_fields`] rebuilds the envelope without exactly the fields it named, so the
 //! gateway repairs the account that rejected it instead of guessing for all of them.
 //!
+//! # Account refusals
+//!
+//! A refusal is not always about the request. Google answers a terminated account with
+//! `403` `{"error": {"status": "TOS_VIOLATION", "message": "The service has been disabled
+//! in this account for violation of our Terms of Service."}}` and a not-yet-verified one
+//! with `VALIDATION_REQUIRED` / "Verify your account to continue" — which arrives on
+//! healthy, fully-quota'd accounts. [`refusal`] separates those from ordinary failures so
+//! the gateway can retire a permanently banned account instead of retrying it forever,
+//! and cool a verification-required one down without retiring it.
+//!
 //! # Responses
 //!
 //! Every buffered body and every SSE `data:` payload wraps the Gemini response:
@@ -49,8 +59,8 @@ use uuid::Uuid;
 
 use rrouter_core::sse::{SseCodec, SseFrame};
 use rrouter_core::{
-    ChatRequest, ChatResponse, Error, FinishReason, Message, Part, Result, Role, StreamEvent,
-    ToolChoice, Usage,
+    ChatRequest, ChatResponse, Error, FinishReason, Message, Part, Refusal, Result, Role,
+    StreamEvent, ToolChoice, Usage,
 };
 
 /// Daily build host. Antigravity desktop points here first.
@@ -490,6 +500,117 @@ fn push_unique(fields: &mut Vec<&'static str>, field: &'static str) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Account refusals
+// ---------------------------------------------------------------------------
+
+/// Wording that means the provider retired the account.
+///
+/// Every phrase is long enough that ordinary failure text cannot produce it by accident:
+/// matching on a bare `disabled` or `violation` would retire healthy accounts on a
+/// coincidental word, and a false permanent verdict is far worse than a missed one (the
+/// account keeps working under the status-quo path). Case-insensitive.
+const PERMANENT_PHRASES: [&str; 7] = [
+    "has been disabled in this account for violation",
+    "service has been disabled in this account",
+    "account has been deactivated",
+    "your account has been suspended",
+    "account permanently banned",
+    "violation of our terms",
+    "violation of terms",
+];
+
+/// Wording that means the account must pass provider verification. This is the one
+/// signal that arrives on a perfectly healthy, fully-quota'd account, so it is matched
+/// before any permanent phrase and can never be classified as one.
+const VERIFICATION_PHRASES: [&str; 1] = ["verify your account to continue"];
+
+/// Google's protobuf `status` enum value for a terms-of-service termination.
+const PERMANENT_STATUS: &str = "TOS_VIOLATION";
+/// Google's protobuf `status` enum value for an account that must be verified.
+const VERIFICATION_STATUS: &str = "VALIDATION_REQUIRED";
+
+/// Classify an upstream answer as a refusal of the *account* rather than of the request.
+///
+/// `http_status` is the status of the enclosing HTTP answer; `None` when the body arrived
+/// inside a `200` (an SSE error frame or a wrapped buffered response), where the body's own
+/// `error.code` is the only status available.
+///
+/// `None` is the status-quo path and the safe default: nothing is classified unless the
+/// body names one of the taxonomy's signals. Two guards keep the classification honest:
+/// a `5xx` or `429` is transient by definition and is never a refusal whatever its
+/// wording, and the verification signal is read before the permanent ones so the healthy
+/// case cannot fall through to "banned".
+pub fn refusal(http_status: Option<u16>, body: &[u8]) -> Option<Refusal> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    refusal_in(http_status, &value)
+}
+
+/// The body's own error message, verbatim, for an operator-facing detail line.
+///
+/// Empty when the body is not JSON or carries no message: the refusal classification is
+/// what the caller acts on, and the detail is only ever appositional.
+pub fn refusal_detail(body: &[u8]) -> String {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .map(|value| error_message(&value).to_string())
+        .unwrap_or_default()
+}
+
+/// [`refusal`] over an already-parsed error, for the response reader and the stream
+/// decoder, which have the error object instead of the raw bytes.
+fn refusal_in(http_status: Option<u16>, value: &Value) -> Option<Refusal> {
+    let error = value.get("error").unwrap_or(value);
+    let code = http_status.or_else(|| {
+        error
+            .get("code")
+            .and_then(Value::as_u64)
+            .and_then(|code| u16::try_from(code).ok())
+    });
+    // Transient by definition: a provider retry or an exhausted quota window can echo any
+    // wording at all, so no phrase in such a body is evidence about the account.
+    if matches!(code, Some(429 | 500..=599)) {
+        return None;
+    }
+    let status = error
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if status.eq_ignore_ascii_case(VERIFICATION_STATUS) {
+        return Some(Refusal::Verification);
+    }
+    let message = error_message(value);
+    let lower = message.to_ascii_lowercase();
+    if VERIFICATION_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+    {
+        return Some(Refusal::Verification);
+    }
+    if status.eq_ignore_ascii_case(PERMANENT_STATUS) {
+        return Some(Refusal::Terminated);
+    }
+    if PERMANENT_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+    {
+        return Some(Refusal::Terminated);
+    }
+    None
+}
+
+/// The `message` an error object carries, or the bare string body itself.
+fn error_message(value: &Value) -> &str {
+    let error = value.get("error").unwrap_or(value);
+    match error {
+        Value::String(text) => text,
+        _ => error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    }
+}
+
 fn contents_in(messages: &[Message], system_parts: &mut Vec<Value>) -> Result<Vec<Value>> {
     let tool_names = tool_names(messages);
     let mut contents: Vec<Value> = Vec::with_capacity(messages.len());
@@ -759,16 +880,20 @@ fn usage_from(usage: Option<&Value>) -> Usage {
     }
 }
 
+/// Provider label used in the translated error text.
+const PROVIDER: &str = "google code assist";
+
 fn error_from_value(error: &Value) -> Error {
-    if let Some(message) = error.as_str() {
-        return Error::Translation(format!("google code assist: {message}"));
+    let detail = match error_message(error) {
+        "" => "upstream error",
+        text => text,
+    };
+    // A refusal of the account is not a translation failure: it is the one error class the
+    // gateway must act on (retire the account, or cool it down) rather than pass through.
+    if let Some(refusal) = refusal_in(None, error) {
+        return Error::account_refused(PROVIDER, refusal, detail);
     }
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| error.get("status").and_then(Value::as_str))
-        .unwrap_or("upstream error");
-    Error::Translation(format!("google code assist: {message}"))
+    Error::Translation(format!("{PROVIDER}: {detail}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1347,6 +1472,168 @@ mod tests {
         let mut events = Vec::new();
         let err = decoder.push(frame.as_bytes(), &mut events).unwrap_err();
         assert!(err.to_string().contains("quota exhausted"), "{err}");
+    }
+
+    /// The three classes the taxonomy distinguishes, read from the same two carriers the
+    /// rest of this module reads: the protobuf `status` enum and the message text.
+    #[test]
+    fn a_permanent_termination_is_classified_from_status_or_wording() {
+        let by_status = json!({
+            "error": {
+                "code": 403,
+                "status": "TOS_VIOLATION",
+                "message": "The caller does not have permission"
+            }
+        });
+        assert_eq!(
+            refusal(Some(403), by_status.to_string().as_bytes()),
+            Some(Refusal::Terminated),
+            "the protobuf status alone is enough"
+        );
+
+        // Google's real wording, in the shape the account endpoint returns it.
+        let by_message = json!({
+            "error": {
+                "code": 403,
+                "message": "The service has been disabled in this account for violation of our \
+                            Terms of Service."
+            }
+        });
+        assert_eq!(
+            refusal(Some(403), by_message.to_string().as_bytes()),
+            Some(Refusal::Terminated)
+        );
+        // Each phrase is matched case-insensitively.
+        let upper = json!({"error": {"message": "YOUR ACCOUNT HAS BEEN SUSPENDED."}});
+        assert_eq!(
+            refusal(Some(403), upper.to_string().as_bytes()),
+            Some(Refusal::Terminated)
+        );
+        let deactivated = json!({"error": {"message": "This account has been deactivated."}});
+        assert_eq!(
+            refusal(Some(400), deactivated.to_string().as_bytes()),
+            Some(Refusal::Terminated)
+        );
+    }
+
+    /// Verification-required is recoverable even though it arrives on healthy accounts, and
+    /// it must never be read as a termination — the one false positive that would retire a
+    /// working account.
+    #[test]
+    fn a_verification_requirement_is_recoverable_and_never_permanent() {
+        let by_status = json!({
+            "error": {
+                "code": 403,
+                "status": "VALIDATION_REQUIRED",
+                "message": "Something went wrong"
+            }
+        });
+        assert_eq!(
+            refusal(Some(403), by_status.to_string().as_bytes()),
+            Some(Refusal::Verification)
+        );
+
+        let by_message = json!({
+            "error": {"code": 403, "message": "Please verify your account to continue."}
+        });
+        assert_eq!(
+            refusal(Some(403), by_message.to_string().as_bytes()),
+            Some(Refusal::Verification)
+        );
+        // The verification signal wins even when the same body also carries phrasing the
+        // permanent list would otherwise match.
+        let both = json!({
+            "error": {
+                "status": "VALIDATION_REQUIRED",
+                "message": "verify your account to continue: suspected violation of terms"
+            }
+        });
+        assert_eq!(
+            refusal(Some(403), both.to_string().as_bytes()),
+            Some(Refusal::Verification),
+            "verification is checked before any permanent signal"
+        );
+    }
+
+    /// The status quo: everything else stays an ordinary upstream failure, including the
+    /// transient answers whose bodies can echo arbitrary wording.
+    #[test]
+    fn ordinary_failures_are_not_refusals() {
+        let cases = [
+            (
+                Some(429u16),
+                json!({"error": {"code": 429, "message": "quota exhausted"}}),
+            ),
+            (
+                Some(500),
+                json!({"error": {"code": 500, "message": "internal error"}}),
+            ),
+            // A 5xx that happens to echo the wording is still transient, not a ban.
+            (
+                Some(503),
+                json!({"error": {"message": "service has been disabled in this account"}}),
+            ),
+            (
+                Some(400),
+                json!({"error": {"status": "INVALID_ARGUMENT", "message": "Unknown name"}}),
+            ),
+            (
+                Some(403),
+                json!({"error": {"message": "The caller does not have permission"}}),
+            ),
+            (None, json!({"error": {"message": "quota exhausted"}})),
+        ];
+        for (status, body) in cases {
+            assert_eq!(
+                refusal(status, body.to_string().as_bytes()),
+                None,
+                "status {status:?} body {body}"
+            );
+        }
+        assert_eq!(refusal(Some(403), b"not json"), None);
+        assert_eq!(refusal(Some(403), b""), None);
+        // A bare string body is read too, so a proxy-shaped error still classifies.
+        assert_eq!(
+            refusal(Some(403), br#""Your account has been suspended""#),
+            Some(Refusal::Terminated)
+        );
+        assert_eq!(
+            refusal_detail(
+                json!({"error": {"message": "The service has been disabled"}})
+                    .to_string()
+                    .as_bytes()
+            ),
+            "The service has been disabled",
+            "the detail keeps the provider's own wording"
+        );
+        assert_eq!(refusal_detail(b"not json"), "");
+    }
+
+    /// A refusal inside an SSE frame or a wrapped buffered body has no HTTP status of its
+    /// own; the readers must still name it instead of flattening it to a translation error.
+    #[test]
+    fn a_streamed_refusal_becomes_an_account_refusal() {
+        let payload = json!({"error": {"code": 403, "status": "TOS_VIOLATION", "message": "off"}});
+        let frame = format!(
+            r#"data: {payload}
+
+"#
+        );
+        let mut decoder = GoogleCcaDecoder::new("m");
+        let mut events = Vec::new();
+        let err = decoder.push(frame.as_bytes(), &mut events).unwrap_err();
+        assert_eq!(
+            err.refusal(),
+            Some(Refusal::Terminated),
+            "the frame carries its own status: {err}"
+        );
+
+        let body = json!({
+            "error": {"code": 403, "message": "Please verify your account to continue"}
+        });
+        let err = parse_response(&body).expect_err("a wrapped error is not a response");
+        assert_eq!(err.refusal(), Some(Refusal::Verification));
+        assert!(err.to_string().contains("needs verification"), "{err}");
     }
 
     #[test]
