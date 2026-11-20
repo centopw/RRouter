@@ -1111,7 +1111,7 @@ async fn fetch_cca_models(
         .post(&url)
         .bearer_auth(access_token)
         .header("accept", "application/json")
-        .header("user-agent", rrouter_translate::google_cca::USER_AGENT)
+        .header("user-agent", rrouter_translate::google_cca::user_agent())
         .header(
             "x-goog-api-client",
             rrouter_translate::google_cca::CLIENT_HEADER,
@@ -1431,7 +1431,7 @@ mod tests {
             ))
             .and(wiremock::matchers::header(
                 "user-agent",
-                rrouter_translate::google_cca::USER_AGENT,
+                rrouter_translate::google_cca::user_agent(),
             ))
             .and(wiremock::matchers::body_json(json!({"project": "proj-1"})))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({

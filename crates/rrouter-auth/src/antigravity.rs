@@ -114,26 +114,24 @@ pub fn available_models(body: &Value) -> Vec<AvailableModel> {
 }
 
 /// Metadata every Antigravity code-assist call declares.
+///
+/// `platform` is the `ClientMetadata.Platform` value (1 macOS x64, 2 macOS arm64,
+/// 3 Linux x64, 4 Linux arm64, 5 Windows) of the host this build runs on, read from
+/// [`rrouter_translate::google_cca::client_identity`] — the same source that renders the
+/// `os_type=`/`arch=` tokens of the wire `User-Agent`. String enums are rejected by
+/// project discovery.
+///
+/// Invariant: the marker and this enum are two views of one identity and must never be
+/// derived separately. They once were, and a Linux host announced macOS arm64 on the wire
+/// while telling `loadCodeAssist` it was Linux x64 — nothing is less plausible than a
+/// client that disagrees with itself, so read the identity here, never
+/// `std::env::consts` directly.
 fn metadata() -> Value {
     json!({
         "ideType": 9,
-        "platform": platform_enum(),
+        "platform": rrouter_translate::google_cca::client_identity().platform(),
         "pluginType": 2
     })
-}
-
-/// Antigravity's `ClientMetadata.Platform` enum: 1 macOS x64, 2 macOS arm64,
-/// 3 Linux x64, 4 Linux arm64, 5 Windows. The shared desktop client is identified by
-/// these values; string enums are rejected by project discovery.
-fn platform_enum() -> i32 {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "x86_64") => 1,
-        ("macos", "aarch64") => 2,
-        ("linux", "x86_64") => 3,
-        ("linux", "aarch64") => 4,
-        ("windows", _) => 5,
-        _ => 0,
-    }
 }
 
 /// Daily host for API traffic: the env override wins, else the provider's configured base.
@@ -283,7 +281,7 @@ async fn post_json(
         .post(url)
         .bearer_auth(access_token)
         .header("accept", "application/json")
-        .header("user-agent", rrouter_translate::google_cca::USER_AGENT)
+        .header("user-agent", rrouter_translate::google_cca::user_agent())
         .header(
             "x-goog-api-client",
             rrouter_translate::google_cca::CLIENT_HEADER,
@@ -593,6 +591,41 @@ mod tests {
         let meta = metadata();
         assert_eq!(meta["ideType"], 9);
         assert_eq!(meta["pluginType"], 2);
-        assert!(meta["platform"].as_i64().unwrap_or(-1) >= 0);
+        assert!(
+            (1..=5).contains(&meta["platform"].as_i64().unwrap_or(0)),
+            "platform must name a ClientMetadata.Platform member, not 0: {meta}"
+        );
+    }
+
+    /// The two surfaces the backend fingerprints must describe one machine.
+    ///
+    /// The wire `User-Agent` carries `os_type=`/`arch=` and `loadCodeAssist` /
+    /// `onboardUser` carry `metadata.platform`; both now come from
+    /// `google_cca::client_identity`, so a host can no longer be announced as macOS
+    /// arm64 on the wire and Linux x64 to project discovery at the same time.
+    #[test]
+    fn wire_marker_and_platform_metadata_describe_the_same_host() {
+        let identity = rrouter_translate::google_cca::client_identity();
+        let meta = metadata();
+        assert_eq!(
+            meta["platform"].as_i64(),
+            Some(i64::from(identity.platform())),
+            "loadCodeAssist metadata disagrees with the identity: {meta}"
+        );
+
+        let marker = rrouter_translate::google_cca::user_agent();
+        assert!(
+            marker.contains(&format!("os_type={}", identity.os_type())),
+            "wire marker disagrees with the identity: {marker}"
+        );
+        assert!(
+            marker.contains(&format!("arch={}", identity.arch())),
+            "wire marker disagrees with the identity: {marker}"
+        );
+        assert!(
+            (1..=5).contains(&identity.platform()),
+            "0 is not a ClientMetadata.Platform member: {}",
+            identity.platform()
+        );
     }
 }

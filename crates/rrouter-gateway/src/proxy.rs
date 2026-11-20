@@ -302,7 +302,7 @@ fn google_cca_headers(
     let mut headers = outbound_headers(spec, creds, client)?;
     headers.insert(
         header::USER_AGENT,
-        HeaderValue::from_static(rrouter_translate::google_cca::USER_AGENT),
+        HeaderValue::from_static(rrouter_translate::google_cca::user_agent()),
     );
     headers.insert(
         "x-goog-api-client",
@@ -5493,7 +5493,7 @@ mod tests {
             headers
                 .get(header::USER_AGENT)
                 .and_then(|value| value.to_str().ok()),
-            Some(rrouter_translate::google_cca::USER_AGENT)
+            Some(rrouter_translate::google_cca::user_agent())
         );
         assert_eq!(
             headers
