@@ -247,6 +247,12 @@ export type Connection = {
    * simply omits the field, and the row shows no project line.
    */
   project_id?: string | null;
+  /**
+   * Why the *provider* took this account out of rotation (`account_suspended`, …), or
+   * `null`/absent for an operator disable. Optional because a gateway older than the V43
+   * migration does not send it at all; see `lib/refusal` for the copy each token carries.
+   */
+  refusal?: string | null;
 };
 
 /** The UTC calendar window a quota resets on; `total` (all time) is API-only. */
