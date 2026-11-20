@@ -3,14 +3,25 @@ use serde_json::Value;
 /// How an upstream refused the *account*, as opposed to the request.
 ///
 /// A refusal is a fact about the credential: re-sending the same request to the same
-/// account cannot change it, and the two classes need opposite handling, which is why
-/// they are a type rather than a string an operator has to interpret.
+/// account cannot change it, and the classes need opposite handling, which is why they are
+/// a type rather than a string an operator has to interpret.
 ///
 /// * [`Refusal::Terminated`] — **permanent**. The provider terminated the account; a
 ///   terms-of-service violation is the case seen in the wild. Retrying it forever hides a
 ///   dead account in rotation and spends a fallback slot on every request, so the
 ///   connection is retired (`is_active = 0` plus `connections.refusal`) and the dispatcher
 ///   fails over to the next account.
+/// * [`Refusal::Entitlement`] — **permanent for this credential**. The credential is not
+///   entitled to the request: a subscription plan that does not cover the model, a token
+///   the provider only authorizes for its own client, or an organization that forbids the
+///   call. Distinct from a ban because the account is intact — the operator's fix is a
+///   plan, credential or client-fingerprint change, not an appeal — and distinct from a
+///   throttle because waiting never clears it. It leaves rotation for the same reason a
+///   termination does: no retry of this credential can succeed.
+/// * [`Refusal::ClientOutdated`] — **the gateway's fault**. The provider enforces a minimum
+///   client version and the one this build declares is below it. Nothing is wrong with the
+///   account, so it is never retired; the client is told the gateway's identity is stale
+///   rather than being handed a throttle to retry.
 /// * [`Refusal::Verification`] — **recoverable**. A `VALIDATION_REQUIRED` answer arrives
 ///   on healthy, fully-quota'd accounts and clears once the operator completes the
 ///   provider's verification. It must never retire an account: the connection cools down
@@ -19,6 +30,12 @@ use serde_json::Value;
 pub enum Refusal {
     /// Permanent account termination: the account leaves rotation for good.
     Terminated,
+    /// The credential is not authorized for this request shape: leaves rotation, but the
+    /// reason is an entitlement, not a suspension.
+    Entitlement,
+    /// The provider rejects the client version this gateway declares: a configuration
+    /// defect on our side, so the account stays in rotation.
+    ClientOutdated,
     /// Recoverable verification-required: cool the account down, keep it eligible.
     Verification,
 }
@@ -29,13 +46,52 @@ impl Refusal {
     pub fn code(self) -> &'static str {
         match self {
             Self::Terminated => "account_suspended",
+            Self::Entitlement => "account_not_entitled",
+            Self::ClientOutdated => "client_version_rejected",
             Self::Verification => "account_verification_required",
         }
     }
 
-    /// Permanently refused accounts leave rotation; recoverable ones only cool down.
+    /// HTTP status the *client* sees for this class.
+    ///
+    /// The classes are further apart here than they are at the provider, because the
+    /// answer is advice: a suspended account and an unentitled credential are both
+    /// `403` "not permitted", a stale client identity is `502` (the gateway is
+    /// misconfigured, not the caller), and a pending verification is `503` because a human
+    /// will fix it.
+    pub fn status(self) -> u16 {
+        match self {
+            Self::Terminated | Self::Entitlement => 403,
+            Self::ClientOutdated => 502,
+            Self::Verification => 503,
+        }
+    }
+
+    /// Status recorded for breaker and attempt bookkeeping, which is the number the
+    /// *provider* answered with rather than the one the client sees.
+    ///
+    /// `403` for every account-level refusal because that is what both subscription
+    /// surfaces answer when they disable an account — and, deliberately, for the
+    /// entitlement gate too: it wears a lying `429`, and recording that number would file
+    /// it as a model-scoped throttle, which is the cooling-and-re-probing this taxonomy
+    /// exists to stop. A real `429` never reaches this type: it is an
+    /// [`Error::Upstream`] carrying `429`, which the breaker treats as a throttle.
+    pub fn upstream_status(self) -> u16 {
+        match self {
+            Self::Terminated | Self::Entitlement | Self::Verification => 403,
+            Self::ClientOutdated => 400,
+        }
+    }
+
+    /// Refusals that take the account out of rotation: no retry of this credential can
+    /// succeed, so leaving it routable spends a fallback slot on every later request.
+    ///
+    /// [`Refusal::Verification`] and [`Refusal::ClientOutdated`] are not in this set. The
+    /// first clears when an operator acts, and the second is a fact about this build — the
+    /// account is healthy, so retiring it would empty rotation for a defect the account
+    /// has nothing to do with.
     pub fn is_permanent(self) -> bool {
-        matches!(self, Self::Terminated)
+        matches!(self, Self::Terminated | Self::Entitlement)
     }
 }
 
@@ -118,18 +174,11 @@ impl Error {
             Self::Forbidden { .. } => 403,
             Self::NotFound(_) | Self::NoRoute { .. } => 404,
             Self::Limited { .. } => 429,
-            // A terminated account is gone for good, so the answer must not invite a
-            // retry: 403 says "not permitted", where 502 would suggest the gateway broke.
-            Self::AccountRefused {
-                refusal: Refusal::Terminated,
-                ..
-            } => 403,
-            // Verification clears once a human acts, so it is a temporary
-            // unavailability rather than a refusal of the caller's key.
-            Self::AccountRefused {
-                refusal: Refusal::Verification,
-                ..
-            } => 503,
+            // The class owns the status: a terminated account or an unentitled credential
+            // is `403` ("not permitted", never invite a retry), a stale client identity is
+            // `502` (the gateway is misconfigured, not the caller), and a pending
+            // verification is `503` because a human will clear it.
+            Self::AccountRefused { refusal, .. } => refusal.status(),
             Self::Upstream { status, .. } => *status,
             Self::Timeout(_) => 504,
             Self::Store(_) | Self::Transport(_) | Self::Json(_) | Self::Io(_) => 502,
@@ -191,10 +240,10 @@ impl Error {
     /// on the next request.
     pub fn upstream_status(&self) -> u16 {
         match self {
-            // Every account-level refusal in the taxonomy is a 403 at the provider:
-            // Cloud Code Assist answers both `TOS_VIOLATION` and `VALIDATION_REQUIRED`
-            // with that status, and the class is carried by `refusal`, not by the number.
-            Self::AccountRefused { .. } => 403,
+            // The class carries the number, not the wire: an entitlement refusal arrives
+            // wearing a `429` and recording that would file it as a throttle (see
+            // [`Refusal::upstream_status`]).
+            Self::AccountRefused { refusal, .. } => refusal.upstream_status(),
             _ => self.status(),
         }
     }
@@ -222,6 +271,17 @@ impl Error {
             Refusal::Terminated => format!(
                 "upstream account suspended: the {provider} account was disabled by the \
                  provider and has been removed from rotation"
+            ),
+            Refusal::Entitlement => format!(
+                "upstream credential not entitled: the {provider} credential is not \
+                 authorized for this request (plan, client fingerprint or organization \
+                 policy) and the account has been removed from rotation until it is \
+                 re-enabled"
+            ),
+            Refusal::ClientOutdated => format!(
+                "upstream rejected the gateway's client version: {provider} requires a newer \
+                 client than this build declares, so no account can serve until RRouter is \
+                 upgraded"
             ),
             Refusal::Verification => format!(
                 "upstream account needs verification: the {provider} account must complete \
@@ -341,5 +401,63 @@ mod tests {
             payload: None,
         };
         assert_eq!(plain.refusal(), None, "an ordinary 403 is not a refusal");
+    }
+
+    /// An unentitled credential is not a ban, but it is just as useless in rotation: both
+    /// leave it, while the two remaining classes must not. Each class also needs its own
+    /// token and status, because the human action differs for every one of them.
+    #[test]
+    fn entitlement_retires_and_a_stale_client_identity_never_does() {
+        let entitled = Error::account_refused(
+            "claude",
+            Refusal::Entitlement,
+            "This credential is only authorized for use with Claude Code",
+        );
+        assert!(entitled.refusal().is_some_and(Refusal::is_permanent));
+        assert_eq!(entitled.status(), 403);
+        assert_eq!(entitled.code(), Some("account_not_entitled"));
+        // Bookkeeping must not repeat the gate's lying 429: a 429 there is a throttle.
+        assert_eq!(entitled.upstream_status(), 403);
+        assert!(
+            entitled.is_retryable_upstream(),
+            "another account may serve"
+        );
+        let text = entitled.to_string();
+        assert!(text.contains("not entitled"), "{text}");
+        assert!(
+            text.contains("This credential is only authorized"),
+            "the provider's own wording rides along: {text}"
+        );
+
+        let stale = Error::account_refused(
+            "claude",
+            Refusal::ClientOutdated,
+            "version 2.1.280 or newer is required",
+        );
+        assert!(
+            !stale.refusal().is_some_and(Refusal::is_permanent),
+            "a stale fingerprint is our defect: retiring accounts for it would empty rotation"
+        );
+        assert_eq!(stale.status(), 502);
+        assert_eq!(stale.code(), Some("client_version_rejected"));
+        assert_eq!(stale.upstream_status(), 400);
+        assert!(stale.to_string().contains("client version"));
+
+        // Four classes, four tokens, four client-facing statuses: nothing collapses.
+        let classes = [
+            Refusal::Terminated,
+            Refusal::Entitlement,
+            Refusal::ClientOutdated,
+            Refusal::Verification,
+        ];
+        let mut codes: Vec<&str> = classes.iter().map(|class| class.code()).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), classes.len(), "codes must be distinct");
+        assert_eq!(
+            classes.iter().filter(|class| class.is_permanent()).count(),
+            2,
+            "only a termination and an entitlement leave rotation"
+        );
     }
 }
