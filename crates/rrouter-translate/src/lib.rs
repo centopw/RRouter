@@ -5,7 +5,7 @@
 //! the proxy at 2N conversions (dialect ↔ canonical) instead of N² pairwise
 //! translators.
 
-mod anthropic;
+pub mod anthropic;
 pub mod error;
 pub mod google_cca;
 mod openai_chat;

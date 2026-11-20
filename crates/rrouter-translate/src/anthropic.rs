@@ -1,11 +1,22 @@
 //! Anthropic Messages API: JSON bodies and event-framed SSE.
+//!
+//! # Account refusals
+//!
+//! A refusal is not always about the request. The Claude subscription gate answers a
+//! request that does not look like Claude Code with
+//! `429 {"type":"error","error":{"type":"rate_limit_error","message":"Error"}}` — an
+//! entitlement verdict wearing a throttle's status — and an account or organization the
+//! provider disabled answers `400`/`403` with its own wording. [`refusal`] separates those
+//! from ordinary failures and from real throttles (which carry `anthropic-ratelimit-*`
+//! headers), so the gateway can retire a credential that can never succeed instead of
+//! cooling it down and re-probing it forever.
 
 use serde_json::{json, Map, Value};
 
 use rrouter_core::sse::{render_anthropic, SseCodec, SseFrame};
 use rrouter_core::{
-    ChatRequest, ChatResponse, Dialect, FinishReason, Message, Part, Result, Role, StreamEvent,
-    ToolChoice, ToolDef, Usage,
+    ChatRequest, ChatResponse, Dialect, Error, FinishReason, Message, Part, Refusal, Result, Role,
+    StreamEvent, ToolChoice, ToolDef, Usage,
 };
 
 use crate::{
@@ -429,6 +440,177 @@ pub fn build_response(resp: &ChatResponse) -> Result<Value> {
 }
 
 // ---------------------------------------------------------------------------
+// Account refusals
+// ---------------------------------------------------------------------------
+
+/// Provider label used in the translated error text and in a refusal's own sentence.
+///
+/// The dialect, not the credential: the gateway overrides it with the registry id when it
+/// has one, and a refusal raised deep inside the stream decoder does not.
+const PROVIDER: &str = "anthropic";
+
+/// Wording that means the provider disabled the *account* or its *organization*.
+///
+/// Every phrase names one or the other: matching a bare `disabled` would retire a healthy
+/// account on a coincidental word, and a false permanent verdict is far worse than a missed
+/// one (the account keeps working under the status-quo path). Case-insensitive.
+const TERMINATED_PHRASES: [&str; 5] = [
+    "your account has been disabled",
+    "account has been deactivated",
+    "organization has been disabled",
+    "organization has been suspended",
+    "organization has been deactivated",
+];
+
+/// Wording that means the credential is real but not entitled to the request.
+///
+/// These never clear by waiting — the first is the subscription gate, the second is a
+/// billing-routing refusal — so treating them as throttles is what leaves a dead account
+/// cooling down and being re-probed forever.
+const ENTITLEMENT_PHRASES: [&str; 2] = [
+    "only authorized for use with claude code",
+    "third-party apps now draw from your extra usage",
+];
+
+/// The message of an organization-level `403`. Gated on the status because the phrase is
+/// short enough to appear inside an unrelated sentence.
+const ENTITLEMENT_FORBIDDEN: &str = "request not allowed";
+
+/// Wording that means the provider enforces a newer client than this build declares. A
+/// configuration defect on our side, never a fact about the account, so it must not be
+/// cooled down like a throttle nor retire anything.
+const OUTDATED_PHRASES: [&str; 2] = [
+    "or newer is required",
+    "please upgrade to the latest version",
+];
+
+/// Error type and message of the subscription gate's refusal.
+///
+/// The gate answers `429 {"type":"error","error":{"type":"rate_limit_error","message":
+/// "Error"}}`: an entitlement verdict wearing a throttle's status. The message is the whole
+/// signature — a real `429` names the limit it exceeded — so a `429` is only ever read as
+/// this class when the body says exactly this, and never when the answer carried the
+/// provider's own rate-limit headers.
+const GATE_TYPE: &str = "rate_limit_error";
+const GATE_MESSAGE: &str = "Error";
+
+/// Classify an upstream answer as a refusal of the *account* rather than of the request.
+///
+/// `http_status` is the status of the enclosing HTTP answer; `None` when the body arrived
+/// inside a `200` (`event: error` on a stream, where the body's own `type` is the only
+/// signal available). `throttle_headers` is `true` when that answer carried the provider's
+/// `anthropic-ratelimit-*` headers.
+///
+/// `None` is the status-quo path and the safe default: nothing is classified unless the
+/// answer carries one of the taxonomy's signals. Four guards keep it honest:
+///
+/// * a `5xx` — `529 overloaded` included — is transient by definition, so no wording in
+///   such a body is evidence about the account;
+/// * a `429` **with** rate-limit headers is a real throttle and is never classified,
+///   whatever its message;
+/// * a `429` without them is only classified when the body is the gate's exact signature,
+///   because an ordinary `429` from an unknown proxy must stay a rate limit;
+/// * `401` matches nothing on purpose: a revoked token is recoverable by a refresh, not a
+///   ban, and terminalising it would retire an account that a refresh can fix.
+pub fn refusal(http_status: Option<u16>, body: &[u8], throttle_headers: bool) -> Option<Refusal> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    refusal_in(http_status, &value, throttle_headers)
+}
+
+/// The body's own error message, verbatim, for an operator-facing detail line.
+///
+/// Empty when the body is not JSON or carries no message: the refusal classification is
+/// what the caller acts on, and the detail is only ever appositional.
+pub fn refusal_detail(body: &[u8]) -> String {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .map(|value| error_message(&value).to_string())
+        .unwrap_or_default()
+}
+
+/// [`refusal`] over an already-parsed error, for the stream decoder, which has the error
+/// object instead of the raw bytes.
+fn refusal_in(http_status: Option<u16>, value: &Value, throttle_headers: bool) -> Option<Refusal> {
+    // The provider's own rate-limit headers are sent on every real throttle and on none of
+    // the gate's answers: with them present the answer is a rate limit, full stop.
+    if throttle_headers {
+        return None;
+    }
+    let error = value.get("error").unwrap_or(value);
+    let kind = error
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // An overloaded provider is the one 5xx-adjacent answer that can arrive with a `200`
+    // envelope: it says nothing about entitlement.
+    if kind.eq_ignore_ascii_case("overloaded_error") {
+        return None;
+    }
+    let message = error_message(value);
+    let lower = message.to_ascii_lowercase();
+    match http_status {
+        // The one refusal that wears a throttle's status, and only in its exact shape.
+        Some(429) => {
+            let gate = kind.eq_ignore_ascii_case(GATE_TYPE)
+                && message.trim().eq_ignore_ascii_case(GATE_MESSAGE);
+            return gate.then_some(Refusal::Entitlement);
+        }
+        // Transient by definition: a provider retry or an exhausted quota window can echo
+        // any wording at all, so no phrase in such a body is evidence about the account.
+        Some(500..=599) => return None,
+        _ => {}
+    }
+    if TERMINATED_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+    {
+        return Some(Refusal::Terminated);
+    }
+    if ENTITLEMENT_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+    {
+        return Some(Refusal::Entitlement);
+    }
+    if http_status == Some(403) && lower.contains(ENTITLEMENT_FORBIDDEN) {
+        return Some(Refusal::Entitlement);
+    }
+    if OUTDATED_PHRASES.iter().any(|phrase| lower.contains(phrase)) {
+        return Some(Refusal::ClientOutdated);
+    }
+    None
+}
+
+/// The `message` an error object carries, or the bare string body itself.
+fn error_message(value: &Value) -> &str {
+    let error = value.get("error").unwrap_or(value);
+    match error {
+        Value::String(text) => text,
+        _ => error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    }
+}
+
+/// A streamed `event: error` frame as the error the gateway sees.
+///
+/// The frame is a refusal when the taxonomy recognises it, so an account the provider
+/// refuses mid-stream is retired exactly like one refused before the stream opened.
+/// Otherwise the provider's wording becomes a translation failure: before this the frame
+/// was dropped and the client got a truncated response recorded as a success.
+fn error_from_value(error: &Value) -> Error {
+    let detail = match error_message(error) {
+        "" => "upstream error",
+        text => text,
+    };
+    if let Some(refusal) = refusal_in(None, error, false) {
+        return Error::account_refused(PROVIDER, refusal, detail);
+    }
+    Error::Translation(format!("{PROVIDER}: {detail}"))
+}
+
+// ---------------------------------------------------------------------------
 // Streaming in
 // ---------------------------------------------------------------------------
 
@@ -471,26 +653,32 @@ impl AnthropicDecoder {
     pub fn push(&mut self, chunk: &[u8], out: &mut Vec<StreamEvent>) -> Result<()> {
         self.codec.push(chunk);
         while let Some(frame) = self.codec.next_frame() {
-            self.frame(&frame, out);
+            self.frame(&frame, out)?;
         }
         Ok(())
     }
 
     pub fn finish(&mut self, out: &mut Vec<StreamEvent>) -> Result<()> {
         while let Some(frame) = self.codec.finish() {
-            self.frame(&frame, out);
+            self.frame(&frame, out)?;
         }
         self.emit_done(out);
         Ok(())
     }
 
-    fn frame(&mut self, frame: &SseFrame, out: &mut Vec<StreamEvent>) {
+    fn frame(&mut self, frame: &SseFrame, out: &mut Vec<StreamEvent>) -> Result<()> {
         if frame.is_done() {
-            return;
+            return Ok(());
         }
         let Ok(v) = serde_json::from_str::<Value>(&frame.data) else {
-            return;
+            return Ok(());
         };
+        // `event: error` (or an error object without the event name) is the provider
+        // refusing after the `200` was already sent — the only place a stream can carry a
+        // verdict, and the only chance to act on a refusal of the account.
+        if let Some(error) = v.get("error") {
+            return Err(error_from_value(error));
+        }
         let event = frame
             .event
             .as_deref()
@@ -566,7 +754,7 @@ impl AnthropicDecoder {
             "content_block_delta" => {
                 let slot = opt_u32(&v, "index").unwrap_or(0) as usize;
                 let Some(Some(block)) = self.blocks.get(slot) else {
-                    return;
+                    return Ok(());
                 };
                 let delta = v.get("delta").unwrap_or(&Value::Null);
                 match req_str(delta, "type") {
@@ -620,6 +808,7 @@ impl AnthropicDecoder {
             "message_stop" => self.emit_done(out),
             _ => {}
         }
+        Ok(())
     }
 
     fn emit_start(&mut self, out: &mut Vec<StreamEvent>, model: String) {
@@ -1320,5 +1509,212 @@ mod tests {
         assert_eq!(source["type"], "base64");
         assert_eq!(source["media_type"], "image/png");
         assert_eq!(source["data"], "QUJD");
+    }
+
+    // ------------------------------------------------------------ account refusals
+
+    /// An Anthropic error answer, in the shape both carriers use.
+    fn answer(kind: &str, message: &str) -> Vec<u8> {
+        json!({"type": "error", "error": {"type": kind, "message": message}})
+            .to_string()
+            .into_bytes()
+    }
+
+    /// The gate's exact body: a rate-limit status with a throttle's error type and no
+    /// content at all in the message.
+    fn gate() -> Vec<u8> {
+        answer("rate_limit_error", "Error")
+    }
+
+    /// Every class is recognised from the answer the provider actually sends for it, so
+    /// the operator reads the class's own reason instead of a generic upstream error.
+    #[test]
+    fn every_refusal_class_is_recognised_from_its_own_answer() {
+        // A disabled account, and a disabled organization: the same class, two subjects.
+        for (status, message) in [
+            (400, "Your account has been disabled"),
+            (403, "Your account has been disabled"),
+            (403, "This organization has been suspended"),
+            (400, "This account has been deactivated"),
+        ] {
+            assert_eq!(
+                refusal(
+                    Some(status),
+                    &answer("invalid_request_error", message),
+                    false
+                ),
+                Some(Refusal::Terminated),
+                "{status} {message}"
+            );
+        }
+
+        // Entitlements: the credential is alive but not authorized for this request.
+        for (status, kind, message) in [
+            (
+                400,
+                "invalid_request_error",
+                "This credential is only authorized for use with Claude Code and cannot be used \
+                 for other API requests.",
+            ),
+            (
+                400,
+                "invalid_request_error",
+                "Third-party apps now draw from your extra usage, not your plan limits.",
+            ),
+            (403, "permission_error", "Request not allowed"),
+            // The subscription gate, in its exact shape and with no rate-limit headers.
+            (429, "rate_limit_error", "Error"),
+        ] {
+            assert_eq!(
+                refusal(Some(status), &answer(kind, message), false),
+                Some(Refusal::Entitlement),
+                "{status} {message}"
+            );
+        }
+
+        // Our own fingerprint being stale is a third, distinct class: nothing is wrong
+        // with the account, so it must not read as one.
+        assert_eq!(
+            refusal(
+                Some(400),
+                &answer(
+                    "invalid_request_error",
+                    "Claude Code version 2.1.280 or newer is required"
+                ),
+                false
+            ),
+            Some(Refusal::ClientOutdated)
+        );
+
+        // The detail is the provider's own sentence, which is what the operator acts on.
+        assert_eq!(
+            refusal_detail(&answer("permission_error", "Request not allowed")),
+            "Request not allowed"
+        );
+        assert_eq!(refusal_detail(b"not json"), "");
+    }
+
+    /// The gate wears a throttle's status, so the headers are the only thing that tells the
+    /// two apart reliably: a real throttle always carries them and the gate never does.
+    #[test]
+    fn a_real_throttle_is_never_an_entitlement() {
+        // The gate's own body, but this answer carried the provider's rate-limit headers:
+        // a real throttle is a fact about the moment, not about the credential.
+        assert_eq!(refusal(Some(429), &gate(), true), None);
+
+        // A real limit, named as one, with and without headers.
+        let real = answer(
+            "rate_limit_error",
+            "Number of request tokens has exceeded your per-minute rate limit",
+        );
+        assert_eq!(refusal(Some(429), &real, true), None);
+        assert_eq!(
+            refusal(Some(429), &real, false),
+            None,
+            "a 429 that names its limit is never the gate"
+        );
+        // A usage-limit answer with a reset time is a limit too.
+        let window = answer(
+            "rate_limit_error",
+            "You have reached your 5-hour limit. Resets at 14:00 UTC.",
+        );
+        assert_eq!(refusal(Some(429), &window, false), None);
+    }
+
+    /// Guards: transient answers and ordinary request errors are never refusals, and a
+    /// revoked token is refreshable rather than terminal.
+    #[test]
+    fn transient_and_ordinary_failures_are_not_refusals() {
+        // Overloaded: 529, and the same class of frame inside a `200` stream envelope.
+        assert_eq!(
+            refusal(Some(529), &answer("overloaded_error", "Overloaded"), false),
+            None
+        );
+        assert_eq!(
+            refusal(
+                Some(500),
+                &answer("api_error", "Internal server error"),
+                false
+            ),
+            None
+        );
+        // A 5xx can echo any wording; none of it is evidence about the account.
+        assert_eq!(
+            refusal(
+                Some(503),
+                &answer("api_error", "Your account has been disabled"),
+                false
+            ),
+            None,
+            "a 5xx is transient by definition"
+        );
+        // A plain request error: an unknown model must never retire anything.
+        assert_eq!(
+            refusal(
+                Some(400),
+                &answer("invalid_request_error", "model: unknown model claude-nope"),
+                false
+            ),
+            None
+        );
+        // `Request not allowed` only classifies as an entitlement on the 403 it belongs to.
+        assert_eq!(
+            refusal(
+                Some(400),
+                &answer("invalid_request_error", "Request not allowed"),
+                false
+            ),
+            None
+        );
+        // A revoked OAuth token is recoverable by a refresh, not a ban.
+        for message in [
+            "OAuth token has been revoked",
+            "Invalid authentication credentials",
+        ] {
+            assert_eq!(
+                refusal(Some(401), &answer("authentication_error", message), false),
+                None,
+                "{message}"
+            );
+        }
+        assert_eq!(refusal(Some(429), b"not json", false), None);
+        assert_eq!(refusal(Some(429), b"", false), None);
+    }
+
+    /// Anthropic streams errors as `event: error` after the `200` was sent, so the decoder
+    /// is the last place a refusal can be recognised — and a dropped frame used to look
+    /// like a successful truncated answer.
+    #[test]
+    fn a_streamed_refusal_becomes_an_account_refusal() {
+        let mut decoder = AnthropicDecoder::new("m");
+        let mut out = Vec::new();
+        let wire = format!(
+            "{}data: {}\n\n",
+            sse(
+                "message_start",
+                json!({"type": "message_start", "message": {"id": "msg_1", "model": "m"}})
+            ),
+            json!({"type": "error", "error": {"type": "invalid_request_error", "message":
+                "This credential is only authorized for use with Claude Code"}})
+        );
+        let err = decoder
+            .push(wire.as_bytes(), &mut out)
+            .expect_err("a refusal is not a successful stream");
+        assert_eq!(err.refusal(), Some(Refusal::Entitlement));
+        assert_eq!(err.code(), Some("account_not_entitled"));
+        assert!(err.to_string().contains("only authorized"), "{err}");
+
+        // An overloaded frame is an error the client must see, but not a refusal.
+        let mut decoder = AnthropicDecoder::new("m");
+        let mut out = Vec::new();
+        let wire = format!(
+            "data: {}\n\n",
+            json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})
+        );
+        let err = decoder
+            .push(wire.as_bytes(), &mut out)
+            .expect_err("an error frame is not success");
+        assert_eq!(err.refusal(), None);
+        assert!(err.to_string().contains("Overloaded"), "{err}");
     }
 }

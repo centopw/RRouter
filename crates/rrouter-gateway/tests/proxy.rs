@@ -47,6 +47,9 @@ struct MockInner {
 enum MockReply {
     /// JSON body + status (non-streaming).
     Json(u16, Value),
+    /// JSON body + status + response headers: the provider's rate-limit budget, which is
+    /// what separates a real throttle from the subscription gate's fake one.
+    JsonWithHeaders(u16, Vec<(&'static str, &'static str)>, Value),
     /// Bytes relayed exactly as sent, for bodies the gateway must not rewrite.
     Raw(u16, &'static str),
     /// Audio: raw bytes with an explicit content type.
@@ -200,6 +203,16 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
         MockReply::Json(status, value) => {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             (code, axum::Json(value)).into_response()
+        }
+        MockReply::JsonWithHeaders(status, headers, value) => {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+            let mut resp = (code, axum::Json(value)).into_response();
+            for (name, value) in headers {
+                if let Ok(value) = axum::http::HeaderValue::from_str(value) {
+                    resp.headers_mut().insert(name, value);
+                }
+            }
+            resp
         }
         MockReply::Raw(status, body) => Response::builder()
             .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
@@ -1053,6 +1066,195 @@ async fn anthropic_non_streaming_round_trip() {
         rrouter_gateway::claude_code::IDENTITY
     );
     assert_eq!(seen[0]["system"][1]["text"], "be terse");
+}
+
+// ------------------------------------------------------- subscription refusals
+
+/// One Messages request, in the shape the gateway routes as a Claude subscription call.
+fn claude_request(stream: bool) -> Value {
+    json!({
+        "model": "claude/sonnet-4-5",
+        "max_tokens": 32,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": stream,
+    })
+}
+
+/// The retirement write is off the request path: wait for it instead of racing it.
+async fn retired_row(h: &Harness, connection: uuid::Uuid) -> rrouter_store::Connection {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows = h.state.store.list_connections(None).await.expect("list");
+        let row = rows
+            .into_iter()
+            .find(|row| row.id == connection)
+            .expect("the account is still listed");
+        if !row.is_active {
+            return row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the refused account was never retired"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// POST and keep the raw body: a stream is SSE frames, not a JSON value.
+async fn post_text(h: &Harness, uri: &str, body: Value) -> (StatusCode, String) {
+    let res = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = res.status();
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The subscription gate's answer — `429 {"type":"error","error":{"type":"rate_limit_error",
+/// "message":"Error"}}` — is an entitlement refusal, not a throttle: it never clears by
+/// waiting, so the account has to leave rotation instead of being cooled and re-probed.
+#[tokio::test]
+async fn the_subscription_gate_is_an_entitlement_and_leaves_rotation() {
+    let mock = Mock::start(vec![MockReply::Json(
+        429,
+        json!({"type": "error", "error": {"type": "rate_limit_error", "message": "Error"}}),
+    )])
+    .await;
+    let h = harness(false);
+    let connection = h.connect("claude", &mock).await;
+
+    let (status, body) = h.post("/v1/messages", claude_request(false)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(
+        body["error"]["code"], "account_not_entitled",
+        "a client can branch on the class: {body}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not entitled")),
+        "the message names the entitlement, not a suspension: {body}"
+    );
+
+    let row = retired_row(&h, connection).await;
+    assert_eq!(
+        row.refusal.as_deref(),
+        Some("account_not_entitled"),
+        "the row records why the provider retired it"
+    );
+    // The class's own status, never the gate's lying 429: a 429 would file it as a throttle.
+    assert_eq!(row.last_error_code, Some(403));
+
+    // Out of rotation: the next request for the same model never contacts it again.
+    let (status, body) = h.post("/v1/messages", claude_request(false)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the unentitled account was contacted once only"
+    );
+}
+
+/// The guard the whole taxonomy hinges on: a `429` that carries the provider's own
+/// rate-limit budget is a real throttle, even when its message says nothing.
+#[tokio::test]
+async fn a_header_bearing_429_stays_a_rate_limit() {
+    let mock = Mock::start(vec![MockReply::JsonWithHeaders(
+        429,
+        vec![
+            ("anthropic-ratelimit-requests-remaining", "0"),
+            ("anthropic-ratelimit-requests-reset", "2026-11-20T00:00:30Z"),
+        ],
+        json!({"type": "error", "error": {"type": "rate_limit_error", "message": "Error"}}),
+    )])
+    .await;
+    let h = harness(false);
+    let connection = h.connect("claude", &mock).await;
+
+    let (status, body) = h.post("/v1/messages", claude_request(false)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_ne!(
+        body["error"]["code"], "account_not_entitled",
+        "a throttle is a fact about the moment, not about the credential: {body}"
+    );
+
+    let rows = h.state.store.list_connections(None).await.expect("list");
+    let row = rows
+        .into_iter()
+        .find(|row| row.id == connection)
+        .expect("connection");
+    assert!(row.is_active, "a throttled account stays in rotation");
+    assert_eq!(row.refusal, None, "a throttle is never a refusal");
+}
+
+/// A revoked OAuth token is recoverable by a refresh: terminalising it would retire an
+/// account the refresher can fix. The refresh itself is what answers the client here (the
+/// mock has no refresh endpoint), so the assertion is about the row, not the status.
+#[tokio::test]
+async fn a_revoked_token_is_not_terminalised() {
+    let mock = Mock::start(vec![MockReply::Json(
+        401,
+        json!({"type": "error", "error": {"type": "authentication_error",
+               "message": "OAuth token has been revoked"}}),
+    )])
+    .await;
+    let h = harness(false);
+    let connection = h.connect("claude", &mock).await;
+
+    let (_, body) = h.post("/v1/messages", claude_request(false)).await;
+    assert!(
+        body["error"]["code"] != "account_not_entitled"
+            && body["error"]["code"] != "account_suspended",
+        "a revoked token is neither an entitlement nor a ban: {body}"
+    );
+
+    let rows = h.state.store.list_connections(None).await.expect("list");
+    let row = rows
+        .into_iter()
+        .find(|row| row.id == connection)
+        .expect("connection");
+    assert!(row.is_active, "a revoked token must not retire the account");
+    assert_eq!(row.refusal, None);
+}
+
+/// Anthropic streams an error as an `event: error` frame after the `200` was already sent.
+/// That is the only refusal a streaming request can carry, and it must still bench the
+/// account for every later request.
+#[tokio::test]
+async fn a_streamed_error_frame_retires_the_account() {
+    let wire = format!(
+        "event: message_start\ndata: {}\n\nevent: error\ndata: {}\n\n",
+        json!({"type": "message_start", "message": {"id": "msg_1", "model": "sonnet-4-5"}}),
+        json!({"type": "error", "error": {"type": "invalid_request_error",
+               "message": "This credential is only authorized for use with Claude Code"}})
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire,
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    let connection = h.connect("claude", &mock).await;
+
+    let (status, text) = post_text(&h, "/v1/messages", claude_request(true)).await;
+    assert_eq!(status, StatusCode::OK, "the 200 was already sent: {text}");
+    assert!(
+        text.contains("event: error") && text.contains("only authorized"),
+        "the client reads the provider's own reason: {text}"
+    );
+
+    let row = retired_row(&h, connection).await;
+    assert_eq!(row.refusal.as_deref(), Some("account_not_entitled"));
 }
 
 #[tokio::test]
