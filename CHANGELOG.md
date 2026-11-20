@@ -54,6 +54,19 @@ All notable changes. Dates are local; versions follow semver once tagged.
   suspension. A `VALIDATION_REQUIRED` / "Verify your account to continue" answer is
   recoverable and never retires the account. Neither class is retried on the same account
   within a request. See [Providers → Google Antigravity](docs/PROVIDERS.md#google-antigravity-cloud-code-assist).
+- **Claude subscriptions: entitlement is not a throttle.** The subscription gate's
+  `429 {"type":"error","error":{"type":"rate_limit_error","message":"Error"}}` was cooling
+  the account down and re-probing it forever, because it wears a rate limit's status. It
+  is now classified as an **entitlement** refusal — as are "This credential is only
+  authorized for use with Claude Code", "Third-party apps now draw from your extra usage"
+  and `403 "Request not allowed"` — and the connection is retired (`is_active = 0`,
+  `connections.refusal = account_not_entitled`) with a `403 account_not_entitled` naming
+  the entitlement rather than a suspension. Disabled accounts and organizations stay
+  `account_suspended`; a rejected client version is `client_version_rejected` (`502`, the
+  account is kept — the fault is this build's); a `429` carrying `anthropic-ratelimit-*`
+  headers, `overloaded_error`/`529`, any `5xx` and a revoked `401` never classify. An
+  `event: error` frame inside a `200` stream is classified the same way and retires the
+  account too. See [Providers](docs/PROVIDERS.md#providers).
 
 ## 0.31.0 — 2026-11-18
 

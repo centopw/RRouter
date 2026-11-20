@@ -65,6 +65,27 @@ fn is_google_cca(provider: &str) -> bool {
     provider == GOOGLE_ANTIGRAVITY
 }
 
+/// Registry id of the Claude subscription (Anthropic OAuth) provider.
+///
+/// Only this id takes the refusal taxonomy: the `anthropic` API-key provider is a different
+/// credential, never subject to the subscription gate, and its `400`s are ordinary request
+/// errors.
+const CLAUDE_SUBSCRIPTION: &str = "claude";
+
+fn is_claude_subscription(provider: &str) -> bool {
+    provider == CLAUDE_SUBSCRIPTION
+}
+
+/// `true` when an answer carried the provider's own rate-limit headers.
+///
+/// The one signal that separates a real throttle from the Claude subscription gate's fake
+/// `429`: every genuine throttle reports its budget, and the gate reports nothing at all.
+fn carries_rate_limit_headers(headers: &HeaderMap) -> bool {
+    headers
+        .keys()
+        .any(|name| name.as_str().starts_with("anthropic-ratelimit-"))
+}
+
 /// Bytes of one captured body kept in the database.
 ///
 /// Capture is a debugging aid, never a reason to fail a request or let the database grow
@@ -2719,13 +2740,25 @@ fn upstream_error(candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
 /// The error one upstream answer becomes.
 ///
 /// Almost every answer is an ordinary [`Error::Upstream`], pass-through for the client.
-/// Cloud Code Assist can also refuse the *account* itself, which the dispatcher and the
-/// connection row must treat differently, so that class is read here — next to the body it
-/// comes from — and carried as [`Error::AccountRefused`].
-fn answered(candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
+/// A subscription provider can also refuse the *account* itself, which the dispatcher and
+/// the connection row must treat differently, so that class is read here — next to the
+/// body it comes from — and carried as [`Error::AccountRefused`].
+///
+/// `rate_limited` is `true` when the answer carried `anthropic-ratelimit-*` headers: a
+/// `429` with them is a real throttle and must stay an ordinary error, which is the whole
+/// reason the classifier is told about them.
+fn answered(candidate: &Candidate, status: u16, bytes: &Bytes, rate_limited: bool) -> Error {
     if is_google_cca(&candidate.provider) {
         if let Some(refusal) = rrouter_translate::google_cca::refusal(Some(status), bytes) {
             let detail = rrouter_translate::google_cca::refusal_detail(bytes);
+            return Error::account_refused(&candidate.provider, refusal, &detail);
+        }
+    }
+    if is_claude_subscription(&candidate.provider) {
+        if let Some(refusal) =
+            rrouter_translate::anthropic::refusal(Some(status), bytes, rate_limited)
+        {
+            let detail = rrouter_translate::anthropic::refusal_detail(bytes);
             return Error::account_refused(&candidate.provider, refusal, &detail);
         }
     }
@@ -3031,21 +3064,28 @@ impl Attempt<'_> {
     /// provider error often echoes part of the prompt, and this string is both stored on
     /// the usage row and returned to the client.
     ///
-    /// A Cloud Code Assist answer that names an *account* refusal becomes
+    /// A subscription answer that names an *account* refusal becomes
     /// [`Error::AccountRefused`] instead of a generic upstream error: the dispatcher then
     /// fails over without retrying this account, and [`RequestTrace::time`] retires a
-    /// permanently banned one.
-    fn upstream_error(&self, candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
+    /// permanently refused one. `rate_limited` is the answer's own rate-limit-header hint
+    /// (see [`answered`]), captured before the body was consumed.
+    fn upstream_error(
+        &self,
+        candidate: &Candidate,
+        status: u16,
+        bytes: &Bytes,
+        rate_limited: bool,
+    ) -> Error {
         if self.redact_pii {
             let text = String::from_utf8_lossy(bytes);
             let (redacted, report) = crate::redaction::redact(&text);
             if report.redacted {
                 crate::metrics::pii_redacted(crate::metrics::RedactStage::Output, &report);
                 let redacted = Bytes::from(redacted.into_owned());
-                return answered(candidate, status, &redacted);
+                return answered(candidate, status, &redacted, rate_limited);
             }
         }
-        answered(candidate, status, bytes)
+        answered(candidate, status, bytes, rate_limited)
     }
 
     fn provider(&self, candidate: &Candidate) -> Result<&'static ProviderSpec> {
@@ -3372,12 +3412,16 @@ impl Attempt<'_> {
                     if status.is_success() {
                         return Ok(resp);
                     }
+                    // Read before the body is consumed: these headers are the only thing
+                    // that tells a real throttle from the subscription gate's fake 429.
+                    let rate_limited = carries_rate_limit_headers(resp.headers());
                     let bytes = resp
                         .bytes()
                         .await
                         .map_err(|e| Box::new(Failure::transport(transport_error(e))))?;
                     if status.as_u16() < 500 {
-                        let error = self.upstream_error(candidate, status.as_u16(), &bytes);
+                        let error =
+                            self.upstream_error(candidate, status.as_u16(), &bytes, rate_limited);
                         return Err(Box::new(Failure::answer(error, status.as_u16(), bytes)));
                     }
                     last_server_error = Some((status.as_u16(), bytes));
@@ -3387,7 +3431,9 @@ impl Attempt<'_> {
             }
         }
         if let Some((status, bytes)) = last_server_error {
-            let error = self.upstream_error(candidate, status, &bytes);
+            // 5xx only: a `429` took the branch above, and no refusal class is ever read
+            // from a server error (see the 5xx guard in the classifiers).
+            let error = self.upstream_error(candidate, status, &bytes, false);
             return Err(Box::new(Failure::answer(error, status, bytes)));
         }
         Err(Box::new(Failure::transport(transport.unwrap_or_else(
@@ -4149,13 +4195,22 @@ fn retire_refused_account(state: &AppState, candidate: &Candidate, err: &Error) 
     let Some(refusal) = err.refusal() else { return };
     if !refusal.is_permanent() {
         // Verification-required is a cooldown, not a death: the breaker already benched the
-        // account and it must come back without an operator touching the row.
+        // account and it must come back without an operator touching the row. A stale client
+        // identity is not the account's fault either, so it stays in rotation as well.
         return;
     }
+    retire_connection(state, candidate.connection, refusal, &err.to_string());
+}
+
+/// The retirement write itself: `is_active = 0` plus `connections.refusal`.
+///
+/// Called by both carriers a refusal can arrive on — the HTTP answer and the terminal error
+/// frame of a stream — so the row records the same class however the provider said it. The
+/// status stored is the class's own, never the wire's (see [`Refusal::upstream_status`]).
+fn retire_connection(state: &AppState, connection: Uuid, refusal: Refusal, detail: &str) {
     let store = Arc::clone(&state.store);
-    let connection = candidate.connection;
-    let detail = err.to_string();
-    let code = err.status();
+    let detail = detail.to_owned();
+    let code = refusal.upstream_status();
     tokio::spawn(async move {
         if let Err(e) = store
             .terminate_connection(connection, refusal.code(), Some(&detail), Some(code))
@@ -4214,6 +4269,10 @@ struct Wire {
     /// The terminal error sent after a decode/transport failure. Without this the usage
     /// row would say `200` even though the client received an error frame.
     terminal_error: Option<(u16, String)>,
+    /// The refusal class behind [`Self::terminal_error`], when that failure was a refusal
+    /// of the *account*. A stream already handed to the client cannot fail over, but the
+    /// account can still leave rotation for every later request.
+    terminal_refusal: Option<Refusal>,
     /// Longest blocked term, in characters; zero when output scanning is off.
     guard_max: usize,
     /// Trailing response text from the previous delta, per channel, so a term split
@@ -4257,6 +4316,7 @@ impl Wire {
             stream_redactor: redact_pii.then(crate::redaction::StreamRedactor::new),
             blocked: None,
             terminal_error: None,
+            terminal_refusal: None,
             guard_max,
             guard_text_tail: String::new(),
             guard_reasoning_tail: String::new(),
@@ -4404,6 +4464,7 @@ impl Wire {
     /// Flush the redaction tail, then build one terminal error frame.
     fn close_with_error(&mut self, err: Error) -> Bytes {
         self.terminal_error = Some((err.status(), err.to_string()));
+        self.terminal_refusal = err.refusal();
         let tail = match self.flush_stream_tail_mode(true) {
             Ok(tail) => tail,
             Err(e) => return Bytes::from(error_frame(self.inbound, &e)),
@@ -4543,6 +4604,25 @@ impl ResponseStream {
                 None => (200, None),
             },
         };
+        // A refusal that arrived as an `event: error` frame cannot fail over — the stream is
+        // already the client's answer — but the account must still leave rotation for every
+        // later request, exactly like one refused before the stream opened.
+        if let Some(refusal) = self.inner.terminal_refusal {
+            if refusal.is_permanent() {
+                let detail = self
+                    .inner
+                    .terminal_error
+                    .as_ref()
+                    .map(|(_, message)| message.as_str())
+                    .unwrap_or_default();
+                retire_connection(
+                    &pending.state,
+                    pending.candidate.connection,
+                    refusal,
+                    detail,
+                );
+            }
+        }
         record_once(
             &pending.state,
             Recorded {
