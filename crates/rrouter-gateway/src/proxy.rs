@@ -4363,13 +4363,22 @@ fn retire_refused_account(state: &AppState, candidate: &Candidate, err: &Error) 
 ///
 /// The stream carrier calls this from `Stream::poll_next` and from the body's `Drop`:
 /// neither has an async context to await a store write in, and blocking a runtime worker on
-/// SQLite to retire an account would stall every other request that worker serves. So the
-/// write stays on a task — but one best-effort attempt is not enough either. A busy or
-/// locked store would silently leave a suspended account routable, which is precisely the
-/// state this exists to prevent, and the next request would pay for the same refusal. The
-/// task therefore retries a bounded number of times and logs at `error` with the connection
-/// and class when it gives up, so a lost retirement is visible in the log instead of being
-/// inferred from traffic the provider keeps refusing.
+/// SQLite to retire an account would stall every other request that worker serves. Awaiting
+/// would also change what the buffered carrier does — it calls this from inside the
+/// dispatcher's failover loop, where the next candidate is already being chosen — so the
+/// write is kept off both request paths, and the row means the same thing whatever carrier
+/// the refusal arrived on.
+///
+/// One best-effort attempt is not enough, though. A busy or locked store would silently
+/// leave a suspended account routable, which is precisely the state this exists to prevent,
+/// and the next request would pay for the same refusal. The task therefore retries a
+/// bounded number of times and logs at `error` with the connection and class when it gives
+/// up, so a lost retirement is visible in the log instead of being inferred from traffic
+/// the provider keeps refusing.
+///
+/// What this does *not* cover is a process death inside the retry window, which no
+/// fire-and-forget write can: closing that needs the verdict committed before the client
+/// sees the terminal frame, i.e. a durable marker the next boot replays.
 fn retire_connection(state: &AppState, connection: Uuid, refusal: Refusal, detail: &str) {
     /// Attempts before the write is reported as lost. A SQLite `UPDATE` either lands on the
     /// first try or fails on a transient lock, so a short window is enough.

@@ -846,6 +846,7 @@ async fn a_suspended_account_in_a_200_stream_is_named_and_leaves_rotation() {
     let mock = Mock::start(vec![Reply::Sse(sse.into())]).await;
     let h = harness();
     h.connect(&mock, PROJECT).await;
+    let connection = only_connection(&h).await;
     let request = json!({
         "model": format!("{PROVIDER}/gemini-3-pro"),
         "stream": true,
@@ -869,6 +870,12 @@ async fn a_suspended_account_in_a_200_stream_is_named_and_leaves_rotation() {
         retired.last_error_code,
         Some(403),
         "the class's own status is recorded even though the wire said 200"
+    );
+    // The refusal is also the breaker's verdict: before this carrier recorded it, the
+    // dispatcher's stream wrapper settled the call as a success instead.
+    assert!(
+        !h.state.dispatcher.breaker().is_available(connection),
+        "a streamed refusal must never be booked as a healthy call"
     );
 
     // Out of rotation: the next request for the same model never contacts it again.
