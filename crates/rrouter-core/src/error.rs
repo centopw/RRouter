@@ -289,10 +289,13 @@ mod tests {
         // The message names the refusal instead of flattening to a translation error, and
         // keeps the provider's own wording for the operator.
         let text = banned.to_string();
-        assert!(text.contains("account suspended"), "{text}");
+        assert!(
+            text.contains("account suspended"),
+            "the message must name the suspension rather than read as a translation error"
+        );
         assert!(
             text.to_lowercase().contains("terms of service"),
-            "the provider's own wording rides along: {text}"
+            "the provider's own wording must ride along"
         );
 
         let verify = Error::account_refused(
@@ -331,8 +334,11 @@ mod tests {
     fn refusal_messages_survive_an_empty_detail() {
         let bare = Error::account_refused("p", Refusal::Terminated, "  ");
         let text = bare.to_string();
-        assert!(text.ends_with("removed from rotation"), "{text}");
-        assert!(!text.contains("()"), "{text}");
+        assert!(
+            text.ends_with("removed from rotation"),
+            "the sentence must still end properly when the provider gave no wording"
+        );
+        assert!(!text.contains("()"), "no empty parenthetical");
 
         let plain = Error::Upstream {
             provider: "p".into(),

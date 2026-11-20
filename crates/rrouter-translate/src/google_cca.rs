@@ -2123,7 +2123,10 @@ mod tests {
         });
         let err = parse_response(&body).expect_err("a wrapped error is not a response");
         assert_eq!(err.refusal(), Some(Refusal::Verification));
-        assert!(err.to_string().contains("needs verification"), "{err}");
+        assert!(
+            err.to_string().contains("needs verification"),
+            "a wrapped verification error must read as verification, not as a translation failure"
+        );
     }
 
     #[test]
