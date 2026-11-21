@@ -11,6 +11,7 @@ import {
   type QuotaPingRow,
 } from "../../lib/api";
 import { qk } from "../../lib/queries";
+import { refusalView } from "../../lib/refusal";
 
 export type ProviderNotice = { tone: "pos" | "neg"; text: string };
 
@@ -40,6 +41,8 @@ export type ProviderGroup = {
   enabled: number;
   backoff: number;
   overQuota: number;
+  /** Accounts a provider retired (`refusal` set): out of rotation, and not by an operator. */
+  refused: number;
   /** Current-window spend, summed; `null` until the admin-only quota list has arrived. */
   spend: { cost_micros: number; tokens: number; requests: number } | null;
   /** Worst subscription window in the group; `null` when no account reported one. */
@@ -458,6 +461,7 @@ export function buildProviderGroups(
     let spend: ProviderGroup["spend"] = null;
     let overQuota = 0;
     let backoff = 0;
+    let refused = 0;
     let worstPercent = 0;
     let worstResets: number | null = null;
     let reporting = 0;
@@ -473,6 +477,7 @@ export function buildProviderGroups(
         if (quota.exhausted) overQuota += 1;
       }
       if (account.backoff_level > 0) backoff += 1;
+      if (refusalView(account.refusal)) refused += 1;
       const windows = subscriptionBy.get(account.id)?.windows ?? [];
       if (windows.length > 0) reporting += 1;
       const accountWorst = windows.reduce((max, window) => Math.max(max, window.used_percent), 0);
@@ -501,6 +506,7 @@ export function buildProviderGroups(
       enabled: connections.filter((account) => account.is_active).length,
       backoff,
       overQuota,
+      refused,
       spend,
       subscription:
         reporting === 0

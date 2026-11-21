@@ -18,16 +18,19 @@ use rrouter_store::Store;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+mod support;
+
 struct H {
     state: Arc<AppState>,
     router: Router,
+    _data_dir: support::TempDir,
 }
 
 fn config() -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
         port: 0,
-        data_dir: std::env::temp_dir().join(format!("rrouter-conn-scope-{}", uuid::Uuid::new_v4())),
+        data_dir: support::temp_path("conn-scope"),
         master_key: None,
         require_api_key: false,
         request_timeout_secs: 5,
@@ -63,7 +66,7 @@ fn config() -> Config {
 
 fn harness() -> H {
     let config = config();
-    let data_dir = config.data_dir.clone();
+    let data_dir = support::TempDir::adopt(config.data_dir.clone());
     let state = Arc::new(AppState {
         store: Arc::new(Store::open_in_memory().expect("store")),
         catalog: Arc::new(Catalog::builtin()),
@@ -89,7 +92,11 @@ fn harness() -> H {
         auth: Auth::load(&data_dir, false),
     });
     let router = app(Arc::clone(&state));
-    H { state, router }
+    H {
+        state,
+        router,
+        _data_dir: data_dir,
+    }
 }
 
 impl H {

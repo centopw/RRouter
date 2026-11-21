@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, RwLock};
 
 use rrouter_core::{Error, Result};
 
@@ -15,21 +15,40 @@ pub enum OverrideKind {
 }
 
 struct Overrides {
-    values: HashMap<(String, OverrideKind), String>,
+    /// Values are leaked once on load so a caller can hold `&'static str`, which is what
+    /// the const-shaped [`crate::LoginFlow`] fields need. A reload leaks a fresh set; the
+    /// old strings stay valid because something may still be holding them.
+    values: HashMap<(String, OverrideKind), &'static str>,
     invalid: Vec<String>,
 }
 
-static OVERRIDES: LazyLock<Overrides> = LazyLock::new(load_overrides);
+static OVERRIDES: LazyLock<RwLock<Overrides>> = LazyLock::new(|| RwLock::new(load_overrides()));
 
 /// Return the configured endpoint for `provider` and `kind`, if it passed validation.
 pub fn override_for(provider: &str, kind: OverrideKind) -> Option<&'static str> {
     let key = (normalize_provider(provider), kind);
-    OVERRIDES.values.get(&key).map(String::as_str)
+    OVERRIDES.read().ok()?.values.get(&key).copied()
 }
 
 /// Return the rejected override environment variables, including their values.
 pub fn invalid_overrides() -> Vec<String> {
-    OVERRIDES.invalid.clone()
+    OVERRIDES
+        .read()
+        .map(|overrides| overrides.invalid.clone())
+        .unwrap_or_default()
+}
+
+/// Re-read the override environment.
+///
+/// The cache exists so hot paths do not parse URLs per call, but an integration test that
+/// starts its own endpoint has to be able to install an override *after* the cache was
+/// populated by an earlier test in the same process. Reloading is also what an operator
+/// gets if they export overrides into a running process' environment. Reads take the lock
+/// for the duration of one map lookup, so a reload cannot tear a lookup.
+pub fn reload_overrides() {
+    if let Ok(mut overrides) = OVERRIDES.write() {
+        *overrides = load_overrides();
+    }
 }
 
 /// OAuth client id for `provider`: `GOOGLE_ANTIGRAVITY_CLIENT_ID` for the built-in
@@ -126,7 +145,10 @@ fn load_overrides() -> Overrides {
             invalid.push(format!("{name}={value}"));
             continue;
         }
-        values.insert((normalize_provider(provider), kind), value);
+        values.insert((normalize_provider(provider), kind), {
+            let leaked: &'static str = Box::leak(value.into_boxed_str());
+            leaked
+        });
     }
 
     Overrides { values, invalid }

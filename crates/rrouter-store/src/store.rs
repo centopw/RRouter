@@ -1566,6 +1566,77 @@ impl Store {
         Ok(())
     }
 
+    /// Record *why* a provider refused an account that stays in rotation.
+    ///
+    /// [`Self::terminate_connection`] is the write for a **permanent** refusal: it takes
+    /// the row out of rotation and puts the class token in `refusal`. A **recoverable**
+    /// refusal ([`rrouter_core::Refusal::Verification`]) is the opposite fact, which is why
+    /// it needs its own write instead of a flag on that one: the account is healthy and
+    /// fully quota'd, a human clears the provider's prompt, and the cooldown belongs to the
+    /// breaker. So the routing state must not move — `is_active` stays 1 and `refusal`
+    /// stays NULL — or the account would silently leave every model's candidate list for a
+    /// condition that expires, and "the provider retired this" could no longer be told
+    /// apart from "this is cooling down". `backoff_level` is likewise left alone: raising or
+    /// zeroing it here would fight the breaker that owns the bench.
+    ///
+    /// What it does record is the reason, in the three columns the dashboard and the admin
+    /// API already read: `last_error` carries the refusal token (so the class is machine-
+    /// readable even though `refusal` is reserved for the permanent case) followed by the
+    /// provider's own wording, `last_error_code` the class's provider status, and
+    /// `last_error_at` when it was first seen. Without them a restart erases the only
+    /// evidence of why the account stopped serving — the breaker is in memory — and the
+    /// operator is left with a healthy-looking row or an unexplained cooldown.
+    ///
+    /// This runs on every refused request while the cooldown is active, so it is a no-op
+    /// unless the stored reason or code actually differs: an unchanged refusal writes no
+    /// page, does not grow the database, and does not move `last_error_at` (which therefore
+    /// reads as "since when", not "how often").
+    pub async fn record_connection_refusal_reason(
+        &self,
+        id: Uuid,
+        refusal: &str,
+        reason: Option<&str>,
+        code: Option<u16>,
+    ) -> Result<()> {
+        let conn = self.conn();
+        // The token leads, so one stable string says both what the class was and what the
+        // provider said. A provider that gave no wording still leaves the token behind.
+        let reason = match reason.map(str::trim).filter(|text| !text.is_empty()) {
+            Some(text) => format!("{refusal}: {text}"),
+            None => refusal.to_string(),
+        };
+        let now = now();
+        // `IS NOT` is null-safe in SQLite, so an unchanged row — the common case while the
+        // breaker holds the account down — matches nothing and costs a single index probe.
+        let n = conn
+            .execute(
+                "UPDATE connections SET last_error = ?2, last_error_code = ?3, last_error_at = ?4, \
+                 updated_at = ?4 WHERE id = ?1 \
+                 AND (last_error IS NOT ?2 OR last_error_code IS NOT ?3)",
+                params![id.to_string(), reason, code, now],
+            )
+            .map_err(migrations::db_err)?;
+        if n > 0 {
+            return Ok(());
+        }
+        // Nothing was written: either this exact reason is already stored, or the row is
+        // gone. One primary-key read separates the two, so a vanished account still fails
+        // the way every other connection write does.
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM connections WHERE id = ?1",
+                params![id.to_string()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(migrations::db_err)?
+            .is_some();
+        if !exists {
+            return Err(Error::NotFound(format!("connection {id}")));
+        }
+        Ok(())
+    }
+
     /// Lower `priority` values are tried first by the planner; equal values round-robin.
     pub async fn set_connection_priority(&self, id: Uuid, priority: i32) -> Result<()> {
         let conn = self.conn();

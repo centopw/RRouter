@@ -41,7 +41,7 @@ pub use flows::{Challenge, OAuthFlows, SignedIn};
 pub use fresh::{CredentialStore, Refresher, GITHUB_COPILOT_TOKEN_URL, LEAD_SECS};
 pub use headers::{build_headers, merge_client_headers, resolve_base_url};
 pub use loopback::LoopbackServer;
-pub use overrides::{invalid_overrides, override_for, OverrideKind};
+pub use overrides::{invalid_overrides, override_for, reload_overrides, OverrideKind};
 pub use query::with_query;
 pub use registry::{
     all, get, is_oauth, login_flow_for, search_spec, AuthStyle, DeviceFlow, LoginFlow, PkceFlow,

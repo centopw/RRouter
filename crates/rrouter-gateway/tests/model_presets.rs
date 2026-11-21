@@ -20,9 +20,12 @@ use rrouter_store::{LayoutDocument, Store, DEFAULT_MODEL_PRESET_ID, LAYOUT_SCHEM
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+mod support;
+
 struct H {
     state: Arc<AppState>,
     router: Router,
+    _data_dir: support::TempDir,
 }
 
 const ADMIN_TOKEN: &str = "adm-test-presets";
@@ -31,7 +34,7 @@ fn config() -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
         port: 0,
-        data_dir: std::env::temp_dir().join(format!("rrouter-presets-{}", uuid::Uuid::new_v4())),
+        data_dir: support::temp_path("presets"),
         master_key: None,
         require_api_key: false,
         request_timeout_secs: 30,
@@ -67,7 +70,7 @@ fn config() -> Config {
 
 fn harness() -> H {
     let config = config();
-    let data_dir = config.data_dir.clone();
+    let data_dir = support::TempDir::adopt(config.data_dir.clone());
     let dispatcher = Arc::new(rrouter_gateway::state::dispatcher(&config));
     let state = Arc::new(AppState {
         store: Arc::new(Store::open_in_memory().expect("store")),
@@ -94,7 +97,11 @@ fn harness() -> H {
         auth: Auth::load(&data_dir, false),
     });
     let router = app(Arc::clone(&state));
-    H { state, router }
+    H {
+        state,
+        router,
+        _data_dir: data_dir,
+    }
 }
 
 fn cookie_of(headers: &HeaderMap) -> Option<String> {

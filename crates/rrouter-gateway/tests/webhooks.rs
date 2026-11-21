@@ -23,6 +23,8 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tower::ServiceExt;
 
+mod support;
+
 const SECRET_ENV: &str = "RR_WEBHOOK_TEST_SECRET_8D";
 const SECRET: &[u8] = b"shhh-8d-do-not-return-this";
 
@@ -133,13 +135,14 @@ async fn start_receiver(fail_first: usize) -> (Arc<Receiver>, String) {
 struct H {
     state: Arc<AppState>,
     router: Router,
+    _data_dir: support::TempDir,
 }
 
 fn config() -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
         port: 0,
-        data_dir: std::env::temp_dir().join(format!("rrouter-webhooks-{}", uuid::Uuid::new_v4())),
+        data_dir: support::temp_path("webhooks"),
         master_key: None,
         require_api_key: false,
         request_timeout_secs: 30,
@@ -176,7 +179,7 @@ fn config() -> Config {
 fn harness() -> H {
     set_secret();
     let config = config();
-    let data_dir = config.data_dir.clone();
+    let data_dir = support::TempDir::adopt(config.data_dir.clone());
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -198,7 +201,11 @@ fn harness() -> H {
         auth: Auth::load(&data_dir, false),
     });
     let router = app(Arc::clone(&state));
-    H { state, router }
+    H {
+        state,
+        router,
+        _data_dir: data_dir,
+    }
 }
 
 impl H {

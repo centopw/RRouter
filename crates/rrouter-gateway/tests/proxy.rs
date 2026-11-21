@@ -3,8 +3,10 @@
 //! points a provider at that server, so the whole proxy path (translate → dispatch →
 //! refresh → headers → HTTP → translate back) runs exactly as in production.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -24,6 +26,8 @@ use rrouter_store::{
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+mod support;
+
 // ---------------------------------------------------------------- mock upstream
 
 #[derive(Clone)]
@@ -40,6 +44,13 @@ struct MockInner {
     /// Every request's headers, in arrival order, so passthrough can be inspected.
     headers: Mutex<Vec<Vec<(String, String)>>>,
     plan: Mutex<Vec<MockReply>>,
+    /// Bearer token that is always answered `401`, without consuming a planned reply.
+    ///
+    /// A FIFO plan cannot express "this exact credential is stale": two concurrent requests
+    /// racing a rotated token would take each other's replies. Gating on the bearer keeps
+    /// the 401 with the request that carried the dead token and the planned reply with the
+    /// retry that carries the new one.
+    stale_bearer: Mutex<Option<String>>,
     url: String,
 }
 
@@ -47,6 +58,9 @@ struct MockInner {
 enum MockReply {
     /// JSON body + status (non-streaming).
     Json(u16, Value),
+    /// JSON body + status + response headers: the provider's rate-limit budget, which is
+    /// what separates a real throttle from the subscription gate's fake one.
+    JsonWithHeaders(u16, Vec<(&'static str, &'static str)>, Value),
     /// Bytes relayed exactly as sent, for bodies the gateway must not rewrite.
     Raw(u16, &'static str),
     /// Audio: raw bytes with an explicit content type.
@@ -81,6 +95,7 @@ impl Mock {
                 wire: Mutex::new(Vec::new()),
                 headers: Mutex::new(Vec::new()),
                 plan: Mutex::new(plan),
+                stale_bearer: Mutex::new(None),
                 url: format!("http://{addr}"),
             }),
         };
@@ -151,6 +166,11 @@ impl Mock {
             .get(index)
             .cloned()
     }
+
+    /// Answer every request carrying this bearer with `401`, leaving the plan untouched.
+    fn reject_bearer(&self, token: &str) {
+        *self.inner.stale_bearer.lock().expect("stale bearer") = Some(token.to_string());
+    }
 }
 
 async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
@@ -172,6 +192,19 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
             )
         })
         .collect();
+    // A rejected bearer is answered before the plan is consulted: the retry that carries
+    // the refreshed token is the request the planned reply belongs to.
+    let stale = mock
+        .inner
+        .stale_bearer
+        .lock()
+        .expect("stale bearer")
+        .clone()
+        .is_some_and(|token| {
+            seen_headers
+                .iter()
+                .any(|(name, value)| name == "authorization" && *value == format!("Bearer {token}"))
+        });
     let bytes = req.into_body().collect().await.expect("body").to_bytes();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     mock.inner
@@ -189,6 +222,19 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
         .lock()
         .expect("wire")
         .push((path, content_type, bytes.to_vec()));
+    if stale {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    "message": "OAuth token has expired"
+                }
+            })),
+        )
+            .into_response();
+    }
     let reply = {
         let mut plan = mock.inner.plan.lock().expect("plan");
         if plan.is_empty() {
@@ -200,6 +246,16 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
         MockReply::Json(status, value) => {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             (code, axum::Json(value)).into_response()
+        }
+        MockReply::JsonWithHeaders(status, headers, value) => {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+            let mut resp = (code, axum::Json(value)).into_response();
+            for (name, value) in headers {
+                if let Ok(value) = axum::http::HeaderValue::from_str(value) {
+                    resp.headers_mut().insert(name, value);
+                }
+            }
+            resp
         }
         MockReply::Raw(status, body) => Response::builder()
             .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
@@ -257,6 +313,7 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
 struct Harness {
     state: Arc<AppState>,
     router: Router,
+    _data_dir: support::TempDir,
 }
 
 const TEST_ADMIN_TOKEN: &str = "adm-test-7f3a91";
@@ -265,7 +322,7 @@ fn config(require_api_key: bool) -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
         port: 0,
-        data_dir: std::env::temp_dir().join(format!("rrouter-test-{}", uuid::Uuid::new_v4())),
+        data_dir: support::temp_path("test"),
         master_key: None,
         require_api_key,
         request_timeout_secs: 30,
@@ -314,9 +371,14 @@ fn harness(require_api_key: bool) -> Harness {
 
 /// A harness whose runtime settings are the ones under test (admin token, caps).
 fn harness_with(config: Config) -> Harness {
+    let data_dir = support::TempDir::adopt(config.data_dir.clone());
     let state = Arc::new(build_state(config));
     let router = app(Arc::clone(&state));
-    Harness { state, router }
+    Harness {
+        state,
+        router,
+        _data_dir: data_dir,
+    }
 }
 
 fn build_state(config: Config) -> AppState {
@@ -335,7 +397,15 @@ fn build_state(config: Config) -> AppState {
         dispatcher: Arc::new(
             Dispatcher::new(Breaker::new())
                 .with_max_attempts(config.max_attempts)
-                .with_hedge((config.hedge_ms > 0).then(|| Duration::from_millis(config.hedge_ms))),
+                .with_hedge((config.hedge_ms > 0).then(|| Duration::from_millis(config.hedge_ms)))
+                // Wired the way `state::dispatcher` wires it in production, so a test that
+                // sets `retry_attempts` is measuring the retry curve it asked for.
+                .with_retry_policy(rrouter_router::dispatch::RetryPolicy {
+                    attempts: config.retry_attempts,
+                    base: Duration::from_millis(config.retry_base_ms),
+                    max: Duration::from_millis(config.retry_max_ms),
+                    budget: Some(Duration::from_secs(config.request_timeout_secs)),
+                }),
         ),
         http: reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -397,6 +467,33 @@ impl Harness {
                 Some(team_id),
                 None,
             )
+            .await
+            .expect("connection")
+            .id
+    }
+
+    /// An OAuth connection whose bearer still looks valid (`expires_at` in the future) but
+    /// that the upstream will reject — the shape a rotated Claude Code token leaves behind.
+    ///
+    /// `refresh_token` doubles as the test's identity at the shared token endpoint, so
+    /// counters cannot race another test's refresh.
+    async fn connect_stale_oauth(&self, mock: &Mock, refresh_token: &str) -> uuid::Uuid {
+        // The token endpoint has to be up — and its override in place — before the request
+        // that will refresh. Forcing the shared endpoint sets the environment; the reload
+        // then installs it even though an earlier test in this process populated the
+        // override cache before the variable existed.
+        LazyLock::force(&TOKEN_ENDPOINT);
+        rrouter_auth::reload_overrides();
+        let creds = Credentials {
+            access_token: Some(STALE_ACCESS_TOKEN.into()),
+            refresh_token: Some(refresh_token.into()),
+            base_url_override: Some(mock.url()),
+            expires_at: Some(rrouter_gateway::now_unix() + 3600),
+            ..Credentials::default()
+        };
+        self.state
+            .store
+            .create_connection("claude", "oauth", creds, Some("stale"))
             .await
             .expect("connection")
             .id
@@ -1055,6 +1152,195 @@ async fn anthropic_non_streaming_round_trip() {
     assert_eq!(seen[0]["system"][1]["text"], "be terse");
 }
 
+// ------------------------------------------------------- subscription refusals
+
+/// One Messages request, in the shape the gateway routes as a Claude subscription call.
+fn claude_request(stream: bool) -> Value {
+    json!({
+        "model": "claude/sonnet-4-5",
+        "max_tokens": 32,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": stream,
+    })
+}
+
+/// The retirement write is off the request path: wait for it instead of racing it.
+async fn retired_row(h: &Harness, connection: uuid::Uuid) -> rrouter_store::Connection {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows = h.state.store.list_connections(None).await.expect("list");
+        let row = rows
+            .into_iter()
+            .find(|row| row.id == connection)
+            .expect("the account is still listed");
+        if !row.is_active {
+            return row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the refused account was never retired"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// POST and keep the raw body: a stream is SSE frames, not a JSON value.
+async fn post_text(h: &Harness, uri: &str, body: Value) -> (StatusCode, String) {
+    let res = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = res.status();
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The subscription gate's answer — `429 {"type":"error","error":{"type":"rate_limit_error",
+/// "message":"Error"}}` — is an entitlement refusal, not a throttle: it never clears by
+/// waiting, so the account has to leave rotation instead of being cooled and re-probed.
+#[tokio::test]
+async fn the_subscription_gate_is_an_entitlement_and_leaves_rotation() {
+    let mock = Mock::start(vec![MockReply::Json(
+        429,
+        json!({"type": "error", "error": {"type": "rate_limit_error", "message": "Error"}}),
+    )])
+    .await;
+    let h = harness(false);
+    let connection = h.connect("claude", &mock).await;
+
+    let (status, body) = h.post("/v1/messages", claude_request(false)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(
+        body["error"]["code"], "account_not_entitled",
+        "a client can branch on the class: {body}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not entitled")),
+        "the message names the entitlement, not a suspension: {body}"
+    );
+
+    let row = retired_row(&h, connection).await;
+    assert_eq!(
+        row.refusal.as_deref(),
+        Some("account_not_entitled"),
+        "the row records why the provider retired it"
+    );
+    // The class's own status, never the gate's lying 429: a 429 would file it as a throttle.
+    assert_eq!(row.last_error_code, Some(403));
+
+    // Out of rotation: the next request for the same model never contacts it again.
+    let (status, body) = h.post("/v1/messages", claude_request(false)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the unentitled account was contacted once only"
+    );
+}
+
+/// The guard the whole taxonomy hinges on: a `429` that carries the provider's own
+/// rate-limit budget is a real throttle, even when its message says nothing.
+#[tokio::test]
+async fn a_header_bearing_429_stays_a_rate_limit() {
+    let mock = Mock::start(vec![MockReply::JsonWithHeaders(
+        429,
+        vec![
+            ("anthropic-ratelimit-requests-remaining", "0"),
+            ("anthropic-ratelimit-requests-reset", "2026-11-20T00:00:30Z"),
+        ],
+        json!({"type": "error", "error": {"type": "rate_limit_error", "message": "Error"}}),
+    )])
+    .await;
+    let h = harness(false);
+    let connection = h.connect("claude", &mock).await;
+
+    let (status, body) = h.post("/v1/messages", claude_request(false)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_ne!(
+        body["error"]["code"], "account_not_entitled",
+        "a throttle is a fact about the moment, not about the credential: {body}"
+    );
+
+    let rows = h.state.store.list_connections(None).await.expect("list");
+    let row = rows
+        .into_iter()
+        .find(|row| row.id == connection)
+        .expect("connection");
+    assert!(row.is_active, "a throttled account stays in rotation");
+    assert_eq!(row.refusal, None, "a throttle is never a refusal");
+}
+
+/// A revoked OAuth token is recoverable by a refresh: terminalising it would retire an
+/// account the refresher can fix. The refresh itself is what answers the client here (the
+/// mock has no refresh endpoint), so the assertion is about the row, not the status.
+#[tokio::test]
+async fn a_revoked_token_is_not_terminalised() {
+    let mock = Mock::start(vec![MockReply::Json(
+        401,
+        json!({"type": "error", "error": {"type": "authentication_error",
+               "message": "OAuth token has been revoked"}}),
+    )])
+    .await;
+    let h = harness(false);
+    let connection = h.connect("claude", &mock).await;
+
+    let (_, body) = h.post("/v1/messages", claude_request(false)).await;
+    assert!(
+        body["error"]["code"] != "account_not_entitled"
+            && body["error"]["code"] != "account_suspended",
+        "a revoked token is neither an entitlement nor a ban: {body}"
+    );
+
+    let rows = h.state.store.list_connections(None).await.expect("list");
+    let row = rows
+        .into_iter()
+        .find(|row| row.id == connection)
+        .expect("connection");
+    assert!(row.is_active, "a revoked token must not retire the account");
+    assert_eq!(row.refusal, None);
+}
+
+/// Anthropic streams an error as an `event: error` frame after the `200` was already sent.
+/// That is the only refusal a streaming request can carry, and it must still bench the
+/// account for every later request.
+#[tokio::test]
+async fn a_streamed_error_frame_retires_the_account() {
+    let wire = format!(
+        "event: message_start\ndata: {}\n\nevent: error\ndata: {}\n\n",
+        json!({"type": "message_start", "message": {"id": "msg_1", "model": "sonnet-4-5"}}),
+        json!({"type": "error", "error": {"type": "invalid_request_error",
+               "message": "This credential is only authorized for use with Claude Code"}})
+    );
+    let mock = Mock::start(vec![MockReply::Sse(vec![SseStep {
+        wire,
+        await_gate: None,
+    }])])
+    .await;
+    let h = harness(false);
+    let connection = h.connect("claude", &mock).await;
+
+    let (status, text) = post_text(&h, "/v1/messages", claude_request(true)).await;
+    assert_eq!(status, StatusCode::OK, "the 200 was already sent: {text}");
+    assert!(
+        text.contains("event: error") && text.contains("only authorized"),
+        "the client reads the provider's own reason: {text}"
+    );
+
+    let row = retired_row(&h, connection).await;
+    assert_eq!(row.refusal.as_deref(), Some("account_not_entitled"));
+}
+
 #[tokio::test]
 async fn streaming_flushes_before_upstream_finishes() {
     // Upstream sends frame A, waits for the client to observe it, then sends B.
@@ -1545,13 +1831,16 @@ async fn ui_panels_lists_builtins_and_extensions() {
 #[tokio::test]
 async fn ext_static_rejects_traversal() {
     let mut state_config = config(false);
+    let _dir = support::TempDir::adopt(state_config.data_dir.clone());
+    let build_config = config(false);
+    let _build_dir = support::TempDir::adopt(build_config.data_dir.clone());
     let root = state_config.data_dir.join("public");
     std::fs::create_dir_all(root.join("js")).expect("mkdir");
     std::fs::write(root.join("js/panel.js"), "export const ok = 1;\n").expect("write");
     state_config.static_dir = Some(root.clone());
     let state = Arc::new(AppState {
         config: rrouter_gateway::config::ConfigSnapshot::from(state_config),
-        ..build_state(config(false))
+        ..build_state(build_config)
     });
     // The traversal target must exist relative to the root for the test to be meaningful.
     std::fs::write(root.join("Cargo.toml"), "should never be served").expect("write");
@@ -8817,4 +9106,353 @@ async fn semantic_cache_rows_are_tenant_isolated() {
         "the other team's entry was not served"
     );
     assert!(headers.get("x-rrouter-cache").is_none());
+}
+
+// ------------------------------------------- credential lifecycle: a rejected bearer
+
+/// Bearer every "stale" OAuth connection in this file was issued with.
+///
+/// The upstream mock rejects it, which is what a refresh token rotated by the user's own
+/// Claude Code install looks like from the gateway: the access token is dead while its
+/// recorded expiry still says it is good.
+const STALE_ACCESS_TOKEN: &str = "at-rotated-away";
+
+/// Refresh calls per refresh token, process-wide.
+///
+/// Keyed by refresh token because the token endpoint is process-wide (the
+/// `RROUTER_OAUTH_OVERRIDE_*` environment is read once per process), while "exactly one
+/// refresh" is an assertion about one test's connection.
+static TOKEN_HITS: LazyLock<Arc<Mutex<HashMap<String, usize>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+/// Claude Code's token endpoint, reachable through the process-wide override.
+///
+/// Its own thread and runtime: a `#[tokio::test]` runtime dies with the test that started
+/// it, and this endpoint has to serve the whole binary. Every refresh rotates the refresh
+/// token exactly the way Anthropic's does, which is why spending one twice is the failure
+/// these tests are about.
+static TOKEN_ENDPOINT: LazyLock<()> = LazyLock::new(|| {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("token listener");
+    let addr = listener.local_addr().expect("token address");
+    listener.set_nonblocking(true).expect("token nonblocking");
+    let hits = Arc::clone(&TOKEN_HITS);
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("token runtime");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+            let router = Router::new()
+                .route("/oauth/token", post(issue_token))
+                .with_state(hits);
+            axum::serve(listener, router).await.expect("token server");
+        });
+    });
+
+    // The overrides are read once, before any refresh: set them before the first one.
+    std::env::set_var("RROUTER_ALLOW_INSECURE_OAUTH", "1");
+    std::env::set_var(
+        "RROUTER_OAUTH_OVERRIDE_CLAUDE_TOKEN",
+        format!("http://{addr}/oauth/token"),
+    );
+});
+
+/// One refresh: count it, then hand back a rotated pair.
+async fn issue_token(
+    State(hits): State<Arc<Mutex<HashMap<String, usize>>>>,
+    body: String,
+) -> Response {
+    let request: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let refresh = request["refresh_token"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    *hits
+        .lock()
+        .expect("token hits")
+        .entry(refresh.clone())
+        .or_default() += 1;
+    // Hold the winner inside the endpoint so a loser has to queue on the credential's
+    // mutex instead of racing past a completed refresh.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    axum::Json(json!({
+        "access_token": format!("at-{refresh}"),
+        "refresh_token": format!("{refresh}-rotated"),
+        "expires_in": 3600
+    }))
+    .into_response()
+}
+
+/// Refresh calls the token endpoint saw for `tag` (a connection's refresh token).
+fn refresh_calls(tag: &str) -> usize {
+    LazyLock::force(&TOKEN_ENDPOINT);
+    TOKEN_HITS
+        .lock()
+        .expect("token hits")
+        .get(tag)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// The `authorization` value the upstream saw on hit `index`.
+fn bearer(mock: &Mock, index: usize) -> String {
+    mock.headers(index)
+        .expect("a request reached the upstream")
+        .into_iter()
+        .find(|(name, _)| name == "authorization")
+        .map(|(_, value)| value)
+        .expect("an authorization header")
+}
+
+fn messages_request(body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request")
+}
+
+/// One Anthropic message answer; `text` is what the client must end up reading.
+fn anthropic_message(text: &str) -> MockReply {
+    MockReply::Json(
+        200,
+        json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 9, "output_tokens": 4}
+        }),
+    )
+}
+
+/// Status and JSON body of a response, whichever dialect produced it.
+async fn answer_text(res: Response) -> (StatusCode, Value) {
+    let status = res.status();
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// A `401` on the wire is a rotated token, not a broken account: the gateway refreshes
+/// once and resends the same candidate with the new bearer.
+#[tokio::test]
+async fn rejected_bearer_is_refreshed_and_the_same_candidate_retried() {
+    let mock = Mock::start(vec![anthropic_message("recovered")]).await;
+    mock.reject_bearer(STALE_ACCESS_TOKEN);
+    let h = harness(false);
+    h.connect_stale_oauth(&mock, "rt-401-retry").await;
+
+    let (status, out) = h
+        .post("/v1/messages", anthropic_body("claude/sonnet-4-5"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {out}");
+    assert_eq!(out["content"][0]["text"], "recovered");
+
+    // One rejected send, one resend — and the resend carries the refreshed token.
+    assert_eq!(mock.hits(), 2, "one rejection, one retry");
+    assert_eq!(bearer(&mock, 0), format!("Bearer {STALE_ACCESS_TOKEN}"));
+    assert_eq!(bearer(&mock, 1), "Bearer at-rt-401-retry");
+    assert_eq!(refresh_calls("rt-401-retry"), 1);
+}
+
+/// A second rejection is the account's answer, not another invitation: exactly one refresh,
+/// exactly one resend, then the upstream error reaches the client.
+#[tokio::test]
+async fn a_second_rejection_is_surfaced_without_a_second_refresh() {
+    let mock = Mock::start(vec![MockReply::Json(
+        401,
+        json!({
+            "type": "error",
+            "error": {"type": "authentication_error", "message": "still rejected"}
+        }),
+    )])
+    .await;
+    mock.reject_bearer(STALE_ACCESS_TOKEN);
+    let mut cfg = config(false);
+    // Measure the credential recovery, not the dispatcher's own retry of a retryable
+    // failure: with one retry the dispatcher would send a third request.
+    cfg.retry_attempts = 0;
+    let h = harness_with(cfg);
+    h.connect_stale_oauth(&mock, "rt-401-twice").await;
+
+    let (status, out) = h
+        .post("/v1/messages", anthropic_body("claude/sonnet-4-5"))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {out}");
+
+    assert_eq!(mock.hits(), 2, "one rejected send and exactly one resend");
+    assert_eq!(
+        bearer(&mock, 1),
+        "Bearer at-rt-401-twice",
+        "the resend carried the refreshed token"
+    );
+    assert_eq!(
+        refresh_calls("rt-401-twice"),
+        1,
+        "a rotating refresh token may be spent once"
+    );
+}
+
+/// Two requests 401 on the same bearer at the same moment: one refresh, both retried with
+/// what it returned.
+#[tokio::test]
+async fn concurrent_rejections_collapse_into_one_refresh() {
+    let mock = Mock::start(vec![
+        anthropic_message("first"),
+        anthropic_message("second"),
+    ])
+    .await;
+    mock.reject_bearer(STALE_ACCESS_TOKEN);
+    let h = harness(false);
+    h.connect_stale_oauth(&mock, "rt-401-concurrent").await;
+
+    let router = h.router.clone();
+    let (first, second) = tokio::join!(
+        router
+            .clone()
+            .oneshot(messages_request(anthropic_body("claude/sonnet-4-5"))),
+        router.oneshot(messages_request(anthropic_body("claude/sonnet-4-5"))),
+    );
+    let (first_status, first_body) = answer_text(first.expect("first response")).await;
+    let (second_status, second_body) = answer_text(second.expect("second response")).await;
+    assert_eq!(first_status, StatusCode::OK, "body: {first_body}");
+    assert_eq!(second_status, StatusCode::OK, "body: {second_body}");
+
+    assert_eq!(
+        refresh_calls("rt-401-concurrent"),
+        1,
+        "N concurrent 401s must produce one refresh, or the rotated token is spent twice"
+    );
+    assert_eq!(
+        mock.hits(),
+        4,
+        "each request: one rejected send, one resend"
+    );
+}
+
+/// An API-key connection has no refresh recipe, so its `401` is final: one upstream call,
+/// no refresh, and the stored credential untouched.
+#[tokio::test]
+async fn an_api_key_connection_is_never_refreshed() {
+    let mock = Mock::start(vec![MockReply::Json(
+        401,
+        json!({"error": {"message": "invalid api key"}}),
+    )])
+    .await;
+    let mut cfg = config(false);
+    cfg.retry_attempts = 0;
+    let h = harness_with(cfg);
+    let id = h.connect("openai", &mock).await;
+    let before = h
+        .state
+        .store
+        .get_connection(id)
+        .await
+        .expect("lookup")
+        .expect("connection")
+        .credentials;
+
+    let (status, out) = h
+        .post("/v1/chat/completions", openai_chat_body("gpt-4.1"))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {out}");
+    assert_eq!(mock.hits(), 1, "nothing to refresh means nothing to resend");
+
+    let after = h
+        .state
+        .store
+        .get_connection(id)
+        .await
+        .expect("lookup")
+        .expect("connection")
+        .credentials;
+    assert_eq!(after.access_token, before.access_token);
+    assert_eq!(after.refresh_token, before.refresh_token);
+}
+
+/// The same recovery on the streaming path: the `401` is decided from the status line, so
+/// the resend replaces the response before a single frame reaches the client and the stream
+/// that was retried is the one the client reads.
+#[tokio::test]
+async fn a_streamed_attempt_is_retried_before_its_first_frame() {
+    let sse = |event: &str, data: Value| SseStep {
+        wire: format!("event: {event}\ndata: {data}\n\n"),
+        await_gate: None,
+    };
+    let mock = Mock::start(vec![MockReply::Sse(vec![
+        sse(
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "usage": {"input_tokens": 9}
+                }
+            }),
+        ),
+        sse(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            }),
+        ),
+        sse(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "recovered stream"}
+            }),
+        ),
+        sse(
+            "message_delta",
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 4}
+            }),
+        ),
+        sse("message_stop", json!({"type": "message_stop"})),
+    ])])
+    .await;
+    mock.reject_bearer(STALE_ACCESS_TOKEN);
+    let h = harness(false);
+    h.connect_stale_oauth(&mock, "rt-401-stream").await;
+
+    let mut body = anthropic_body("claude/sonnet-4-5");
+    body["stream"] = json!(true);
+    let res = h
+        .router
+        .clone()
+        .oneshot(messages_request(body))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-type"], "text/event-stream");
+    let text = String::from_utf8(
+        res.into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes()
+            .to_vec(),
+    )
+    .expect("utf8");
+    assert!(text.contains("recovered stream"), "{text}");
+
+    assert_eq!(mock.hits(), 2, "one rejected send, one resend");
+    assert_eq!(bearer(&mock, 1), "Bearer at-rt-401-stream");
+    assert_eq!(refresh_calls("rt-401-stream"), 1);
 }

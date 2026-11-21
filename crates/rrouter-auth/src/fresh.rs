@@ -108,6 +108,40 @@ impl Refresher {
         store.merge(id, patch).await
     }
 
+    /// Refresh a credential the upstream *rejected*, rather than one the clock calls stale.
+    ///
+    /// A rejected bearer is the case [`Self::fresh`] cannot see: the recorded expiry still
+    /// says the token is good, so its fast path hands back the very token the upstream just
+    /// refused. `rejected` is the token the failed send actually carried, and it is what
+    /// makes concurrent rejections collapse: when the store no longer holds that token, a
+    /// peer refreshed while this call queued, so the stored credential *is* the answer and
+    /// the token endpoint is not contacted again. Anthropic rotates the refresh token on
+    /// use, so spending the rotated value twice invalidates the connection — the exact
+    /// outcome this deduplication exists to prevent.
+    ///
+    /// Locking is the same per-credential mutex [`Self::fresh`] uses, taken before the
+    /// store read: a refresh is either observed through the store or waited for, never
+    /// raced. `rejected = None` forces the refresh (no bearer was on the wire to compare).
+    pub async fn fresh_after_rejection(
+        &self,
+        store: &dyn CredentialStore,
+        provider: &ProviderSpec,
+        id: Uuid,
+        rejected: Option<&str>,
+    ) -> Result<Credentials> {
+        let lock = self.lock_for(id);
+        let _guard = lock.lock().await;
+
+        let creds = store.load(id).await?;
+        // A peer already replaced the rejected token while this caller queued.
+        if rejected.is_some() && creds.access_token.as_deref() != rejected {
+            return Ok(creds);
+        }
+
+        let patch = self.exchange(provider, &creds).await?;
+        store.merge(id, patch).await
+    }
+
     /// True when the credential material this provider authenticates with will expire
     /// within [`LEAD_SECS`], or is already expired.
     fn is_stale(&self, provider: &ProviderSpec, c: &Credentials) -> bool {
@@ -576,6 +610,110 @@ mod tests {
 
         // Dropping the mock asserts `expect(1)` was satisfied exactly.
         drop(server);
+    }
+
+    #[tokio::test]
+    async fn rejection_refreshes_a_credential_the_clock_calls_fresh() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "at-new",
+                    "refresh_token": "rt-new",
+                    "expires_in": 3600
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Well inside its lifetime: `fresh` would return this token untouched, which is
+        // exactly why a 401 needs its own entry point.
+        let store = FakeStore::new(Credentials {
+            access_token: Some("at-rejected".to_string()),
+            refresh_token: Some("rt-old".to_string()),
+            expires_at: Some(now_unix() + 3600),
+            ..Credentials::default()
+        });
+        let spec = claude_spec("claude", mock_url(&server), RefreshBody::Json);
+
+        let c = Refresher::new(client())
+            .fresh_after_rejection(store.as_ref(), &spec, Uuid::new_v4(), Some("at-rejected"))
+            .await
+            .expect("refresh");
+        assert_eq!(c.access_token.as_deref(), Some("at-new"));
+        assert_eq!(store.snapshot().refresh_token.as_deref(), Some("rt-new"));
+
+        // The mock's `expect(1)` is asserted when it drops.
+        drop(server);
+    }
+
+    /// Two requests 401 on the same token at the same moment: one refresh, both sent the
+    /// new bearer. A rotated refresh token spent twice would invalidate the connection.
+    #[tokio::test]
+    async fn concurrent_rejections_of_one_bearer_refresh_once() {
+        let server = wiremock::MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+
+        let hits_for_handler = hits.clone();
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(move |req: &wiremock::Request| {
+                hits_for_handler.fetch_add(1, Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                assert_eq!(body["refresh_token"], "rt-old");
+                wiremock::ResponseTemplate::new(200)
+                    // Keep the winner inside the endpoint so the losers must queue on the
+                    // per-credential mutex instead of racing past a completed refresh.
+                    .set_delay(Duration::from_millis(50))
+                    .set_body_json(serde_json::json!({
+                        "access_token": "at-new",
+                        "refresh_token": "rt-new",
+                        "expires_in": 3600
+                    }))
+            })
+            .mount(&server)
+            .await;
+
+        let store = FakeStore::new(Credentials {
+            access_token: Some("at-rejected".to_string()),
+            refresh_token: Some("rt-old".to_string()),
+            expires_at: Some(now_unix() + 3600),
+            ..Credentials::default()
+        });
+        let refresher = Arc::new(Refresher::new(client()));
+        let spec = claude_spec("claude", mock_url(&server), RefreshBody::Json);
+        let id = Uuid::new_v4();
+
+        let mut tasks = Vec::with_capacity(8);
+        for _ in 0..8 {
+            let refresher = refresher.clone();
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                refresher
+                    .fresh_after_rejection(store.as_ref(), &spec, id, Some("at-rejected"))
+                    .await
+            }));
+        }
+        for task in tasks {
+            let c = task.await.expect("join").expect("refresh");
+            assert_eq!(c.access_token.as_deref(), Some("at-new"));
+        }
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "one refresh for N rejections"
+        );
+        assert_eq!(store.merges.load(Ordering::SeqCst), 1, "one persist");
+
+        // A later caller that names the old bearer is answered from the store: the token it
+        // was rejected for is already gone, so nothing more is spent.
+        let c = refresher
+            .fresh_after_rejection(store.as_ref(), &spec, id, Some("at-rejected"))
+            .await
+            .expect("refresh");
+        assert_eq!(c.access_token.as_deref(), Some("at-new"));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

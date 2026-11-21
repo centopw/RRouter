@@ -65,6 +65,27 @@ fn is_google_cca(provider: &str) -> bool {
     provider == GOOGLE_ANTIGRAVITY
 }
 
+/// Registry id of the Claude subscription (Anthropic OAuth) provider.
+///
+/// Only this id takes the refusal taxonomy: the `anthropic` API-key provider is a different
+/// credential, never subject to the subscription gate, and its `400`s are ordinary request
+/// errors.
+const CLAUDE_SUBSCRIPTION: &str = "claude";
+
+fn is_claude_subscription(provider: &str) -> bool {
+    provider == CLAUDE_SUBSCRIPTION
+}
+
+/// `true` when an answer carried the provider's own rate-limit headers.
+///
+/// The one signal that separates a real throttle from the Claude subscription gate's fake
+/// `429`: every genuine throttle reports its budget, and the gate reports nothing at all.
+fn carries_rate_limit_headers(headers: &HeaderMap) -> bool {
+    headers
+        .keys()
+        .any(|name| name.as_str().starts_with("anthropic-ratelimit-"))
+}
+
 /// Bytes of one captured body kept in the database.
 ///
 /// Capture is a debugging aid, never a reason to fail a request or let the database grow
@@ -294,6 +315,20 @@ struct QoderPrepared {
     model: String,
     /// Stable per-(account, model) session id; the upstream keys its queue by it.
     session_id: String,
+}
+
+/// The bearer token a prepared attempt will actually send.
+///
+/// The `401` recovery compares this with what the store holds: if they differ, a peer
+/// already rotated the credential while this request was in flight and the stored token is
+/// the answer, so the refresh endpoint must not be contacted again.
+fn sent_bearer(prepared: &Prepared) -> Option<&str> {
+    prepared
+        .headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
 }
 
 fn google_cca_headers(
@@ -1765,6 +1800,7 @@ async fn handle(
         strip_provider: policy.is_some(),
         client_headers: Some(headers),
         redact_pii,
+        recovered: Mutex::new(Vec::new()),
     };
 
     // Cache eligibility is decided once, before anything is sent: a non-streaming
@@ -2209,6 +2245,7 @@ async fn complete_traced(
         strip_provider: policy.is_some(),
         client_headers: client,
         redact_pii,
+        recovered: Mutex::new(Vec::new()),
     };
 
     if !upstream_stream {
@@ -2719,13 +2756,25 @@ fn upstream_error(candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
 /// The error one upstream answer becomes.
 ///
 /// Almost every answer is an ordinary [`Error::Upstream`], pass-through for the client.
-/// Cloud Code Assist can also refuse the *account* itself, which the dispatcher and the
-/// connection row must treat differently, so that class is read here — next to the body it
-/// comes from — and carried as [`Error::AccountRefused`].
-fn answered(candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
+/// A subscription provider can also refuse the *account* itself, which the dispatcher and
+/// the connection row must treat differently, so that class is read here — next to the
+/// body it comes from — and carried as [`Error::AccountRefused`].
+///
+/// `rate_limited` is `true` when the answer carried `anthropic-ratelimit-*` headers: a
+/// `429` with them is a real throttle and must stay an ordinary error, which is the whole
+/// reason the classifier is told about them.
+fn answered(candidate: &Candidate, status: u16, bytes: &Bytes, rate_limited: bool) -> Error {
     if is_google_cca(&candidate.provider) {
         if let Some(refusal) = rrouter_translate::google_cca::refusal(Some(status), bytes) {
             let detail = rrouter_translate::google_cca::refusal_detail(bytes);
+            return Error::account_refused(&candidate.provider, refusal, &detail);
+        }
+    }
+    if is_claude_subscription(&candidate.provider) {
+        if let Some(refusal) =
+            rrouter_translate::anthropic::refusal(Some(status), bytes, rate_limited)
+        {
+            let detail = rrouter_translate::anthropic::refusal_detail(bytes);
             return Error::account_refused(&candidate.provider, refusal, &detail);
         }
     }
@@ -3024,6 +3073,14 @@ struct Attempt<'a> {
     /// The paying key opted into PII redaction: provider error text is redacted before it
     /// is stored or returned, because an upstream error can echo the prompt.
     redact_pii: bool,
+    /// Connections whose credential this request has already refreshed after a `401`.
+    ///
+    /// One recovery per account per request, never per attempt: the dispatcher retries a
+    /// retryable failure on the same candidate, and a second forced refresh would rotate
+    /// the refresh token again — spending a single-use token twice is what takes the
+    /// connection down. A second account rejected in the same request is a different
+    /// credential and gets its own recovery.
+    recovered: Mutex<Vec<Uuid>>,
 }
 
 impl Attempt<'_> {
@@ -3031,21 +3088,28 @@ impl Attempt<'_> {
     /// provider error often echoes part of the prompt, and this string is both stored on
     /// the usage row and returned to the client.
     ///
-    /// A Cloud Code Assist answer that names an *account* refusal becomes
+    /// A subscription answer that names an *account* refusal becomes
     /// [`Error::AccountRefused`] instead of a generic upstream error: the dispatcher then
     /// fails over without retrying this account, and [`RequestTrace::time`] retires a
-    /// permanently banned one.
-    fn upstream_error(&self, candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
+    /// permanently refused one. `rate_limited` is the answer's own rate-limit-header hint
+    /// (see [`answered`]), captured before the body was consumed.
+    fn upstream_error(
+        &self,
+        candidate: &Candidate,
+        status: u16,
+        bytes: &Bytes,
+        rate_limited: bool,
+    ) -> Error {
         if self.redact_pii {
             let text = String::from_utf8_lossy(bytes);
             let (redacted, report) = crate::redaction::redact(&text);
             if report.redacted {
                 crate::metrics::pii_redacted(crate::metrics::RedactStage::Output, &report);
                 let redacted = Bytes::from(redacted.into_owned());
-                return answered(candidate, status, &redacted);
+                return answered(candidate, status, &redacted, rate_limited);
             }
         }
-        answered(candidate, status, bytes)
+        answered(candidate, status, bytes, rate_limited)
     }
 
     fn provider(&self, candidate: &Candidate) -> Result<&'static ProviderSpec> {
@@ -3208,14 +3272,31 @@ impl Attempt<'_> {
             .refresher
             .fresh(self.state.store.as_ref(), spec, candidate.connection)
             .await?;
-        if !custom_base_present(self.state, &candidate.provider, &creds) {
+        self.prepare_with(candidate, spec, &creds, trace).await
+    }
+
+    /// The rest of [`Self::prepare`], for a caller that already holds this attempt's
+    /// credentials.
+    ///
+    /// The `401` recovery path takes this entry point with the values the refresh returned
+    /// instead of re-entering [`Self::prepare`]: asking [`crate::state::AppState::refresher`]
+    /// again would consult the expiry, which a token endpoint that omits `expires_in`
+    /// leaves stale, and a second refresh there would rotate the token a second time.
+    async fn prepare_with(
+        &self,
+        candidate: &Candidate,
+        spec: &'static ProviderSpec,
+        creds: &Credentials,
+        trace: &AttemptTrace,
+    ) -> Result<Prepared> {
+        if !custom_base_present(self.state, &candidate.provider, creds) {
             return Err(Error::Unauthorized(format!(
                 "provider {} needs an account base URL",
                 candidate.provider
             )));
         }
         if is_google_cca(&candidate.provider) {
-            let project = cca_project(&creds)?;
+            let project = cca_project(creds)?;
             // A credential override is a deployment/test statement about where this
             // account goes; the env override applies only to the built-in daily host.
             let daily = match creds.base_url_override.as_deref() {
@@ -3233,7 +3314,7 @@ impl Attempt<'_> {
                     self.upstream_stream,
                 ));
             }
-            let mut headers = google_cca_headers(spec, &creds, self.client_headers)?;
+            let mut headers = google_cca_headers(spec, creds, self.client_headers)?;
             inject_trace_headers(&mut headers, trace);
             return Ok(Prepared {
                 urls,
@@ -3244,10 +3325,10 @@ impl Attempt<'_> {
             });
         }
         if is_qoder(&candidate.provider) {
-            return self.prepare_qoder(spec, &creds, candidate, trace).await;
+            return self.prepare_qoder(spec, creds, candidate, trace).await;
         }
         let (url, dialect) = endpoint(spec, creds.base_url_override.as_deref(), self.inbound);
-        let mut headers = outbound_headers(spec, &creds, self.client_headers)?;
+        let mut headers = outbound_headers(spec, creds, self.client_headers)?;
         // OpenCode Go rejects requests without a session id (`MissingSessionID`). The
         // affinity hash is stable for one conversation and unique across conversations,
         // which is exactly the routing/prompt-cache key OpenCode asks for.
@@ -3372,12 +3453,16 @@ impl Attempt<'_> {
                     if status.is_success() {
                         return Ok(resp);
                     }
+                    // Read before the body is consumed: these headers are the only thing
+                    // that tells a real throttle from the subscription gate's fake 429.
+                    let rate_limited = carries_rate_limit_headers(resp.headers());
                     let bytes = resp
                         .bytes()
                         .await
                         .map_err(|e| Box::new(Failure::transport(transport_error(e))))?;
                     if status.as_u16() < 500 {
-                        let error = self.upstream_error(candidate, status.as_u16(), &bytes);
+                        let error =
+                            self.upstream_error(candidate, status.as_u16(), &bytes, rate_limited);
                         return Err(Box::new(Failure::answer(error, status.as_u16(), bytes)));
                     }
                     last_server_error = Some((status.as_u16(), bytes));
@@ -3387,7 +3472,9 @@ impl Attempt<'_> {
             }
         }
         if let Some((status, bytes)) = last_server_error {
-            let error = self.upstream_error(candidate, status, &bytes);
+            // 5xx only: a `429` took the branch above, and no refusal class is ever read
+            // from a server error (see the 5xx guard in the classifiers).
+            let error = self.upstream_error(candidate, status, &bytes, false);
             return Err(Box::new(Failure::answer(error, status, bytes)));
         }
         Err(Box::new(Failure::transport(transport.unwrap_or_else(
@@ -3404,14 +3491,21 @@ impl Attempt<'_> {
     /// 400 is the upstream's answer, not another invitation to guess — and a repair that
     /// works is remembered per provider+connection, so the next request omits the field
     /// without paying for a probe.
+    ///
+    /// A failure keeps the upstream's status and body ([`Failure::answer`]) rather than only
+    /// the client-facing error: the credential-recovery step above needs the status to tell
+    /// a rejected bearer from every other refusal.
     async fn post_repairing(
         &self,
         candidate: &Candidate,
         prepared: &Prepared,
-    ) -> Result<reqwest::Response> {
+    ) -> std::result::Result<reqwest::Response, Box<Failure>> {
         let mut repair: Vec<&'static str> = Vec::new();
         loop {
-            let wire = self.outbound_dropping(candidate, prepared, &repair)?;
+            // A body that cannot be built never reached the upstream, so it carries no answer.
+            let wire = self
+                .outbound_dropping(candidate, prepared, &repair)
+                .map_err(|error| Box::new(Failure::transport(error)))?;
             let failure = match self.post_with_fallback(candidate, prepared, &wire).await {
                 Ok(resp) => {
                     self.state.envelope_drops.record(
@@ -3424,7 +3518,7 @@ impl Attempt<'_> {
                 Err(failure) => failure,
             };
             let Some(fields) = self.repairable(prepared, &failure, &repair) else {
-                return Err(failure.error);
+                return Err(failure);
             };
             repair.extend(fields);
         }
@@ -3455,6 +3549,112 @@ impl Attempt<'_> {
         (!fields.is_empty()).then_some(fields)
     }
 
+    /// One candidate's upstream response, including the credential-recovery resend.
+    ///
+    /// Every byte the client may see is produced from what this returns, so this is the one
+    /// place a rejected bearer can still be replaced: [`Self::post_repairing`] has read at
+    /// most the status line and an error body, and nothing has been forwarded.
+    async fn attempt_response(
+        &self,
+        candidate: &Candidate,
+        trace: &AttemptTrace,
+    ) -> Result<(reqwest::Response, Dialect)> {
+        let prepared = self.prepare(candidate, trace).await?;
+        let dialect = prepared.dialect;
+        match self.post_repairing(candidate, &prepared).await {
+            Ok(resp) => Ok((resp, dialect)),
+            Err(failure) => {
+                self.recover_rejection(candidate, &prepared, trace, failure)
+                    .await
+            }
+        }
+    }
+
+    /// Turn an upstream `401` on an OAuth connection into one refresh and one resend.
+    ///
+    /// Claude Code rotates the refresh token on use, so the moment the user's own install
+    /// refreshes, the bearer this gateway holds is dead while its expiry still looks fine.
+    /// Without this step a healthy account answers `401` until an operator re-authenticates
+    /// by hand; that is the "account looks broken" loop that spends a subscription.
+    ///
+    /// The recovery is deliberately one refresh and one resend:
+    /// * one, because a second `401` is the account's answer, not an invitation to try
+    ///   again, and every resend of a *rotating* refresh token risks invalidating the
+    ///   connection for good;
+    /// * pre-stream, because the retry replaces the whole response. [`Failure`] only exists
+    ///   below `200`: once a stream has started the status is already `200` and a mid-stream
+    ///   error is forwarded to the client as the upstream sent it, never retried;
+    /// * replayable, because the attempt rebuilds its body from the canonical request
+    ///   ([`Self::body_for`]) for every send, so the resend is the same request with a new
+    ///   bearer rather than a replay of the client's bytes.
+    ///
+    /// An API-key connection has no credential to renew, so its `401` is reported as-is.
+    async fn recover_rejection(
+        &self,
+        candidate: &Candidate,
+        prepared: &Prepared,
+        trace: &AttemptTrace,
+        failure: Box<Failure>,
+    ) -> Result<(reqwest::Response, Dialect)> {
+        let Some((status, _)) = failure.answer.as_ref() else {
+            // A transport failure carries no upstream verdict, so there is no rejection to
+            // recover from.
+            return Err(failure.error);
+        };
+        if *status != 401 {
+            return Err(failure.error);
+        }
+        let Ok(spec) = self.provider(candidate) else {
+            return Err(failure.error);
+        };
+        if !spec.is_oauth() || spec.refresh.is_none() || !self.claim_recovery(candidate.connection)
+        {
+            return Err(failure.error);
+        }
+
+        let creds = self
+            .state
+            .refresher
+            .fresh_after_rejection(
+                self.state.store.as_ref(),
+                spec,
+                candidate.connection,
+                sent_bearer(prepared),
+            )
+            .await?;
+        tracing::debug!(
+            provider = %candidate.provider,
+            connection = %candidate.connection,
+            "upstream rejected the bearer; retrying once with the refreshed credential"
+        );
+
+        let prepared = self.prepare_with(candidate, spec, &creds, trace).await?;
+        let dialect = prepared.dialect;
+        let resp = self
+            .post_repairing(candidate, &prepared)
+            .await
+            .map_err(|failure| failure.error)?;
+        Ok((resp, dialect))
+    }
+
+    /// Claim this request's one credential recovery for `connection`.
+    ///
+    /// The dispatcher retries a retryable failure on the same candidate, so without this the
+    /// same `401` would refresh twice in one request and spend the rotated refresh token —
+    /// the very way a connection is lost. Distinct accounts keep distinct entries: a second
+    /// account rejected in the same request is a different credential and is recovered.
+    fn claim_recovery(&self, connection: Uuid) -> bool {
+        let mut recovered = self
+            .recovered
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if recovered.contains(&connection) {
+            return false;
+        }
+        recovered.push(connection);
+        true
+    }
+
     /// Non-streaming attempt.
     async fn send_once(&self, candidate: Candidate) -> Result<ChatResponse> {
         self.trace
@@ -3469,11 +3669,10 @@ impl Attempt<'_> {
         candidate: Candidate,
         trace: std::sync::Arc<AttemptTrace>,
     ) -> Result<ChatResponse> {
-        let prepared = self.prepare(&candidate, &trace).await?;
-        let resp = self.post_repairing(&candidate, &prepared).await?;
+        let (resp, dialect) = self.attempt_response(&candidate, &trace).await?;
         let bytes = resp.bytes().await.map_err(transport_error)?;
         let value: Value = serde_json::from_slice(&bytes)?;
-        rrouter_translate::parse_response(prepared.dialect, &value)
+        rrouter_translate::parse_response(dialect, &value)
     }
 
     /// Streaming attempt. A non-2xx upstream fails before any byte is committed, so the
@@ -3491,9 +3690,7 @@ impl Attempt<'_> {
         candidate: Candidate,
         trace: std::sync::Arc<AttemptTrace>,
     ) -> Result<ByteStream> {
-        let prepared = self.prepare(&candidate, &trace).await?;
-        let resp = self.post_repairing(&candidate, &prepared).await?;
-        let dialect = prepared.dialect;
+        let (resp, dialect) = self.attempt_response(&candidate, &trace).await?;
         if dialect == Dialect::QoderAgent {
             return qoder_stream(resp).await;
         }
@@ -3990,14 +4187,15 @@ impl RequestTrace {
                 Some(e.to_string()),
             ),
         });
-        // A permanent account refusal takes the connection out of rotation: the credential
-        // is dead at the provider, so leaving it routable pays for the same refusal on
-        // every later request and hides the cause from the operator. Fire and forget, like
-        // every other bookkeeping write on this path: retirement must never delay the
-        // failover that is already in progress.
+        // An account refusal is recorded on the connection row: a permanent one takes it out
+        // of rotation (the credential is dead at the provider, so leaving it routable pays for
+        // the same refusal on every later request and hides the cause from the operator), and
+        // a recoverable one — verification required — only records why it is cooling down, so
+        // the reason survives a restart. Fire and forget, like every other bookkeeping write
+        // on this path: neither may delay the failover that is already in progress.
         if let Err(e) = &result {
-            if e.refusal().is_some_and(Refusal::is_permanent) {
-                retire_refused_account(state, &target, e);
+            if let Some(refusal) = e.refusal() {
+                record_account_refusal(state, target.connection, refusal, &e.to_string());
             }
         }
         result
@@ -4138,34 +4336,101 @@ fn spawn_latency(state: &AppState, connection: Uuid, latency_ms: u32) {
     });
 }
 
-/// Retire a permanently-refused account, off the request path.
+/// Record an upstream refusal of an account on its row — the single write both refusal
+/// classes go through.
 ///
-/// The row keeps its credentials — an operator may appeal the ban or replace the sign-in —
-/// but `is_active = 0` takes it out of every model's candidate list and
-/// `connections.refusal` records *why*, so the dashboard can tell a provider suspension
-/// apart from an account somebody switched off by hand. The last error is stored with the
-/// provider's own wording, which is what makes the row actionable without grepping logs.
-fn retire_refused_account(state: &AppState, candidate: &Candidate, err: &Error) {
-    let Some(refusal) = err.refusal() else { return };
-    if !refusal.is_permanent() {
-        // Verification-required is a cooldown, not a death: the breaker already benched the
-        // account and it must come back without an operator touching the row.
-        return;
-    }
+/// The classes need opposite persistence, so the branch lives here rather than at each
+/// carrier (the HTTP answer and the terminal error frame of a stream), where one of them
+/// could be forgotten:
+///
+/// * **permanent** ([`Refusal::is_permanent`]) — the credential is dead at the provider, so
+///   the row is retired: `is_active = 0` plus `connections.refusal` carrying the class
+///   token. No later request changes that verdict; an operator re-enabling the row is the
+///   only way back, which is why the token must not be inferred from `is_active` alone.
+/// * **recoverable** ([`Refusal::Verification`]) — the account is healthy and only a human
+///   can clear the provider's prompt, so routing state stays exactly as it was
+///   (`is_active = 1`, `refusal` NULL) and the breaker alone owns the cooldown. Only the
+///   *reason* is persisted, because the breaker is in memory: without the row's
+///   `last_error`/`last_error_code`/`last_error_at` a restart leaves an operator staring at
+///   a healthy-looking account with no idea it needs a browser round-trip, or at an
+///   unexplained cooldown it cannot tell from a flake.
+/// * **our defect** ([`Refusal::ClientOutdated`]) — nothing about the account is wrong, so
+///   nothing is written; blaming the row for a stale client identity would hide a build
+///   problem behind an account problem.
+///
+/// The stored status is the class's own, never the wire's (see
+/// [`Refusal::upstream_status`]).
+///
+/// # Why this runs off the request path, with retries
+///
+/// The stream carrier calls this from `Stream::poll_next` and from the body's `Drop`:
+/// neither has an async context to await a store write in, and blocking a runtime worker on
+/// SQLite to retire an account would stall every other request that worker serves. Awaiting
+/// would also change what the buffered carrier does — it calls this from inside the
+/// dispatcher's failover loop, where the next candidate is already being chosen — so the
+/// write stays off both request paths and the row means the same thing whichever carrier
+/// the refusal arrived on.
+///
+/// One best-effort attempt is not enough, though. A busy or locked store would silently
+/// leave a suspended account routable, which is precisely the state this exists to prevent,
+/// and the next request would pay for the same refusal. The task therefore retries a
+/// bounded number of times and logs at `error` with the connection and class when it gives
+/// up, so a lost retirement is visible in the log instead of being inferred from traffic
+/// the provider keeps refusing. Recording the recoverable class is idempotent in the store,
+/// so a retry costs one index probe and no write.
+///
+/// What this does *not* cover is a process death inside the retry window, which no
+/// fire-and-forget write can: closing that needs the verdict committed before the client
+/// sees the terminal frame, i.e. a durable marker the next boot replays.
+fn record_account_refusal(state: &AppState, connection: Uuid, refusal: Refusal, detail: &str) {
     let store = Arc::clone(&state.store);
-    let connection = candidate.connection;
-    let detail = err.to_string();
-    let code = err.status();
+    let detail = detail.to_owned();
+    // The class's own status, never the wire's (see [`Refusal::upstream_status`]).
+    let code = refusal.upstream_status();
     tokio::spawn(async move {
-        if let Err(e) = store
-            .terminate_connection(connection, refusal.code(), Some(&detail), Some(code))
-            .await
-        {
-            tracing::warn!(
-                connection = %connection,
-                error = %e,
-                "could not retire a permanently refused account"
-            );
+        /// Attempts before the write is reported as lost. A SQLite `UPDATE` either lands on
+        /// the first try or fails on a transient lock, so a short window is enough.
+        const ATTEMPTS: u32 = 3;
+        for attempt in 1..=ATTEMPTS {
+            let outcome = if refusal.is_permanent() {
+                store
+                    .terminate_connection(connection, refusal.code(), Some(&detail), Some(code))
+                    .await
+            } else if matches!(refusal, Refusal::Verification) {
+                store
+                    .record_connection_refusal_reason(
+                        connection,
+                        refusal.code(),
+                        Some(&detail),
+                        Some(code),
+                    )
+                    .await
+            } else {
+                // Nothing about the account is wrong: this build's client identity is stale.
+                return;
+            };
+            match outcome {
+                Ok(()) => return,
+                Err(e) if attempt == ATTEMPTS => tracing::error!(
+                    connection = %connection,
+                    refusal = refusal.code(),
+                    attempts = ATTEMPTS,
+                    error = %e,
+                    "could not record an account refusal: a permanently refused row stays \
+                     active and the account will be selected again"
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        connection = %connection,
+                        refusal = refusal.code(),
+                        attempt,
+                        error = %e,
+                        "refusal write failed; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(25 * u64::from(attempt)))
+                        .await;
+                }
+            }
         }
     });
 }
@@ -4214,6 +4479,10 @@ struct Wire {
     /// The terminal error sent after a decode/transport failure. Without this the usage
     /// row would say `200` even though the client received an error frame.
     terminal_error: Option<(u16, String)>,
+    /// The refusal class behind [`Self::terminal_error`], when that failure was a refusal
+    /// of the *account*. A stream already handed to the client cannot fail over, but the
+    /// account can still leave rotation for every later request.
+    terminal_refusal: Option<Refusal>,
     /// Longest blocked term, in characters; zero when output scanning is off.
     guard_max: usize,
     /// Trailing response text from the previous delta, per channel, so a term split
@@ -4257,6 +4526,7 @@ impl Wire {
             stream_redactor: redact_pii.then(crate::redaction::StreamRedactor::new),
             blocked: None,
             terminal_error: None,
+            terminal_refusal: None,
             guard_max,
             guard_text_tail: String::new(),
             guard_reasoning_tail: String::new(),
@@ -4402,14 +4672,36 @@ impl Wire {
     }
 
     /// Flush the redaction tail, then build one terminal error frame.
+    ///
+    /// The error is also kept, for two readers that only exist after the client already
+    /// has this frame: the usage row ([`Self::terminal_error`]) and the account's
+    /// lifecycle ([`Self::terminal_refusal`]). A refusal that arrives here is the
+    /// mid-stream carrier of the same verdict a `403` body carries on the buffered path —
+    /// the provider opened a `200` and reported the account's state inside the body — so
+    /// it must leave rotation through exactly the same store call, even though there is
+    /// no failover left to attempt.
     fn close_with_error(&mut self, err: Error) -> Bytes {
         self.terminal_error = Some((err.status(), err.to_string()));
+        self.terminal_refusal = err.refusal();
         let tail = match self.flush_stream_tail_mode(true) {
             Ok(tail) => tail,
             Err(e) => return Bytes::from(error_frame(self.inbound, &e)),
         };
         let frame = Bytes::from(error_frame(self.inbound, &err));
         tail.map_or(frame.clone(), |bytes| join(Some(bytes), frame))
+    }
+
+    /// Drop the upstream body while this response is still in the gateway's hands.
+    ///
+    /// The dispatcher wraps every streamed body in its own stream, and that wrapper settles
+    /// breaker accounting when it is dropped: "dropped without an error" is a successful
+    /// call. A mid-stream refusal is exactly that shape — a `200` whose error arrived in a
+    /// frame, not as a transport failure — so the wrapper would otherwise book the refused
+    /// account as healthy *after* the refusal was recorded. Hanging up here fixes the order
+    /// rather than the accounting: the wrapper settles first, then
+    /// [`ResponseStream::commit`] records the refusal, so the refusal is the last word.
+    fn hang_up(&mut self) {
+        self.incoming = Box::pin(futures_util::stream::empty());
     }
 }
 
@@ -4534,6 +4826,40 @@ impl ResponseStream {
             .inner
             .first_output
             .map(|at| at.saturating_duration_since(pending.started));
+        // A refusal that arrived as an `event: error` frame cannot fail over — the stream is
+        // already the client's answer — but the account must still be recorded for every
+        // later request, exactly like one refused before the stream opened: retired when the
+        // class is permanent, its reason noted when it is a recoverable verification, and
+        // left alone when the defect is this build's client identity.
+        if let Some(refusal) = self.inner.terminal_refusal {
+            // Bench first, for *every* class: the dispatcher's own bookkeeping only sees
+            // the raw upstream bytes, and for it this body ended without an error — its
+            // `Committed` wrapper settles a success when the stream is dropped. A refusal
+            // must never be booked as a success, so hang up on the upstream body (that is
+            // where the wrapper settles) and record the class, with the status the
+            // provider answered with rather than the one the client sees. This mirrors the
+            // buffered path, where the dispatcher records the same number from
+            // `status_of`.
+            self.inner.hang_up();
+            pending.state.dispatcher.breaker().record_failure_for(
+                pending.candidate.connection,
+                &pending.candidate.model,
+                refusal.upstream_status(),
+                None,
+            );
+            let detail = self
+                .inner
+                .terminal_error
+                .as_ref()
+                .map(|(_, message)| message.as_str())
+                .unwrap_or_default();
+            record_account_refusal(
+                &pending.state,
+                pending.candidate.connection,
+                refusal,
+                detail,
+            );
+        }
         // A stream a guardrail stopped is a refusal that happens to have a body: the row
         // says 403 with the reason the client read in the terminal error frame.
         let (status, error) = match self.inner.blocked.as_deref() {

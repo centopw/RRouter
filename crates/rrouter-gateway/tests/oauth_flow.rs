@@ -17,6 +17,8 @@ use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 
+mod support;
+
 const ACCESS_TOKEN: &str = "LIVE-ACCESS-TOKEN";
 const REFRESH_TOKEN: &str = "LIVE-REFRESH-TOKEN";
 const PKCE_ACCESS_TOKEN: &str = "PKCE-ACCESS-TOKEN";
@@ -147,9 +149,11 @@ async fn copilot() -> Json<Value> {
 
 struct Harness {
     router: axum::Router,
+    _data_dir: support::TempDir,
 }
 
 fn harness() -> Harness {
+    let data_dir = support::TempDir::adopt(support::temp_path("oauth"));
     let state = Arc::new(AppState {
         store: Arc::new(Store::open_in_memory().expect("store")),
         catalog: Arc::new(Catalog::builtin()),
@@ -168,7 +172,7 @@ fn harness() -> Harness {
         config: rrouter_gateway::config::ConfigSnapshot::from(Config {
             host: "127.0.0.1".parse().expect("host"),
             port: 0,
-            data_dir: std::env::temp_dir().join(format!("rrouter-oauth-{}", uuid::Uuid::new_v4())),
+            data_dir: data_dir.to_path_buf(),
             master_key: None,
             require_api_key: false,
             request_timeout_secs: 30,
@@ -208,7 +212,10 @@ fn harness() -> Harness {
         concurrency: std::sync::RwLock::new(None),
         auth: rrouter_gateway::auth::Auth::load(&std::env::temp_dir(), false),
     });
-    Harness { router: app(state) }
+    Harness {
+        router: app(state),
+        _data_dir: data_dir,
+    }
 }
 
 impl Harness {
