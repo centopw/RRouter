@@ -2,6 +2,68 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.32.0 — 2026-11-21
+
+### Features
+
+- feat(proxy): route every account's calls through its own egress proxy ([`bf441d1`](https://github.com/centopw/RRouter/commit/bf441d100efa4613e711938e6700b7974448c69e))
+- feat(free-mode): import document, discovery and admin CLI ([`d0d7835`](https://github.com/centopw/RRouter/commit/d0d78357c1af33f94244a3d74506af39266a8ead))
+- feat(router): reserved free refs and anti-rate-limit rotation ([`1faf179`](https://github.com/centopw/RRouter/commit/1faf179e6f6f123a77b66b73fd31dfaa19458652))
+- feat(ui): free-mode dashboard with document import and model selection ([`1a5be53`](https://github.com/centopw/RRouter/commit/1a5be5333d853279888aafaa9f5fbc9fbb5f83d3))
+- feat(free-mode): per-account proxy credential and free-mode storage ([`b4c1b0f`](https://github.com/centopw/RRouter/commit/b4c1b0fb227e684d59b327140f0d7ede953475e9))
+- feat(ui): show a provider refusal as its own badge, not as a disable ([`0f61b71`](https://github.com/centopw/RRouter/commit/0f61b71ab6be832e5e280e989bafa714b42b2706))
+- feat(ui): map connection refusal tokens to copy and severity ([`206fbde`](https://github.com/centopw/RRouter/commit/206fbde4b148e5661f19a38355c417ef8507566d))
+- feat(store,gateway): persist the reason for a recoverable account refusal ([`f171458`](https://github.com/centopw/RRouter/commit/f171458e560c40f3a8291965280e2fa5d09d2a7a))
+- feat(gateway): retire claude accounts on an entitlement refusal ([`b904f85`](https://github.com/centopw/RRouter/commit/b904f85bcbf8a464a44d0729e66282ea34de1ed2))
+- feat(core,translate): classify Claude subscription refusals ([`807dbaf`](https://github.com/centopw/RRouter/commit/807dbaf6a900ebdf79689c89043438e55f773756))
+- feat(gateway): refresh once and retry on a pre-stream 401 ([`79686f5`](https://github.com/centopw/RRouter/commit/79686f595c2f9a8e08b50b9e34fbe6954885e15a))
+- feat(auth): refresh a credential the upstream rejected ([`84f940c`](https://github.com/centopw/RRouter/commit/84f940ccef993c896a080d72761ec0a2ad139b1f))
+- feat(gateway): retire permanently-refused accounts ([`092c7a8`](https://github.com/centopw/RRouter/commit/092c7a813f10db52de63f292c8fb78ac9fe2c6fd))
+- feat(translate): classify upstream account refusals ([`856310c`](https://github.com/centopw/RRouter/commit/856310c5e7742076af3337997ebd4561927c60cd))
+- feat(ui): provider cards and live tryout on Search, Rerank, Embeddings ([`22f4248`](https://github.com/centopw/RRouter/commit/22f4248eef13327ebbcbb924fb6500d12ae36ed0))
+- feat(compression): record and surface what compression removed ([`57b8fef`](https://github.com/centopw/RRouter/commit/57b8fef8ae35db7b4b3de31715b46bf9554cc1b3))
+- feat: compression page, capability defaults, and appearance settings ([`00de2e1`](https://github.com/centopw/RRouter/commit/00de2e101a33b08836e8610a49ddaa6c880b5c86))
+
+### Bug Fixes
+
+- fix(free-mode): discovery leaves through the account's proxy; prove account rotation ([`4674782`](https://github.com/centopw/RRouter/commit/467478257b9c76f2028409d90b50e05ff8f8c5c8))
+- fix(auth): refresh the OAuth override cache on demand ([`03a9aeb`](https://github.com/centopw/RRouter/commit/03a9aeb783e1d2eff903a960010c8eab037a5178))
+- fix(gateway): bench and retire an account refused inside a stream ([`3ff36d9`](https://github.com/centopw/RRouter/commit/3ff36d90f3070eea26474fde422ad2a53adc4a50))
+- fix(antigravity): derive wire marker and platform enum from one identity ([`687d7f1`](https://github.com/centopw/RRouter/commit/687d7f1dcce961824d4edec9b846557c0676983f))
+- fix(translate): never repair away the CCA envelope's identity fields ([`673534c`](https://github.com/centopw/RRouter/commit/673534c4f870139a19d6adfa1eb5c821eb8aad64))
+- fix(ui): consolidate Quick start into one card with modals ([`44aa35e`](https://github.com/centopw/RRouter/commit/44aa35e93ba8fcb657865f50e6870a1330ac6a64))
+
+### Documentation
+
+- docs(gateway): retire-on-refusal write is retried; record the mid-stream rule ([`17cfc87`](https://github.com/centopw/RRouter/commit/17cfc87d0e9d406406b00eab7a6e8f62f2e2a340))
+- docs: describe compression effectiveness and the capability catalog ([`5b56d13`](https://github.com/centopw/RRouter/commit/5b56d13bec8edb0606264b6d4dc40aacb8e42563))
+
+### Build & CI
+
+- build(deps): bump the dashboard group in /ui with 5 updates (#10) ([`0879d2d`](https://github.com/centopw/RRouter/commit/0879d2dfc0bbbc6779ed57780d5a86cc5e739caf))
+- build(deps): bump the rust group across 1 directory with 3 updates (#11) ([`3be4e07`](https://github.com/centopw/RRouter/commit/3be4e073ae4579e49a66400fdc3593c4d4a51508))
+
+### Other Changes
+
+- test(free-mode): treat any non-200 state read as blocked, not a failure ([`df37270`](https://github.com/centopw/RRouter/commit/df37270e0788d185bd52ffe91ba34407428e2d37))
+- test(free-mode): acceptance harness for import, discovery and free routing ([`e2d7e0d`](https://github.com/centopw/RRouter/commit/e2d7e0d40d0dbbf501ac11b7d9bdfa66e7fd04ce))
+- test(store): pin free-mode upsert, ordering and document round-trip ([`bf9859c`](https://github.com/centopw/RRouter/commit/bf9859c01b238bfb299972e6fbd6a082b1ae39aa))
+- merge fix/test-temp-dirs ([`d8be8ad`](https://github.com/centopw/RRouter/commit/d8be8ad9436b230c834bf7548cbb27e0fe7a4812))
+- test(gateway): give the remaining temp-dir helpers the same guard ([`35ed4df`](https://github.com/centopw/RRouter/commit/35ed4dfb965dacdbf53f3e44d0fd5354cb3f6f5f))
+- test(gateway): hold the temp data dir in the test harnesses ([`64606f5`](https://github.com/centopw/RRouter/commit/64606f59b8414e63010b7838f1db8a19f8908035))
+- test(gateway): add a shared temp data-dir guard for the integration tests ([`5f69970`](https://github.com/centopw/RRouter/commit/5f699701455dd42b80eeaa7e50c9c6ec5b33aed5))
+- merge fix/refusal-badge ([`89fca32`](https://github.com/centopw/RRouter/commit/89fca3259b8ab78ab527dc79a50432da8b541971))
+- merge fix/verify-reason-persist ([`a11a269`](https://github.com/centopw/RRouter/commit/a11a26919a6b3be524e37bac0dcc356918e3e162))
+- merge fix/cca-stream-retire ([`36206e9`](https://github.com/centopw/RRouter/commit/36206e9110652e941c58c0cd809bd4ea9c6b95f7))
+- chore(ui): rebuild the served bundle ([`1612d7c`](https://github.com/centopw/RRouter/commit/1612d7c8ec204eacebd0c25502e01bafe8a5798b))
+- test: a recoverable refusal is recorded and still routable ([`f8a9b35`](https://github.com/centopw/RRouter/commit/f8a9b357aeed26c59f3817071bc79406c274e3ef))
+- merge fix/cc-401-refresh ([`933f7e7`](https://github.com/centopw/RRouter/commit/933f7e77ed4525dd16c78d4562bfcb38b32c5fec))
+- merge fix/cc-refusal-taxonomy ([`c24f645`](https://github.com/centopw/RRouter/commit/c24f64544bd18ac46fdc014585b312aa0fc167ee))
+- test(antigravity): keep provider wording out of assertion sinks ([`5dc7192`](https://github.com/centopw/RRouter/commit/5dc71921642579bd281352ed72815a57ae4fb69f))
+- merge fix/ban-classification ([`d65d143`](https://github.com/centopw/RRouter/commit/d65d143bb8c7607190871ac6ec155dc43599dae7))
+- merge fix/identity-consistency ([`5fed2a8`](https://github.com/centopw/RRouter/commit/5fed2a811eb640df1efb6e121a6b9d32a96d6a97))
+- merge fix/envelope-repair ([`0c12ba2`](https://github.com/centopw/RRouter/commit/0c12ba2bca06844b3da881d2f7f72682e84ca1fa))
+
 ## Unreleased
 
 ### Features
