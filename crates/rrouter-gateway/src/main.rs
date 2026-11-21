@@ -497,6 +497,7 @@ async fn serve(config: Config, log: LogReload) -> Result<(), String> {
         planner: rrouter_router::Planner::with_free_rotation(rrouter_router::FreeRotation::new()),
         dispatcher: Arc::new(dispatcher(&config)),
         http,
+        proxy_clients: Default::default(),
         config: rrouter_gateway::config::ConfigSnapshot::from(config.clone()),
         started: Instant::now(),
         oauth: rrouter_auth::OAuthFlows::new(),

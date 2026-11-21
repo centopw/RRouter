@@ -262,7 +262,9 @@ async fn send_once(
     })?;
     let creds = state
         .refresher
-        .fresh(state.store.as_ref(), spec, candidate.connection)
+        .fresh_via(state.store.as_ref(), spec, candidate.connection, |creds| {
+            state.http_for(creds)
+        })
         .await?;
     // A connection's own endpoint wins, keeping the reviewed path; a manifest-declared
     // query parameter fills the gap. One resolution shared with the files/batches routes.
@@ -273,7 +275,7 @@ async fn send_once(
     wire["model"] = Value::String(candidate.model.clone());
     let sent = Instant::now();
     let response = state
-        .http
+        .http_for(&creds)?
         .post(&url)
         .headers(headers)
         .json(&wire)

@@ -1708,6 +1708,49 @@ impl Store {
         Ok(())
     }
 
+    /// Turn free-mode membership (and its proactive per-minute cap) on or off.
+    ///
+    /// Both live in the encrypted credential blob, where [`Self::merge_credentials`] is a
+    /// patch: a `bool` has no "absent" state and an `Option<u32>` cannot tell "no cap"
+    /// from "leave the cap alone". Removal therefore has its own verb, so an account can
+    /// leave free mode without its credentials being rewritten by a patch that cannot
+    /// express it.
+    pub async fn set_connection_free_mode(
+        &self,
+        id: Uuid,
+        free_mode: bool,
+        free_rpm: Option<u32>,
+    ) -> Result<Connection> {
+        {
+            let mut conn = self.conn();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(migrations::db_err)?;
+            let raw = tx
+                .query_row(
+                    &format!("SELECT {CONN_COLUMNS} FROM connections WHERE id = ?1"),
+                    params![id.to_string()],
+                    row_to_connection,
+                )
+                .optional()
+                .map_err(migrations::db_err)?
+                .ok_or_else(|| Error::NotFound(format!("connection {id}")))?;
+            let mut merged = self.decode(raw)?.credentials;
+            merged.free_mode = free_mode;
+            merged.free_rpm = free_rpm;
+            let blob = self.seal(&id, &merged)?;
+            tx.execute(
+                "UPDATE connections SET data = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id.to_string(), blob, now()],
+            )
+            .map_err(migrations::db_err)?;
+            tx.commit().map_err(migrations::db_err)?;
+        }
+        self.get_connection(id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("connection {id}")))
+    }
+
     /// Traffic share used by the weighted strategy. Clamped to the schema's
     /// `1..=1000`: zero would silently starve an account that is still meant to serve,
     /// and an unbounded value would make the weighted cycle unbounded too.
@@ -5017,6 +5060,23 @@ fn merge_into(dst: &mut Credentials, patch: Credentials) {
         account_label,
         base_url_override,
     );
+    // A proxy is set or cleared, never half-merged: an empty string is the clear marker
+    // because this merge cannot remove a key, and `routes/connections.rs` sends it for
+    // `""` / `null`. An empty proxy must not survive as `Some("")`: routing reads
+    // `has_proxy()`, and a blank value there would silently send the account direct while
+    // the admin view still claimed a proxy was configured.
+    if let Some(proxy) = patch.proxy_url {
+        dst.proxy_url = (!proxy.trim().is_empty()).then_some(proxy);
+    }
+    // Free-mode membership is hop-on only here. `false` cannot mean "unchanged" and
+    // "off" at once, and every other merge patches (a token refresh) carries the default
+    // `false`, so clearing has its own verb: [`Store::set_connection_free_mode`].
+    if patch.free_mode {
+        dst.free_mode = true;
+    }
+    if patch.free_rpm.is_some() {
+        dst.free_rpm = patch.free_rpm;
+    }
     for (k, v) in patch.extra {
         if v.is_null() {
             dst.extra.remove(&k);

@@ -193,6 +193,7 @@ fn build_state(config: Config) -> AppState {
         envelope_drops: Default::default(),
         providers: Default::default(),
         concurrency: RwLock::new(concurrency),
+        proxy_clients: Default::default(),
         auth: rrouter_gateway::auth::Auth::load(&data_dir, false),
     }
 }

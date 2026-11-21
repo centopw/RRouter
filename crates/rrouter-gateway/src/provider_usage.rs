@@ -256,7 +256,9 @@ async fn fetch(state: &AppState, conn: &Connection) -> Result<Windows> {
             .as_deref()
             .filter(|key| !key.is_empty())
             .ok_or_else(|| Error::Unauthorized("this account has no API key".into()))?;
-        return opencode_go(state, key).await;
+        // The usage meter is per account, so it is read from that account's address.
+        let http = state.http_for(&conn.credentials)?;
+        return opencode_go(&http, key).await;
     }
     // An API key has no plan: asking the OAuth usage endpoint would only produce a 401
     // that reads like a broken account.
@@ -267,17 +269,20 @@ async fn fetch(state: &AppState, conn: &Connection) -> Result<Windows> {
     }
     let creds = state
         .refresher
-        .fresh(state.store.as_ref(), spec, conn.id)
+        .fresh_via(state.store.as_ref(), spec, conn.id, |creds| {
+            state.http_for(creds)
+        })
         .await?;
+    let http = state.http_for(&creds)?;
     let token = creds
         .access_token
         .as_deref()
         .filter(|token| !token.is_empty())
         .ok_or_else(|| Error::Unauthorized("API-key accounts have no subscription usage".into()))?;
     match conn.provider.as_str() {
-        "claude" => claude(state, token).await,
-        "codex" => codex(state, token, creds.id_token.as_deref(), &creds.extra).await,
-        "github" => github(state, spec, &creds).await,
+        "claude" => claude(&http, token).await,
+        "codex" => codex(&http, token, creds.id_token.as_deref(), &creds.extra).await,
+        "github" => github(&http, spec, &creds).await,
         provider => Err(Error::BadRequest(format!(
             "{provider} does not expose subscription usage"
         ))),
@@ -288,9 +293,8 @@ async fn fetch(state: &AppState, conn: &Connection) -> Result<Windows> {
 /// The JSON is `{"usage": {"rolling" | "weekly" | "monthly": {"percent", "resetsAt"}}}`;
 /// a meter whose `status` is not `ok` (OpenCode's `rate-limited`) is spent even when its
 /// percentage is below 100.
-async fn opencode_go(state: &AppState, key: &str) -> Result<Windows> {
-    let response = state
-        .http
+async fn opencode_go(http: &reqwest::Client, key: &str) -> Result<Windows> {
+    let response = http
         .get("https://opencode.ai/zen/go/v1/usage")
         .header("authorization", format!("Bearer {key}"))
         .header("accept", "application/json")
@@ -367,9 +371,8 @@ fn opencode_go_windows(body: &Value) -> Result<Windows> {
 
 /// Claude Code's own `/usage` endpoint. `utilization` is the consumed percentage; buckets
 /// that do not apply to a plan are absent or null.
-async fn claude(state: &AppState, token: &str) -> Result<Windows> {
-    let response = state
-        .http
+async fn claude(http: &reqwest::Client, token: &str) -> Result<Windows> {
+    let response = http
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("authorization", format!("Bearer {token}"))
         .header("anthropic-beta", "oauth-2025-04-20")
@@ -454,13 +457,12 @@ fn claude_windows(body: &Value) -> Result<Windows> {
 /// twice in 2026, so every window is parsed defensively and classified by its own
 /// `limit_window_seconds` rather than by field position.
 async fn codex(
-    state: &AppState,
+    http: &reqwest::Client,
     token: &str,
     id_token: Option<&str>,
     extra: &serde_json::Map<String, Value>,
 ) -> Result<Windows> {
-    let mut request = state
-        .http
+    let mut request = http
         .get("https://chatgpt.com/backend-api/wham/usage")
         .header("authorization", format!("Bearer {token}"))
         .header("accept", "application/json")
@@ -553,12 +555,11 @@ fn codex_windows(body: &Value) -> Result<Windows> {
 /// GitHub Copilot reports monthly request allowances per feature under
 /// `quota_snapshots`. It authenticates with the derived copilot token.
 async fn github(
-    state: &AppState,
+    http: &reqwest::Client,
     spec: &'static rrouter_auth::ProviderSpec,
     creds: &rrouter_auth::Credentials,
 ) -> Result<Windows> {
-    let mut request = state
-        .http
+    let mut request = http
         .get("https://api.github.com/copilot_internal/user")
         .header("accept", "application/json")
         .timeout(REQUEST_TIMEOUT);

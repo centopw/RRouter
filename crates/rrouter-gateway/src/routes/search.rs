@@ -330,7 +330,9 @@ async fn send_once(
         })?;
     let creds = state
         .refresher
-        .fresh(state.store.as_ref(), spec, candidate.connection)
+        .fresh_via(state.store.as_ref(), spec, candidate.connection, |creds| {
+            state.http_for(creds)
+        })
         .await?;
     let url = search_url(&candidate, spec, &creds, search.mode)?;
     let headers = outbound_headers(spec, &creds, search.mode)?;
@@ -349,7 +351,7 @@ async fn send_once(
 
     let sent = Instant::now();
     let response = state
-        .http
+        .http_for(&creds)?
         .post(&url)
         .headers(headers)
         .json(&wire)

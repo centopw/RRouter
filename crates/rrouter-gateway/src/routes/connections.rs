@@ -39,6 +39,13 @@ pub struct ConnectionView {
     /// Dashboard attribution: the account that added this connection. Not an access grant.
     pub owner_user_id: Option<String>,
     pub base_url_override: Option<String>,
+    /// This account's egress proxy, masked as `scheme://***@host:port`. The stored URL
+    /// carries `user:pass@`, so it is never echoed; a masked value is still enough to tell
+    /// two proxies on one host apart.
+    pub proxy: Option<String>,
+    /// Proactive free-mode request cap, requests per minute; `null` means the account has
+    /// no local cap and only the provider's own 429 paces it.
+    pub free_rpm: Option<u32>,
     /// Cloud project an Antigravity (Cloud Code Assist) sign-in was provisioned with.
     /// Read from `credentials.extra.project_id`; `None` for every other provider.
     pub project_id: Option<String>,
@@ -71,6 +78,8 @@ impl From<&Connection> for ConnectionView {
             team_id: c.team_id.map(|team| team.to_string()),
             owner_user_id: c.owner_user_id.map(|user| user.to_string()),
             base_url_override: creds.base_url_override.clone(),
+            proxy: creds.proxy_masked(),
+            free_rpm: creds.free_rpm,
             project_id: rrouter_auth::antigravity::project_id(creds).map(str::to_string),
             has_access_token: creds.access_token.as_deref().is_some_and(|t| !t.is_empty()),
             has_refresh_token: creds
@@ -125,6 +134,10 @@ fn patched_fields(value: &Value) -> String {
         "credentials",
         "email",
         "base_url_override",
+        "proxy",
+        "proxy_url",
+        "free_mode",
+        "free_rpm",
         "priority",
         "weight",
         "is_active",
@@ -554,8 +567,13 @@ async fn probe(
 ) -> Result<u16, Error> {
     let creds = state
         .refresher
-        .fresh(state.store.as_ref(), spec, conn.id)
+        .fresh_via(state.store.as_ref(), spec, conn.id, |creds| {
+            state.http_for(creds)
+        })
         .await?;
+    // The probe is an authenticated call on the account's own credential: leaving from the
+    // gateway's address would be the very inconsistency the account's proxy exists to avoid.
+    let http = state.http_for(&creds)?;
     // The probe must name a model the provider actually serves: sending a
     // placeholder like "ping" makes every provider answer 400 model_not_found,
     // which reads as a broken credential. Use the provider's cheapest known model.
@@ -563,7 +581,7 @@ async fn probe(
     // Qoder is upstream-only *and* needs its catalog and a per-attempt signature, so it
     // has its own probe: the catalog fetch alone already exercises the credential.
     if spec.default_dialect == rrouter_core::Dialect::QoderAgent {
-        return probe_qoder(state, &conn, &creds, &model).await;
+        return probe_qoder(&http, &conn, &creds, &model, state.request_timeout()).await;
     }
     let mut req = ChatRequest::new(model);
     req.messages.push(Message::text(Role::User, "ping"));
@@ -642,8 +660,7 @@ async fn probe(
             axum::http::HeaderValue::from_static(rrouter_translate::google_cca::CLIENT_HEADER),
         );
     }
-    let resp = state
-        .http
+    let resp = http
         .post(url)
         .headers(headers)
         .json(&body)
@@ -703,18 +720,19 @@ async fn probe(
 /// The model is the catalog's own: a probe must not send a key the account cannot serve,
 /// and `model_config` has to be the account's block, exactly as chat does it.
 async fn probe_qoder(
-    state: &Arc<AppState>,
+    http: &reqwest::Client,
     conn: &Connection,
     creds: &Credentials,
     requested: &str,
+    timeout: std::time::Duration,
 ) -> Result<u16, Error> {
-    let signer = rrouter_auth::qoder::resolve(&state.http, creds).await?;
+    let signer = rrouter_auth::qoder::resolve(http, creds).await?;
     let base = creds
         .base_url_override
         .as_deref()
         .map(|base| base.trim().trim_end_matches('/').to_string())
         .unwrap_or_else(|| rrouter_translate::qoder::base_for(&signer.token).to_string());
-    let catalog = rrouter_auth::qoder::catalog(&state.http, &signer, &base).await?;
+    let catalog = rrouter_auth::qoder::catalog(http, &signer, &base).await?;
     let model = catalog
         .config(requested)
         .map(|_| requested.to_string())
@@ -765,12 +783,11 @@ async fn probe_qoder(
         }
     }
 
-    let response = state
-        .http
+    let response = http
         .post(&url)
         .headers(headers)
         .body(wire)
-        .timeout(state.request_timeout())
+        .timeout(timeout)
         .send()
         .await
         .map_err(|e| {
@@ -925,6 +942,12 @@ async fn apply_patch(state: &AppState, id: Uuid, value: Value) -> Result<(), Err
         patch.base_url_override = Some(url.to_string());
         has_patch = true;
     }
+    if let Some(proxy) = proxy_field(&value)? {
+        // The merge cannot remove a field, so a clear travels as the empty string and
+        // `merge_into` stores "no proxy" for it.
+        patch.proxy_url = Some(proxy.unwrap_or_default());
+        has_patch = true;
+    }
     if has_patch {
         // `email` is mirrored into the credentials blob's display label.
         state.store.merge_credentials(id, patch).await?;
@@ -970,17 +993,56 @@ async fn apply_patch(state: &AppState, id: Uuid, value: Value) -> Result<(), Err
             .update_connection_status(id, conn.backoff_level, Some(error), None)
             .await?;
     }
+    // Free-mode membership is a credential-blob field a patch cannot express (a `bool` has
+    // no "unchanged", and `free_rpm: null` must clear the cap), so it is written by its own
+    // store verb. `free_mode`/`free_rpm` are read from the body's top level first, then
+    // from `credentials`, so both spellings reach the same verb.
+    let free_mode = match field_at(&value, "free_mode") {
+        None => None,
+        Some(raw) => Some(free_mode_of(raw)?),
+    };
+    let free_rpm = free_rpm_field(&value)?;
+    if free_mode.is_some() || free_rpm.is_some() {
+        state
+            .store
+            .set_connection_free_mode(
+                id,
+                free_mode.unwrap_or(conn.credentials.free_mode),
+                free_rpm.unwrap_or(conn.credentials.free_rpm),
+            )
+            .await?;
+    }
     Ok(())
 }
 
 /// Extract the writable credential fields from a create body.
 pub fn credentials_from(value: &Value) -> Result<Credentials, Error> {
-    let Some(creds) = value.get("credentials").filter(|v| v.is_object()) else {
-        return Ok(Credentials::default());
+    let mut out = match value.get("credentials").filter(|v| v.is_object()) {
+        Some(creds) => credentials_patch(creds)?,
+        None => Credentials::default(),
     };
-    let mut out = credentials_patch(creds)?;
     if let Some(email) = super::models::str_field(value, "email") {
         out.account_label = Some(email);
+    }
+    // A create may name the proxy and the free-mode knobs beside `priority` instead of
+    // inside `credentials`; both spellings mean the same credential fields.
+    if let Some(proxy) = proxy_field(value)? {
+        out.proxy_url = proxy;
+    }
+    if let Some(free_mode) = field_at(value, "free_mode") {
+        out.free_mode = free_mode_of(free_mode)?;
+    }
+    if let Some(free_rpm) = free_rpm_field(value)? {
+        out.free_rpm = free_rpm;
+    }
+    // The empty string is the merge's clear marker; a new row has nothing to clear, so it
+    // must not store a blank proxy the admin view would then report as absent anyway.
+    if out
+        .proxy_url
+        .as_deref()
+        .is_some_and(|url| url.trim().is_empty())
+    {
+        out.proxy_url = None;
     }
     Ok(out)
 }
@@ -1031,6 +1093,9 @@ fn credentials_patch(value: &Value) -> Result<Credentials, Error> {
             "copilot_expires_at" => c.copilot_expires_at = v.as_i64(),
             "account_label" => c.account_label = string_or_none(v),
             "base_url_override" => c.base_url_override = string_or_none(v),
+            "proxy" | "proxy_url" => c.proxy_url = proxy_patch(v)?,
+            "free_mode" => c.free_mode = free_mode_of(v)?,
+            "free_rpm" => c.free_rpm = free_rpm_of(v)?,
             _ => {
                 extra.insert(key.clone(), v.clone());
             }
@@ -1054,6 +1119,74 @@ fn team_field(value: &Value) -> Result<Option<Uuid>, Error> {
 
 fn string_or_none(v: &Value) -> Option<String> {
     v.as_str().map(|s| s.to_string()).filter(|s| !s.is_empty())
+}
+
+/// The first `name` in a connection body: top level, else inside `credentials`.
+///
+/// The dashboard's simple editor writes routing knobs beside `priority`; the free-mode
+/// importer writes them with the credential. Both name the same field, and reading both
+/// keeps a body written either way from being silently half-applied.
+fn field_at<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
+    value
+        .get(name)
+        .or_else(|| value.get("credentials").and_then(|creds| creds.get(name)))
+}
+
+/// A proxy URL from a body: `Some(Some(url))` sets it, `Some(None)` clears it (`null` or
+/// an empty string), `None` means the body did not mention a proxy at all.
+///
+/// The three states are the point: an update must be able to remove a proxy, and "absent"
+/// must not be read as "clear" or every unrelated PATCH would drop the account's egress.
+fn proxy_field(value: &Value) -> Result<Option<Option<String>>, Error> {
+    match field_at(value, "proxy").or_else(|| field_at(value, "proxy_url")) {
+        None => Ok(None),
+        Some(raw) => proxy_choice(raw).map(Some),
+    }
+}
+
+/// One credential-object proxy value; the empty string is the merge's clear marker.
+fn proxy_patch(raw: &Value) -> Result<Option<String>, Error> {
+    Ok(Some(proxy_choice(raw)?.unwrap_or_default()))
+}
+
+fn proxy_choice(raw: &Value) -> Result<Option<String>, Error> {
+    match raw {
+        Value::Null => Ok(None),
+        Value::String(text) if text.trim().is_empty() => Ok(None),
+        Value::String(text) => Ok(Some(text.trim().to_string())),
+        _ => Err(Error::BadRequest(
+            "proxy must be a string or null".to_string(),
+        )),
+    }
+}
+
+fn free_mode_of(raw: &Value) -> Result<bool, Error> {
+    raw.as_bool()
+        .ok_or_else(|| Error::BadRequest("free_mode must be a boolean".into()))
+}
+
+/// `free_rpm` with the same three states as [`proxy_field`]: `Some(None)` removes the cap.
+fn free_rpm_field(value: &Value) -> Result<Option<Option<u32>>, Error> {
+    match field_at(value, "free_rpm") {
+        None => Ok(None),
+        Some(raw) => rpm_of(raw).map(Some),
+    }
+}
+
+fn free_rpm_of(raw: &Value) -> Result<Option<u32>, Error> {
+    rpm_of(raw)
+}
+
+fn rpm_of(raw: &Value) -> Result<Option<u32>, Error> {
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let number = raw
+        .as_u64()
+        .ok_or_else(|| Error::BadRequest("free_rpm must be an unsigned integer or null".into()))?;
+    u32::try_from(number)
+        .map(Some)
+        .map_err(|_| Error::BadRequest("free_rpm is out of range".into()))
 }
 
 #[cfg(test)]
