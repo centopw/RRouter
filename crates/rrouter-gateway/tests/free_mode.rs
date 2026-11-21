@@ -48,6 +48,19 @@ async fn mock_models(State(mock): State<Mock>, headers: HeaderMap) -> Response {
     axum::Json(mock.models.clone()).into_response()
 }
 
+/// A proxy URL that refuses connections immediately.
+///
+/// Discovery must leave through the account's own proxy, so an account with a proxy cannot
+/// reach the mock upstream at all — which is the point of the proxy. A port bound and then
+/// released refuses instantly (`ECONNREFUSED`), so the "one broken account does not fail
+/// the run" case costs no wall clock, unlike a black-holed address behind a connect timeout.
+fn refusing_proxy() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind proxy port");
+    let port = listener.local_addr().expect("proxy addr").port();
+    drop(listener);
+    format!("http://user:pass@127.0.0.1:{port}")
+}
+
 async fn start_mock(models: Value) -> (String, Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -74,6 +87,9 @@ struct Harness {
     /// The mock upstream's origin, used as a custom provider's base URL.
     upstream: String,
     hits: Arc<AtomicUsize>,
+    /// The egress proxy this harness's document assigns to `acc-1`. One port per harness, so
+    /// building the document twice (a re-import) sends the same URL.
+    proxy: String,
 }
 
 fn config() -> Config {
@@ -147,6 +163,7 @@ async fn harness() -> Harness {
         envelope_drops: Default::default(),
         providers: Default::default(),
         concurrency: std::sync::RwLock::new(None),
+        proxy_clients: Default::default(),
         auth: rrouter_gateway::auth::Auth::load(&config().data_dir, false),
     });
     let router = app(Arc::clone(&state));
@@ -155,6 +172,7 @@ async fn harness() -> Harness {
         router,
         upstream,
         hits,
+        proxy: refusing_proxy(),
     }
 }
 
@@ -165,7 +183,7 @@ impl Harness {
         json!({
             "version": 1,
             "routing": { "enabled": true, "per_account_rpm": 7, "max_attempts": 3 },
-            "proxies": { "p1": "http://user:pass@10.0.0.1:8080" },
+            "proxies": { "p1": self.proxy.clone() },
             "providers": [{
                 "provider": "mock-free",
                 "custom": {
@@ -273,7 +291,8 @@ async fn import_creates_accounts_with_their_proxy_and_rpm() {
     );
     assert_eq!(
         first.credentials.proxy_url.as_deref(),
-        Some("http://user:pass@10.0.0.1:8080")
+        Some(h.proxy.as_str()),
+        "the account keeps the proxy the document named"
     );
     assert_eq!(first.credentials.free_rpm, Some(5));
     assert_eq!(first.priority, 2);
@@ -595,7 +614,21 @@ async fn discovery_stores_rows_with_their_source_and_survives_one_bad_account() 
         !error.contains("bad-key"),
         "the echoed key was scrubbed: {error}"
     );
-    assert_eq!(h.hits.load(Ordering::SeqCst), 3, "one request per account");
+    // `acc-1` left through its own (refusing) proxy, so only the other two accounts reached
+    // the upstream: an account with a proxy never connects directly, even for discovery.
+    assert_eq!(
+        h.hits.load(Ordering::SeqCst),
+        2,
+        "one request per account without a proxy; the proxied account never reaches the upstream"
+    );
+    let proxied = accounts
+        .iter()
+        .find(|row| row["label"] == "acc-1")
+        .expect("proxied account row");
+    assert!(
+        proxied["error"].is_string(),
+        "the proxied account reports its own failure: {proxied}"
+    );
 
     let rows = h.state.store.list_free_models().await.expect("rows");
     let row = |model: &str| {
@@ -609,8 +642,8 @@ async fn discovery_stores_rows_with_their_source_and_survives_one_bad_account() 
         row("mock-alpha:free")
             .connection_id
             .map(|id| id.to_string()),
-        Some(h.account("acc-1").await.id.to_string()),
-        "the row names the account that proved it"
+        Some(h.account("acc-2").await.id.to_string()),
+        "the row names the account that actually proved it"
     );
     assert!(row("mock-beta").free);
     assert_eq!(row("mock-beta").source, "registry");
@@ -640,18 +673,18 @@ async fn no_api_key_or_proxy_userinfo_is_ever_echoed() {
         assert!(!encoded.contains("good-key"), "{encoded}");
         assert!(!encoded.contains("user:pass"), "{encoded}");
     }
-    // The proxy is masked, not dropped: an operator still has to tell two apart.
+    // The proxy is masked, not dropped: an operator still has to tell two apart. The host
+    // is read back from the document this test sent, so the assertion does not depend on a
+    // fixed port.
+    let masked = h.proxy.replace("user:pass@", "***@");
     let proxied = shown["accounts"]
         .as_array()
         .expect("accounts")
         .iter()
         .find(|row| row["label"] == "acc-1")
         .expect("acc-1 row");
-    assert_eq!(proxied["proxy"], "http://***@10.0.0.1:8080", "{shown}");
-    assert_eq!(
-        shown["document"]["proxies"]["p1"],
-        "http://***@10.0.0.1:8080"
-    );
+    assert_eq!(proxied["proxy"], masked, "{shown}");
+    assert_eq!(shown["document"]["proxies"]["p1"], masked);
     assert_eq!(
         shown["document"]["providers"][0]["accounts"][0]["has_api_key"],
         true

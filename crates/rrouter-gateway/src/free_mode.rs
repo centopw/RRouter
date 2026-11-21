@@ -1099,11 +1099,14 @@ async fn declared_models(store: &Store) -> rrouter_core::Result<BTreeSet<(String
 
 /// The client one account's requests must leave through.
 ///
-/// Until `AppState::http_for(creds)` lands from the per-account proxy workstream, every
-/// account uses the shared client. This is deliberately the only place that decision is
-/// made, so wiring the proxy in touches one line here instead of every call site.
-fn egress(state: &AppState, _creds: &Credentials) -> reqwest::Client {
-    state.http.clone()
+/// Discovery is an authenticated request on an account's own credential, so it has to leave
+/// from that account's address exactly like generation traffic: a provider that sees the
+/// catalogue fetched from a different IP than the completions is the inconsistency these
+/// accounts get suspended for. One place makes the decision so no call site can forget it.
+fn egress(state: &AppState, creds: &Credentials) -> Result<reqwest::Client, String> {
+    state
+        .http_for(creds)
+        .map_err(|error| scrub(&error.to_string(), creds))
 }
 
 /// Fetch one account's model list through that account's credentials.
@@ -1119,7 +1122,9 @@ async fn fetch_models(state: &AppState, conn: &Connection) -> Result<Vec<Fetched
     }
     let creds = state
         .refresher
-        .fresh(state.store.as_ref(), spec, conn.id)
+        .fresh_via(state.store.as_ref(), spec, conn.id, |creds| {
+            state.http_for(creds)
+        })
         .await
         .map_err(|error| scrub(&error.to_string(), &conn.credentials))?;
     let base = creds.base_url_override.as_deref().unwrap_or(spec.base_url);
@@ -1130,7 +1135,7 @@ async fn fetch_models(state: &AppState, conn: &Connection) -> Result<Vec<Fetched
         (None, None) => models_registry::models_url(base),
     };
     let headers = provider_headers(spec, &creds)?;
-    let response = egress(state, &creds)
+    let response = egress(state, &creds)?
         .get(&url)
         .headers(headers)
         .timeout(Duration::from_secs(30))

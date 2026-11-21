@@ -51,9 +51,11 @@ LISTED_FREE = "llama-3.3:free"
 PAID_MODEL = "gpt-5-expensive"
 KEY_ONE = "smoke-free-key-one"
 KEY_TWO = "smoke-free-key-two"
-# The account whose first chat request the upstream answers 429, forcing the gateway to
-# finish the same client request on another free account.
-THROTTLED_KEY = KEY_ONE
+# A third free account the upstream always answers 429. It is in the pool on purpose: the
+# gateway must walk past it to a healthy account and the client must never see the 429.
+THROTTLED_KEY = "smoke-free-key-three"
+# How many chat requests the pinned-model phase sends.
+PINNED_ROUNDS = 4
 
 
 def free_port() -> int:
@@ -133,9 +135,9 @@ class Upstream(BaseHTTPRequestHandler):
         body = self._body()
         model = body.get("model", "")
         key = self._auth_key()
-        # Answer 429 exactly once for the throttled account: the gateway must then finish
-        # this client request on another free account rather than surfacing the 429.
-        if key == THROTTLED_KEY and key not in self.state.throttled:
+        # The throttled account always answers 429: the gateway must finish every client
+        # request on another free account rather than surfacing the rate limit.
+        if key == THROTTLED_KEY:
             self.state.throttled.add(key)
             self.state.record(key, model, 429)
             self._json(
@@ -249,6 +251,7 @@ def document(upstream_base: str, models: list[str]) -> dict:
                 "accounts": [
                     {"label": "smoke-account-one", "api_key": KEY_ONE, "rpm": 1000},
                     {"label": "smoke-account-two", "api_key": KEY_TWO, "rpm": 1000},
+                    {"label": "smoke-account-throttled", "api_key": THROTTLED_KEY, "rpm": 1000},
                 ],
             }
         ],
@@ -331,8 +334,8 @@ def main() -> int:
             return 1
         accounts = imported.get("accounts") or {}
         run.check(
-            "import creates both accounts",
-            accounts.get("created") == 2 and accounts.get("updated") == 0,
+            "import creates every account",
+            accounts.get("created") == 3 and accounts.get("updated") == 0,
             str(accounts),
         )
 
@@ -342,7 +345,7 @@ def main() -> int:
         accounts = again.get("accounts") or {}
         run.check(
             "re-import is idempotent",
-            status == 200 and accounts.get("created") == 0 and accounts.get("updated") == 2,
+            status == 200 and accounts.get("created") == 0 and accounts.get("updated") == 3,
             f"{status} {accounts}",
         )
 
@@ -354,7 +357,7 @@ def main() -> int:
             f"{status} {routing}",
         )
         listed = state.get("accounts") or []
-        run.check("two free-mode accounts are listed", len(listed) == 2, str(len(listed)))
+        run.check("every free-mode account is listed", len(listed) == 3, str(len(listed)))
         run.check(
             "accounts are marked free mode and hide their key",
             all(a.get("free_rpm") is not None for a in listed)
@@ -387,11 +390,15 @@ def main() -> int:
         # ----- routing: free/MODEL spreads across accounts (and survives a 429)
         before = len(upstream_state.calls)
         served_ok = 0
-        for _ in range(4):
+        for _ in range(PINNED_ROUNDS):
             status, body = chat(base, f"free/{PINNED_MODEL}", token=token)
             if status == 200:
                 served_ok += 1
-        run.check("free/MODEL answers four requests", served_ok == 4, str(served_ok))
+        run.check(
+            f"free/MODEL answers all {PINNED_ROUNDS} requests",
+            served_ok == PINNED_ROUNDS,
+            str(served_ok),
+        )
         attempts = upstream_state.since(before)
         run.check(
             "free/MODEL always sends the pinned model",
@@ -399,15 +406,25 @@ def main() -> int:
             str([a["model"] for a in attempts]),
         )
         keys = {a["key"] for a in attempts}
+        healthy = keys & {KEY_ONE, KEY_TWO}
         run.check(
-            "free/MODEL rotates across both free accounts",
-            keys == {KEY_ONE, KEY_TWO},
-            str(sorted(keys)),
+            "free/MODEL rotates across the healthy free accounts",
+            healthy == {KEY_ONE, KEY_TWO},
+            f"saw {sorted(keys)}; every attempt {[(a['key'], a['status']) for a in attempts]}",
+        )
+        # The throttled account is in the pool, so an attempt may legitimately 429; what
+        # must never happen is the client seeing one. A single healthy account taking all
+        # the traffic would mean the rotation stopped, which the previous check rules out.
+        run.check(
+            "a 429 on a free account never reaches the client",
+            served_ok == PINNED_ROUNDS
+            and all(a["status"] in (200, 429) for a in attempts),
+            str([(a["key"], a["status"]) for a in attempts]),
         )
         run.check(
-            "a 429 on one free account does not fail the client request",
-            any(a["status"] == 429 for a in attempts) and served_ok == 4,
-            str([(a["key"], a["status"]) for a in attempts]),
+            "the throttled account was actually exercised",
+            THROTTLED_KEY in keys,
+            str(sorted(keys)),
         )
         answer = body.get("choices", [{}])[0].get("message", {}).get("content")
         run.check(
