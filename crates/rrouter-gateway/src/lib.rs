@@ -15,6 +15,7 @@ pub mod combo_meta;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod free_mode;
 pub mod headers;
 pub mod metrics;
 pub mod models_registry;
@@ -204,6 +205,15 @@ pub fn app(state: Arc<AppState>) -> Router {
             post(routes::models::custom).delete(routes::models::delete_custom),
         )
         .route("/models/test", post(routes::models::test))
+        // Free mode: the imported document, its discovery run and teardown. Admin-only at
+        // the gate above, because a document names accounts and the proxies they leave
+        // through.
+        .route(
+            "/free-mode",
+            get(routes::free_mode::get).delete(routes::free_mode::remove),
+        )
+        .route("/free-mode/import", post(routes::free_mode::import))
+        .route("/free-mode/discover", post(routes::free_mode::discover))
         .route("/route/explain", post(routes::explain::explain))
         // Which providers serve search, rerank and embeddings, plus the stored default
         // for each. Admin-only: the account counts are operator data.

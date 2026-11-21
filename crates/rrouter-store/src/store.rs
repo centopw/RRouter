@@ -5016,7 +5016,27 @@ fn merge_into(dst: &mut Credentials, patch: Credentials) {
         copilot_expires_at,
         account_label,
         base_url_override,
+        free_rpm,
+        proxy_url,
     );
+    // A merge cannot express `None`, so the two new fields use sentinels a caller can send:
+    // an empty proxy URL clears the proxy, and `free_rpm: Some(0)` drops the cap (a cap of
+    // zero would park the account forever, so the value is never a real one).
+    if dst
+        .proxy_url
+        .as_deref()
+        .is_some_and(|url| url.trim().is_empty())
+    {
+        dst.proxy_url = None;
+    }
+    if dst.free_rpm == Some(0) {
+        dst.free_rpm = None;
+    }
+    // Free mode is sticky through a merge: an ordinary connection edit that does not
+    // mention it must not silently take the account out of free-mode rotation.
+    if patch.free_mode {
+        dst.free_mode = true;
+    }
     for (k, v) in patch.extra {
         if v.is_null() {
             dst.extra.remove(&k);
