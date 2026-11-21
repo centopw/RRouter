@@ -232,6 +232,15 @@ export type Connection = {
    * gateway keeps the provider's endpoint path and takes only the origin from here.
    */
   base_url_override: string | null;
+  /**
+   * Egress proxy, already masked by the server (`scheme://***@host:port`). The raw URL is
+   * never sent back to the browser. Absent on a gateway older than the free-mode build.
+   */
+  proxy?: string | null;
+  /** Proactive per-account cap free mode applies, requests/minute; `null` = no local cap. */
+  free_rpm?: number | null;
+  /** The account belongs to the imported free-mode document. */
+  free_mode?: boolean;
   priority: number;
   /** Share of traffic inside one priority group; only used by the weighted strategy. */
   weight: number;
