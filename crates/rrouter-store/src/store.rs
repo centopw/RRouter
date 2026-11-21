@@ -738,6 +738,34 @@ pub struct ModelCost {
     pub source: String,
 }
 
+/// One discovered free model: the answer of a discovery run for a `(provider, model)` pair.
+///
+/// `free` is stored rather than derived because the two signals disagree by design: a
+/// provider's own list can advertise a `:free` variant that no price registry knows, and a
+/// registry can price a model at zero that the provider never labels. `source` records
+/// which signal won (`provider-list`, `registry`, `document`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FreeModel {
+    pub provider: String,
+    pub model: String,
+    pub free: bool,
+    /// Published `input + output` USD per million tokens; `None` when the registry has no
+    /// price for this model at all (which is not the same as free).
+    pub price: Option<f64>,
+    pub source: String,
+    /// The account whose discovery run proved this row, when one did.
+    pub connection_id: Option<Uuid>,
+    pub discovered_at: i64,
+}
+
+/// The imported free-mode document, verbatim, plus the routing knobs it declared.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FreeModeConfig {
+    pub document: serde_json::Value,
+    pub routing: serde_json::Value,
+    pub updated_at: i64,
+}
+
 /// One provider's shorthand code and, for an operator-defined provider, its transport.
 ///
 /// Built-in rows carry only `provider` and `code`: the binary's transport table owns
@@ -2783,6 +2811,149 @@ impl Store {
             out.push(r.map_err(migrations::db_err)?);
         }
         Ok(out)
+    }
+
+    // ----- free mode ---------------------------------------------------------------
+
+    /// Insert or refresh one discovery row.
+    ///
+    /// Upsert rather than insert: a re-discovery of the same model replaces the price and
+    /// timestamp in place, so `free_models` never grows a duplicate history and the reader
+    /// always sees the last answer.
+    pub async fn upsert_free_model(&self, row: &FreeModel) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO free_models (provider, model, free, price, source, connection_id, \
+             discovered_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(provider, model) DO UPDATE SET free = excluded.free, \
+             price = excluded.price, source = excluded.source, \
+             connection_id = excluded.connection_id, discovered_at = excluded.discovered_at",
+            params![
+                row.provider,
+                row.model,
+                i64::from(row.free),
+                row.price,
+                row.source,
+                row.connection_id.map(|id| id.to_string()),
+                row.discovered_at,
+            ],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Every discovered row, ordered so the planner's expansion is deterministic.
+    pub async fn list_free_models(&self) -> Result<Vec<FreeModel>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT provider, model, free, price, source, connection_id, discovered_at \
+                 FROM free_models ORDER BY provider ASC, model ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(FreeModel {
+                    provider: r.get(0)?,
+                    model: r.get(1)?,
+                    free: r.get::<_, i64>(2)? != 0,
+                    price: r.get(3)?,
+                    source: r.get(4)?,
+                    connection_id: r
+                        .get::<_, Option<String>>(5)?
+                        .and_then(|raw| Uuid::parse_str(&raw).ok()),
+                    discovered_at: r.get(6)?,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(migrations::db_err)?);
+        }
+        Ok(out)
+    }
+
+    /// Drop discovery rows, for one provider or for every provider. Returns how many went.
+    pub async fn delete_free_models(&self, provider: Option<&str>) -> Result<usize> {
+        let conn = self.conn();
+        let removed = match provider {
+            Some(provider) => conn.execute(
+                "DELETE FROM free_models WHERE provider = ?1",
+                params![provider],
+            ),
+            None => conn.execute("DELETE FROM free_models", []),
+        }
+        .map_err(migrations::db_err)?;
+        Ok(removed)
+    }
+
+    /// Store the imported free-mode document and its routing knobs.
+    ///
+    /// The document is kept verbatim (not normalised) so the next import can be compared
+    /// with what the operator actually sent, and so a field this build does not read yet is
+    /// not silently destroyed by a re-save.
+    pub async fn save_free_mode_config(
+        &self,
+        document: &serde_json::Value,
+        routing: &serde_json::Value,
+    ) -> Result<FreeModeConfig> {
+        let document = serde_json::to_string(document)?;
+        let routing = serde_json::to_string(routing)?;
+        let now = now();
+        {
+            let conn = self.conn();
+            conn.execute(
+                "INSERT INTO free_mode (id, document, routing, updated_at) VALUES (1, ?1, ?2, ?3) \
+                 ON CONFLICT(id) DO UPDATE SET document = excluded.document, \
+                 routing = excluded.routing, updated_at = excluded.updated_at",
+                params![document, routing, now],
+            )
+            .map_err(migrations::db_err)?;
+        }
+        Ok(FreeModeConfig {
+            document: serde_json::from_str(&document)?,
+            routing: serde_json::from_str(&routing)?,
+            updated_at: now,
+        })
+    }
+
+    /// The stored free-mode document, or `None` when nothing was ever imported.
+    pub async fn free_mode_config(&self) -> Result<Option<FreeModeConfig>> {
+        let conn = self.conn();
+        let row = conn
+            .query_row(
+                "SELECT document, routing, updated_at FROM free_mode WHERE id = 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(migrations::db_err)?;
+        let Some((document, routing, updated_at)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(FreeModeConfig {
+            document: serde_json::from_str(&document)?,
+            routing: serde_json::from_str(&routing)?,
+            updated_at,
+        }))
+    }
+
+    /// Forget the document and every discovery row. Accounts themselves are left alone:
+    /// disabling them is the operator's decision, and a teardown that deleted credentials
+    /// could not be undone by a re-import.
+    pub async fn clear_free_mode(&self) -> Result<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM free_mode", [])
+            .map_err(migrations::db_err)?;
+        conn.execute("DELETE FROM free_models", [])
+            .map_err(migrations::db_err)?;
+        Ok(())
     }
 
     // ----- model registry ----------------------------------------------------------

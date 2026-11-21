@@ -12,14 +12,47 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 43;
+pub const SCHEMA_VERSION: i64 = 44;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
     V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40,
-    V41, V42, V43,
+    V41, V42, V43, V44,
 ];
+
+/// V44: free mode — the imported document plus the models discovery proved free.
+///
+/// `free_models` is a *discovery* cache, not configuration: one row per
+/// `(provider, model)` that a provider's own model list or price registry shows at zero
+/// cost. `price` is the published `input + output` USD per million when a registry knew
+/// one (`NULL` for a provider that does not publish prices, which is why `free` is stored
+/// rather than derived at read time). `source` says which signal proved it, so an operator
+/// can tell "the provider lists it as free" from "the price registry says zero".
+///
+/// `free_mode` is the single imported document, kept verbatim so a re-import is a diff of
+/// two documents rather than a guess, plus the routing knobs the planner reads. One row:
+/// free mode is instance-wide admin configuration, like combos.
+const V44: &str = r#"
+CREATE TABLE IF NOT EXISTS free_models (
+  provider      TEXT NOT NULL,
+  model         TEXT NOT NULL,
+  free          INTEGER NOT NULL DEFAULT 1,
+  price         REAL,
+  source        TEXT NOT NULL,
+  connection_id TEXT,
+  discovered_at INTEGER NOT NULL,
+  PRIMARY KEY (provider, model)
+);
+CREATE INDEX IF NOT EXISTS idx_free_models_provider ON free_models(provider);
+CREATE TABLE IF NOT EXISTS free_mode (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  document   TEXT NOT NULL,
+  routing    TEXT NOT NULL DEFAULT '{}',
+  updated_at INTEGER NOT NULL
+);
+"#;
+
 
 /// V43: why a provider retired an account.
 ///
