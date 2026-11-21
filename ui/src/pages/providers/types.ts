@@ -253,6 +253,31 @@ export function intProblem(value: string, min: number, max: number): string | nu
   return null;
 }
 
+/**
+ * Why this egress proxy cannot be saved, or `null`.
+ *
+ * Empty is not an error: the raw URL never comes back to the browser, so an untouched field
+ * means "keep the saved one". Clearing is the drawer's own explicit control, which sends an
+ * empty value the server reads as a removal.
+ */
+export function proxyProblem(value: string): string | null {
+  const text = value.trim();
+  if (text === "") return null;
+  if (!/^(https?|socks5h?):\/\/[^\s/]+$/i.test(text)) {
+    return "scheme://[user:pass@]host[:port], with scheme http, https, socks5 or socks5h";
+  }
+  return null;
+}
+
+/** Optional per-account cap: empty means the free-mode routing default, never zero. */
+export function freeRpmProblem(value: string): string | null {
+  const text = value.trim();
+  if (text === "") return null;
+  return /^\d+$/.test(text) && Number(text) >= 1
+    ? null
+    : "requests per minute as a whole number, or empty for the document default";
+}
+
 /** Non-negative whole number or empty (unlimited) for operator quota counters. */
 export function countProblem(value: string): string | null {
   const text = value.trim();

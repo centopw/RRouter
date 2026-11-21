@@ -10,6 +10,7 @@ import {
   GithubLogo,
   Heartbeat,
   Key,
+  Lightning,
   ListBullets,
   MagnifyingGlass,
   Plugs,
@@ -101,6 +102,7 @@ const NAV_GROUPS: NavGroup[] = [
     label: "ROUTING",
     leaves: [
       { to: "/providers", label: "Providers", icon: glyph(Plugs) },
+      { to: "/free-mode", label: "Free mode", icon: glyph(Lightning), adminOnly: true },
       { to: "/models", label: "Models", icon: glyph(SquaresFour) },
       {
         to: "/routing/presets",

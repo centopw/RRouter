@@ -66,6 +66,12 @@ import {
   signOut,
   updateUser,
 } from "./auth";
+import {
+  discoverFreeMode,
+  getFreeMode,
+  importFreeMode,
+  teardownFreeMode,
+} from "./free-mode";
 
 /** Query keys live here so invalidation after a mutation is always exact. */
 export const qk = {
@@ -101,6 +107,7 @@ export const qk = {
   capabilities: ["capabilities"] as const,
   aliases: ["aliases"] as const,
   combos: ["combos"] as const,
+  freeMode: ["free-mode"] as const,
   templates: ["templates"] as const,
   templateVersions: (id: string) => ["template-versions", id] as const,
   usage: (limit: number) => ["usage", limit] as const,
@@ -414,6 +421,45 @@ export function useCombos(enabled = true) {
     queryKey: qk.combos,
     queryFn: () => list<Combo>("/api/combos"),
     enabled,
+  });
+}
+
+/**
+ * The imported free-mode document, its routing knobs, the accounts it created and what
+ * discovery classified. One read: the page never derives a number the gateway did not send.
+ */
+export function useFreeMode(enabled = true) {
+  return useQuery({ queryKey: qk.freeMode, queryFn: getFreeMode, enabled });
+}
+
+/** An import can create connections and switch accounts off, so those reads follow it. */
+function invalidateFreeMode(client: ReturnType<typeof useQueryClient>) {
+  void client.invalidateQueries({ queryKey: qk.freeMode });
+  void client.invalidateQueries({ queryKey: qk.connections });
+  void client.invalidateQueries({ queryKey: qk.system });
+}
+
+export function useImportFreeMode() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (document: unknown) => importFreeMode(document),
+    onSuccess: () => invalidateFreeMode(client),
+  });
+}
+
+export function useDiscoverFreeMode() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (providers: string[]) => discoverFreeMode(providers),
+    onSuccess: () => invalidateFreeMode(client),
+  });
+}
+
+export function useTeardownFreeMode() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (disableAccounts: boolean) => teardownFreeMode(disableAccounts),
+    onSuccess: () => invalidateFreeMode(client),
   });
 }
 

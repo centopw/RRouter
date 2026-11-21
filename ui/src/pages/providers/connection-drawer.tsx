@@ -25,8 +25,10 @@ import {
   connectionLabel,
   credentialShapeOf,
   derivedIdentifiers,
+  freeRpmProblem,
   intProblem,
   needsBaseUrlOverride,
+  proxyProblem,
   useInvalidateProviders,
   type ConnectionTestResult,
 } from "./types";
@@ -70,6 +72,12 @@ export function ConnectionDrawer({
   const [priority, setPriority] = useState(String(connection.priority));
   const [weight, setWeight] = useState(String(connection.weight));
   const [baseUrl, setBaseUrl] = useState(connection.base_url_override ?? "");
+  /** Empty by design: the server only ever returns the masked proxy, never the URL. */
+  const [proxy, setProxy] = useState("");
+  const [clearProxy, setClearProxy] = useState(false);
+  const [freeRpm, setFreeRpm] = useState(
+    connection.free_rpm === null || connection.free_rpm === undefined ? "" : String(connection.free_rpm),
+  );
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<unknown>(null);
@@ -83,6 +91,9 @@ export function ConnectionDrawer({
     setPriority(String(connection.priority));
     setWeight(String(connection.weight));
     setBaseUrl(connection.base_url_override ?? "");
+    setFreeRpm(
+      connection.free_rpm === null || connection.free_rpm === undefined ? "" : String(connection.free_rpm),
+    );
   }, [connection, touched]);
 
   const label = connectionLabel(connection, display);
@@ -108,19 +119,31 @@ export function ConnectionDrawer({
 
   const nextName = trimmedName === "" ? null : trimmedName;
   const nextTeam = team === "" ? null : team;
+  // An egress proxy is write-only: an empty field keeps the saved URL, and the clear control
+  // is the only way to remove one.
+  const proxyEdit = clearProxy || proxy.trim() !== "";
+  const proxyNext = clearProxy ? "" : proxy.trim();
+  const proxyProblemText = proxyProblem(clearProxy ? "" : proxy);
+  const freeRpmNext = freeRpm.trim() === "" ? null : Number(freeRpm.trim());
+  const freeRpmProblemText = freeRpmProblem(freeRpm);
+  const freeRpmDirty = freeRpmNext !== (connection.free_rpm ?? null);
 
   const dirty =
     nextName !== connection.name ||
     nextTeam !== connection.team_id ||
     nextBaseUrl !== (connection.base_url_override ?? "") ||
     priority.trim() !== String(connection.priority) ||
-    weight.trim() !== String(connection.weight);
+    weight.trim() !== String(connection.weight) ||
+    proxyEdit ||
+    freeRpmDirty;
 
   const invalid =
     nameProblem !== null ||
     priorityProblem !== null ||
     weightProblem !== null ||
-    baseProblem !== null;
+    baseProblem !== null ||
+    proxyProblemText !== null ||
+    freeRpmProblemText !== null;
 
   const currentTest = lastTest && lastTest.id === connection.id ? lastTest : null;
   // `refusal` is the provider's own reason for retiring the account; `NULL`/absent is an
@@ -147,17 +170,28 @@ export function ConnectionDrawer({
     setBusy(true);
     setFailure(null);
     setSavedNotice(null);
+    // Free-mode metadata lives on the credential blob; the proxy is also exposed beside it
+    // on the read path, so the write names it in both places and a build that reads only
+    // one of them still applies it.
+    const credentials: Record<string, unknown> = {};
+    if (nextBaseUrl !== (connection.base_url_override ?? "") && nextBaseUrl !== "") {
+      credentials.base_url_override = nextBaseUrl;
+    }
+    if (proxyEdit) credentials.proxy = proxyNext;
+    if (freeRpmDirty) credentials.free_rpm = freeRpmNext;
     try {
       await api.patch<Connection>(`/api/connections/${connection.id}`, {
         name: nextName,
         team_id: nextTeam,
         priority: Number(priority.trim()),
         weight: Number(weight.trim()),
-        ...(nextBaseUrl !== (connection.base_url_override ?? "") && nextBaseUrl !== ""
-          ? { credentials: { base_url_override: nextBaseUrl } }
-          : {}),
+        ...(proxyEdit ? { proxy: proxyNext } : {}),
+        ...(freeRpmDirty ? { free_rpm: freeRpmNext } : {}),
+        ...(Object.keys(credentials).length > 0 ? { credentials } : {}),
       });
       setTouched(false);
+      setProxy("");
+      setClearProxy(false);
       invalidate();
       setSavedNotice("Connection updated");
     } catch (error) {
@@ -336,6 +370,84 @@ export function ConnectionDrawer({
                   placeholder={spec?.base_url_example ?? "https://api.example.com/v1"}
                   ariaLabel="connection base url"
                   mono
+                  disabled={busy}
+                />
+              </Field>
+            </section>
+
+            <section className="flex flex-col gap-4 border-t border-line pt-4">
+              <SectionLabel>Egress &amp; free mode</SectionLabel>
+              <p className="text-small leading-relaxed text-muted">
+                Free mode imports accounts that each leave through their own proxy, so provider
+                limits fall on different addresses. A proxy set here applies to every request
+                this account makes, including provider token refresh; the dashboard only ever
+                shows it masked.
+              </p>
+
+              <Field
+                label="Egress proxy"
+                optional
+                hint={
+                  clearProxy
+                    ? "Saving removes the proxy: this account connects directly again."
+                    : connection.proxy
+                      ? "Saved already — leave empty to keep it, or type a new URL to replace it."
+                      : "scheme://[user:pass@]host[:port] — http, https, socks5 or socks5h. Empty connects directly."
+                }
+                error={proxyProblemText ?? undefined}
+                aside={
+                  connection.proxy ? (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        patchField(() => {
+                          setClearProxy((value) => !value);
+                          setProxy("");
+                        })
+                      }
+                      className="text-caption text-muted underline underline-offset-2 hover:text-fg disabled:opacity-50"
+                    >
+                      {clearProxy ? "keep proxy" : "clear proxy"}
+                    </button>
+                  ) : null
+                }
+              >
+                <Input
+                  value={proxy}
+                  onChange={(value) => patchField(() => setProxy(value))}
+                  placeholder={
+                    connection.proxy ?? (clearProxy ? "" : "http://user:pass@10.0.0.1:8080")
+                  }
+                  ariaLabel="connection egress proxy"
+                  mono
+                  disabled={busy || clearProxy}
+                />
+              </Field>
+
+              {connection.proxy ? (
+                <p className="text-caption leading-relaxed text-faint">
+                  Saved proxy{" "}
+                  <span className="font-mono text-muted" title="masked by the gateway">
+                    {connection.proxy}
+                  </span>
+                  {clearProxy ? " — will be removed when this drawer saves." : " (masked)."}
+                </p>
+              ) : null}
+
+              <Field
+                label="Free-mode requests per minute"
+                optional
+                hint="Proactive cap for this account. Empty uses the document's routing.per_account_rpm; an explicit value wins."
+                error={freeRpmProblemText ?? undefined}
+              >
+                <Input
+                  type="number"
+                  value={freeRpm}
+                  onChange={(value) => patchField(() => setFreeRpm(value))}
+                  placeholder="document default"
+                  ariaLabel="connection free-mode requests per minute"
+                  className="tnum"
                   disabled={busy}
                 />
               </Field>

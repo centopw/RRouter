@@ -80,6 +80,7 @@ const SettingsProfile = page(() => import("./pages/settings/profile"));
 const SettingsSecurity = page(() => import("./pages/settings/security"));
 const SettingsSessions = page(() => import("./pages/settings/sessions"));
 const Providers = page(() => import("./pages/providers"));
+const FreeMode = page(() => import("./pages/free-mode"));
 const Setup = page(() => import("./pages/setup"));
 const Users = page(() => import("./pages/users"));
 const Teams = page(() => import("./pages/teams"));
@@ -231,6 +232,7 @@ const router = createBrowserRouter(
             },
             { path: "models", element: <Models /> },
             { path: "providers", element: <Providers /> },
+            { path: "free-mode", element: <AdminPage><FreeMode /></AdminPage> },
             { path: "quickstart", element: <QuickStart /> },
             {
               path: "routing",
