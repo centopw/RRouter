@@ -22,6 +22,8 @@ use rrouter_store::{CaptureRecord, Store};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+mod support;
+
 /// Serializes tests that flip process-global switches. Tokio's mutex, because the
 /// tests hold it across awaits by design.
 static SWITCHES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -116,13 +118,14 @@ fn openai_sse(content: &str) -> Reply {
 struct Harness {
     state: Arc<AppState>,
     router: Router,
+    _data_dir: support::TempDir,
 }
 
 fn config() -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
         port: 0,
-        data_dir: std::env::temp_dir().join(format!("rrouter-capture-{}", uuid::Uuid::new_v4())),
+        data_dir: support::temp_path("capture"),
         master_key: None,
         require_api_key: false,
         request_timeout_secs: 30,
@@ -158,9 +161,14 @@ fn config() -> Config {
 
 fn harness() -> Harness {
     let cfg = config();
+    let data_dir = support::TempDir::adopt(cfg.data_dir.clone());
     let state = Arc::new(build_state(cfg));
     let router = app(Arc::clone(&state));
-    Harness { state, router }
+    Harness {
+        state,
+        router,
+        _data_dir: data_dir,
+    }
 }
 
 fn build_state(config: Config) -> AppState {

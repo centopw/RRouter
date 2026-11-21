@@ -24,6 +24,8 @@ use rrouter_store::Store;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+mod support;
+
 // ------------------------------------------------------------------------- mock upstream
 
 /// One request as the provider saw it.
@@ -173,13 +175,14 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
 struct H {
     state: Arc<AppState>,
     router: Router,
+    _data_dir: support::TempDir,
 }
 
 fn config(require_api_key: bool) -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
         port: 0,
-        data_dir: std::env::temp_dir().join(format!("rrouter-files-{}", uuid::Uuid::new_v4())),
+        data_dir: support::temp_path("files"),
         master_key: None,
         require_api_key,
         request_timeout_secs: 10,
@@ -215,7 +218,7 @@ fn config(require_api_key: bool) -> Config {
 
 fn harness(require_api_key: bool) -> H {
     let config = config(require_api_key);
-    let data_dir = config.data_dir.clone();
+    let data_dir = support::TempDir::adopt(config.data_dir.clone());
     let dispatcher = Arc::new(rrouter_gateway::state::dispatcher(&config));
     let concurrency = rrouter_gateway::state::concurrency_for(config.max_concurrency);
     let state = Arc::new(AppState {
@@ -243,7 +246,11 @@ fn harness(require_api_key: bool) -> H {
         auth: rrouter_gateway::auth::Auth::load(&data_dir, false),
     });
     let router = app(Arc::clone(&state));
-    H { state, router }
+    H {
+        state,
+        router,
+        _data_dir: data_dir,
+    }
 }
 
 const API_KEY: &str = "sk-secret-files-9b";

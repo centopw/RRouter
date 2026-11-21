@@ -28,6 +28,8 @@ use rrouter_store::Store;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+mod support;
+
 const PROVIDER: &str = "qoder";
 const USER_ID: &str = "user-42";
 const TOKEN: &str = "dt-test-token";
@@ -258,13 +260,14 @@ fn envelope_error(body: Value) -> Response {
 struct Harness {
     state: Arc<AppState>,
     router: Router,
+    _data_dir: support::TempDir,
 }
 
 fn config(cache: bool) -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
         port: 0,
-        data_dir: std::env::temp_dir().join(format!("rrouter-qoder-{}", uuid::Uuid::new_v4())),
+        data_dir: support::temp_path("qoder"),
         master_key: None,
         require_api_key: false,
         request_timeout_secs: 30,
@@ -304,7 +307,7 @@ fn config(cache: bool) -> Config {
 
 fn harness(cache: bool) -> Harness {
     let config = config(cache);
-    let data_dir = config.data_dir.clone();
+    let data_dir = support::TempDir::adopt(config.data_dir.clone());
     let state = Arc::new(AppState {
         store: Arc::new(Store::open_in_memory().expect("store")),
         catalog: Arc::new(Catalog::builtin()),
@@ -330,7 +333,11 @@ fn harness(cache: bool) -> Harness {
         auth: rrouter_gateway::auth::Auth::load(&data_dir, false),
     });
     let router = app(Arc::clone(&state));
-    Harness { state, router }
+    Harness {
+        state,
+        router,
+        _data_dir: data_dir,
+    }
 }
 
 impl Harness {

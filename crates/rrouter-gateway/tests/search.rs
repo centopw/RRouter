@@ -19,6 +19,8 @@ use rrouter_store::{Store, UsageQuery};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+mod support;
+
 // ------------------------------------------------------------------------- mock upstream
 
 /// One recorded upstream request: path, JSON body, headers.
@@ -119,13 +121,14 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
 struct Harness {
     state: Arc<AppState>,
     router: Router,
+    _data_dir: support::TempDir,
 }
 
 fn config(require_api_key: bool) -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
         port: 0,
-        data_dir: std::env::temp_dir().join(format!("rrouter-search-{}", uuid::Uuid::new_v4())),
+        data_dir: support::temp_path("search"),
         master_key: None,
         require_api_key,
         request_timeout_secs: 10,
@@ -190,9 +193,15 @@ fn build_state(config: Config) -> AppState {
 }
 
 fn harness(require_api_key: bool) -> Harness {
-    let state = Arc::new(build_state(config(require_api_key)));
+    let config = config(require_api_key);
+    let data_dir = support::TempDir::adopt(config.data_dir.clone());
+    let state = Arc::new(build_state(config));
     let router = app(Arc::clone(&state));
-    Harness { state, router }
+    Harness {
+        state,
+        router,
+        _data_dir: data_dir,
+    }
 }
 
 impl Harness {

@@ -26,6 +26,8 @@ use rrouter_store::{
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+mod support;
+
 // ---------------------------------------------------------------- mock upstream
 
 #[derive(Clone)]
@@ -311,6 +313,7 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
 struct Harness {
     state: Arc<AppState>,
     router: Router,
+    _data_dir: support::TempDir,
 }
 
 const TEST_ADMIN_TOKEN: &str = "adm-test-7f3a91";
@@ -319,7 +322,7 @@ fn config(require_api_key: bool) -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
         port: 0,
-        data_dir: std::env::temp_dir().join(format!("rrouter-test-{}", uuid::Uuid::new_v4())),
+        data_dir: support::temp_path("test"),
         master_key: None,
         require_api_key,
         request_timeout_secs: 30,
@@ -368,9 +371,14 @@ fn harness(require_api_key: bool) -> Harness {
 
 /// A harness whose runtime settings are the ones under test (admin token, caps).
 fn harness_with(config: Config) -> Harness {
+    let data_dir = support::TempDir::adopt(config.data_dir.clone());
     let state = Arc::new(build_state(config));
     let router = app(Arc::clone(&state));
-    Harness { state, router }
+    Harness {
+        state,
+        router,
+        _data_dir: data_dir,
+    }
 }
 
 fn build_state(config: Config) -> AppState {
@@ -1823,13 +1831,16 @@ async fn ui_panels_lists_builtins_and_extensions() {
 #[tokio::test]
 async fn ext_static_rejects_traversal() {
     let mut state_config = config(false);
+    let _dir = support::TempDir::adopt(state_config.data_dir.clone());
+    let build_config = config(false);
+    let _build_dir = support::TempDir::adopt(build_config.data_dir.clone());
     let root = state_config.data_dir.join("public");
     std::fs::create_dir_all(root.join("js")).expect("mkdir");
     std::fs::write(root.join("js/panel.js"), "export const ok = 1;\n").expect("write");
     state_config.static_dir = Some(root.clone());
     let state = Arc::new(AppState {
         config: rrouter_gateway::config::ConfigSnapshot::from(state_config),
-        ..build_state(config(false))
+        ..build_state(build_config)
     });
     // The traversal target must exist relative to the root for the test to be meaningful.
     std::fs::write(root.join("Cargo.toml"), "should never be served").expect("write");
