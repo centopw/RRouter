@@ -381,10 +381,34 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A data directory that removes itself, so a second run leaves nothing behind.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("rrouter-{tag}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).expect("dir");
+            Self(path)
+        }
+    }
+
+    impl std::ops::Deref for TempDir {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn setup_code_lives_on_disk_until_retired() {
-        let dir = std::env::temp_dir().join(format!("rrouter-auth-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = TempDir::new("auth");
         let auth = Auth::load(&dir, false);
         let code = auth.code().expect("generated");
         assert_eq!(code.len(), 9, "XXXX-XXXX");
@@ -396,16 +420,13 @@ mod tests {
         again.retire();
         assert!(!again.verify(&code));
         assert!(!dir.join(SETUP_FILE).exists());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(unix)]
     #[test]
     fn existing_secret_files_are_tightened_to_0600() {
         use std::os::unix::fs::PermissionsExt;
-        let dir =
-            std::env::temp_dir().join(format!("rrouter-secret-mode-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = TempDir::new("secret-mode");
         let auth = Auth::load(&dir, false);
         let _ = auth.code().expect("setup code");
         let jwt = dir.join(JWT_KEY_FILE);
@@ -422,12 +443,11 @@ mod tests {
             let mode = std::fs::metadata(path).expect("stat").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "{} must be repaired to 0600", path.display());
         }
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn login_throttle_is_five_per_minute_per_key() {
-        let dir = std::env::temp_dir().join(format!("rrouter-auth-{}", uuid::Uuid::new_v4()));
+        let dir = TempDir::new("auth");
         let auth = Auth::load(&dir, true);
         for _ in 0..5 {
             assert!(auth.throttle("a@b.c|1.2.3.4").is_none());
@@ -441,8 +461,7 @@ mod tests {
 
     #[test]
     fn session_jwt_is_signed_and_tamper_evident() {
-        let dir = std::env::temp_dir().join(format!("rrouter-jwt-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = TempDir::new("jwt");
         let auth = Auth::load(&dir, true);
         let user = uuid::Uuid::new_v4();
         let token = auth
@@ -456,7 +475,6 @@ mod tests {
             .issue_session(user, "sid-hash", crate::now_unix() - 60)
             .expect("signed");
         assert!(auth.verify_session(&expired).is_none());
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
