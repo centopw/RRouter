@@ -75,6 +75,8 @@ pub struct AppState {
     pub store: Arc<Store>,
     pub catalog: Arc<Catalog>,
     pub refresher: Arc<rrouter_auth::Refresher>,
+    /// Owns the process-wide free-mode windows (`free_rpm`), so a `free` plan and the next
+    /// one share one view of who has been spent — see [`rrouter_router::FreeRotation`].
     pub planner: rrouter_router::Planner,
     pub dispatcher: Arc<rrouter_router::Dispatcher>,
     pub http: reqwest::Client,

@@ -58,6 +58,17 @@ resolution, so a client can keep a stable name while the operator repoints it.
 Team-scoped keys are planned only from their own team's connections; shared instance-wide
 accounts are never eligible for a team key.
 
+## Free mode
+
+An operator can import free-tier accounts, each with its own egress proxy, and then ask for
+the reserved refs `free`, `free:<provider>`, `free/<model>` or `free:<provider>/<model>`.
+They resolve before aliases and combos, expand only to free-mode accounts and only to models
+discovery marked free, and rotate models and accounts — hence proxies — per request so a
+pool of accounts reaches the providers' per-account limits later. Priority, allowlists,
+request policy, quotas and the breaker/429 cooldown keep their usual precedence; the
+per-account `free_rpm` window only reorders accounts and never refuses a request. See
+[Free mode](FREE_MODE.md).
+
 ## Capability endpoints
 
 `/v1/search`, `/v1/rerank` and `/v1/embeddings` route through the same planner — key

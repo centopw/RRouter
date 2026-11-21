@@ -24,6 +24,21 @@
 //! reach a team key — so a team that owns no account for the model fails with a `NoRoute`
 //! that names the team rather than being quietly served by someone else's account.
 //!
+//! The reserved refs `free`, `free:<provider>`, `free/<model>` and
+//! `free:<provider>/<model>` are resolved before aliases, combos and the catalog, because
+//! they name a *pool* rather than a model: the rows are whatever discovery found free
+//! across the imported document, and the accounts are only the free-mode ones. They
+//! deliberately short-circuit the bare-id rule further down — an unknown free model id must
+//! never widen to "every active provider can serve it", or a paid account would end up
+//! spending money on a request that asked for free capacity. A pin (`free/<model>`) narrows
+//! the pool to one model id while keeping the same account spread, so a client can choose
+//! for example a free DeepSeek id and still land on a different account and proxy each
+//! request; a bare `free` can be narrowed by the document's `routing.models` knob. Their
+//! account order is the stored `routing.prefer` knob (`spread` default, or `cheapest`),
+//! rotated by a per-process cursor and an account window
+//! ([`crate::free_mode::FreeRotation`]) so consecutive requests land on a different
+//! `(account, proxy)` pair instead of queueing behind one account's rate limit.
+//!
 //! A [`CanaryRule`] (operator A/B, `RROUTER_CANARY`) is applied *last*, and its
 //! precedence is deliberate, highest first:
 //!
@@ -39,8 +54,9 @@
 //! gateway's request id (or the conversation's affinity), so it is stable within a request
 //! and repeatable for a fixed seed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use rrouter_core::{Dialect, Error, Result};
 use rrouter_store::{AccountQuotaState, Connection, ConnectionScope, Store};
@@ -49,6 +65,7 @@ use uuid::Uuid;
 use crate::candidate::{Candidate, CapacityHints, Plan};
 use crate::capabilities::capabilities;
 use crate::catalog::Catalog;
+use crate::free_mode::FreeRotation;
 use crate::policy::{candidate_allowed, DataCollection, ProviderPolicy};
 
 /// A connection's dialect, from the provider's registry entry.
@@ -130,6 +147,140 @@ fn is_registered_provider(id: &str) -> bool {
 /// Prefix that forces combo interpretation even when a combo name collides with
 /// a model id.
 const COMBO_PREFIX: &str = "combo:";
+
+/// The reserved ref that names the whole free pool, the prefix that narrows it to one
+/// provider (`free:openrouter`) and the prefix that pins one model (`free/<model>`).
+const FREE_REF: &str = "free";
+const FREE_PREFIX: &str = "free:";
+const FREE_MODEL_PREFIX: &str = "free/";
+
+/// Default cap on free-mode candidates in one plan, from the document's
+/// `routing.max_attempts`.
+///
+/// Equal to the dispatcher's default attempt budget: a plan longer than that would be
+/// truncated later anyway, and the cap is also what keeps one plan from listing an
+/// unbounded pool of accounts (every one of them a separate proxy egress).
+const DEFAULT_FREE_ATTEMPTS: usize = 8;
+
+/// Ceiling for `routing.max_attempts`, so a typo cannot make one plan enumerate a
+/// thousand accounts. It is far above any sensible pool and only bounds the pathological.
+const MAX_FREE_ATTEMPTS: u64 = 64;
+
+/// How a free-mode plan orders its models and accounts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum FreePrefer {
+    /// Rotate models and accounts so consecutive requests spend a different pair. The
+    /// default: free capacity is only useful while it lasts, and draining one account
+    /// invites the 429 that the pool exists to postpone.
+    #[default]
+    Spread,
+    /// Cheapest first, reusing the normal price order; equal prices keep the spread order.
+    Cheapest,
+}
+
+/// Ordering knobs from the imported document's `routing` object.
+#[derive(Debug, Clone)]
+struct FreeKnobs {
+    enabled: bool,
+    prefer: FreePrefer,
+    max_attempts: usize,
+    /// Cap for an account that carries no `free_rpm` of its own, from
+    /// `routing.per_account_rpm`.
+    per_account_rpm: Option<u32>,
+    /// Model ids a bare `free` may use, from `routing.models`. Empty = the whole pool.
+    /// A pin (`free/<model>`) supersedes it: the client named the model explicitly.
+    models: Vec<String>,
+}
+
+impl Default for FreeKnobs {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prefer: FreePrefer::Spread,
+            max_attempts: DEFAULT_FREE_ATTEMPTS,
+            per_account_rpm: None,
+            models: Vec::new(),
+        }
+    }
+}
+
+impl FreeKnobs {
+    /// Read the knobs, tolerating a partial or absent object.
+    ///
+    /// The import path validates the document; a planner that refused to route because a
+    /// knob was missing would take free mode down over a field it can default around. An
+    /// unknown `prefer` falls back to `spread` for the same reason.
+    fn from_routing(routing: Option<&serde_json::Value>) -> Self {
+        let mut knobs = Self::default();
+        let Some(routing) = routing else {
+            return knobs;
+        };
+        if let Some(enabled) = routing.get("enabled").and_then(serde_json::Value::as_bool) {
+            knobs.enabled = enabled;
+        }
+        if let Some(prefer) = routing.get("prefer").and_then(serde_json::Value::as_str) {
+            knobs.prefer = match prefer {
+                "cheapest" => FreePrefer::Cheapest,
+                _ => FreePrefer::Spread,
+            };
+        }
+        if let Some(max) = routing
+            .get("max_attempts")
+            .and_then(serde_json::Value::as_u64)
+        {
+            knobs.max_attempts = max.clamp(1, MAX_FREE_ATTEMPTS) as usize;
+        }
+        knobs.per_account_rpm = routing
+            .get("per_account_rpm")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|rpm| u32::try_from(rpm).ok())
+            .filter(|rpm| *rpm > 0);
+        knobs.models = routing
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        knobs
+    }
+}
+
+/// One resolved reserved ref: the discovered rows it expands to, plus the knobs that
+/// order them.
+struct FreePlan {
+    /// `(provider, model)` pairs, already restricted to providers with an active free-mode
+    /// account and rotated for this request.
+    targets: Vec<(String, String)>,
+    knobs: FreeKnobs,
+}
+
+/// A `404` that explains which operator step is missing, since the model is fine and the
+/// pool is not ready yet.
+fn no_route(model: &str, detail: impl Into<String>) -> Error {
+    Error::NoRoute {
+        model: model.to_string(),
+        detail: detail.into(),
+    }
+}
+
+/// True when a discovered row is the model a client pinned with `free/<model>`.
+///
+/// The row's own id is the canonical spelling; `provider/model` is accepted too because
+/// that is what usage rows and the dashboard show. The provider prefix is stripped only
+/// when it names *this* row's provider, so an id that legitimately begins with a provider
+/// name (`meta-llama/Llama-3`) is never mangled into a different model.
+fn model_matches(provider: &str, model_id: &str, wanted: &str) -> bool {
+    model_id == wanted
+        || wanted
+            .strip_prefix(provider)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|rest| rest == model_id)
+}
 
 /// How equal-priority connections are ordered inside one plan.
 ///
@@ -312,6 +463,9 @@ impl<'a> PlanRequest<'a> {
 pub struct Planner {
     /// Round-robin cursor, advanced per `plan()` call.
     cursor: AtomicU64,
+    /// Free-mode windows and rotation cursor. Shared by handle, so the gateway's one
+    /// planner is the authority for every request and a rebuilt planner can inherit it.
+    free: FreeRotation,
 }
 
 impl Default for Planner {
@@ -324,7 +478,26 @@ impl Planner {
     pub fn new() -> Self {
         Self {
             cursor: AtomicU64::new(0),
+            free: FreeRotation::new(),
         }
+    }
+
+    /// Build a planner that continues an existing free-mode rotation.
+    ///
+    /// The windows are what make the pool last, so a planner constructed after a reload
+    /// must not start from an empty one: the first request would go back to an account
+    /// that is already at its cap.
+    pub fn with_free_rotation(free: FreeRotation) -> Self {
+        Self {
+            cursor: AtomicU64::new(0),
+            free,
+        }
+    }
+
+    /// The rotation this planner is using, for a caller that wants the same windows in a
+    /// second planner (or to inspect pressure in a test).
+    pub fn free_rotation(&self) -> &FreeRotation {
+        &self.free
     }
 
     /// Build the ordered candidate list for `req.model`.
@@ -395,9 +568,25 @@ impl Planner {
             }
         }
 
-        let targets = self
-            .targets(catalog, store, model, &aliases, req.combo_start, &providers)
+        // Resolved before aliases and combos: `free` names a pool, not a model, so no
+        // alias may shadow it and the bare-id widening rule below must never see it —
+        // otherwise a free request could land on a paying account.
+        let free = self
+            .free_targets(store, &connections, model, &providers)
             .await?;
+        let pool = free.as_ref().map(|plan| {
+            plan.targets
+                .iter()
+                .map(|(provider, model_id)| (provider.clone(), model_id.clone(), true))
+                .collect::<Vec<(String, String, bool)>>()
+        });
+        let targets = match pool {
+            Some(targets) => targets,
+            None => {
+                self.targets(catalog, store, model, &aliases, req.combo_start, &providers)
+                    .await?
+            }
+        };
         if targets.is_empty() {
             return Err(Error::NoRoute {
                 model: model.to_string(),
@@ -496,6 +685,10 @@ impl Planner {
         let mut candidates = Vec::with_capacity(active.len());
         let offset = affinity.unwrap_or_else(|| self.next_offset());
         let target_count = seen_pairs.len();
+        // A free plan may only be served by free-mode accounts. Read once, before the
+        // loop, because the closure below runs per candidate pair.
+        let free_accounts = free.is_some();
+        let default_rpm = free.as_ref().and_then(|plan| plan.knobs.per_account_rpm);
         for &(provider, model_id) in &seen_pairs {
             if disabled.contains(model_id) {
                 continue;
@@ -503,7 +696,7 @@ impl Planner {
             let mut matching: Vec<&Connection> = active
                 .iter()
                 .copied()
-                .filter(|c| c.provider == provider)
+                .filter(|c| c.provider == provider && (!free_accounts || c.credentials.free_mode))
                 .collect();
             if matching.is_empty() {
                 continue;
@@ -519,10 +712,14 @@ impl Planner {
                     group_end += 1;
                 }
                 let group = &mut matching[group_start..group_end];
-                match strategy {
-                    Strategy::Priority | Strategy::Cheapest => rotate(group, offset),
-                    Strategy::Weighted => weighted_order(group, offset),
-                    Strategy::LeastLatency => latency_order(group, &latencies),
+                if free_accounts {
+                    free_order(group, &self.free, default_rpm);
+                } else {
+                    match strategy {
+                        Strategy::Priority | Strategy::Cheapest => rotate(group, offset),
+                        Strategy::Weighted => weighted_order(group, offset),
+                        Strategy::LeastLatency => latency_order(group, &latencies),
+                    }
                 }
                 group_start = group_end;
             }
@@ -537,7 +734,14 @@ impl Planner {
             }
         }
 
-        if strategy == Strategy::Cheapest {
+        // `routing.prefer: cheapest` reuses the normal price order; free rows are usually
+        // unpriced, and `cheapest_order` is a stable sort, so equal prices keep the spread
+        // order above instead of reverting to declaration order.
+        let price_first = match &free {
+            Some(plan) => plan.knobs.prefer == FreePrefer::Cheapest,
+            None => strategy == Strategy::Cheapest,
+        };
+        if price_first {
             candidates = cheapest_order(store, candidates).await;
         }
 
@@ -551,7 +755,20 @@ impl Planner {
             } else {
                 format!("; excluded by request policy: {}", summarize(&excluded))
             };
-            let detail = if let Some(team) = team {
+            let detail = if let Some(plan) = &free {
+                let resolved: Vec<String> = plan
+                    .targets
+                    .iter()
+                    .map(|(provider, model_id)| format!("{provider}/{model_id}"))
+                    .collect();
+                format!(
+                    "free mode resolved {} discovered free model(s) but none has an active \
+                     free-mode account left ({}); activate a free-mode account for those \
+                     providers or run discovery again{policy_note}",
+                    resolved.len(),
+                    summarize(&resolved)
+                )
+            } else if let Some(team) = team {
                 let resolved: Vec<String> = seen_pairs
                     .iter()
                     .map(|(provider, model_id)| format!("{provider}/{model_id}"))
@@ -674,6 +891,20 @@ impl Planner {
             }
         }
 
+        if let Some(plan) = &free {
+            // The cap comes from the imported document, not from the dispatcher: it
+            // decides how many (account, proxy) pairs one request may walk before giving
+            // up. Applied last so it keeps the order every rule above produced.
+            candidates.truncate(plan.knobs.max_attempts);
+            // One send, recorded where the decision was made. The planner never sees the
+            // attempt that actually leaves, so it counts the plan's head — the account the
+            // dispatcher tries first. A real 429 is still the breaker's business, and this
+            // module never refuses a request.
+            if let Some(head) = candidates.first() {
+                self.free.note(head.connection);
+            }
+        }
+
         Ok(Plan {
             model: model.to_string(),
             candidates,
@@ -683,6 +914,246 @@ impl Planner {
 
     fn next_offset(&self) -> u64 {
         self.cursor.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Resolve one of the reserved free refs into the discovered pool:
+    ///
+    /// - `free` — every discovered free model (narrowed by `routing.models` when set);
+    /// - `free:<provider>` — the same, one provider;
+    /// - `free/<model>` — one model across every provider that discovered it;
+    /// - `free:<provider>/<model>` — both.
+    ///
+    /// `Ok(None)` means `model` is an ordinary ref and every existing path runs untouched.
+    /// Otherwise the discovered rows are the *only* source of targets: a model discovery
+    /// did not mark free can never be reached through these refs, and neither can a
+    /// connection that is not a free-mode account. The `404`s name the operator step that
+    /// would fix them, because a client cannot tell an empty pool from a typo.
+    async fn free_targets(
+        &self,
+        store: &Store,
+        connections: &[Connection],
+        model: &str,
+        providers: &RuntimeProviders,
+    ) -> Result<Option<FreePlan>> {
+        // `free:<provider>[/<model>]` and `free/<model>` share a spelling, so the prefix
+        // decides which side of the slash carries what: after `free:` the first segment is
+        // a provider, after `free/` the whole remainder is a model id (ids contain slashes).
+        let (raw_provider, raw_model) = if model == FREE_REF {
+            (None, None)
+        } else if let Some(rest) = model.strip_prefix(FREE_PREFIX) {
+            match rest.split_once('/') {
+                Some((provider, model_id)) => (Some(provider), Some(model_id)),
+                None => (Some(rest), None),
+            }
+        } else if let Some(rest) = model.strip_prefix(FREE_MODEL_PREFIX) {
+            (None, Some(rest))
+        } else {
+            return Ok(None);
+        };
+        let model_filter = match raw_model {
+            Some("") => {
+                return Err(no_route(
+                    model,
+                    "the ref names no model; use `free/<model id>` or \
+                     `free:<provider>/<model id>`",
+                ));
+            }
+            Some(model_id) => Some(model_id),
+            None => None,
+        };
+
+        let config = store.free_mode_config().await?;
+        let knobs = FreeKnobs::from_routing(config.as_ref().map(|config| &config.routing));
+        if !knobs.enabled {
+            return Err(no_route(
+                model,
+                "free-mode routing is switched off (`routing.enabled: false` in the imported \
+                 document); set it to `true` and re-import",
+            ));
+        }
+
+        // One read for the whole pool, from the same scoped list the rest of planning
+        // uses: a team key therefore cannot reach an instance-wide free account, and the
+        // credential was already decrypted by that read.
+        let accounts: HashSet<&str> = connections
+            .iter()
+            .filter(|connection| connection.is_active && connection.credentials.free_mode)
+            .map(|connection| connection.provider.as_str())
+            .collect();
+
+        let wanted_provider = match raw_provider {
+            Some("") => {
+                return Err(no_route(
+                    model,
+                    "`free:` names no provider; use `free` for the whole pool, `free:<provider>` \
+                     for one provider, or `free/<model>` for one model",
+                ));
+            }
+            Some(raw) => {
+                let Some(provider) = providers.id(raw) else {
+                    return Err(no_route(
+                        model,
+                        format!(
+                            "`free:{raw}`: {raw} is not a provider this instance knows; use a \
+                             provider id or short code (`GET /api/providers`) after `free:`"
+                        ),
+                    ));
+                };
+                if !accounts.contains(provider.as_str()) {
+                    return Err(no_route(
+                        model,
+                        format!(
+                            "`free:{raw}` resolves to {provider}, which has no active free-mode \
+                             account; import or activate one (`POST /api/free-mode/import`) and \
+                             run discovery"
+                        ),
+                    ));
+                }
+                Some(provider)
+            }
+            None => None,
+        };
+
+        let rows = store.list_free_models().await?;
+        let free_rows: Vec<rrouter_store::FreeModel> =
+            rows.into_iter().filter(|row| row.free).collect();
+        if free_rows.is_empty() {
+            return Err(no_route(
+                model,
+                "free mode has discovered no free models yet; import a document and run \
+                 discovery (`POST /api/free-mode/discover`) so the free refs have a pool to \
+                 route over",
+            ));
+        }
+
+        if let Some(wanted) = model_filter {
+            if !free_rows
+                .iter()
+                .any(|row| model_matches(&row.provider, &row.model, wanted))
+            {
+                return Err(no_route(
+                    model,
+                    format!(
+                        "{wanted} is not in the free pool (no discovery row marks it free); run \
+                         discovery (`POST /api/free-mode/discover`) or add it to the imported \
+                         document"
+                    ),
+                ));
+            }
+        }
+
+        // `routing.models` narrows the *unqualified* pool only: a client that pinned a
+        // model has already chosen, and applying the knob too would fail a valid pin for a
+        // reason the client cannot see.
+        let narrowed = raw_provider.is_none() && model_filter.is_none();
+        let knob_matches = knobs
+            .models
+            .iter()
+            .any(|allowed| free_rows.iter().any(|row| &row.model == allowed));
+
+        let mut targets: Vec<(String, String)> = free_rows
+            .iter()
+            .filter(|row| accounts.contains(row.provider.as_str()))
+            .filter(|row| {
+                wanted_provider
+                    .as_deref()
+                    .is_none_or(|wanted| row.provider == wanted)
+            })
+            .filter(|row| {
+                model_filter.is_none_or(|wanted| model_matches(&row.provider, &row.model, wanted))
+            })
+            .filter(|row| {
+                !narrowed
+                    || knobs.models.is_empty()
+                    || knobs.models.iter().any(|allowed| allowed == &row.model)
+            })
+            .map(|row| (row.provider.clone(), row.model.clone()))
+            .collect();
+
+        if targets.is_empty() {
+            let detail = if let Some(wanted) = model_filter {
+                // The model is in the pool (checked above), so what is missing is either an
+                // account or the pinned provider's own row. Only the providers that could
+                // have served *this* ref count.
+                let mut sources: Vec<String> = Vec::new();
+                for row in &free_rows {
+                    if model_matches(&row.provider, &row.model, wanted)
+                        && wanted_provider
+                            .as_deref()
+                            .is_none_or(|wanted| row.provider == wanted)
+                        && !sources.iter().any(|provider| provider == &row.provider)
+                    {
+                        sources.push(row.provider.clone());
+                    }
+                }
+                if sources.is_empty() {
+                    // Only reachable through the provider filter: without it, the model
+                    // check above proved at least one row matches.
+                    match wanted_provider {
+                        Some(provider) => format!(
+                            "{provider} has no discovered free model {wanted}; run discovery \
+                             for it (`POST /api/free-mode/discover` with \
+                             {{\"providers\":[\"{provider}\"]}})"
+                        ),
+                        None => format!(
+                            "{wanted} is not in the free pool (no discovery row marks it \
+                             free); run discovery (`POST /api/free-mode/discover`) or add it \
+                             to the imported document"
+                        ),
+                    }
+                } else {
+                    format!(
+                        "{wanted} is free on {} but no free-mode account on those providers \
+                         is active; activate one (or import an account) and run discovery \
+                         again",
+                        summarize(&sources)
+                    )
+                }
+            } else if let Some(provider) = wanted_provider {
+                format!(
+                    "{provider} has no discovered free model; run discovery for it \
+                     (`POST /api/free-mode/discover` with {{\"providers\":[\"{provider}\"]}})"
+                )
+            } else if narrowed && !knobs.models.is_empty() && !knob_matches {
+                let mut available: Vec<String> = Vec::new();
+                for row in &free_rows {
+                    if !available.iter().any(|model| model == &row.model) {
+                        available.push(row.model.clone());
+                    }
+                }
+                format!(
+                    "`routing.models` ({}) matches none of the discovered free models ({}); \
+                     correct that knob in the imported document, or empty it to route the \
+                     whole pool",
+                    summarize(&knobs.models),
+                    summarize(&available)
+                )
+            } else {
+                // Providers whose rows cannot be used because no account is active: an
+                // activation problem, not a discovery one, and the message must say which.
+                let mut idle: Vec<String> = Vec::new();
+                for row in &free_rows {
+                    if !accounts.contains(row.provider.as_str())
+                        && !idle.iter().any(|provider| provider == &row.provider)
+                    {
+                        idle.push(row.provider.clone());
+                    }
+                }
+                format!(
+                    "discovered free models exist ({}) but no free-mode account on those \
+                     providers is active; activate one and run discovery again",
+                    summarize(&idle)
+                )
+            };
+            return Err(no_route(model, detail));
+        }
+
+        // Model rotation: successive free plans start at successive discovered models, so
+        // two requests in a row never open with the same (account, proxy) pair. A pinned
+        // model yields one entry and this is a no-op, which is why the account order below
+        // still spreads: `free_order` rotates the accounts of that one model.
+        rotate(&mut targets, self.free.turn());
+        Ok(Some(FreePlan { targets, knobs }))
     }
 
     /// Ordered `(provider, model, explicit)` list for `model`, before connection
@@ -952,6 +1423,30 @@ fn rotate<T>(items: &mut [T], offset: u64) {
     }
     let shift = (offset % len as u64) as usize;
     items.rotate_left(shift);
+}
+
+/// Order one model's free-mode accounts: the ones with room left in their local window
+/// first, then whoever has waited longest.
+///
+/// The window is a budget, not a gate. When every account is at its cap they all stay in
+/// the plan — serving from an account the provider may still accept beats a 429 the
+/// gateway invents — and rotate by least-recent use so the pool keeps moving. Priority has
+/// already split the group, so an operator's tier still dominates this order.
+fn free_order(group: &mut [&Connection], rotation: &FreeRotation, default_rpm: Option<u32>) {
+    let ranks: HashMap<Uuid, (bool, Option<Instant>)> = group
+        .iter()
+        .map(|connection| {
+            let rpm = connection.credentials.free_rpm.or(default_rpm);
+            let capped = !rotation.admit(connection.id, rpm);
+            (connection.id, (capped, rotation.last_used(connection.id)))
+        })
+        .collect();
+    // `false < true` puts an account under its cap first, and `None` (never sent to) before
+    // any `Some` timestamp, which is exactly "least recently used first".
+    group.sort_by_key(|connection| {
+        let (capped, used) = ranks[&connection.id];
+        (capped, used, connection.id)
+    });
 }
 
 /// Order one equal-priority group by smooth weighted round-robin.

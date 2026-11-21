@@ -491,7 +491,10 @@ async fn serve(config: Config, log: LogReload) -> Result<(), String> {
         store,
         catalog: Arc::new(Catalog::builtin()),
         refresher: Arc::new(rrouter_auth::Refresher::new(http.clone())),
-        planner: rrouter_router::Planner::new(),
+        // One rotation for the whole process: the planner is shared by every request, so
+        // the free-mode windows only postpone a provider's 429 if every request sees the
+        // same counters. Building it here (rather than per plan) is what makes that true.
+        planner: rrouter_router::Planner::with_free_rotation(rrouter_router::FreeRotation::new()),
         dispatcher: Arc::new(dispatcher(&config)),
         http,
         config: rrouter_gateway::config::ConfigSnapshot::from(config.clone()),
