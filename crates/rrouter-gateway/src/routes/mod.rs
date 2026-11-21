@@ -10,6 +10,7 @@ pub mod connections;
 pub mod evals;
 pub mod explain;
 pub mod files;
+pub mod free_mode;
 pub mod health;
 pub mod keys;
 pub mod model_presets;

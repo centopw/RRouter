@@ -5059,6 +5059,8 @@ fn merge_into(dst: &mut Credentials, patch: Credentials) {
         copilot_expires_at,
         account_label,
         base_url_override,
+        free_rpm,
+        proxy_url,
     );
     // A proxy is set or cleared, never half-merged: an empty string is the clear marker
     // because this merge cannot remove a key, and `routes/connections.rs` sends it for
@@ -5068,14 +5070,16 @@ fn merge_into(dst: &mut Credentials, patch: Credentials) {
     if let Some(proxy) = patch.proxy_url {
         dst.proxy_url = (!proxy.trim().is_empty()).then_some(proxy);
     }
+    // A cap of zero would park the account forever, so it is the clear sentinel rather
+    // than a real rate: `Some(0)` drops the cap instead of storing an impossible one.
+    if dst.free_rpm == Some(0) {
+        dst.free_rpm = None;
+    }
     // Free-mode membership is hop-on only here. `false` cannot mean "unchanged" and
     // "off" at once, and every other merge patches (a token refresh) carries the default
     // `false`, so clearing has its own verb: [`Store::set_connection_free_mode`].
     if patch.free_mode {
         dst.free_mode = true;
-    }
-    if patch.free_rpm.is_some() {
-        dst.free_rpm = patch.free_rpm;
     }
     for (k, v) in patch.extra {
         if v.is_null() {

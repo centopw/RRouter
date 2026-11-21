@@ -33,7 +33,11 @@ fn main() -> ExitCode {
              [--healthcheck|--ready]\n\n\
              Every option is an environment variable, plus the optional JSON file named\n\
              by RROUTER_CONFIG. `--check-config` validates that merge and exits 0/1;\n\
-             `--print-config` prints the effective, secrets-free configuration.",
+             `--print-config` prints the effective, secrets-free configuration.\n\n\
+             usage: rrouter admin show-setup-code | reset-password <email> | backup <file> |\n\
+             free-mode <import <file>|show>\n\
+             `admin free-mode import` validates a free-mode document and applies it to a\n\
+             stopped instance; `admin free-mode show` prints what is imported."
         );
         return ExitCode::SUCCESS;
     }
@@ -217,13 +221,136 @@ fn admin(args: &[String]) -> ExitCode {
             println!("Every session for that account was signed out.");
             ExitCode::SUCCESS
         }
+        [command, sub, path] if command == "free-mode" && sub == "import" => {
+            free_mode_import(&runtime, &store, path)
+        }
+        [command, sub] if command == "free-mode" && sub == "show" => {
+            free_mode_show(&runtime, &store)
+        }
         _ => {
             eprintln!(
-                "usage: rrouter admin show-setup-code | admin reset-password <email> | admin backup <file>"
+                "usage: rrouter admin show-setup-code | admin reset-password <email> | admin backup <file> | admin free-mode <import <file>|show>"
             );
             ExitCode::FAILURE
         }
     }
+}
+
+/// `admin free-mode import <file>`: validate a document, then apply it.
+///
+/// The same [`crate::free_mode::validate`] and [`crate::free_mode::apply`] the HTTP route
+/// uses, so a document that the CLI accepts cannot be one the endpoint refuses. Output is a
+/// secrets-free summary: counts only.
+fn free_mode_import(runtime: &tokio::runtime::Runtime, store: &Store, path: &str) -> ExitCode {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("rrouter: read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("rrouter: {path} is not JSON: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let catalog = match runtime.block_on(rrouter_gateway::provider_catalog::ProviderCatalog::load(
+        store,
+    )) {
+        Ok(catalog) => catalog,
+        Err(e) => {
+            eprintln!("rrouter: load providers: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let document = match rrouter_gateway::free_mode::validate(&value, &catalog) {
+        Ok(document) => document,
+        Err(problem) => {
+            eprintln!("rrouter: {}", problem.message);
+            for detail in &problem.details {
+                eprintln!("  - {detail}");
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(rrouter_gateway::free_mode::apply(store, &document)) {
+        Ok(report) => {
+            println!(
+                "free-mode: {} provider(s), {} account(s) created, {} updated, {} disabled, \
+                 {} model(s) seeded",
+                report.providers, report.created, report.updated, report.disabled, report.models
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("rrouter: free-mode import failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `admin free-mode show`: what is imported, with no credential material in it.
+fn free_mode_show(runtime: &tokio::runtime::Runtime, store: &Store) -> ExitCode {
+    let config = match runtime.block_on(store.free_mode_config()) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("rrouter: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(config) = config else {
+        println!("free-mode: nothing imported");
+        return ExitCode::SUCCESS;
+    };
+    let models = runtime
+        .block_on(store.list_free_models())
+        .unwrap_or_default();
+    let connections = runtime
+        .block_on(store.list_connections(None))
+        .unwrap_or_default();
+    println!("free-mode: imported at {}", config.updated_at);
+    println!(
+        "routing: {}",
+        serde_json::to_string(&config.routing).unwrap_or_else(|_| "{}".to_string())
+    );
+    let accounts: Vec<_> = connections
+        .iter()
+        .filter(|conn| conn.credentials.free_mode)
+        .collect();
+    println!("accounts: {}", accounts.len());
+    for conn in accounts {
+        println!(
+            "  {} / {}  proxy={}  rpm={}  {}",
+            conn.provider,
+            conn.credentials
+                .account_label
+                .as_deref()
+                .or(conn.name.as_deref())
+                .unwrap_or("—"),
+            conn.credentials
+                .proxy_masked()
+                .unwrap_or_else(|| "direct".to_string()),
+            conn.credentials
+                .free_rpm
+                .map(|rpm| rpm.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            if conn.is_active { "active" } else { "inactive" },
+        );
+    }
+    let free = models.iter().filter(|row| row.free).count();
+    println!("models: {} ({} free)", models.len(), free);
+    for row in &models {
+        println!(
+            "  {} / {}  {}  source={}",
+            row.provider,
+            row.model,
+            if row.free { "free" } else { "paid" },
+            row.source
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 fn probe_health(host: &str, port: u16, path: &str) -> std::io::Result<()> {
