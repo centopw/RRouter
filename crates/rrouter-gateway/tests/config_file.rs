@@ -4,17 +4,17 @@
 //! contract an operator (or a deploy script) actually depends on: exit codes, the
 //! source-annotated error, and that a referenced secret never reaches stdout.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
+
+mod support;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rrouter")
 }
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rrouter-config-{tag}-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    dir
+fn temp_dir(tag: &str) -> support::TempDir {
+    support::TempDir::new(&format!("config-{tag}"))
 }
 
 /// Run the binary with a clean environment, so an ambient `RROUTER_*` variable in the

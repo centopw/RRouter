@@ -10,14 +10,14 @@ use rrouter_gateway::AppState;
 use rrouter_router::{Catalog, Strategy};
 use rrouter_store::Store;
 
+mod support;
+
 fn no_env(_: &str) -> Option<String> {
     None
 }
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rrouter-reload-{tag}-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    dir
+fn temp_dir(tag: &str) -> support::TempDir {
+    support::TempDir::new(&format!("reload-{tag}"))
 }
 
 /// A live config whose only non-default field is the data directory, so a file can match it
