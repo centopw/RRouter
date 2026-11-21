@@ -125,7 +125,11 @@ else
   step "7/8 live end-to-end (mock upstream + real binary)"
   run "e2e smoke" python3 scripts/e2e_smoke.py
   run "oauth smoke" python3 scripts/oauth_smoke.py
-  pass "e2e + oauth flows"
+  # Free mode is its own contract: import, discovery, and the reserved refs, asserted
+  # against what the mock upstream actually received (pinned model, account rotation, a
+  # 429 absorbed instead of surfaced).
+  run "free-mode smoke" python3 scripts/free_mode_smoke.py
+  pass "e2e + oauth + free-mode flows"
 
   step "8/8 backup/restore drill"
   run "restore drill" python3 scripts/backup_restore_smoke.py
