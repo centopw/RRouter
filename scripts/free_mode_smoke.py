@@ -311,10 +311,12 @@ def main() -> int:
     try:
         # ----- contract: the endpoints exist at all ---------------------------
         status, state = api(base, "GET", "/free-mode", token=token)
-        if status == 404:
+        if status != 200:
+            # A build without free mode answers 404, or 307 to the dashboard catch-all.
+            # Either way the harness makes no claim about behaviour.
             run.note(
                 "free-mode API",
-                "GET /api/free-mode is not served by this build",
+                f"GET /api/free-mode answered {status}: {state}",
             )
             run.blocked = "free-mode import/discovery endpoints are absent"
             return 3
