@@ -3,7 +3,7 @@
 //! request comes from the dashboard playground with an admin session or the configured
 //! admin token.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +16,8 @@ use rrouter_router::{Breaker, Catalog, Dispatcher, Planner};
 use rrouter_store::Store;
 use serde_json::{json, Value};
 use tower::ServiceExt;
+
+mod support;
 
 const ADMIN_TOKEN: &str = "adm-test";
 
@@ -62,10 +64,8 @@ fn config(data_dir: &Path) -> Config {
     }
 }
 
-fn data_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rrouter-keys-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("data dir");
-    dir
+fn data_dir() -> support::TempDir {
+    support::TempDir::new("keys")
 }
 
 /// A gateway over a file-backed store in `dir`, so a second harness on the same dir is a

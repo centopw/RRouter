@@ -18,6 +18,8 @@ use rrouter_router::{Breaker, Catalog, Dispatcher, Planner};
 use rrouter_store::Store;
 use serde_json::{json, Value};
 
+mod support;
+
 /// The module keeps process-wide status; tests take this lock so scenarios cannot
 /// interleave with each other. `tokio::sync::Mutex` so the guard can be held across the
 /// awaits of a test without the `await_holding_lock` lint firing.
@@ -156,7 +158,7 @@ fn config() -> Config {
     Config {
         host: "127.0.0.1".parse().expect("ip"),
         port: 0,
-        data_dir: std::env::temp_dir().join(format!("rrouter-updates-{}", uuid::Uuid::new_v4())),
+        data_dir: support::temp_path("updates"),
         master_key: None,
         require_api_key: false,
         request_timeout_secs: 10,
@@ -190,14 +192,14 @@ fn config() -> Config {
     }
 }
 
-fn harness() -> Arc<AppState> {
+fn harness() -> (Arc<AppState>, support::TempDir) {
     let config = config();
-    let data_dir = config.data_dir.clone();
+    let data_dir = support::TempDir::adopt(config.data_dir.clone());
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("client");
-    Arc::new(AppState {
+    let state = Arc::new(AppState {
         store: Arc::new(Store::open_in_memory().expect("store")),
         catalog: Arc::new(Catalog::builtin()),
         refresher: Arc::new(rrouter_auth::Refresher::new(http.clone())),
@@ -212,7 +214,8 @@ fn harness() -> Arc<AppState> {
         providers: Default::default(),
         concurrency: std::sync::RwLock::new(None),
         auth: Auth::load(&data_dir, false),
-    })
+    });
+    (state, data_dir)
 }
 
 fn release_json(version: &str, notes: &str) -> Value {
@@ -230,7 +233,7 @@ async fn an_older_release_is_not_an_update() {
     let _guard = serial().await;
     updates::reset_for_tests();
     let (mock, base) = mock_server().await;
-    let state = harness();
+    let (state, _dir) = harness();
     mock.plan(vec![Reply::Json {
         status: 200,
         headers: vec![],
@@ -253,7 +256,7 @@ async fn a_cached_release_from_an_older_build_is_dropped_and_rechecked() {
     let _guard = serial().await;
     updates::reset_for_tests();
     let (mock, base) = mock_server().await;
-    let state = harness();
+    let (state, _dir) = harness();
 
     // What a previous build left behind: a fresh check, its ETag, and a release that is
     // now older than the running binary.
@@ -308,7 +311,7 @@ async fn conditional_get_reuses_the_cached_release_on_304() {
     let _guard = serial().await;
     updates::reset_for_tests();
     let (mock, base) = mock_server().await;
-    let state = harness();
+    let (state, _dir) = harness();
 
     mock.plan(vec![
         Reply::Json {
@@ -359,7 +362,7 @@ async fn without_a_token_discovery_uses_the_release_redirect_and_never_calls_the
     let _guard = serial().await;
     updates::reset_for_tests();
     let (mock, base) = mock_server().await;
-    let state = harness();
+    let (state, _dir) = harness();
 
     mock.plan(vec![
         Reply::Redirect {
@@ -396,7 +399,7 @@ async fn a_rate_limited_api_sets_backoff_and_a_second_automatic_check_sends_noth
     let _guard = serial().await;
     updates::reset_for_tests();
     let (mock, base) = mock_server().await;
-    let state = harness();
+    let (state, _dir) = harness();
     let reset = rrouter_gateway::now_unix() + 3_600;
 
     mock.plan(vec![
@@ -484,7 +487,7 @@ async fn a_malformed_reset_uses_the_safe_default_backoff() {
     let _guard = serial().await;
     updates::reset_for_tests();
     let (mock, base) = mock_server().await;
-    let state = harness();
+    let (state, _dir) = harness();
 
     mock.plan(vec![
         Reply::Json {
@@ -523,7 +526,7 @@ async fn an_api_failure_falls_back_and_keeps_cached_notes_while_never_echoing_th
     let _guard = serial().await;
     updates::reset_for_tests();
     let (mock, base) = mock_server().await;
-    let state = harness();
+    let (state, _dir) = harness();
     let token = "ghp_secret_token_value";
 
     // Seed notes through a successful API call first.
@@ -585,7 +588,7 @@ async fn download_urls_follow_the_release_layout() {
 async fn status_json_keeps_existing_fields_and_adds_backoff_fields() {
     let _guard = serial().await;
     updates::reset_for_tests();
-    let state = harness();
+    let (state, _dir) = harness();
     let status = updates::snapshot(&state).await;
     for field in [
         "current_version",
