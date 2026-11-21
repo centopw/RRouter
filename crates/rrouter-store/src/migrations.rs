@@ -53,7 +53,6 @@ CREATE TABLE IF NOT EXISTS free_mode (
 );
 "#;
 
-
 /// V43: why a provider retired an account.
 ///
 /// `refusal` is the class token (`account_suspended` today) of an upstream refusal of the
