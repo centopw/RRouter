@@ -82,6 +82,7 @@ fn harness() -> H {
         envelope_drops: Default::default(),
         providers: Default::default(),
         concurrency: std::sync::RwLock::new(None),
+        proxy_clients: Default::default(),
         // An admin token is configured, so the tests prove session auth stands on its
         // own rather than relying on the loopback shortcut.
         auth: Auth::load(&data_dir, false),

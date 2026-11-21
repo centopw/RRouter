@@ -86,6 +86,7 @@ fn harness() -> H {
         envelope_drops: Default::default(),
         providers: Default::default(),
         concurrency: std::sync::RwLock::new(None),
+        proxy_clients: Default::default(),
         auth: Auth::load(&data_dir, false),
     });
     let router = app(Arc::clone(&state));

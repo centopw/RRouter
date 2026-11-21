@@ -327,6 +327,7 @@ fn harness(cache: bool) -> Harness {
         envelope_drops: Default::default(),
         providers: Default::default(),
         concurrency: std::sync::RwLock::new(None),
+        proxy_clients: Default::default(),
         auth: rrouter_gateway::auth::Auth::load(&data_dir, false),
     });
     let router = app(Arc::clone(&state));

@@ -45,6 +45,7 @@ fn state(config: Config) -> Arc<AppState> {
         envelope_drops: Default::default(),
         providers: Default::default(),
         concurrency: std::sync::RwLock::new(concurrency),
+        proxy_clients: Default::default(),
         auth: Auth::load(&data_dir, false),
     })
 }

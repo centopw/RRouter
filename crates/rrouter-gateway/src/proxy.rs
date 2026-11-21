@@ -304,6 +304,10 @@ struct Prepared {
     project: Option<String>,
     /// COSY state for a Qoder attempt; `None` for every other provider.
     qoder: Option<QoderPrepared>,
+    /// The account's own egress client: pinned to its proxy when it has one, so every
+    /// send for this attempt — including the catalog and signer calls a Qoder attempt
+    /// makes before the chat — leaves from the same address.
+    http: reqwest::Client,
 }
 
 /// What one Qoder attempt needs beyond its headers: the signer, the account's own
@@ -915,7 +919,9 @@ async fn send_special(
     })?;
     let creds = state
         .refresher
-        .fresh(state.store.as_ref(), spec, candidate.connection)
+        .fresh_via(state.store.as_ref(), spec, candidate.connection, |creds| {
+            state.http_for(creds)
+        })
         .await?;
     if !custom_base_present(state, &candidate.provider, &creds) {
         return Err(Error::Unauthorized(format!(
@@ -931,7 +937,7 @@ async fn send_special(
     let mut wire = body.clone();
     wire["model"] = Value::String(candidate.model.clone());
     let resp = state
-        .http
+        .http_for(&creds)?
         .post(&url)
         .headers({
             let mut headers = outbound_headers(spec, &creds, Some(client))?;
@@ -1286,14 +1292,15 @@ fn audio_response(audio: Audio) -> Response {
     resp
 }
 
-/// Native URL (account override applied) and outbound headers for one passthrough attempt.
+/// Native URL (account override applied), outbound headers and the account's egress
+/// client for one passthrough attempt.
 async fn prepare_pass(
     state: &Arc<AppState>,
     client: &HeaderMap,
     kind: Pass,
     candidate: &Candidate,
     trace: &AttemptTrace,
-) -> Result<(String, axum::http::HeaderMap)> {
+) -> Result<(String, axum::http::HeaderMap, reqwest::Client)> {
     let spec = state
         .provider_spec(&candidate.provider)
         .ok_or_else(|| Error::NoRoute {
@@ -1306,7 +1313,9 @@ async fn prepare_pass(
     })?;
     let creds = state
         .refresher
-        .fresh(state.store.as_ref(), spec, candidate.connection)
+        .fresh_via(state.store.as_ref(), spec, candidate.connection, |creds| {
+            state.http_for(creds)
+        })
         .await?;
     if !custom_base_present(state, &candidate.provider, &creds) {
         return Err(Error::Unauthorized(format!(
@@ -1314,13 +1323,14 @@ async fn prepare_pass(
             candidate.provider
         )));
     }
+    let http = state.http_for(&creds)?;
     let url = match creds.base_url_override.as_deref() {
         Some(base) => rewrite_base(native, base),
         None => native.to_string(),
     };
     let mut headers = outbound_headers(spec, &creds, Some(client))?;
     inject_trace_headers(&mut headers, trace);
-    Ok((rrouter_auth::with_query(&url, spec), headers))
+    Ok((rrouter_auth::with_query(&url, spec), headers, http))
 }
 
 /// One JSON passthrough attempt. The model is the provider's own bare id.
@@ -1332,11 +1342,10 @@ async fn send_json(
     candidate: Candidate,
     trace: std::sync::Arc<AttemptTrace>,
 ) -> Result<(StatusCode, Value)> {
-    let (url, headers) = prepare_pass(state, client, kind, &candidate, &trace).await?;
+    let (url, headers, http) = prepare_pass(state, client, kind, &candidate, &trace).await?;
     let mut wire = body.clone();
     wire["model"] = Value::String(candidate.model.clone());
-    let resp = state
-        .http
+    let resp = http
         .post(&url)
         .headers(headers)
         .json(&wire)
@@ -1355,11 +1364,11 @@ async fn send_speech(
     candidate: Candidate,
     trace: std::sync::Arc<AttemptTrace>,
 ) -> Result<Audio> {
-    let (url, headers) = prepare_pass(state, client, Pass::Speech, &candidate, &trace).await?;
+    let (url, headers, http) =
+        prepare_pass(state, client, Pass::Speech, &candidate, &trace).await?;
     let mut wire = body.clone();
     wire["model"] = Value::String(candidate.model.clone());
-    let resp = state
-        .http
+    let resp = http
         .post(&url)
         .headers(headers)
         .json(&wire)
@@ -1389,11 +1398,10 @@ async fn send_multipart(
     candidate: Candidate,
     trace: std::sync::Arc<AttemptTrace>,
 ) -> Result<(StatusCode, Value)> {
-    let (url, mut headers) =
+    let (url, mut headers, http) =
         prepare_pass(state, client, Pass::Transcriptions, &candidate, &trace).await?;
     headers.insert(header::CONTENT_TYPE, content_type.clone());
-    let resp = state
-        .http
+    let resp = http
         .post(&url)
         .headers(headers)
         .body(raw.to_vec())
@@ -1410,9 +1418,9 @@ async fn send_voices(
     candidate: Candidate,
     trace: std::sync::Arc<AttemptTrace>,
 ) -> Result<(StatusCode, Value)> {
-    let (url, headers) = prepare_pass(state, client, Pass::Voices, &candidate, &trace).await?;
-    let resp = state
-        .http
+    let (url, headers, http) =
+        prepare_pass(state, client, Pass::Voices, &candidate, &trace).await?;
+    let resp = http
         .get(&url)
         .headers(headers)
         .timeout(state.request_timeout())
@@ -3267,10 +3275,18 @@ impl Attempt<'_> {
 
     async fn prepare(&self, candidate: &Candidate, trace: &AttemptTrace) -> Result<Prepared> {
         let spec = self.provider(candidate)?;
+        // The refresh is an authenticated call on this account's credential, so it leaves
+        // through this account's proxy too; a token minted from another address is exactly
+        // the inconsistency that suspends accounts.
         let creds = self
             .state
             .refresher
-            .fresh(self.state.store.as_ref(), spec, candidate.connection)
+            .fresh_via(
+                self.state.store.as_ref(),
+                spec,
+                candidate.connection,
+                |creds| self.state.http_for(creds),
+            )
             .await?;
         self.prepare_with(candidate, spec, &creds, trace).await
     }
@@ -3295,6 +3311,9 @@ impl Attempt<'_> {
                 candidate.provider
             )));
         }
+        // Resolved once per attempt: a proxy URL the client cannot accept fails *this*
+        // candidate, and the dispatcher moves on to an account that can leave.
+        let http = self.state.http_for(creds)?;
         if is_google_cca(&candidate.provider) {
             let project = cca_project(creds)?;
             // A credential override is a deployment/test statement about where this
@@ -3322,10 +3341,13 @@ impl Attempt<'_> {
                 headers,
                 project: Some(project),
                 qoder: None,
+                http,
             });
         }
         if is_qoder(&candidate.provider) {
-            return self.prepare_qoder(spec, creds, candidate, trace).await;
+            return self
+                .prepare_qoder(spec, creds, candidate, trace, http)
+                .await;
         }
         let (url, dialect) = endpoint(spec, creds.base_url_override.as_deref(), self.inbound);
         let mut headers = outbound_headers(spec, creds, self.client_headers)?;
@@ -3345,6 +3367,7 @@ impl Attempt<'_> {
             headers,
             project: None,
             qoder: None,
+            http,
         })
     }
 
@@ -3359,8 +3382,9 @@ impl Attempt<'_> {
         creds: &Credentials,
         candidate: &Candidate,
         trace: &AttemptTrace,
+        http: reqwest::Client,
     ) -> Result<Prepared> {
-        let signer = rrouter_auth::qoder::resolve(&self.state.http, creds).await?;
+        let signer = rrouter_auth::qoder::resolve(&http, creds).await?;
         // An override is a deployment/test statement about where this account's traffic
         // goes; otherwise the resolved token picks the origin: job tokens are served by
         // api2, device tokens by api3.
@@ -3377,8 +3401,7 @@ impl Attempt<'_> {
             .to_string();
         // A model this account's catalog does not list is a hard error here, never a
         // request the upstream would answer with a different model.
-        let model_config =
-            rrouter_auth::qoder::model_config(&self.state.http, &signer, &base, &model).await?;
+        let model_config = rrouter_auth::qoder::model_config(&http, &signer, &base, &model).await?;
         let mut headers = outbound_headers(spec, creds, self.client_headers)?;
         headers.insert(
             header::ACCEPT,
@@ -3409,6 +3432,7 @@ impl Attempt<'_> {
                 model_config,
                 model,
             }),
+            http,
         })
     }
 
@@ -3436,8 +3460,7 @@ impl Attempt<'_> {
                 },
                 None => (prepared.headers.clone(), None),
             };
-            let mut request = self
-                .state
+            let mut request = prepared
                 .http
                 .post(url)
                 .headers(headers)
@@ -3615,11 +3638,12 @@ impl Attempt<'_> {
         let creds = self
             .state
             .refresher
-            .fresh_after_rejection(
+            .fresh_after_rejection_via(
                 self.state.store.as_ref(),
                 spec,
                 candidate.connection,
                 sent_bearer(prepared),
+                |creds| self.state.http_for(creds),
             )
             .await?;
         tracing::debug!(
@@ -5236,7 +5260,9 @@ async fn send_embedding_once(
     }
     let creds = state
         .refresher
-        .fresh(state.store.as_ref(), spec, candidate.connection)
+        .fresh_via(state.store.as_ref(), spec, candidate.connection, |creds| {
+            state.http_for(creds)
+        })
         .await?;
     if !custom_base_present(state, &candidate.provider, &creds) {
         return Err(Error::Unauthorized(format!(
@@ -5252,7 +5278,7 @@ async fn send_embedding_once(
     let outbound = request_headers(spec, &creds)?;
     let body = serde_json::json!({ "model": candidate.model, "input": text });
     let resp = state
-        .http
+        .http_for(&creds)?
         .post(&url)
         .headers(outbound)
         .json(&body)
@@ -5385,7 +5411,9 @@ async fn embeddings_inner(
     }
     let creds = state
         .refresher
-        .fresh(state.store.as_ref(), spec, candidate.connection)
+        .fresh_via(state.store.as_ref(), spec, candidate.connection, |creds| {
+            state.http_for(creds)
+        })
         .await?;
     if !custom_base_present(state, &candidate.provider, &creds) {
         return Err(Error::Unauthorized(format!(
@@ -5409,7 +5437,7 @@ async fn embeddings_inner(
     // The upstream body is relayed verbatim, status included, so the attempt is logged
     // around the send itself and its status is the upstream's own.
     let sent = state
-        .http
+        .http_for(&creds)?
         .post(&url)
         .headers(outbound)
         .body(rewritten.unwrap_or_else(|| raw.to_vec()))

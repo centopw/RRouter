@@ -206,6 +206,7 @@ fn harness() -> Harness {
         envelope_drops: Default::default(),
         providers: Default::default(),
         concurrency: std::sync::RwLock::new(None),
+        proxy_clients: Default::default(),
         auth: rrouter_gateway::auth::Auth::load(&std::env::temp_dir(), false),
     });
     Harness { router: app(state) }

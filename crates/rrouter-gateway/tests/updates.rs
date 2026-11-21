@@ -211,6 +211,7 @@ fn harness() -> Arc<AppState> {
         envelope_drops: Default::default(),
         providers: Default::default(),
         concurrency: std::sync::RwLock::new(None),
+        proxy_clients: Default::default(),
         auth: Auth::load(&data_dir, false),
     })
 }

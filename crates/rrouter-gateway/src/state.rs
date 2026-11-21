@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::OwnedMutexGuard;
 
 use axum::http::HeaderMap;
+use rrouter_auth::Credentials;
 use rrouter_core::{Dialect, Error, Result};
 use rrouter_router::{model_allowed, Catalog};
 use rrouter_store::{ApiKey, Guardrails, KeyKind, KeyScope, Store};
@@ -71,6 +72,58 @@ pub(crate) struct BudgetHold {
     _guards: Vec<OwnedMutexGuard<()>>,
 }
 
+/// Egress clients keyed by proxy URL: one pool per egress address, shared by every
+/// account that leaves through it.
+///
+/// A client cannot be retargeted at a proxy after it is built, so the routing decision has
+/// to be made when the client exists — once per proxy URL, not once per request. Keying by
+/// URL rather than by connection is what lets two accounts behind one proxy share a pool,
+/// and lets a proxy edit on one account take effect for that account alone.
+///
+/// Eviction is by insertion time: the map only grows when an operator adds another proxy,
+/// so the oldest entries are the ones no longer referenced by the account list.
+#[derive(Default)]
+pub struct ProxyClients {
+    clients: RwLock<HashMap<String, (Instant, reqwest::Client)>>,
+}
+
+/// How many distinct proxies get a live pool. Well past any hand-written free-mode
+/// document, and small enough that the pools cannot cost more than a few thousand idle
+/// sockets.
+const PROXY_CLIENTS_MAX: usize = 64;
+
+impl ProxyClients {
+    /// The pool for `url`, when one was already built.
+    fn get(&self, url: &str) -> Option<reqwest::Client> {
+        let clients = self
+            .clients
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
+        clients.get(url).map(|(_, client)| client.clone())
+    }
+
+    /// Cache a freshly built client, dropping the oldest entry when the map is full.
+    ///
+    /// Only successful builds reach here: a URL reqwest rejects is reported to the attempt
+    /// that named it, so the next request retries the parse instead of pinning the failure.
+    fn insert(&self, url: &str, client: reqwest::Client) {
+        let mut clients = self
+            .clients
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if clients.len() >= PROXY_CLIENTS_MAX && !clients.contains_key(url) {
+            let oldest = clients
+                .iter()
+                .min_by_key(|(_, (added, _))| *added)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                clients.remove(&oldest);
+            }
+        }
+        clients.insert(url.to_string(), (Instant::now(), client));
+    }
+}
+
 pub struct AppState {
     pub store: Arc<Store>,
     pub catalog: Arc<Catalog>,
@@ -78,6 +131,8 @@ pub struct AppState {
     pub planner: rrouter_router::Planner,
     pub dispatcher: Arc<rrouter_router::Dispatcher>,
     pub http: reqwest::Client,
+    /// Egress clients pinned to per-account proxies; see [`AppState::http_for`].
+    pub proxy_clients: ProxyClients,
     /// The live configuration. Read one snapshot per request with [`ConfigSnapshot::load`].
     pub config: ConfigSnapshot,
     pub started: Instant,
@@ -154,6 +209,49 @@ pub struct RetentionReport {
 }
 
 impl AppState {
+    /// The client this account's upstream calls must use.
+    ///
+    /// An account without a proxy shares [`Self::http`]. An account with one gets a client
+    /// pinned to that proxy, cached by URL and eligible for reuse with its connection pool
+    /// intact. Connect and idle settings mirror `build_http_client` in `main.rs`; the absent
+    /// global timeout is deliberate — a streaming body may legitimately run for minutes, so
+    /// the per-request budget is applied to the response headers by the proxy path.
+    ///
+    /// A proxy URL reqwest refuses is an error for *this account only*, and never a quiet
+    /// fall back to the direct client. Connecting directly would expose the exact address
+    /// the operator paid a proxy to keep separate, and that mismatch is what gets accounts
+    /// banned; `Transport` is what makes the dispatcher spend a fallback candidate instead
+    /// of failing the request.
+    pub fn http_for(&self, creds: &Credentials) -> Result<reqwest::Client> {
+        if !creds.has_proxy() {
+            return Ok(self.http.clone());
+        }
+        let url = creds.proxy_url.as_deref().unwrap_or_default().trim();
+        if let Some(client) = self.proxy_clients.get(url) {
+            return Ok(client);
+        }
+        let connect = Duration::from_secs(self.config.load().connect_timeout_secs);
+        let client = reqwest::Proxy::all(url)
+            .and_then(|proxy| {
+                reqwest::Client::builder()
+                    .connect_timeout(connect)
+                    .pool_idle_timeout(Duration::from_secs(90))
+                    .proxy(proxy)
+                    .build()
+            })
+            .map_err(|e| {
+                // A builder error may quote the URL it refused — userinfo included — so the
+                // URL is stripped before the message can reach a log line or an attempt row.
+                Error::Transport(format!(
+                    "account proxy {} is unusable: {}",
+                    creds.proxy_masked().unwrap_or_else(|| "***".to_string()),
+                    e.without_url()
+                ))
+            })?;
+        self.proxy_clients.insert(url, client.clone());
+        Ok(client)
+    }
+
     /// Start the daily usage-retention sweep.
     ///
     /// The task owns an `Arc<Self>` for the life of the process; it waits

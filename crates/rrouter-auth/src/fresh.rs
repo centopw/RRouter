@@ -84,12 +84,40 @@ impl Refresher {
     /// Fast path: nothing expires within the lead window → one `load`, no lock, no HTTP.
     /// Slow path: take the credential's mutex, re-read the store (a peer may have refreshed
     /// while we waited), and only transport for real if it is *still* stale.
+    ///
+    /// This is [`Self::fresh_via`] through the shared client. Callers that can route an
+    /// account's traffic must use that form instead: a refresh is an authenticated request
+    /// on the account's own credential, and one that leaves from an address the account
+    /// never uses is exactly the inconsistency providers suspend accounts for.
     pub async fn fresh(
         &self,
         store: &dyn CredentialStore,
         provider: &ProviderSpec,
         id: Uuid,
     ) -> Result<Credentials> {
+        self.fresh_via(store, provider, id, |_| Ok(self.http.clone()))
+            .await
+    }
+
+    /// [`Self::fresh`], with the refresh request sent by a client chosen from the
+    /// credential being refreshed.
+    ///
+    /// `client_for` is a factory rather than a client because the caller cannot know which
+    /// proxy applies until this module has read the credential — that is the whole reason
+    /// the proxy lives on the credential. It is consulted only on the slow path, so a
+    /// credential that is still valid pays nothing for it. A factory that fails (an
+    /// unusable proxy URL) fails the attempt: refreshing from the wrong address is worse
+    /// than not refreshing, so falling back to the shared client is not an option.
+    pub async fn fresh_via<F>(
+        &self,
+        store: &dyn CredentialStore,
+        provider: &ProviderSpec,
+        id: Uuid,
+        client_for: F,
+    ) -> Result<Credentials>
+    where
+        F: Fn(&Credentials) -> Result<reqwest::Client> + Send,
+    {
         let creds = store.load(id).await?;
         if !self.is_stale(provider, &creds) {
             return Ok(creds);
@@ -104,7 +132,9 @@ impl Refresher {
             return Ok(creds);
         }
 
-        let patch = self.exchange(provider, &creds).await?;
+        let patch = self
+            .exchange(provider, &creds, &client_for(&creds)?)
+            .await?;
         store.merge(id, patch).await
     }
 
@@ -129,6 +159,24 @@ impl Refresher {
         id: Uuid,
         rejected: Option<&str>,
     ) -> Result<Credentials> {
+        self.fresh_after_rejection_via(store, provider, id, rejected, |_| Ok(self.http.clone()))
+            .await
+    }
+
+    /// [`Self::fresh_after_rejection`] with the same credential-chosen refresh client as
+    /// [`Self::fresh_via`], for the same reason: the replacement token must be obtained
+    /// from the address the account actually uses.
+    pub async fn fresh_after_rejection_via<F>(
+        &self,
+        store: &dyn CredentialStore,
+        provider: &ProviderSpec,
+        id: Uuid,
+        rejected: Option<&str>,
+        client_for: F,
+    ) -> Result<Credentials>
+    where
+        F: Fn(&Credentials) -> Result<reqwest::Client> + Send,
+    {
         let lock = self.lock_for(id);
         let _guard = lock.lock().await;
 
@@ -138,7 +186,9 @@ impl Refresher {
             return Ok(creds);
         }
 
-        let patch = self.exchange(provider, &creds).await?;
+        let patch = self
+            .exchange(provider, &creds, &client_for(&creds)?)
+            .await?;
         store.merge(id, patch).await
     }
 
@@ -179,9 +229,14 @@ impl Refresher {
 
     /// Perform the provider's refresh and turn the response into a store patch (never a
     /// full overwrite: only the fields the endpoint actually returned).
-    async fn exchange(&self, provider: &ProviderSpec, c: &Credentials) -> Result<Credentials> {
+    async fn exchange(
+        &self,
+        provider: &ProviderSpec,
+        c: &Credentials,
+        http: &reqwest::Client,
+    ) -> Result<Credentials> {
         if provider.id == "github" {
-            return self.exchange_github_copilot(c).await;
+            return self.exchange_github_copilot(c, http).await;
         }
         let spec = provider.refresh.ok_or_else(|| {
             Error::Unauthorized(format!(
@@ -195,7 +250,8 @@ impl Refresher {
                 provider.id
             ))
         })?;
-        self.exchange_oauth(provider.id, spec, refresh_token).await
+        self.exchange_oauth(provider.id, spec, refresh_token, http)
+            .await
     }
 
     /// RFC 6749 refresh for `claude` (JSON), `codex`/Google (form) and any future OAuth
@@ -208,6 +264,7 @@ impl Refresher {
         provider_id: &str,
         spec: RefreshSpec,
         refresh_token: &str,
+        http: &reqwest::Client,
     ) -> Result<Credentials> {
         let token_url = override_for(provider_id, OverrideKind::Token).unwrap_or(spec.token_url);
         // Google Antigravity has no static client: missing env fails before any request.
@@ -216,8 +273,7 @@ impl Refresher {
 
         let mut attempt = 0;
         loop {
-            let mut req = self
-                .http
+            let mut req = http
                 .post(token_url)
                 .timeout(REQUEST_TIMEOUT)
                 .header("accept", "application/json");
@@ -293,7 +349,11 @@ impl Refresher {
 
     /// `github`: derive a short-lived copilot session token from the long-lived GitHub
     /// access token stored in `access_token`.
-    async fn exchange_github_copilot(&self, c: &Credentials) -> Result<Credentials> {
+    async fn exchange_github_copilot(
+        &self,
+        c: &Credentials,
+        http: &reqwest::Client,
+    ) -> Result<Credentials> {
         let gh_token = c.access_token.as_deref().ok_or_else(|| {
             Error::Unauthorized("github credential has no access token".to_string())
         })?;
@@ -305,8 +365,7 @@ impl Refresher {
             .and_then(serde_json::Value::as_str)
             .unwrap_or(GITHUB_COPILOT_TOKEN_URL);
 
-        let resp = self
-            .http
+        let resp = http
             .get(url)
             .header("authorization", format!("Bearer {gh_token}"))
             .header("editor-version", GITHUB_EDITOR_VERSION)
@@ -1019,5 +1078,72 @@ mod tests {
             .await
             .expect_err("must fail");
         assert!(matches!(err, Error::Unauthorized(_)), "got {err:?}");
+    }
+
+    /// A refresh is an authenticated call on the account's own credential, so it must
+    /// leave through the account's egress — and a client that cannot route must fail the
+    /// refresh rather than quietly using the shared direct one.
+    #[tokio::test]
+    async fn fresh_via_sends_the_refresh_through_the_accounts_client() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "at-new",
+                    "expires_in": 3600
+                })),
+            )
+            // The shared client can reach this endpoint; the account's client cannot. Zero
+            // hits is the proof that the refresh did not fall back to a direct connection.
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let store = FakeStore::new(expired("at-old"));
+        let spec = claude_spec("claude", mock_url(&server), RefreshBody::Json);
+        let proxied = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").expect("proxy"))
+            .build()
+            .expect("client");
+
+        let err = Refresher::new(client())
+            .fresh_via(store.as_ref(), &spec, Uuid::new_v4(), move |_| {
+                Ok(proxied.clone())
+            })
+            .await
+            .expect_err("the unreachable proxy must fail the refresh");
+        assert!(matches!(err, Error::Transport(_)), "got {err:?}");
+        assert_eq!(store.merges.load(Ordering::SeqCst), 0, "nothing persisted");
+
+        // The mock asserts `expect(0)` when it is dropped.
+        drop(server);
+    }
+
+    /// The factory is only consulted on the slow path: a credential that is still valid
+    /// must not pay for a client (or a proxy) it never uses.
+    #[tokio::test]
+    async fn fresh_via_builds_a_client_only_when_a_refresh_is_needed() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = FakeStore::new(Credentials {
+            access_token: Some("at-live".to_string()),
+            refresh_token: Some("rt".to_string()),
+            expires_at: Some(now_unix() + 3600),
+            ..Credentials::default()
+        });
+        let calls_for_factory = calls.clone();
+        let creds = Refresher::new(client())
+            .fresh_via(
+                store.as_ref(),
+                registry::get("claude").expect("claude"),
+                Uuid::new_v4(),
+                move |_| {
+                    calls_for_factory.fetch_add(1, Ordering::SeqCst);
+                    Err(Error::Transport("not reached".into()))
+                },
+            )
+            .await
+            .expect("a live credential needs no refresh");
+        assert_eq!(creds.access_token.as_deref(), Some("at-live"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no client was built");
     }
 }

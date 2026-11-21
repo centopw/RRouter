@@ -90,7 +90,9 @@ pub(crate) async fn resolve_target(
     })?;
     let credentials = state
         .refresher
-        .fresh(state.store.as_ref(), spec, conn.id)
+        .fresh_via(state.store.as_ref(), spec, conn.id, |creds| {
+            state.http_for(creds)
+        })
         .await?;
     let base =
         rrouter_auth::capability_endpoint(native, credentials.base_url_override.as_deref(), spec);
@@ -169,7 +171,7 @@ pub(crate) async fn relay(
 ) -> Result<Response, Error> {
     let url = sub_url(&target.base, suffix, query);
     let mut request = state
-        .http
+        .http_for(&target.credentials)?
         .request(method, &url)
         .timeout(state.request_timeout())
         .headers(outbound_headers(target.spec, &target.credentials, client)?);
@@ -207,7 +209,7 @@ pub(crate) async fn relay_stream(
 ) -> Result<Response, Error> {
     let url = sub_url(&target.base, suffix, query);
     let response = state
-        .http
+        .http_for(&target.credentials)?
         .get(&url)
         .timeout(state.request_timeout())
         .headers(outbound_headers(target.spec, &target.credentials, client)?)

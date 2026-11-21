@@ -168,7 +168,9 @@ async fn tick(state: &AppState) -> rrouter_core::Result<()> {
         let result = async {
             let creds = state
                 .refresher
-                .fresh(state.store.as_ref(), spec, conn.id)
+                .fresh_via(state.store.as_ref(), spec, conn.id, |creds| {
+                    state.http_for(creds)
+                })
                 .await
                 .map_err(|error| error.to_string())?;
             send_ping(state, &conn, &creds, config).await
@@ -213,6 +215,9 @@ async fn send_ping(
     creds: &rrouter_auth::Credentials,
     config: &QuotaPing,
 ) -> Result<(), String> {
+    // A keep-alive is an authenticated call on the account's own token: it must leave from
+    // the same address the account's real traffic does, or the ping itself is the mismatch.
+    let http = state.http_for(creds).map_err(|error| error.to_string())?;
     match conn.provider.as_str() {
         "claude" => {
             let spec = rrouter_auth::get("claude").ok_or("unknown claude provider")?;
@@ -224,7 +229,7 @@ async fn send_ping(
                 "max_tokens": 1,
                 "messages": [{"role": "user", "content": "hi"}],
             });
-            send(state, CLAUDE_URL, headers, &body).await
+            send(&http, CLAUDE_URL, headers, &body).await
         }
         "codex" => {
             let spec = rrouter_auth::get("codex").ok_or("unknown codex provider")?;
@@ -244,19 +249,19 @@ async fn send_ping(
                 "store": false,
                 "stream": true,
             });
-            send(state, CODEX_URL, headers, &body).await
+            send(&http, CODEX_URL, headers, &body).await
         }
         provider => Err(format!("{provider} has no quota ping")),
     }
 }
 
 async fn send(
-    state: &AppState,
+    http: &reqwest::Client,
     url: &str,
     headers: Vec<(String, String)>,
     body: &Value,
 ) -> Result<(), String> {
-    let mut request = state.http.post(url).timeout(PING_TIMEOUT).json(body);
+    let mut request = http.post(url).timeout(PING_TIMEOUT).json(body);
     for (name, value) in headers {
         request = request.header(name, value);
     }

@@ -973,8 +973,13 @@ async fn fetch_upstream(
 ) -> rrouter_core::Result<Value> {
     let creds = state
         .refresher
-        .fresh(state.store.as_ref(), spec, conn.id)
+        .fresh_via(state.store.as_ref(), spec, conn.id, |creds| {
+            state.http_for(creds)
+        })
         .await?;
+    // The catalogue is per account, so it leaves through that account's own address: a
+    // list request from the gateway's address would contradict every chat request.
+    let http = state.http_for(&creds)?;
 
     // Google Antigravity publishes no `GET /models`: its catalogue is a project-scoped
     // `POST /v1internal:fetchAvailableModels` on the production Cloud Code Assist host.
@@ -992,7 +997,7 @@ async fn fetch_upstream(
                 Error::Unauthorized("google-antigravity connection has no access token".to_string())
             })?;
         let (status, models) = fetch_cca_models(
-            &state.http,
+            &http,
             &rrouter_auth::antigravity::prod_base(),
             token,
             project,
@@ -1014,14 +1019,14 @@ async fn fetch_upstream(
     // Qoder's catalogue is a COSY-signed, per-account `GET`; it is also the only source of
     // the `model_config` block every envelope must carry.
     if spec.id == rrouter_auth::qoder::PROVIDER_ID {
-        let signer = rrouter_auth::qoder::resolve(&state.http, &creds).await?;
+        let signer = rrouter_auth::qoder::resolve(&http, &creds).await?;
         let base = creds
             .base_url_override
             .as_deref()
             .unwrap_or_else(|| rrouter_translate::qoder::base_for(&signer.token))
             .trim_end_matches('/')
             .to_string();
-        let catalog = rrouter_auth::qoder::catalog(&state.http, &signer, &base).await?;
+        let catalog = rrouter_auth::qoder::catalog(&http, &signer, &base).await?;
         let items = catalog
             .entries()
             .map(|(key, block)| models_registry::FetchedModel {
@@ -1063,8 +1068,7 @@ async fn fetch_upstream(
         url.push_str("?limit=1000");
     }
     let headers = provider_headers(spec, &creds)?;
-    let response = state
-        .http
+    let response = http
         .get(&url)
         .headers(headers)
         .timeout(Duration::from_secs(30))
