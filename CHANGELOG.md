@@ -9,9 +9,23 @@ All notable changes. Dates are local; versions follow semver once tagged.
 - feat(ui): usage page leads with the limit, the pace and a forecast chart ([`97a8240`](https://github.com/centopw/RRouter/commit/97a8240139f80e65be2ee343175403654c143e77))
 - feat(gateway): quota history endpoint, concurrent quota fetch, 35-day sample retention ([`e315285`](https://github.com/centopw/RRouter/commit/e31528588f1167ca8ab46cd9f94f560f304e6d26))
 
+### Bug Fixes
+
+- fix(deps): bump url to 2.5.9 for RUSTSEC-2026-0592 ([`10c6838`](https://github.com/centopw/RRouter/commit/10c6838ec7f0d20b992f2331bf2f8679393c6103))
+
 ### Performance
 
 - perf(store): let usage and compression range filters use the ts index ([`5587c47`](https://github.com/centopw/RRouter/commit/5587c47cf4fea5a8d31d256db9004ed388dea3e0))
+
+### Build & CI
+
+- ci: release builds the dashboard itself instead of trusting the committed bundle ([`005bcf2`](https://github.com/centopw/RRouter/commit/005bcf2bccba1ea954506514bcc13a4a3d545eb1))
+- ci: audit stays a visible check but no longer gates image publish ([`5be29c6`](https://github.com/centopw/RRouter/commit/5be29c6a1a33711cfee39bcf2663a48a8feb6aee))
+- ci: build and test each commit once; re-tag instead of rebuild on release ([`5f23dc5`](https://github.com/centopw/RRouter/commit/5f23dc51be6424aaa508614814357029db5c6941))
+
+### Other Changes
+
+- chore(ui): rebuild the served bundle ([`daaee8b`](https://github.com/centopw/RRouter/commit/daaee8b8922714d7120721a74c4111297c7261ba))
 
 ## 0.32.0 — 2026-11-21
 
