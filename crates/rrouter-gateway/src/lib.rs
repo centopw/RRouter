@@ -248,6 +248,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/accounts/quotas", get(routes::quotas::list))
         .route("/accounts/usage", get(routes::quotas::usage))
+        .route(
+            "/accounts/usage/{id}/history",
+            get(routes::quotas::usage_history),
+        )
         .route("/quota-pings", get(routes::quota_pings::list))
         .route(
             "/quota-pings/{connection_id}",

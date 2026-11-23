@@ -601,11 +601,23 @@ pub async fn series(
         Ok(scope) => scope,
         Err(response) => return *response,
     };
+    // One account's series: the operator-quota curve sums a single account's spend over
+    // its window. The store still applies the team scope, so a reader naming another
+    // team's account gets an empty series rather than someone else's rows.
+    let connection_id = match param("connection_id").filter(|raw| !raw.is_empty()) {
+        None => None,
+        Some(raw) => match Uuid::parse_str(&raw) {
+            Ok(id) => Some(id),
+            Err(_) => {
+                return admin_error(&Error::BadRequest("connection_id must be a uuid".into()))
+            }
+        },
+    };
     // `by=model` answers the stacked traffic chart: one row per bucket and model.
     if param("by").as_deref() == Some("model") {
         return match state
             .store
-            .usage_series_by_model_in_teams(since, bucket_secs, teams.as_deref())
+            .usage_series_by_model_in_teams(since, bucket_secs, teams.as_deref(), connection_id)
             .await
         {
             Ok(rows) => {
@@ -628,7 +640,8 @@ pub async fn series(
                     })
                     .collect();
                 ok_json(
-                    json!({ "data": data, "hours": hours, "bucket_secs": bucket_secs, "by": "model" }),
+                    json!({ "data": data, "hours": hours, "bucket_secs": bucket_secs, "by": "model",
+                            "connection_id": connection_id.map(|id| id.to_string()) }),
                 )
             }
             Err(e) => admin_error(&e),
@@ -636,7 +649,7 @@ pub async fn series(
     }
     match state
         .store
-        .usage_series_in_teams(since, bucket_secs, teams.as_deref())
+        .usage_series_in_teams(since, bucket_secs, teams.as_deref(), connection_id)
         .await
     {
         Ok(buckets) => {
@@ -656,7 +669,10 @@ pub async fn series(
                     })
                 })
                 .collect();
-            ok_json(json!({ "data": data, "hours": hours, "bucket_secs": bucket_secs }))
+            ok_json(
+                json!({ "data": data, "hours": hours, "bucket_secs": bucket_secs,
+                            "connection_id": connection_id.map(|id| id.to_string()) }),
+            )
         }
         Err(e) => admin_error(&e),
     }

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use rrouter_store::{
@@ -25,6 +25,8 @@ use crate::state::AppState;
 struct Row {
     connection: Connection,
     window: BudgetWindow,
+    /// Start of the current budget window; `null` for `total`, which never resets.
+    window_start: Option<i64>,
     max_requests: u64,
     max_tokens: u64,
     max_cost_micros: u64,
@@ -41,6 +43,7 @@ impl Row {
             "provider": self.connection.provider,
             "is_active": self.connection.is_active,
             "window": self.window.as_str(),
+            "window_start": self.window_start,
             "max_requests": self.max_requests,
             "max_tokens": self.max_tokens,
             "max_cost_micros": self.max_cost_micros,
@@ -72,6 +75,7 @@ async fn rows(state: &AppState) -> rrouter_core::Result<Vec<Row>> {
         .map(|connection| match quota.get(&connection.id) {
             Some(state) => Row {
                 window: state.quota.window,
+                window_start: window_start(state.quota.window, now),
                 max_requests: state.quota.max_requests,
                 max_tokens: state.quota.max_tokens,
                 max_cost_micros: state.quota.max_cost_micros,
@@ -82,6 +86,7 @@ async fn rows(state: &AppState) -> rrouter_core::Result<Vec<Row>> {
             },
             None => Row {
                 window: BudgetWindow::Daily,
+                window_start: daily,
                 max_requests: 0,
                 max_tokens: 0,
                 max_cost_micros: 0,
@@ -100,6 +105,67 @@ async fn rows(state: &AppState) -> rrouter_core::Result<Vec<Row>> {
 pub async fn usage(State(state): State<Arc<AppState>>) -> Response {
     match crate::provider_usage::list(&state).await {
         Ok(value) => ok_json(value),
+        Err(e) => admin_error(&e),
+    }
+}
+
+/// `GET /api/accounts/usage/{id}/history?window=<window_id>` — the sampled curve of one
+/// subscription window: at most 31 daily points, each the max percent seen that day.
+///
+/// Samples are written by the background refresh, so a day with no sample is a gap, not
+/// a zero. Admin-only with the rest of `/api/accounts/usage`.
+pub async fn usage_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<Vec<(String, String)>>,
+) -> Response {
+    let Ok(id) = Uuid::parse_str(&id) else {
+        return admin_error(&rrouter_core::Error::NotFound("connection".into()));
+    };
+    let Some(window_id) = query
+        .iter()
+        .find(|(key, _)| key == "window")
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return admin_error(&rrouter_core::Error::BadRequest(
+            "window is required".into(),
+        ));
+    };
+    match state.store.get_connection(id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return admin_error(&rrouter_core::Error::NotFound(format!("connection {id}"))),
+        Err(e) => return admin_error(&e),
+    }
+    let now = crate::now_unix();
+    // The window's own span when the provider has reported `(resets_at, window_seconds)`.
+    // A window with no known span (`extra`) or one never sampled falls back to the oldest
+    // horizon a daily chart shows.
+    let window = crate::provider_usage::cached(id).and_then(|usage| {
+        usage
+            .windows
+            .into_iter()
+            .find(|window| window.id == window_id)
+    });
+    let span = window
+        .as_ref()
+        .and_then(|window| Some(window.resets_at? - window.window_seconds?));
+    let since = span.unwrap_or(now - 30 * 86_400).max(now - 30 * 86_400);
+    match state.store.quota_ping_history(id, window_id, since).await {
+        Ok(points) => {
+            let data: Vec<Value> = points
+                .into_iter()
+                .map(|(day, used_percent)| json!({ "day": day, "used_percent": used_percent }))
+                .collect();
+            ok_json(json!({
+                "connection_id": id.to_string(),
+                "window": window_id,
+                "window_start": window
+                    .as_ref()
+                    .and_then(|w| Some(w.resets_at? - w.window_seconds?)),
+                "data": data,
+            }))
+        }
         Err(e) => admin_error(&e),
     }
 }

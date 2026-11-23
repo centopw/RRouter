@@ -255,7 +255,9 @@ Usage reads are aggregated in SQL:
 | --- | --- |
 | `GET /api/usage?hours=&limit=` | request log: id, endpoint, method/protocol, tokens, cache, latency, status, requested model, finish reason, reasoning effort/tokens, client session |
 | `GET /api/usage/series?hours=&bucket=5m\|hour\|day` | per-bucket requests, errors, tokens, cache, latency |
-| `GET /api/usage/series?by=model` | the same buckets split per model |
+| `GET /api/usage/series?by=model` | the same buckets split per model; `connection_id=<uuid>` narrows either series to one account |
+| `GET /api/accounts/usage` | each active account's provider-reported subscription windows (`id`, `used_percent`, `window_seconds`, `resets_at`) |
+| `GET /api/accounts/usage/{id}/history?window=<window_id>` | the sampled curve of one window: `{day, used_percent}` per UTC day, the day's peak, oldest first, at most 31 points; `window` is required and an unknown account is `404` |
 | `GET /api/usage/summary?hours=` | per-model totals; omit `hours` for all time |
 | `GET /api/usage/export.csv?…` | the same filters as the log, streamed CSV |
 | `GET /api/usage/{id}` | one request plus its candidate attempts |

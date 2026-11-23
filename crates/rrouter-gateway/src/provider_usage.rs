@@ -24,6 +24,9 @@ use crate::state::AppState;
 const SUCCESS_TTL: Duration = Duration::from_secs(300);
 const FAILURE_TTL: Duration = Duration::from_secs(900);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the sampled usage curve is kept. Longer than the longest provider window
+/// (30 days) so the chart's first day is not clipped by the prune.
+const SAMPLE_RETENTION: i64 = 35 * 24 * 3600;
 
 /// One subscription window: percent consumed plus when it rolls over.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -83,10 +86,6 @@ pub async fn account(state: &AppState, conn: &Connection) -> AccountUsage {
                     )
                     .await;
             }
-            let _ = state
-                .store
-                .prune_quota_ping_samples(sampled_at - 30 * 24 * 3600)
-                .await;
             AccountUsage {
                 connection_id: conn.id.to_string(),
                 provider: conn.provider.clone(),
@@ -180,20 +179,29 @@ pub fn spawn_refresh(state: std::sync::Arc<AppState>) {
     });
 }
 
+/// Accounts whose plan usage the background pass fetches: active, a supported provider,
+/// and signed in. OpenCode Go is the one API-key exception — it reports its plan through
+/// the connection's key. This gates provider calls only; the admin list still returns a
+/// row for every supported account, so an inactive or API-key account keeps its place on
+/// the providers page instead of vanishing.
+fn eligible(conn: &Connection) -> bool {
+    conn.is_active
+        && supports(&conn.provider)
+        && (conn.auth_type == "oauth" || conn.provider == "opencode-go")
+}
+
 async fn refresh_once(state: &AppState) -> Result<()> {
     let connections = state.store.list_connections(None).await?;
-    for conn in connections {
-        if !conn.is_active || !supports(&conn.provider) {
-            continue;
-        }
-        // OpenCode Go reports its plan through the connection's API key; every other
-        // provider here is a subscription sign-in.
-        if conn.auth_type != "oauth" && conn.provider != "opencode-go" {
-            continue;
-        }
+    for conn in connections.into_iter().filter(eligible) {
         // `account` caches its own answer; a cached entry costs no network I/O.
         let _ = account(state, &conn).await;
     }
+    // Prune once per pass, not on every fetch: the samples are small and the delete is a
+    // table scan, so paying it 60 times a minute per account bought nothing.
+    let _ = state
+        .store
+        .prune_quota_ping_samples(crate::now_unix() - SAMPLE_RETENTION)
+        .await;
     Ok(())
 }
 
@@ -750,17 +758,46 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// A row for an account that must not trigger a provider call: its fresh cached value if
+/// there is one, otherwise the explanation the account's fetch would have produced.
+fn without_fetch(conn: &Connection) -> AccountUsage {
+    if let Some(cached) = cache_get(conn.id) {
+        return cached;
+    }
+    AccountUsage {
+        connection_id: conn.id.to_string(),
+        provider: conn.provider.clone(),
+        name: conn.name.clone(),
+        plan: None,
+        windows: Vec::new(),
+        error: Some(if conn.is_active {
+            "API-key accounts have no plan windows".to_string()
+        } else {
+            "this account is inactive; its usage is not refreshed".to_string()
+        }),
+        fetched_at: crate::now_unix(),
+    }
+}
+
 /// JSON for the admin API: every account with a known usage endpoint.
 pub async fn list(state: &AppState) -> Result<Value> {
     let connections = state.store.list_connections(None).await?;
-    let targets: Vec<Connection> = connections
-        .into_iter()
-        .filter(|conn| supports(&conn.provider))
-        .collect();
-    let mut accounts = Vec::with_capacity(targets.len());
-    for conn in targets {
-        accounts.push(account(state, &conn).await);
-    }
+    // One provider call in flight per account instead of ten seconds per account in
+    // turn; `account` still answers from its cache without I/O. Ineligible accounts are
+    // listed without a fetch — an inactive or API-key account still needs its row.
+    let accounts = futures_util::future::join_all(
+        connections
+            .iter()
+            .filter(|conn| supports(&conn.provider))
+            .map(|conn| async move {
+                if eligible(conn) {
+                    account(state, conn).await
+                } else {
+                    without_fetch(conn)
+                }
+            }),
+    )
+    .await;
     Ok(json!({ "accounts": accounts }))
 }
 
