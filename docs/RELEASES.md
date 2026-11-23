@@ -123,18 +123,33 @@ linux-amd64,linux-arm64,darwin-arm64,darwin-amd64` (update when the matrix chang
 
 ## 5. The pipeline
 
-`release.yml` has four jobs:
+Two workflows, and nothing is built twice for one commit.
+
+**`ci.yml`** runs on every push to `main` and on pull requests. Its jobs run in parallel:
+`lint` (rustfmt, `release.py --check`, actionlint), `clippy`, `test`, `e2e` (release build
+plus the three smoke scripts), `audit`, `dashboard` (typecheck, tests, build, and a check
+that the committed `ui/dist` bundle is current) and `image`. On `main`, `publish` then
+needs all of them and moves `sha-<short>`, `main` and `latest` to the multi-arch image.
+
+**`release.yml`** runs on a `v*` tag:
 
 | Job | Permissions | Steps |
 | --- | --- | --- |
-| `prepare` | none | validate the tag is `v*`; publish `tag`/`version` outputs |
-| `create-release` (once) | `contents: write` | checkout the tag → `python3 scripts/release-notes.py <tag> --check` → render `.release-notes.md` → create/update the release with `body_path` and `generate_release_notes: false` |
-| `binaries` (matrix, 4 targets) | `contents: write`, `id-token: write`, `attestations: write` | checkout the tag → `cargo build --release --locked` → package (stable names) → SBOM → attest → `gh release upload --clobber` (assets only) |
-| `verify` (after the matrix) | `contents: read`, `attestations: read` | download the published assets → completeness, checksums, SBOM shape, SBOM reproducibility, provenance |
+| `prepare` | `contents: read` | validate the tag is `v*`; resolve the tagged commit |
+| `binaries` (matrix, 4 targets) | `contents: read` | `cargo build --release --locked` → package (stable names) → SBOM → hand the three files over as an artifact |
+| `gate` | `actions: read` | wait for `ci.yml` to finish on the tagged commit (`scripts/wait_for_ci.sh`); fail unless it passed |
+| `image` (after `gate`) | `packages: write` | re-tag CI's `sha-<short>` image as `X.Y.Z` and `X.Y` (a manifest copy, no rebuild) |
+| `publish` (after `binaries` and `gate`) | `contents: write`, `id-token: write`, `attestations: write` | validate metadata and notes → render the body → attest the tarballs → create/update the release with `generate_release_notes: false` and attach every asset |
+| `verify` (after `publish` and `image`) | `contents: read`, `attestations: read` | download the published assets → completeness, checksums, SBOM shape, SBOM reproducibility, provenance |
+
+`binaries` compile while CI runs, so a release is ready about when CI finishes. A tag on a
+commit that never passed CI on `main` publishes nothing. Push `main` and the tag together
+(`release.py --publish` does): the `gate` job waits for the CI run that the `main` push
+started.
 
 The body has exactly one writer. Before this change every matrix leg called
 `generate_release_notes: true`, so a release contained one “Full Changelog” comparison
-block per leg (four for `v0.4.1`). Now the matrix never touches the body.
+block per leg (four for `v0.4.1`). The matrix now only produces files.
 
 ### 5.1 Release notes from the changelog
 
@@ -151,20 +166,24 @@ line count/byte summary instead of the body, so it is safe in CI and locally.
 
 ### 5.2 Docker images (native, no QEMU)
 
-`docker.yml` builds each architecture on its own runner: `linux/amd64` on
+The `image` job in `ci.yml` builds each architecture on its own runner: `linux/amd64` on
 `ubuntu-24.04`, `linux/arm64` on `ubuntu-24.04-arm`. Each leg pushes an image **by
-digest** (`provenance: false`, GHA cache scoped per architecture); a single `merge` job
-downloads the two digest files and runs `docker buildx imagetools create` for the version,
-major-minor, branch/PR, short-sha and `latest` tags. Pull requests build both platforms
-without pushing and skip the merge. The `smoke` job builds a local amd64 image from the
-same GHA cache scope and runs the existing health/volume checks.
+digest** (`provenance: false`, GHA layer cache scoped per architecture, written only by
+`main`) and then starts that exact image and runs `scripts/image_smoke.sh` against it, so
+both architectures are proven runnable and there is no second compile. Pull requests build
+amd64 only, never push, and smoke the loaded image. Pushing a digest moves no tag.
+
+The Dockerfile compiles dependencies in their own layer with `cargo-chef`: a change that
+leaves `Cargo.lock` alone recompiles only the workspace crates. (`--mount=type=cache` is
+not exported by buildx's GHA cache, so a mount-based cache was cold on every runner.)
 
 Measured vs expected:
 
 | Flow | Wall clock |
 | --- | --- |
 | v0.4.1 (old): one QEMU job, `linux/amd64,linux/arm64` | **31m54s** |
-| New: two native legs in parallel (~8–12 min cold each, overlapping) + merge inspection (~1 min) + cache-hit smoke (~2–4 min) | expected ~12–16 min cold; lower with warm GHA cache. Measure the next tag and update this row. |
+| v0.32.0 (previous): tests inside the docker workflow, then two image legs, on the branch push and again on the tag | ~9 min per push, two pushes, plus a duplicate CI run |
+| Current | measure the next tag and put the number here |
 
 Workflow files are linted by `actionlint` in CI (`.github/workflows/ci.yml`, pinned image
 `rhysd/actionlint:1.7.12`); run it locally before pushing a workflow change.
@@ -199,8 +218,8 @@ Notes:
    `./scripts/verify.sh`, commits, tags and pushes `main` and `vX.Y.Z`.
 2. **Read the release notes** the workflow generated and confirm all four tarballs, four
    checksums and four SBOMs are attached.
-3. **Container image.** `docker.yml` builds and pushes the multi-arch image on the same tag,
-   but this workflow does not attest image digests. Verifying/publishing an attested image
+3. **Container image.** `ci.yml` builds the multi-arch image and `release.yml` re-tags it,
+   but nothing attests image digests. Verifying/publishing an attested image
    digest is a separate decision — until then, treat the image as unverified and prefer a
    tarball for high-assurance installs.
 4. **Homebrew tap / installer.** Formula bumps and any mirror updates are still manual.
