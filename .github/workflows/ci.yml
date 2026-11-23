@@ -6,7 +6,6 @@ name: CI
 #   clippy ┤
 #   test ──┤
 #   e2e ───┼──► publish   (push to main only: moves sha-/main/latest to the new image)
-#   audit ─┤
 #   dashboard ┤
 #   image ─┘    (native amd64 + arm64, pushed by digest; no tag moves until the rest is green)
 #
@@ -102,10 +101,11 @@ jobs:
       - name: Backup/restore drill
         run: python3 scripts/backup_restore_smoke.py
 
-  # Dependency advisories. The lockfile is clean (252 crates against the full RustSec
-  # database), so this is a real gate: a newly published advisory fails the PR and is
-  # fixed by bumping the crate, or — only when no fixed version exists — by an
-  # `audit.toml` `[advisories] ignore` entry with a review date in the comment.
+  # Dependency advisories. A newly published advisory turns this check red and is fixed by
+  # bumping the crate, or — only when no fixed version exists — by an `audit.toml`
+  # `[advisories] ignore` entry with a review date in the comment. It is advisory for
+  # `publish`: an advisory is news about a dependency, not about the commit, so it does
+  # not hold back an image. Watch the red check; it is not hidden.
   audit:
     runs-on: ubuntu-24.04
     steps:
@@ -243,7 +243,7 @@ jobs:
   # partially built or untested commit can never become `latest`. release.yml re-tags
   # `sha-<short>` to the version when a tag lands on this commit.
   publish:
-    needs: [lint, clippy, test, e2e, audit, dashboard, image]
+    needs: [lint, clippy, test, e2e, dashboard, image]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
