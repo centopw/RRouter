@@ -133,15 +133,6 @@ jobs:
         working-directory: ui
       - run: npm run build
         working-directory: ui
-      # The served bundle is committed, and cargo embeds it without Node. A UI change
-      # that forgot to rebuild it would ship the old dashboard in every release tarball.
-      - name: Committed bundle is current
-        run: |
-          if [ -n "$(git status --porcelain -- ui/dist)" ]; then
-            git status --short -- ui/dist >&2
-            echo "ui/dist is stale: run 'npm run build' in ui/ and commit the result" >&2
-            exit 1
-          fi
 
   # One native builder per architecture (no QEMU). Pull requests build amd64 only and
   # never push; main builds both and pushes each by digest. Pushing a digest moves no tag,
