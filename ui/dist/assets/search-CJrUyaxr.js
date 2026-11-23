@@ -1,1 +1,0 @@
-import{t as e}from"./shared-WPOovxm3.js";import{n as t}from"./cx-Dkd-0IPb.js";var n=t();function r(){return(0,n.jsx)(e,{capability:`search`,title:`Search`,endpoint:`POST /v1/search`})}export{r as default};
