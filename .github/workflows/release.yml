@@ -6,7 +6,7 @@ name: release
 #
 # A tag rebuilds nothing CI already built:
 #
-#   binaries (4 legs, parallel) ─┐
+#   ui ─► binaries (4 legs, parallel) ─┐
 #   gate (waits for CI on the commit) ─┼─► publish (notes, attest, upload) ─► verify
 #                                  └─► image  (re-tag the CI image: version, major.minor)
 #
@@ -64,8 +64,36 @@ jobs:
         id: sha
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  binaries:
+  # The release binaries embed `ui/dist`. The committed bundle is only a convenience for a
+  # plain `cargo build` (Vite's hashes differ between machines, so it cannot be checked for
+  # freshness), so the release builds the dashboard itself, once, and hands it to every leg.
+  ui:
     needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ui-dist
+          path: ui/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  binaries:
+    needs: [prepare, ui]
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +122,12 @@ jobs:
           # A re-run for an old tag must build that tag, not the branch it is dispatched
           # from — otherwise the provenance would name the wrong source.
           ref: ${{ needs.prepare.outputs.tag }}
+
+      # Replaces the committed bundle with this tag's own build.
+      - uses: actions/download-artifact@v8
+        with:
+          name: ui-dist
+          path: ui/dist
 
       - uses: dtolnay/rust-toolchain@stable
         with:

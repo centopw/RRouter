@@ -127,8 +127,7 @@ Two workflows, and nothing is built twice for one commit.
 
 **`ci.yml`** runs on every push to `main` and on pull requests. Its jobs run in parallel:
 `lint` (rustfmt, `release.py --check`, actionlint), `clippy`, `test`, `e2e` (release build
-plus the three smoke scripts), `audit` (advisory: it does not gate `publish`), `dashboard` (typecheck, tests, build, and a check
-that the committed `ui/dist` bundle is current) and `image`. On `main`, `publish` then
+plus the three smoke scripts), `audit` (advisory: it does not gate `publish`), `dashboard` (typecheck, tests, build) and `image`. On `main`, `publish` then
 needs the rest and moves `sha-<short>`, `main` and `latest` to the multi-arch image.
 
 **`release.yml`** runs on a `v*` tag:
@@ -136,6 +135,7 @@ needs the rest and moves `sha-<short>`, `main` and `latest` to the multi-arch im
 | Job | Permissions | Steps |
 | --- | --- | --- |
 | `prepare` | `contents: read` | validate the tag is `v*`; resolve the tagged commit |
+| `ui` | `contents: read` | build the dashboard once and hand `ui/dist` to every binary leg (the committed bundle is only a convenience for a plain `cargo build`; Vite's hashes differ between machines, so it cannot be checked for freshness) |
 | `binaries` (matrix, 4 targets) | `contents: read` | `cargo build --release --locked` → package (stable names) → SBOM → hand the three files over as an artifact |
 | `gate` | `actions: read` | wait for `ci.yml` to finish on the tagged commit (`scripts/wait_for_ci.sh`); fail unless it passed |
 | `image` (after `gate`) | `packages: write` | re-tag CI's `sha-<short>` image as `X.Y.Z` and `X.Y` (a manifest copy, no rebuild) |
