@@ -2,6 +2,17 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.33.0 — 2026-11-23
+
+### Features
+
+- feat(ui): usage page leads with the limit, the pace and a forecast chart ([`97a8240`](https://github.com/centopw/RRouter/commit/97a8240139f80e65be2ee343175403654c143e77))
+- feat(gateway): quota history endpoint, concurrent quota fetch, 35-day sample retention ([`e315285`](https://github.com/centopw/RRouter/commit/e31528588f1167ca8ab46cd9f94f560f304e6d26))
+
+### Performance
+
+- perf(store): let usage and compression range filters use the ts index ([`5587c47`](https://github.com/centopw/RRouter/commit/5587c47cf4fea5a8d31d256db9004ed388dea3e0))
+
 ## 0.32.0 — 2026-11-21
 
 ### Features
