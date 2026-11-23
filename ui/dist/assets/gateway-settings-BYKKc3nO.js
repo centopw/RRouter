@@ -1,0 +1,1 @@
+import{an as e}from"./index-DZBr_MK3.js";import{o as t}from"./api-BxlCh9DA.js";var n=[`gateway-settings`];function r(){return e({queryKey:n,queryFn:()=>t.get(`/api/settings`),staleTime:6e4})}export{r as n,n as t};

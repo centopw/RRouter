@@ -1,1 +1,0 @@
-import{t as e}from"./shared-WPOovxm3.js";import{n as t}from"./cx-Dkd-0IPb.js";var n=t();function r(){return(0,n.jsx)(e,{capability:`embeddings`,title:`Embeddings`,endpoint:`POST /v1/embeddings`,providerWording:`eligible`,eligibilityNote:`Eligible providers are OpenAI-dialect; the upstream must expose /embeddings.`})}export{r as default};
