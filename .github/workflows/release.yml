@@ -4,9 +4,15 @@ name: release
 # before installing. Every release also carries a CycloneDX SBOM per artifact and a
 # GitHub build-provenance attestation; see docs/RELEASES.md for what that proves.
 #
-# The release body is written ONCE from CHANGELOG.md by `create-release`; the matrix legs
-# only attach files to that existing release, so four legs cannot publish four bodies or
-# four duplicated "Full Changelog" blocks.
+# A tag rebuilds nothing CI already built:
+#
+#   binaries (4 legs, parallel) ─┐
+#   gate (waits for CI on the commit) ─┼─► publish (notes, attest, upload) ─► verify
+#                                  └─► image  (re-tag the CI image: version, major.minor)
+#
+# The binaries compile while CI runs, so the release is ready roughly when CI finishes. The
+# release body is written once from CHANGELOG.md by `publish`; the matrix legs only hand
+# files to it, so four legs cannot publish four bodies.
 
 on:
   push:
@@ -20,14 +26,19 @@ on:
 permissions:
   contents: write
 
+env:
+  REGISTRY: ghcr.io
+
 jobs:
   # One place decides which tag this run publishes; every later job reads its outputs.
   prepare:
     runs-on: ubuntu-24.04
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
+      sha: ${{ steps.sha.outputs.sha }}
     steps:
       - name: Validate the tag
         id: tag
@@ -43,44 +54,18 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
-  # The only job that writes the release body. It runs before the binaries so the
-  # release exists when the matrix uploads assets, and a notes failure stops the publish
-  # before any artifact is attached.
-  create-release:
-    needs: prepare
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
-          # `release.py --check` needs the tag it is validating and the commits behind it.
-          fetch-depth: 0
+          ref: ${{ steps.tag.outputs.tag }}
 
-      - name: Validate release metadata at the tag
-        run: python3 scripts/release.py --check
-
-      - name: Validate CHANGELOG notes (dry run)
-        run: python3 scripts/release-notes.py "${{ needs.prepare.outputs.tag }}" --check
-
-      - name: Render release notes
-        run: |
-          set -eu
-          python3 scripts/release-notes.py "${{ needs.prepare.outputs.tag }}" > .release-notes.md
-          test -s .release-notes.md
-
-      - name: Create or update the release once
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          body_path: .release-notes.md
-          # The body comes from CHANGELOG.md; GitHub's auto-generated comparison list
-          # would append a second, per-leg copy and duplicate it on every matrix run.
-          generate_release_notes: false
+      # `github.sha` is the event's commit; on a workflow_dispatch re-run that is the
+      # branch head, not the tag. Everything below is about the tagged commit.
+      - name: Resolve the tagged commit
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   binaries:
-    needs: [prepare, create-release]
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -100,24 +85,15 @@ jobs:
             target: x86_64-apple-darwin
             asset: darwin-amd64
     runs-on: ${{ matrix.runner }}
-    # Least privilege: the release upload, the OIDC token for attestation signing, and
-    # the attestation store. Nothing else is granted to a job that runs build scripts.
+    # A leg compiles and packages; it can write nothing to the release.
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
           # A re-run for an old tag must build that tag, not the branch it is dispatched
           # from — otherwise the provenance would name the wrong source.
           ref: ${{ needs.prepare.outputs.tag }}
-
-      - name: Resolve source commit
-        id: source
-        # `github.sha` is the event's commit; on a workflow_dispatch re-run that is the
-        # branch head, not the tag. The SBOM must describe what was actually built.
-        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -128,6 +104,7 @@ jobs:
           # Cache downloaded crates only. Restoring compiled `target/` output would let a
           # poisoned cache reach a signed release artifact.
           cache-targets: "false"
+          save-if: "false"
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
@@ -156,34 +133,136 @@ jobs:
           python3 scripts/sbom.py \
             --artifact "rrouter-${{ matrix.asset }}" \
             --version "${{ needs.prepare.outputs.version }}" \
-            --commit "${{ steps.source.outputs.commit }}" \
+            --commit "${{ needs.prepare.outputs.sha }}" \
             --output "dist/rrouter-${{ matrix.asset }}.tar.gz.sbom.cdx.json"
 
-      - name: Attest build provenance
-        # Binds each downloadable file to this workflow, repository, commit and tag.
-        # `gh attestation verify` is the documented way to check it.
-        uses: actions/attest-build-provenance@v4
+      - uses: actions/upload-artifact@v7
         with:
-          subject-path: dist/rrouter-${{ matrix.asset }}.tar.gz
+          name: release-${{ matrix.asset }}
+          path: |
+            dist/rrouter-${{ matrix.asset }}.tar.gz
+            dist/rrouter-${{ matrix.asset }}.tar.gz.sha256
+            dist/rrouter-${{ matrix.asset }}.tar.gz.sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Upload assets to the existing release
+  # A tag publishes only a commit CI already passed. It runs beside the builds, so it
+  # costs no extra wall time when CI is quick.
+  gate:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Wait for CI on the tagged commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-        # `gh release upload` attaches files only: it never touches the body that
-        # `create-release` already wrote. `--clobber` makes a re-run idempotent.
+        run: sh scripts/wait_for_ci.sh "${{ needs.prepare.outputs.sha }}"
+
+  # CI already built, smoke-tested and pushed this commit's multi-arch image as
+  # `sha-<short>`. Giving it the version tags is a manifest copy, not a rebuild.
+  image:
+    needs: [prepare, gate]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-tag the CI image with the version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${IMAGE_NAME}"
+          src="${image}:sha-${SHA::7}"
+          majmin="$(echo "$VERSION" | cut -d. -f1,2)"
+          docker buildx imagetools inspect "$src" >/dev/null \
+            || { echo "no CI image $src: the tagged commit was never built on main" >&2; exit 1; }
+          docker buildx imagetools create -t "${image}:${VERSION}" -t "${image}:${majmin}" "$src"
+          docker buildx imagetools inspect "${image}:${VERSION}"
+
+  # The only job that writes the release: notes, provenance and assets, in one place.
+  publish:
+    needs: [prepare, binaries, gate]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          # `release.py --check` needs the tag it is validating and the commits behind it.
+          fetch-depth: 0
+
+      - name: Validate release metadata at the tag
+        run: python3 scripts/release.py --check
+
+      - name: Validate CHANGELOG notes (dry run)
+        run: python3 scripts/release-notes.py "${{ needs.prepare.outputs.tag }}" --check
+
+      - name: Render release notes
         run: |
           set -eu
-          gh release upload "$TAG" \
-            "dist/rrouter-${{ matrix.asset }}.tar.gz" \
-            "dist/rrouter-${{ matrix.asset }}.tar.gz.sha256" \
-            "dist/rrouter-${{ matrix.asset }}.tar.gz.sbom.cdx.json" \
-            --clobber
+          python3 scripts/release-notes.py "${{ needs.prepare.outputs.tag }}" > .release-notes.md
+          test -s .release-notes.md
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Check every asset is present
+        run: |
+          set -eu
+          for a in linux-amd64 linux-arm64 darwin-arm64 darwin-amd64; do
+            for ext in tar.gz tar.gz.sha256 tar.gz.sbom.cdx.json; do
+              test -s "dist/rrouter-$a.$ext" || { echo "missing dist/rrouter-$a.$ext" >&2; exit 1; }
+            done
+          done
+
+      # Binds each downloadable tarball to this workflow, repository, commit and tag.
+      # `gh attestation verify` is the documented way to check it.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/rrouter-*.tar.gz
+
+      - name: Create or update the release once
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          body_path: .release-notes.md
+          # The body comes from CHANGELOG.md; GitHub's auto-generated list would append a
+          # second copy.
+          generate_release_notes: false
+          # Assets are attached by name and replaced on a re-run.
+          overwrite_files: true
+          files: dist/*
 
   # Post-publish check: verify what users actually download, not what the build workspace
   # happened to contain. A missing or swapped asset fails the workflow here.
   verify:
-    needs: [prepare, binaries]
+    needs: [prepare, publish, image]
     runs-on: ubuntu-24.04
     permissions:
       # Read-only: download the release assets and read the attestation store.
