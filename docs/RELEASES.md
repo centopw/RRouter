@@ -127,9 +127,9 @@ Two workflows, and nothing is built twice for one commit.
 
 **`ci.yml`** runs on every push to `main` and on pull requests. Its jobs run in parallel:
 `lint` (rustfmt, `release.py --check`, actionlint), `clippy`, `test`, `e2e` (release build
-plus the three smoke scripts), `audit`, `dashboard` (typecheck, tests, build, and a check
+plus the three smoke scripts), `audit` (advisory: it does not gate `publish`), `dashboard` (typecheck, tests, build, and a check
 that the committed `ui/dist` bundle is current) and `image`. On `main`, `publish` then
-needs all of them and moves `sha-<short>`, `main` and `latest` to the multi-arch image.
+needs the rest and moves `sha-<short>`, `main` and `latest` to the multi-arch image.
 
 **`release.yml`** runs on a `v*` tag:
 
