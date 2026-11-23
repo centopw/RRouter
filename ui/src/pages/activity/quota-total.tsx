@@ -1,20 +1,28 @@
 /**
- * One line of total quota across every account that actually carries an operator limit.
- * The limit and its current-window consumption come from the account quota rows (the only
- * source of limits); the roster supplies how many accounts exist, so "N of M" means what
- * it says. Accounts without a limit take no part in the average, and with no limit anywhere
- * the line is not rendered at all — a bar needs a real budget behind it.
+ * Operator quota totals on Activity, one line per window (daily / weekly / monthly).
+ *
+ * Caps of different windows are never added together: a daily $5 and a monthly $100 are
+ * not a $105 budget. Within one window the line sums one dimension — spend if any account
+ * there carries a spend cap, else tokens, else requests — over the accounts that carry that
+ * cap, and says how many of the active accounts that is. Disabled accounts take no part:
+ * they route nothing, so their caps are not budget. With no limit anywhere the component
+ * renders nothing — a bar needs a real budget behind it.
+ *
+ * Provider plan windows (`/api/accounts/usage`) are deliberately absent: they are percent
+ * only, with no absolute budget, so they cannot be summed honestly. They are shown per
+ * account on /usage (Limits card) instead.
  */
 
-import type { AccountQuotaRow, Connection } from "../../lib/api";
+import type { AccountQuotaRow, AccountQuotaWindow, Connection } from "../../lib/api";
 import { cx } from "../../components/ui";
 import { compact, pct, usd } from "../../lib/format";
+import { barFill, barText, QUOTA_WINDOWS, until } from "../providers/types";
 
 type Unit = "cost" | "tokens" | "requests";
 
 type Dimension = {
   unit: Unit;
-  /** Read in a sentence: "report a spend limit". */
+  /** Read in a sentence: "a daily spend limit". */
   noun: string;
   limit: (row: AccountQuotaRow) => number;
   used: (row: AccountQuotaRow) => number;
@@ -22,16 +30,14 @@ type Dimension = {
 };
 
 /** Money first: a spend cap is the limit an operator reads as "quota". */
-const COST: Dimension = {
-  unit: "cost",
-  noun: "spend",
-  limit: (row) => row.max_cost_micros,
-  used: (row) => row.cost_micros,
-  format: (micros) => usd(micros),
-};
-
 const DIMENSIONS: Dimension[] = [
-  COST,
+  {
+    unit: "cost",
+    noun: "spend",
+    limit: (row) => row.max_cost_micros,
+    used: (row) => row.cost_micros,
+    format: (micros) => usd(micros),
+  },
   {
     unit: "tokens",
     noun: "token",
@@ -49,57 +55,96 @@ const DIMENSIONS: Dimension[] = [
 ];
 
 export type QuotaTotal = {
+  window: AccountQuotaWindow;
   unit: Unit;
   /** How the counted limit reads in a sentence: "spend", "token", "request". */
   noun: string;
   used: number;
   limit: number;
   percent: number;
-  /** Accounts the bar covers: those carrying a limit in the counted dimension. */
+  /** Active accounts the bar covers: those with a cap in this window and dimension. */
   limited: number;
-  /** Every account the caller can see. */
+  /** Every active account the caller can see. */
   accounts: number;
   detail: string;
+  /** Earliest reset among the counted rows (unix seconds), `null` when none was given. */
+  resets_at: number | null;
 };
 
-/** A quota row states a limit only when one of its three caps is non-zero. */
+/** An active quota row that states a limit (one of its three caps is non-zero). */
 export function hasLimit(row: AccountQuotaRow): boolean {
-  return row.max_cost_micros > 0 || row.max_tokens > 0 || row.max_requests > 0;
+  return (
+    row.is_active && (row.max_cost_micros > 0 || row.max_tokens > 0 || row.max_requests > 0)
+  );
 }
 
-export function quotaTotal(
-  quotas: AccountQuotaRow[],
-  connections: Connection[],
-): QuotaTotal | null {
-  const limited = quotas.filter(hasLimit);
-  if (limited.length === 0) return null;
+/** One total per window that has any active limit, in daily → weekly → monthly order. */
+export function quotaTotals(quotas: AccountQuotaRow[], connections: Connection[]): QuotaTotal[] {
+  const active = new Set<string>(
+    connections.filter((connection) => connection.is_active).map((connection) => connection.id),
+  );
+  for (const quota of quotas) if (quota.is_active) active.add(quota.connection_id);
 
-  const dimension =
-    DIMENSIONS.find((candidate) => limited.some((row) => candidate.limit(row) > 0)) ?? COST;
-  const inDimension = limited.filter((row) => dimension.limit(row) > 0);
-  const used = inDimension.reduce((total, row) => total + dimension.used(row), 0);
-  const limit = inDimension.reduce((total, row) => total + dimension.limit(row), 0);
-
-  const roster = new Set<string>(connections.map((connection) => connection.id));
-  for (const quota of quotas) roster.add(quota.connection_id);
-
-  return {
-    unit: dimension.unit,
-    noun: dimension.noun,
-    used,
-    limit,
-    percent: limit > 0 ? (used / limit) * 100 : 0,
-    limited: inDimension.length,
-    accounts: Math.max(roster.size, limited.length),
-    detail: `${dimension.format(used)} of ${dimension.format(limit)}`,
-  };
+  const totals: QuotaTotal[] = [];
+  for (const { id: window } of QUOTA_WINDOWS) {
+    const limited = quotas.filter((row) => row.window === window && hasLimit(row));
+    if (limited.length === 0) continue;
+    const dimension = DIMENSIONS.find((candidate) =>
+      limited.some((row) => candidate.limit(row) > 0),
+    )!;
+    const counted = limited.filter((row) => dimension.limit(row) > 0);
+    const used = counted.reduce((total, row) => total + dimension.used(row), 0);
+    const limit = counted.reduce((total, row) => total + dimension.limit(row), 0);
+    const resets = counted
+      .map((row) => row.resets_at)
+      .filter((ts): ts is number => ts !== null);
+    totals.push({
+      window,
+      unit: dimension.unit,
+      noun: dimension.noun,
+      used,
+      limit,
+      percent: limit > 0 ? (used / limit) * 100 : 0,
+      limited: counted.length,
+      accounts: Math.max(active.size, counted.length),
+      detail: `${dimension.format(used)} of ${dimension.format(limit)}`,
+      resets_at: resets.length > 0 ? Math.min(...resets) : null,
+    });
+  }
+  return totals;
 }
 
-/** Muted until the window is nearly spent; colour is a warning, not decoration. */
-function fillTone(percent: number): string {
-  if (percent >= 100) return "bg-[var(--color-neg-fill)]";
-  if (percent >= 90) return "bg-[var(--color-warn)]";
-  return "bg-[var(--color-line-strong)]";
+function TotalLine({ total }: { total: QuotaTotal }) {
+  const width = Math.min(100, Math.max(0, total.percent));
+  const name = `${total.window.charAt(0).toUpperCase()}${total.window.slice(1)} ${total.noun}`;
+  const reset = until(total.resets_at);
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-small">
+      <span className="w-[112px] shrink-0 font-medium text-fg">{name}</span>
+      <span className={cx("tnum", barText(total.percent))}>{total.detail}</span>
+      <span
+        role="progressbar"
+        aria-label={`${name} quota used${reset ? `, resets in ${reset}` : ""}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(total.percent)}
+        className="h-1.5 w-full max-w-[220px] overflow-hidden rounded-full bg-rule"
+      >
+        <span
+          className={cx("block h-full rounded-full", barFill(total.percent))}
+          style={{ width: `${width}%` }}
+        />
+      </span>
+      <span className={cx("tnum", barText(total.percent))}>{pct(total.percent)}</span>
+      {reset ? <span className="text-faint tnum">resets in {reset}</span> : null}
+      <span className="text-faint tnum">
+        {total.limited} of {total.accounts} active{" "}
+        {total.accounts === 1 ? "account" : "accounts"} {total.limited === 1 ? "has" : "have"} a{" "}
+        {total.window} {total.noun}{" "}
+        limit
+      </span>
+    </div>
+  );
 }
 
 export function QuotaTotalLine({
@@ -109,35 +154,13 @@ export function QuotaTotalLine({
   quotas: AccountQuotaRow[];
   connections: Connection[];
 }) {
-  const total = quotaTotal(quotas, connections);
-  if (!total) return null;
-
-  const width = Math.min(100, Math.max(0, total.percent));
-  const tone = fillTone(total.percent);
-
+  const totals = quotaTotals(quotas, connections);
+  if (totals.length === 0) return null;
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-small">
-      <span className="font-medium text-fg">Quota this window</span>
-      <span className={cx("tnum", total.percent >= 90 ? "text-warn" : "text-muted")}>
-        {total.detail}
-      </span>
-      <span
-        role="progressbar"
-        aria-label={`total ${total.unit} quota used`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(total.percent)}
-        className="h-1.5 w-full max-w-[220px] overflow-hidden rounded-full bg-rule"
-      >
-        <span className={cx("block h-full rounded-full", tone)} style={{ width: `${width}%` }} />
-      </span>
-      <span className={cx("tnum", total.percent >= 90 ? "text-warn" : "text-muted")}>
-        {pct(total.percent)}
-      </span>
-      <span className="text-faint tnum">
-        {total.limited} of {total.accounts}{" "}
-        {total.limited === 1 ? "account reports" : "accounts report"} a {total.noun} limit
-      </span>
+    <div className="flex flex-col gap-2">
+      {totals.map((total) => (
+        <TotalLine key={total.window} total={total} />
+      ))}
     </div>
   );
 }

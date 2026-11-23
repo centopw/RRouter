@@ -180,6 +180,15 @@ export async function getAccountSubscriptions(): Promise<AccountSubscription[]> 
   return body.accounts ?? [];
 }
 
+export async function getAccountUsageHistory(
+  connectionId: string,
+  window: string,
+): Promise<AccountUsageHistory> {
+  return api.get<AccountUsageHistory>(
+    `/api/accounts/usage/${encodeURIComponent(connectionId)}/history?window=${encodeURIComponent(window)}`,
+  );
+}
+
 export async function getAccountQuotas(): Promise<AccountQuotaRow[]> {
   const body = await api.get<{ quotas?: AccountQuotaRow[] }>("/api/accounts/quotas");
   return body.quotas ?? [];
@@ -294,6 +303,26 @@ export type SubscriptionWindow = {
   used_percent: number;
   window_seconds: number | null;
   resets_at: number | null;
+};
+
+/** One UTC day of a plan window: the highest `used_percent` sampled that day. */
+export type UsageHistoryPoint = {
+  /** Unix seconds at UTC midnight. */
+  day: number;
+  used_percent: number;
+};
+
+/**
+ * `GET /api/accounts/usage/{id}/history?window=<window id>`: the current window's
+ * sampled usage, oldest first, at most 31 points. A missing day is a gap in sampling,
+ * not zero usage, so draw the points without interpolating across it.
+ */
+export type AccountUsageHistory = {
+  connection_id: string;
+  window: string;
+  /** Unix seconds the window opened (`resets_at - window_seconds`), when known. */
+  window_start: number | null;
+  data: UsageHistoryPoint[];
 };
 
 /** Plan limits read from the provider; `error` explains why there are none. */

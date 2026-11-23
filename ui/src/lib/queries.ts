@@ -1,9 +1,16 @@
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   adminToken,
   api,
   clearAccountQuota,
   getAccountSubscriptions,
+  getAccountUsageHistory,
   getAccountQuotas,
   getQuotaPings,
   ensurePlaygroundKey,
@@ -153,16 +160,46 @@ export function useAccountSubscriptions(enabled = true) {
   return useQuery({
     queryKey: qk.accountSubscriptions,
     queryFn: getAccountSubscriptions,
-    // Provider usage endpoints are shared with the vendor's own client; a minute is
-    // frequent enough for a dashboard and polite to the upstream.
+    // Provider usage endpoints are shared with the vendor's own client. Five minutes
+    // matches the server's 300s cache, so a value can be up to ~10 minutes old: the
+    // page shows each subscription's `fetched_at` instead of implying it is live.
     refetchInterval: 300_000,
     staleTime: 270_000,
     enabled,
   });
 }
 
+/**
+ * Daily usage of one account's plan window (`window` is `SubscriptionWindow.id`), for
+ * the limit chart. Samples land about every five minutes and are bucketed by day, so
+ * it polls on the subscriptions' cadence. Idle until both ids are known; admin only,
+ * like the route.
+ */
+export function useAccountUsageHistory(
+  connectionId: string | null | undefined,
+  window: string | null | undefined,
+) {
+  return useQuery({
+    queryKey: ["accounts", "usage-history", connectionId ?? "", window ?? ""] as const,
+    queryFn: () => getAccountUsageHistory(connectionId!, window!),
+    refetchInterval: 300_000,
+    staleTime: 270_000,
+    enabled: Boolean(connectionId && window),
+  });
+}
+
+/**
+ * Operator quotas and the spend of their current window. Polled so a bar does not
+ * freeze at mount while the totals beside it refresh; the query is a covering-index
+ * read, so 30s is cheap.
+ */
 export function useAccountQuotas(enabled = true) {
-  return useQuery({ queryKey: qk.accountQuotas, queryFn: getAccountQuotas, enabled });
+  return useQuery({
+    queryKey: qk.accountQuotas,
+    queryFn: getAccountQuotas,
+    refetchInterval: 30_000,
+    enabled,
+  });
 }
 
 export function useUpdateAccountQuota() {
@@ -637,6 +674,8 @@ export function useUsageSummary(hours: number | null = null, teamId?: string) {
     queryFn: () =>
       list<UsageSummaryRow>(`/api/usage/summary${suffix === "" ? "" : `?${suffix}`}`),
     refetchInterval: 15_000,
+    // A range switch changes the key; keep the old rows on screen until the new ones land.
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -655,9 +694,10 @@ export function useCompressionStats(hours: number, teamId?: string) {
 }
 
 /**
- * The same window split by (connection, provider, model). This is what makes an
- * account row exact over the whole range instead of a capped request-log sample.
- * `enabled` lets callers keep it idle when nothing is being attributed.
+ * The same window split by (connection, provider, model). Every account row on
+ * `/usage` comes from it, and folding it by (provider, model) gives exactly the
+ * provider summary, so the page needs no second query. `enabled` lets callers keep it
+ * idle when nothing is being attributed.
  */
 export function useUsageSummaryByConnection(
   hours: number | null,
@@ -671,6 +711,7 @@ export function useUsageSummaryByConnection(
     queryKey: [...qk.summaryByConnection(hours), teamId ?? ""] as const,
     queryFn: () => list<UsageSummaryByConnection>(`/api/usage/summary?${query}`),
     refetchInterval: 15_000,
+    placeholderData: keepPreviousData,
     enabled,
   });
 }

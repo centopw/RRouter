@@ -94,7 +94,7 @@
   --rr-red-800: #891c14;
   --rr-red-900: #6e2829;
   --rr-red-950: #2d1215;
-  --rr-red-fill-dark: #b92b27;
+  --rr-red-fill-dark: #e5534b; /* >= 3:1 on rule #2b364a (3.28), 4.62 on surface */
 
   /* Scrims */
   --rr-scrim-drawer-light: rgba(15, 23, 42, 0.38);

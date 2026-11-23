@@ -1,11 +1,11 @@
 /**
  * `/usage` — the consolidated consumption surface.
  *
- * Range totals and the provider/model rows are exactly what `/api/usage/summary`
- * aggregates. Account rows come from the same endpoint grouped by connection, so they
- * cover the whole range. Only when a server reports no such grouping do they fall back
- * to the capped request log, and then the table says the numbers came from it.
- * Quota columns are current-window values from the account APIs, never range totals.
+ * One range query feeds the table: `/api/usage/summary?group_by=connection`. Account
+ * rows group it by connection; provider and model rows fold the same rows, so the
+ * provider row is always the exact sum of its accounts. Quota is each account's
+ * current window from the account APIs, never a range total, so a provider with quota
+ * stays in the table even when the range has no traffic for it.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -17,25 +17,24 @@ import {
   useAccountSubscriptions,
   useConnections,
   useIsAdmin,
-  useUsage,
-  useUsageSummary,
   useUsageSummaryByConnection,
 } from "../lib/queries";
 import { providerLabel } from "./providers/types";
 import {
   addTotals,
   buildAccountNodes,
-  buildObservedAccounts,
   buildProviderNodes,
   emptyTotals,
-  isConnectionGrouped,
   mergeKnownAccounts,
+  withQuotaShells,
   type ProviderNode,
 } from "./usage/aggregate";
+import { Headline } from "./usage/headline";
+import { LimitsCard } from "./usage/limits";
+import { worstQuotaPercent } from "./usage/quota";
 import { UsageTable, type AccountInfo } from "./usage/table";
 
 const DEFAULT_RANGE: RangeId = "30d";
-const SAMPLE_LIMIT = 1000;
 
 export default function UsagePage() {
   const isAdmin = useIsAdmin();
@@ -48,24 +47,12 @@ export default function UsagePage() {
   const range = rangeOf(values.range as RangeId);
   const providerFilter = values.provider;
 
-  const summary = useUsageSummary(range.hours);
-  // Exact per-account totals. Off only when the provider summary already failed, which
-  // leaves the page in its error state anyway.
-  const connectionSummary = useUsageSummaryByConnection(range.hours, !summary.isError);
+  const summary = useUsageSummaryByConnection(range.hours);
   const connections = useConnections();
   const quotas = useAccountQuotas(isAdmin);
   const subscriptions = useAccountSubscriptions(isAdmin);
-
-  // The connection aggregate is the source of truth for account rows. A server that
-  // answers without `connection_id` has ignored `group_by`, so its rows are not
-  // per-account and the log fallback below has to carry the table (with its caveat).
-  const aggregateRows = connectionSummary.data;
-  const aggregateUsable =
-    aggregateRows !== undefined &&
-    (aggregateRows.length > 0
-      ? isConnectionGrouped(aggregateRows)
-      : (summary.data?.length ?? 0) === 0);
-  const usage = useUsage(SAMPLE_LIMIT, range.hours, undefined, !aggregateUsable);
+  // Both sources answered: only then may a bar-less account read "no limit".
+  const quotaLoaded = isAdmin && quotas.isSuccess && subscriptions.isSuccess;
 
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(() => new Set());
   const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(() => new Set());
@@ -78,7 +65,32 @@ export default function UsagePage() {
     );
   }, [providerFilter]);
 
-  const allProviders = useMemo(() => buildProviderNodes(summary.data ?? []), [summary.data]);
+  /** Providers with at least one active account that reports a limit right now. */
+  const providersWithQuota = useMemo(() => {
+    const inactive = new Set(
+      (connections.data ?? []).filter((c) => !c.is_active).map((c) => c.id),
+    );
+    const subscriptionById = new Map(
+      (subscriptions.data ?? []).map((row) => [row.connection_id, row]),
+    );
+    const out = new Set<string>();
+    for (const quota of quotas.data ?? []) {
+      if (!quota.is_active || inactive.has(quota.connection_id)) continue;
+      if (worstQuotaPercent(quota, subscriptionById.get(quota.connection_id)) !== null) {
+        out.add(quota.provider);
+      }
+    }
+    for (const subscription of subscriptions.data ?? []) {
+      if (inactive.has(subscription.connection_id)) continue;
+      if (worstQuotaPercent(undefined, subscription) !== null) out.add(subscription.provider);
+    }
+    return out;
+  }, [connections.data, quotas.data, subscriptions.data]);
+
+  const allProviders = useMemo(
+    () => withQuotaShells(buildProviderNodes(summary.data ?? []), providersWithQuota),
+    [summary.data, providersWithQuota],
+  );
 
   const providers = useMemo<ProviderNode[]>(() => {
     if (!providerFilter) return allProviders;
@@ -106,19 +118,10 @@ export default function UsagePage() {
       }
     }
     return mergeKnownAccounts(
-      aggregateUsable
-        ? buildAccountNodes(connectionSummary.data ?? [])
-        : buildObservedAccounts(usage.data ?? []),
+      buildAccountNodes(summary.data ?? []),
       [...known].map(([id, provider]) => ({ id, provider })),
     );
-  }, [
-    connections.data,
-    quotas.data,
-    subscriptions.data,
-    usage.data,
-    aggregateUsable,
-    connectionSummary.data,
-  ]);
+  }, [connections.data, quotas.data, subscriptions.data, summary.data]);
 
   const accountInfo = useMemo(() => {
     const info = new Map<string, AccountInfo>();
@@ -156,8 +159,6 @@ export default function UsagePage() {
     [subscriptions.data],
   );
 
-  const fallback = !aggregateUsable;
-  const sampleCapped = fallback && (usage.data?.length ?? 0) >= SAMPLE_LIMIT;
   const emptyText = providerFilter
     ? `No usage for ${providerLabel(providerFilter)} in the last ${range.id}.`
     : `No requests in the last ${range.id}.`;
@@ -166,7 +167,6 @@ export default function UsagePage() {
     <>
       <PageHeader
         title="Usage"
-        subtitle="Consumption and quota by provider, account and model. Totals and quota use different windows and say so."
         actions={
           <Segmented
             options={RANGES.map((item) => ({ id: item.id, label: item.id }))}
@@ -191,22 +191,17 @@ export default function UsagePage() {
         </div>
       ) : null}
 
-      <Card>
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-line px-4 py-2.5 text-caption text-faint">
-          <span>
-            Requests, tokens and spend cover the last {range.id}; quota is each account's
-            current window.
-          </span>
-          {fallback ? (
-            <span>
-              account and model rows from the request log
-              {sampleCapped
-                ? `, capped at the newest ${SAMPLE_LIMIT.toLocaleString()} requests`
-                : ""}
-            </span>
-          ) : null}
-        </div>
+      {/* Plan windows are current, not range-gated: this band ignores the range control.
+          Both render nothing without a reported window (non-admins get none), and the
+          band collapses with them. */}
+      <section
+        className="mb-4 grid items-start gap-4 empty:hidden lg:grid-cols-[minmax(0,1fr)_minmax(320px,400px)]"
+      >
+        <Headline accounts={subscriptions.data ?? []} connections={connections.data} />
+        <LimitsCard accounts={subscriptions.data ?? []} connections={connections.data} />
+      </section>
 
+      <Card>
         {summary.isError ? (
           <div className="px-4 pt-3">
             <ErrorNote error={summary.error} onRetry={() => void summary.refetch()} />
@@ -220,6 +215,8 @@ export default function UsagePage() {
           accountInfo={accountInfo}
           quotaByConnection={quotaByConnection}
           subscriptionByConnection={subscriptionByConnection}
+          showQuota={isAdmin}
+          quotaLoaded={quotaLoaded}
           loading={summary.isLoading}
           emptyText={emptyText}
           expandedProviders={expandedProviders}
@@ -242,12 +239,11 @@ export default function UsagePage() {
           }
         />
 
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-4 py-2.5 text-caption text-faint">
-          <span>Only provider-reported or operator limits get a bar; unconfigured means no limit.</span>
-          {isAdmin && (quotas.isError || subscriptions.isError) ? (
-            <span className="text-warn">quota data unavailable; usage totals are unaffected</span>
-          ) : null}
-        </div>
+        {isAdmin && (quotas.isError || subscriptions.isError) ? (
+          <div className="border-t border-line px-4 py-2.5 text-caption text-warn">
+            Quota data unavailable; usage totals are unaffected.
+          </div>
+        ) : null}
       </Card>
     </>
   );
