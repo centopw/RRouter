@@ -439,7 +439,8 @@ impl Store {
             .query_row(
                 "SELECT count(*), COALESCE(SUM(input_tokens + output_tokens), 0), \
                         COALESCE(SUM(cost_micros), 0) \
-                 FROM usage WHERE team_id = ?1 AND (?2 IS NULL OR ts >= ?2)",
+                 FROM usage WHERE team_id = ?1 \
+                 AND ts >= coalesce(?2, -9223372036854775808)",
                 params![team_id.to_string(), since],
                 |r| {
                     Ok(TeamSpend {

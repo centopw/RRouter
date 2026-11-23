@@ -2758,6 +2758,34 @@ impl Store {
         Ok(())
     }
 
+    /// One sample per UTC day for one connection and window: the day's peak
+    /// `used_percent`, oldest day first, restricted to samples at or after `since`.
+    ///
+    /// The dashboard draws a real curve from these points, so a day with no sample is
+    /// absent rather than interpolated.
+    pub async fn quota_ping_history(
+        &self,
+        connection_id: Uuid,
+        window_id: &str,
+        since: i64,
+    ) -> Result<Vec<(i64, f64)>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT (sampled_at / 86400) * 86400 AS day, max(used_percent) \
+                 FROM quota_ping_samples \
+                 WHERE connection_id = ?1 AND window_id = ?2 AND sampled_at >= ?3 \
+                 GROUP BY day ORDER BY day ASC",
+            )
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params![connection_id.to_string(), window_id, since], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+            })
+            .map_err(migrations::db_err)?;
+        rows.map(|r| r.map_err(migrations::db_err)).collect()
+    }
+
     pub async fn prune_quota_ping_samples(&self, before: i64) -> Result<usize> {
         self.conn()
             .execute(
@@ -4092,7 +4120,9 @@ impl Store {
                         coalesce(sum(CASE WHEN rtk_before > 0 THEN 1 ELSE 0 END), 0), \
                         coalesce(sum(rtk_before), 0), coalesce(sum(rtk_after), 0), \
                         coalesce(sum(caveman), 0) \
-                 FROM compression_events WHERE (?1 IS NULL OR ts >= ?1) {team_sql}"
+                 FROM compression_events \
+                 WHERE {} {team_sql}",
+                since_filter(1)
             ))
             .map_err(migrations::db_err)?;
         stmt.query_row(params_from_iter(args), |r| {
@@ -4122,7 +4152,7 @@ impl Store {
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {USAGE_COLUMNS} FROM usage \
-                 WHERE (?2 IS NULL OR ts >= ?2) \
+                 WHERE {} \
                  AND (?3 IS NULL OR ts < ?3 OR (?4 IS NOT NULL AND ts = ?3 AND id < ?4)) \
                  AND (?5 IS NULL OR provider = ?5) \
                  AND (?6 IS NULL OR model = ?6 OR (?7 IS NOT NULL AND model = ?7)) \
@@ -4130,7 +4160,8 @@ impl Store {
                  AND (?9 IS NULL \
                       OR (?9 = 'success' AND status BETWEEN 200 AND 299 AND error IS NULL) \
                       OR (?9 = 'error' AND (status >= 400 OR error IS NOT NULL))) \
-                 ORDER BY ts DESC, id DESC LIMIT ?1"
+                 ORDER BY ts DESC, id DESC LIMIT ?1",
+                since_filter(2)
             ))
             .map_err(migrations::db_err)?;
         let rows = stmt
@@ -4161,15 +4192,16 @@ impl Store {
     pub async fn usage_summary(&self, since: Option<i64>) -> Result<Vec<UsageSummary>> {
         let conn = self.conn();
         let mut stmt = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT provider, model, count(*), \
                         sum(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), \
                         sum(input_tokens), sum(output_tokens), \
                         sum(cache_read_tokens), sum(cache_write_tokens), \
                         sum(cost_micros), avg(latency_ms) \
-                 FROM usage WHERE ?1 IS NULL OR ts >= ?1 \
+                 FROM usage WHERE {} \
                  GROUP BY provider, model ORDER BY provider ASC, model ASC",
-            )
+                since_filter(1)
+            ))
             .map_err(migrations::db_err)?;
         let rows = stmt
             .query_map(params![since], |r| {
@@ -4319,7 +4351,7 @@ impl Store {
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {USAGE_COLUMNS} FROM usage \
-                 WHERE (?2 IS NULL OR ts >= ?2) \
+                 WHERE {} \
                  AND (?3 IS NULL OR ts < ?3 OR (?4 IS NOT NULL AND ts = ?3 AND id < ?4)) \
                  AND (?5 IS NULL OR provider = ?5) \
                  AND (?6 IS NULL OR model = ?6 OR (?7 IS NOT NULL AND model = ?7)) \
@@ -4328,7 +4360,8 @@ impl Store {
                       OR (?9 = 'success' AND status BETWEEN 200 AND 299 AND error IS NULL) \
                       OR (?9 = 'error' AND (status >= 400 OR error IS NOT NULL))) \
                  {team_sql} \
-                 ORDER BY ts DESC, id DESC LIMIT ?1"
+                 ORDER BY ts DESC, id DESC LIMIT ?1",
+                since_filter(2)
             ))
             .map_err(migrations::db_err)?;
         let rows = stmt
@@ -4354,8 +4387,9 @@ impl Store {
                         sum(input_tokens), sum(output_tokens), \
                         sum(cache_read_tokens), sum(cache_write_tokens), \
                         sum(cost_micros), avg(latency_ms) \
-                 FROM usage WHERE (?1 IS NULL OR ts >= ?1) {team_sql} \
-                 GROUP BY provider, model ORDER BY provider ASC, model ASC"
+                 FROM usage WHERE {} {team_sql} \
+                 GROUP BY provider, model ORDER BY provider ASC, model ASC",
+                since_filter(1)
             ))
             .map_err(migrations::db_err)?;
         let rows = stmt
@@ -4400,9 +4434,10 @@ impl Store {
                         sum(input_tokens), sum(output_tokens), \
                         sum(cache_read_tokens), sum(cache_write_tokens), \
                         sum(cost_micros), avg(latency_ms) \
-                 FROM usage WHERE (?1 IS NULL OR ts >= ?1) {team_sql} \
+                 FROM usage WHERE {} {team_sql} \
                  GROUP BY connection_id, provider, model \
-                 ORDER BY provider ASC, model ASC, connection_id ASC"
+                 ORDER BY provider ASC, model ASC, connection_id ASC",
+                since_filter(1)
             ))
             .map_err(migrations::db_err)?;
         let rows = stmt
@@ -4427,15 +4462,23 @@ impl Store {
     }
 
     /// Time buckets restricted to `teams`; see [`Store::recent_usage_in_teams`].
+    ///
+    /// `connection_id` narrows the series to one account when the dashboard asks for
+    /// an operator's spend; `None` keeps every connection, including unattributed rows.
     pub async fn usage_series_in_teams(
         &self,
         since: i64,
         bucket_secs: i64,
         teams: Option<&[Uuid]>,
+        connection_id: Option<Uuid>,
     ) -> Result<Vec<UsageBucket>> {
         let bucket_secs = bucket_secs.max(60);
-        let (team_sql, team_args) = team_filter(teams, 3);
-        let mut args: Vec<SqlValue> = vec![bucket_secs.into(), since.into()];
+        let (team_sql, team_args) = team_filter(teams, 4);
+        let mut args: Vec<SqlValue> = vec![
+            bucket_secs.into(),
+            since.into(),
+            connection_id.map(|id| id.to_string()).into(),
+        ];
         args.extend(team_args);
         let conn = self.conn();
         let mut stmt = conn
@@ -4445,7 +4488,7 @@ impl Store {
                         sum(input_tokens), sum(output_tokens), \
                         sum(cache_read_tokens), sum(cache_write_tokens), \
                         sum(cost_micros), avg(latency_ms) \
-                 FROM usage WHERE ts >= ?2 {team_sql} \
+                 FROM usage WHERE ts >= ?2 AND (?3 IS NULL OR connection_id = ?3) {team_sql} \
                  GROUP BY bucket ORDER BY bucket ASC"
             ))
             .map_err(migrations::db_err)?;
@@ -4469,15 +4512,21 @@ impl Store {
     }
 
     /// Per-model buckets restricted to `teams`; see [`Store::recent_usage_in_teams`].
+    /// `connection_id` filters to one account, matching [`Store::usage_series_in_teams`].
     pub async fn usage_series_by_model_in_teams(
         &self,
         since: i64,
         bucket_secs: i64,
         teams: Option<&[Uuid]>,
+        connection_id: Option<Uuid>,
     ) -> Result<Vec<UsageModelBucket>> {
         let bucket_secs = bucket_secs.max(60);
-        let (team_sql, team_args) = team_filter(teams, 3);
-        let mut args: Vec<SqlValue> = vec![bucket_secs.into(), since.into()];
+        let (team_sql, team_args) = team_filter(teams, 4);
+        let mut args: Vec<SqlValue> = vec![
+            bucket_secs.into(),
+            since.into(),
+            connection_id.map(|id| id.to_string()).into(),
+        ];
         args.extend(team_args);
         let conn = self.conn();
         let mut stmt = conn
@@ -4487,7 +4536,7 @@ impl Store {
                         sum(input_tokens), sum(output_tokens), \
                         sum(cache_read_tokens), sum(cache_write_tokens), \
                         sum(cost_micros), avg(latency_ms) \
-                 FROM usage WHERE ts >= ?2 {team_sql} \
+                 FROM usage WHERE ts >= ?2 AND (?3 IS NULL OR connection_id = ?3) {team_sql} \
                  GROUP BY bucket, provider, model ORDER BY bucket ASC, provider ASC, model ASC"
             ))
             .map_err(migrations::db_err)?;
@@ -4768,6 +4817,15 @@ struct RawConnection {
     team_id: Option<Uuid>,
     owner_user_id: Option<Uuid>,
     refusal: Option<String>,
+}
+
+/// `ts >= since` range predicate for a query whose `since` parameter is optional.
+///
+/// The `coalesce` keeps the comparison a plain range constraint, so SQLite searches
+/// `idx_usage_ts` (or `(team_id, ts)`) instead of scanning the table — the
+/// `(?n IS NULL OR ts >= ?n)` form this replaces disabled that index.
+fn since_filter(param: usize) -> String {
+    format!("ts >= coalesce(?{param}, -9223372036854775808)")
 }
 
 /// `(sql, args)` restricting a `usage` scan to `teams`, with numbered placeholders that
