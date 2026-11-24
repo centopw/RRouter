@@ -2,6 +2,17 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.34.0 — 2026-11-24
+
+### Features
+
+- feat(ui): redesign free mode, providers, models and usage; show requested vs routed model ([`5d0ab97`](https://github.com/centopw/RRouter/commit/5d0ab97b16a30166561ff0f6852f704d486b7db3))
+- feat(routing): zero-config free mode, stable group slugs and per-key default group ([`be82d23`](https://github.com/centopw/RRouter/commit/be82d23f7ced6f8d067591e63d6a51b19ada9d96))
+
+### Other Changes
+
+- chore(ui): rebuild the served bundle ([`d986b3f`](https://github.com/centopw/RRouter/commit/d986b3fadc8a07d4b9e6b792b71a2b043273f3fc))
+
 ## 0.33.0 — 2026-11-23
 
 ### Features
