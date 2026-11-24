@@ -51,11 +51,11 @@ curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh | s
 Pin a release or choose a directory:
 
 ```sh
-RROUTER_VERSION=v0.34.0 RROUTER_INSTALL_DIR="$HOME/bin" \
+RROUTER_VERSION=v0.34.1 RROUTER_INSTALL_DIR="$HOME/bin" \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/centopw/RRouter/main/install.sh)"
 ```
 
-`install.sh` downloads a published release; `v0.34.0` is the newest. From source:
+`install.sh` downloads a published release; `v0.34.1` is the newest. From source:
 
 ```sh
 git clone https://github.com/centopw/RRouter && cd RRouter

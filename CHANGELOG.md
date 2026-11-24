@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.34.1 — 2026-11-24
+
+### Other Changes
+
+- test(e2e): group models are advertised under the stable slug ([`5446cb9`](https://github.com/centopw/RRouter/commit/5446cb9877412fff6f2156effc58c6a2e1e92860))
+
 ## 0.34.0 — 2026-11-24
 
 ### Features
