@@ -1,19 +1,19 @@
 /**
- * One dense table for the whole Usage page: a totals row, provider rows, then the
- * accounts and models inside each provider. Expansion is local; the range and the
- * provider filter live in the URL. Requests, tokens, spend and errors cover the range;
- * the Quota column is each account's current window.
+ * Detailed drill-down table for `/usage`: totals row, provider rows, then accounts and
+ * models inside each provider. Requests, tokens, spend, and errors cover the selected
+ * range; the Quota column shows each account's current window using the shared QuotaCell.
  */
 
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, memo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { CaretRight } from "@phosphor-icons/react";
 import { Badge, Button, cx } from "../../components/ui";
-import { ProviderIcon } from "../../components/provider-icon";
 import { ago, compact, pct, splitRef, usd } from "../../lib/format";
 import type { AccountQuotaRow, AccountSubscription } from "../../lib/api";
-import { barText, providerLabel } from "../providers/types";
+import { barText } from "../providers/types";
 import { errorRateOf, type AccountNode, type ProviderNode, type Totals } from "./aggregate";
+import { resolveProviderDisplay } from "./board-model";
+import { UsageProviderIcon } from "./provider-badge";
 import { QuotaCell, worstQuotaBar, type QuotaBar } from "./quota";
 
 export type AccountInfo = { name: string | null; email: string | null; isActive: boolean | null };
@@ -21,8 +21,8 @@ export type AccountInfo = { name: string | null; email: string | null; isActive:
 /** Child models shown at a time, so a 200-model account cannot bury the next account. */
 const MODEL_PAGE = 25;
 
-const HEAD =
-  "px-3 py-2 text-right text-caption font-medium uppercase tracking-[0.06em] text-faint";
+const HEAD_LEFT = "px-3 py-2 text-left text-caption font-medium text-faint";
+const HEAD_RIGHT = "px-3 py-2 text-right text-caption font-medium text-faint";
 
 function Num({ children, className }: { children: ReactNode; className?: string }) {
   return (
@@ -39,13 +39,14 @@ function ErrorRate({ totals, className }: { totals: Totals; className?: string }
   );
 }
 
-export function UsageTable({
+export const UsageTable = memo(function UsageTable({
   providers,
   totals,
   accountsByProvider,
   accountInfo,
   quotaByConnection,
   subscriptionByConnection,
+  providerDisplayMap,
   showQuota,
   quotaLoaded,
   loading,
@@ -61,11 +62,13 @@ export function UsageTable({
   accountInfo: Map<string, AccountInfo>;
   quotaByConnection: Map<string, AccountQuotaRow>;
   subscriptionByConnection: Map<string, AccountSubscription>;
+  /** Optional catalog display names (`provider id -> display`). */
+  providerDisplayMap?: ReadonlyMap<string, string>;
   /** False for callers who cannot read quota at all: the column is not rendered. */
   showQuota: boolean;
   /**
    * True once both quota sources answered. Until then an account without a bar shows
-   * "—", never "no limit", because the absence is ours, not the account's.
+   * "—", never "Not reported", because the absence is ours, not the account's.
    */
   quotaLoaded: boolean;
   loading: boolean;
@@ -117,23 +120,23 @@ export function UsageTable({
         </caption>
         <thead>
           <tr className="border-b border-line">
-            <th scope="col" className={cx(HEAD, "px-4 text-left")}>
+            <th scope="col" className={cx(HEAD_LEFT, "px-4")}>
               Provider / account / model
             </th>
-            <th scope="col" className={cx(HEAD, "w-[88px]")}>
+            <th scope="col" className={cx(HEAD_RIGHT, "w-[88px]")}>
               Requests
             </th>
-            <th scope="col" className={cx(HEAD, "w-[96px]")}>
+            <th scope="col" className={cx(HEAD_RIGHT, "w-[96px]")}>
               Tokens
             </th>
-            <th scope="col" className={cx(HEAD, "w-[104px]")}>
+            <th scope="col" className={cx(HEAD_RIGHT, "w-[104px]")}>
               Spend
             </th>
-            <th scope="col" className={cx(HEAD, "w-[78px]")}>
+            <th scope="col" className={cx(HEAD_RIGHT, "w-[78px]")}>
               Errors
             </th>
             {showQuota ? (
-              <th scope="col" className={cx(HEAD, "w-[232px] pl-6 text-left")}>
+              <th scope="col" className={cx(HEAD_LEFT, "w-[232px] pl-6")}>
                 Quota (now)
               </th>
             ) : null}
@@ -167,15 +170,18 @@ export function UsageTable({
           const providerOpen = expandedProviders.has(node.provider);
           const accounts = accountsByProvider.get(node.provider) ?? [];
           const worst = worstByProvider.get(node.provider) ?? null;
+          const resolved = resolveProviderDisplay(node.provider, providerDisplayMap);
+          const providerFailing = node.totals.requests > 0 && errorRateOf(node.totals) >= 50;
+
           return (
-            <tbody key={node.provider}>
+            <tbody key={node.provider || "__unrouted__"}>
               <tr className="border-b border-line hover:bg-[var(--color-row-hover)]">
                 <th scope="row" className="px-4 py-2.5 text-left text-body font-medium text-fg">
                   <button
                     type="button"
                     aria-expanded={providerOpen}
                     onClick={() => onToggleProvider(node.provider)}
-                    className="flex w-full min-w-0 items-center gap-2 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-text"
+                    className="flex w-full min-w-0 items-center gap-2 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
                   >
                     <CaretRight
                       size={11}
@@ -185,8 +191,9 @@ export function UsageTable({
                         providerOpen && "rotate-90",
                       )}
                     />
-                    <ProviderIcon provider={node.provider} size={14} />
-                    <span className="truncate">{providerLabel(node.provider)}</span>
+                    <UsageProviderIcon provider={node.provider} size={14} />
+                    <span className="truncate">{resolved.label}</span>
+                    {providerFailing ? <Badge tone="neg">failing</Badge> : null}
                     <span className="shrink-0 text-caption text-faint tnum">
                       {node.models.length} {node.models.length === 1 ? "model" : "models"}
                     </span>
@@ -217,6 +224,7 @@ export function UsageTable({
                       <Fragment key={key}>
                         <AccountRow
                           account={account}
+                          isUnrouted={resolved.isUnrouted}
                           info={
                             account.connectionId
                               ? accountInfo.get(account.connectionId)
@@ -264,10 +272,11 @@ export function UsageTable({
       </table>
     </div>
   );
-}
+});
 
 function AccountRow({
   account,
+  isUnrouted,
   info,
   quota,
   subscription,
@@ -277,6 +286,7 @@ function AccountRow({
   onToggle,
 }: {
   account: AccountNode;
+  isUnrouted: boolean;
   info: AccountInfo | undefined;
   quota: AccountQuotaRow | undefined;
   subscription: AccountSubscription | undefined;
@@ -287,7 +297,10 @@ function AccountRow({
 }) {
   const id = account.connectionId;
   const name =
-    info?.name ?? quota?.name ?? subscription?.name ?? (id ? "Unnamed account" : "Unattributed");
+    info?.name ??
+    quota?.name ??
+    subscription?.name ??
+    (id ? "Unnamed account" : isUnrouted ? "Failed before dispatch" : "Unattributed");
   const planFetchedAt =
     subscription && subscription.windows.length > 0 && subscription.fetched_at > 0
       ? subscription.fetched_at
@@ -301,9 +314,9 @@ function AccountRow({
             <button
               type="button"
               aria-expanded={open}
-              aria-label={`${open ? "Hide" : "Show"} models for ${name}`}
+              aria-label={`Models for ${name}`}
               onClick={onToggle}
-              className="mt-[5px] flex shrink-0 items-center rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+              className="mt-[5px] flex shrink-0 items-center rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
             >
               <CaretRight
                 size={10}
@@ -337,7 +350,9 @@ function AccountRow({
       <AccountNums account={account} />
       {showQuota ? (
         <td className="px-3 py-2 pl-6 align-top">
-          {id === null ? null : (
+          {id === null ? (
+            <span className="text-caption text-faint">—</span>
+          ) : (
             <div className="flex flex-col gap-1">
               <QuotaCell quota={quota} subscription={subscription} loaded={quotaLoaded} />
               {planFetchedAt !== null ? (

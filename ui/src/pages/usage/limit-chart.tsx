@@ -38,6 +38,8 @@ function useWidth(): [(element: HTMLDivElement | null) => (() => void) | undefin
   const [width, setWidth] = useState(0);
   const ref = useCallback((element: HTMLDivElement | null) => {
     if (!element) return undefined;
+    const initial = Math.round(element.getBoundingClientRect().width);
+    if (initial > 0) setWidth(initial);
     const observer = new ResizeObserver(([entry]) => {
       if (entry) setWidth(Math.round(entry.contentRect.width));
     });

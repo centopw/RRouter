@@ -186,11 +186,11 @@ export function QuotaCell({
   if (subscription?.error) {
     return (
       <span className="flex max-w-[220px] flex-col text-caption">
-        <span className="text-faint">quota unavailable</span>
+        <span className="text-[var(--color-warn)]">Limits unavailable</span>
         <span className="line-clamp-2 break-words text-faint">{subscription.error}</span>
       </span>
     );
   }
   if (!loaded) return <span className="text-caption text-faint">—</span>;
-  return <span className="text-caption text-faint">no limit</span>;
+  return <span className="text-caption text-faint">Not reported</span>;
 }

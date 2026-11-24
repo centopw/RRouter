@@ -1,13 +1,15 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
-import { MagnifyingGlass, X } from "@phosphor-icons/react";
-import { Heading, SectionLabel } from "../../components/atoms";
+import { CheckCircle, MagnifyingGlass, WarningCircle, X } from "@phosphor-icons/react";
+import { Heading } from "../../components/atoms";
 import { ProviderIcon } from "../../components/provider-icon";
 import {
   Badge,
   Button,
   Card,
   CardHeader,
+  Dot,
   ErrorNote,
   Field,
   Input,
@@ -20,6 +22,7 @@ import {
   type ModelProvider,
   type OAuthProvider,
 } from "../../lib/api";
+import { ms } from "../../lib/format";
 import { useTeams } from "../../lib/queries";
 import {
   baseUrlProblem,
@@ -30,6 +33,7 @@ import {
   providerMeta,
   publishedDefaultUrl,
   useInvalidateProviders,
+  type ConnectionTestResult,
 } from "./types";
 
 export function EmptyProviders({ onAdd }: { onAdd: (() => void) | null }) {
@@ -45,15 +49,21 @@ export function EmptyProviders({ onAdd }: { onAdd: (() => void) | null }) {
       <Heading level={2} className="mt-4 text-heading font-medium">
         Connect your first provider
       </Heading>
-      <p className="mx-auto mt-1.5 max-w-[420px] text-body text-muted">
-        RRouter has nothing to route to yet. Sign in to a subscription account, or paste an API
-        key — either takes about a minute.
+      <p className="mx-auto mt-1.5 max-w-[440px] text-body text-muted">
+        RRouter has nothing to route to yet. Sign in to a subscription account, paste an API key,
+        or turn on zero-config free models.
       </p>
       {onAdd ? (
-        <div className="mt-5">
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
           <Button variant="primary" onClick={onAdd}>
             Add your first provider
           </Button>
+          <Link
+            to="/free-mode"
+            className="text-small font-medium text-[var(--color-accent-text)] underline-offset-2 hover:underline focus-visible:underline"
+          >
+            Try free models →
+          </Link>
         </div>
       ) : (
         <p className="mt-4 text-caption text-faint">
@@ -120,12 +130,20 @@ export function ProviderCodesModal({
   );
 }
 
-type AddStep = "pick" | "credential";
+type AddStep = "pick" | "credential" | "result";
+
+type DraftFields = {
+  name: string;
+  team: string;
+  baseUrl: string;
+};
+
+const EMPTY_DRAFT: DraftFields = { name: "", team: "", baseUrl: "" };
 
 /**
- * Two steps only: pick a provider (sign-in, API key, or a custom endpoint), then enter the
- * credential. Validation is inline and every branch keeps its own form; there is no
- * full-screen wizard churn between them.
+ * Pick a provider, enter the credential (API key first, focused), then save and run a
+ * live probe right inside the dialog so a bad key is caught in one click instead of on
+ * the first client request.
  */
 export function AddProviderFlow({
   open,
@@ -136,7 +154,8 @@ export function AddProviderFlow({
   subscriptionProviders,
   keyProviders,
   providers,
-  onConnected,
+  onAccountCreated,
+  onTestRecorded,
 }: {
   open: boolean;
   initialCustomProtocol: "openai" | "anthropic" | null;
@@ -148,15 +167,29 @@ export function AddProviderFlow({
   keyProviders: ModelProvider[];
   /** Every provider row, for the connection scope of a subscription sign-in. */
   providers: ModelProvider[];
-  onConnected: (label: string, warning: string | null) => void;
+  onAccountCreated: (connection: Connection) => void;
+  onTestRecorded: (result: ConnectionTestResult) => void;
 }) {
+  const { invalidate } = useInvalidateProviders();
   const [step, setStep] = useState<AddStep>("pick");
   const [keyProvider, setKeyProvider] = useState<string | null>(null);
   const [customProtocol, setCustomProtocol] = useState<"openai" | "anthropic" | null>(null);
   const [query, setQuery] = useState("");
+  const [draft, setDraft] = useState<DraftFields>(EMPTY_DRAFT);
+  const [created, setCreated] = useState<{ connection: Connection; display: string } | null>(null);
+  const [probeResult, setProbeResult] = useState<ConnectionTestResult | null>(null);
+  const [probeBusy, setProbeBusy] = useState(false);
+  const [removeError, setRemoveError] = useState<unknown>(null);
+  const probeRunId = useRef(0);
 
   useEffect(() => {
     setQuery("");
+    setDraft(EMPTY_DRAFT);
+    setCreated(null);
+    setProbeResult(null);
+    setProbeBusy(false);
+    setRemoveError(null);
+    probeRunId.current += 1;
     if (!open) {
       setStep("pick");
       setKeyProvider(null);
@@ -168,7 +201,6 @@ export function AddProviderFlow({
       setKeyProvider(initialCustomProtocol);
       setCustomProtocol(initialCustomProtocol);
     } else if (initialProvider) {
-      // Deep link: the provider is already chosen, so the flow starts on its key form.
       setStep("credential");
       setKeyProvider(initialProvider);
       setCustomProtocol(null);
@@ -179,6 +211,56 @@ export function AddProviderFlow({
     }
   }, [open, initialCustomProtocol, initialProvider]);
 
+  const runProbe = useCallback(
+    async (connectionId: string) => {
+      const run = ++probeRunId.current;
+      setProbeBusy(true);
+      setProbeResult(null);
+      setRemoveError(null);
+      try {
+        const res = await api.post<{
+          ok: boolean;
+          status: number;
+          latency_ms: number;
+          error?: string;
+        }>(`/api/connections/${connectionId}/test`);
+        if (probeRunId.current !== run) return;
+        const result: ConnectionTestResult = { id: connectionId, ...res };
+        setProbeResult(result);
+        onTestRecorded(result);
+      } catch (error) {
+        if (probeRunId.current !== run) return;
+        const message = error instanceof Error ? error.message : String(error);
+        const result: ConnectionTestResult = {
+          id: connectionId,
+          ok: false,
+          status: 0,
+          latency_ms: 0,
+          error: message,
+        };
+        setProbeResult(result);
+        onTestRecorded(result);
+      } finally {
+        if (probeRunId.current === run) setProbeBusy(false);
+      }
+    },
+    [onTestRecorded],
+  );
+
+  const removeAndRetry = useMutation({
+    mutationFn: (id: string) => api.del<{ deleted: boolean }>(`/api/connections/${id}`),
+    onSuccess: () => {
+      probeRunId.current += 1;
+      setCreated(null);
+      setProbeResult(null);
+      setProbeBusy(false);
+      setRemoveError(null);
+      invalidate();
+      setStep("credential");
+    },
+    onError: setRemoveError,
+  });
+
   const needle = query.trim().toLowerCase();
   const signIn = subscriptionProviders.filter((provider) => matchesProvider(needle, provider));
   const keyMatches = keyProviders.filter((provider) => matchesProvider(needle, provider));
@@ -187,15 +269,27 @@ export function AddProviderFlow({
 
   const choose = (provider: string, protocol: "openai" | "anthropic" | null) => {
     setQuery("");
+    setDraft(EMPTY_DRAFT);
     setKeyProvider(provider);
     setCustomProtocol(protocol);
     setStep("credential");
   };
 
+  const resetToPick = () => {
+    probeRunId.current += 1;
+    setStep("pick");
+    setKeyProvider(null);
+    setCustomProtocol(null);
+    setDraft(EMPTY_DRAFT);
+    setCreated(null);
+    setProbeResult(null);
+    setProbeBusy(false);
+    setRemoveError(null);
+  };
+
   return (
     <Modal
       onEscapeKeyDown={(event) => {
-        // The search box consumes the first Escape; a second one still closes the dialog.
         if (query !== "") {
           event.preventDefault();
           setQuery("");
@@ -204,28 +298,64 @@ export function AddProviderFlow({
       title={
         step === "pick"
           ? "Add a provider"
-          : customProtocol !== null
-            ? "Add a custom endpoint"
-            : keyProvider === "opencode"
-              ? "Add OpenCode"
-              : `Add an API key${chosenLabel ? ` · ${chosenLabel}` : ""}`
+          : step === "result"
+            ? probeBusy
+              ? `Testing ${created?.display ?? "connection"}…`
+              : probeResult?.ok
+                ? `${created?.display ?? "Provider"} connected`
+                : `${created?.display ?? "Provider"} test failed`
+            : customProtocol !== null
+              ? "Add a custom endpoint"
+              : keyProvider === "opencode"
+                ? "Add OpenCode"
+                : `Add an API key${chosenLabel ? ` · ${chosenLabel}` : ""}`
       }
       open={open}
       variant="dialog"
       width={step === "pick" ? "lg" : "md"}
       onClose={onClose}
       footer={
-        step === "credential" ? (
-          <Button
-            variant="quiet"
-            onClick={() => {
-              setStep("pick");
-              setKeyProvider(null);
-              setCustomProtocol(null);
-            }}
-          >
-            Back
-          </Button>
+        step === "result" && created ? (
+          probeBusy ? (
+            <Button variant="quiet" onClick={onClose}>
+              Close
+            </Button>
+          ) : probeResult?.ok ? (
+            <>
+              <Button variant="quiet" onClick={resetToPick}>
+                Add another
+              </Button>
+              <Button variant="primary" onClick={onClose}>
+                Done
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                variant="danger"
+                loading={removeAndRetry.isPending}
+                disabled={removeAndRetry.isPending}
+                onClick={() => removeAndRetry.mutate(created.connection.id)}
+                className="mr-auto"
+              >
+                Remove and re-enter
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={removeAndRetry.isPending}
+                onClick={() => void runProbe(created.connection.id)}
+              >
+                Retry test
+              </Button>
+              <Button
+                variant="quiet"
+                disabled={removeAndRetry.isPending}
+                onClick={onClose}
+              >
+                Keep and close
+              </Button>
+            </>
+          )
         ) : null
       }
     >
@@ -279,7 +409,7 @@ export function AddProviderFlow({
               <div className="flex flex-col gap-5">
                 <section className="flex flex-col gap-2">
                   <div className="flex items-baseline justify-between gap-3">
-                    <SectionLabel>Sign in</SectionLabel>
+                    <h3 className="text-small font-semibold text-fg">Sign in</h3>
                     <span className="text-caption text-faint">
                       subscription or account sign-in
                     </span>
@@ -318,7 +448,7 @@ export function AddProviderFlow({
 
                 <section className="flex flex-col gap-2">
                   <div className="flex items-baseline justify-between gap-3">
-                    <SectionLabel>API key</SectionLabel>
+                    <h3 className="text-small font-semibold text-fg">API key</h3>
                     <span className="text-caption text-faint tnum">
                       {keyProviders.length} available
                     </span>
@@ -396,16 +526,115 @@ export function AddProviderFlow({
 
       {step === "credential" ? (
         <div className="flex flex-col gap-4">
-          {keyProvider === "opencode" ? <OpenCodeGuide /> : null}
+          {keyProvider === "opencode" ? <OpenCodeGuide onCloseDialog={onClose} /> : null}
           <ApiKeyForm
             providers={keyProviders}
             fixedProvider={keyProvider}
             customProtocol={customProtocol}
-            onConnected={onConnected}
+            draft={draft}
+            onDraftChange={setDraft}
+            onBack={resetToPick}
+            onSaved={(connection, display) => {
+              setCreated({ connection, display });
+              setStep("result");
+              onAccountCreated(connection);
+              void runProbe(connection.id);
+            }}
           />
         </div>
       ) : null}
+
+      {step === "result" && created ? (
+        <AddTestResultPanel
+          connection={created.connection}
+          display={created.display}
+          busy={probeBusy}
+          result={probeResult}
+          removeError={removeError}
+        />
+      ) : null}
     </Modal>
+  );
+}
+
+function AddTestResultPanel({
+  connection,
+  display,
+  busy,
+  result,
+  removeError,
+}: {
+  connection: Connection;
+  display: string;
+  busy: boolean;
+  result: ConnectionTestResult | null;
+  removeError: unknown;
+}) {
+  const accountName = connection.name ?? display;
+
+  if (busy || !result) {
+    return (
+      <div className="flex flex-col gap-3" role="status" aria-live="polite">
+        <div className="flex items-center gap-3 rounded-lg border border-line bg-surface-2 px-4 py-3.5">
+          <ProviderIcon provider={connection.provider} size={24} />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-body font-medium text-fg">{accountName}</p>
+            <p className="mt-0.5 flex items-center gap-1.5 text-caption text-muted">
+              <Dot tone="muted" />
+              <span>Account saved — running a live test request…</span>
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (result.ok) {
+    return (
+      <div className="flex flex-col gap-3" role="status" aria-live="polite">
+        <div className="flex items-center gap-3 rounded-lg border border-[var(--color-pos-line)] bg-[var(--color-pos-tint)] px-4 py-3.5">
+          <ProviderIcon provider={connection.provider} size={26} />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-body font-medium text-fg">{accountName}</p>
+            <p className="mt-0.5 text-caption text-[var(--color-pos-ink)] tnum">
+              Works · HTTP {result.status} · {ms(result.latency_ms)}
+            </p>
+          </div>
+          <CheckCircle size={22} aria-hidden className="shrink-0 text-[var(--color-pos)]" />
+        </div>
+        <p className="text-caption leading-relaxed text-faint">
+          Requests can route through this account now. Credentials stay encrypted on the gateway
+          and are never returned by the API.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3" role="alert">
+      <div className="flex items-start gap-3 rounded-lg border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] px-4 py-3.5">
+        <WarningCircle
+          size={20}
+          aria-hidden
+          className="mt-0.5 shrink-0 text-[var(--color-neg)]"
+        />
+        <div className="min-w-0 flex-1">
+          <p className="text-body font-medium text-[var(--color-neg-ink)]">
+            Saved, but the live test failed{result.status ? ` · HTTP ${result.status}` : ""}
+          </p>
+          {result.error ? (
+            <p className="mt-1 break-words font-mono text-caption text-[var(--color-neg-ink)]">
+              {result.error}
+            </p>
+          ) : null}
+        </div>
+      </div>
+      <p className="text-caption leading-relaxed text-muted">
+        The account was saved so the gateway could probe it. Remove and re-enter the key if there
+        was a typo, retry the test, or keep it and adjust its endpoint later.
+      </p>
+      {removeError ? <ErrorNote error={removeError} /> : null}
+    </div>
   );
 }
 
@@ -431,25 +660,23 @@ function ProviderCatalogGrid({
           <button
             type="button"
             onClick={item.onClick}
-            className="flex h-full w-full items-center gap-3 rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-left transition-colors hover:border-[var(--color-line-strong)] hover:bg-[var(--color-selected)]"
+            className="flex h-full w-full items-center gap-3 rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-left transition-colors hover:border-[var(--color-line-strong)] hover:bg-[var(--color-selected)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
           >
             <ProviderIcon provider={item.id} size={20} />
             <span className="min-w-0 flex-1">
               <span className="flex flex-wrap items-center gap-1.5">
                 <span className="truncate text-body font-medium text-fg">{item.title}</span>
                 {item.scope === "global" ? (
-                  <Badge tone="neutral" title="a shared instance account: serves non-team keys only">
-                    connected · shared
-                  </Badge>
+                  <Badge tone="neutral">connected · shared</Badge>
                 ) : item.scope === "team" ? (
-                  <Badge tone="neutral" title="a team-owned account: serves that team's keys">
-                    connected · team
-                  </Badge>
+                  <Badge tone="neutral">connected · team</Badge>
                 ) : null}
               </span>
               <span className="mt-0.5 block truncate text-caption text-faint">{item.meta}</span>
             </span>
-            <span className="shrink-0 text-caption text-faint">→</span>
+            <span className="shrink-0 text-caption text-faint" aria-hidden>
+              →
+            </span>
           </button>
         </li>
       ))}
@@ -457,24 +684,28 @@ function ProviderCatalogGrid({
   );
 }
 
-/** OpenCode plan reference, folded away so the key form stays the first thing on screen. */
-function OpenCodeGuide() {
+/** OpenCode plan reference, folded away so the key input stays first on screen. */
+function OpenCodeGuide({ onCloseDialog }: { onCloseDialog: () => void }) {
   return (
     <details className="rounded-[var(--radius-card)] border border-line bg-surface-2/60">
       <summary className="cursor-pointer list-none px-3 py-2 text-small font-medium text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]">
-        OpenCode plans — free, pay-as-you-go, Go
+        OpenCode plans — free models, pay-as-you-go, Go
       </summary>
       <div className="flex flex-col gap-2 border-t border-line px-3 py-3">
         <p className="text-caption leading-relaxed text-muted">
-          OpenCode exposes its models through an OpenAI-compatible endpoint. All three plans reuse
-          one OpenCode API key, created in the Console.
+          OpenCode serves its models over an OpenAI-compatible API. For zero-price free models,
+          use{" "}
+          <Link
+            to="/free-mode"
+            onClick={onCloseDialog}
+            className="font-medium text-[var(--color-accent-text)] underline-offset-2 hover:underline"
+          >
+            Free mode
+          </Link>{" "}
+          — it discovers and routes them automatically. Add an OpenCode Console API key here for
+          pay-as-you-go credits or a Go plan.
         </p>
         {[
-          {
-            title: "Free",
-            meta: "limited-time free models",
-            body: "Free endpoints are available inside the OpenCode client only; from another client use a Go or pay-as-you-go key. You can still add the key here and route paid/Go models.",
-          },
           {
             title: "Pay as you go",
             meta: "Console credits",
@@ -483,7 +714,7 @@ function OpenCodeGuide() {
           {
             title: "Go / Go Plus / Go Teams",
             meta: "$10 / $40 / $20 per member monthly",
-            body: "Subscription access to the Go model list with 5-hour, weekly and monthly allowances. Upgrade or manage members in the Console.",
+            body: "Subscription access to the Go model list with 5-hour, weekly and monthly allowances.",
           },
         ].map((plan) => (
           <div key={plan.title} className="text-caption leading-relaxed">
@@ -510,10 +741,6 @@ function OpenCodeGuide() {
             Go plans and limits
           </a>
         </div>
-        <p className="text-caption leading-relaxed text-faint">
-          The OpenCode key authorises RRouter upstream. Clients calling RRouter still need a gateway
-          key from API Keys unless the server runs with RROUTER_REQUIRE_API_KEY=false.
-        </p>
       </div>
     </details>
   );
@@ -523,20 +750,24 @@ function ApiKeyForm({
   providers,
   fixedProvider,
   customProtocol,
-  onConnected,
+  draft,
+  onDraftChange,
+  onBack,
+  onSaved,
 }: {
   providers: ModelProvider[];
   fixedProvider: string | null;
   customProtocol: "openai" | "anthropic" | null;
-  onConnected: (label: string, warning: string | null) => void;
+  draft: DraftFields;
+  onDraftChange: (next: DraftFields) => void;
+  onBack: () => void;
+  onSaved: (connection: Connection, display: string) => void;
 }) {
   const { invalidate } = useInvalidateProviders();
   const teams = useTeams();
+  const teamList = teams.data ?? [];
   const [provider, setProvider] = useState(fixedProvider ?? providers[0]?.id ?? "");
-  const [name, setName] = useState("");
-  const [team, setTeam] = useState("");
   const [key, setKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [code, setCode] = useState("");
   const [codeError, setCodeError] = useState<unknown>(null);
@@ -548,54 +779,47 @@ function ApiKeyForm({
   }, [fixedProvider]);
 
   const selected = providers.find((p) => p.id === (fixedProvider ?? provider));
-  // The draft follows the selected provider's stored code, but only a provider switch
-  // resets it: a successful save refreshes `providers` and must not wipe the confirmation.
   const selectedId = selected?.id ?? "";
   useEffect(() => {
     setCode(providers.find((p) => p.id === selectedId)?.code ?? "");
     setCodeError(null);
     setCodeNotice(null);
-    // `providers` is deliberately not a dependency; see above.
+    // `providers` is deliberately not a dependency so saving a code keeps the confirmation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
   const fixedDisplay = selected?.display;
   const requiresBaseUrl = selected?.requires_base_url_override === true;
   const example = selected?.base_url_example ?? "https://<resource>.openai.azure.com";
-  const baseProblem = baseUrlProblem(baseUrl, requiresBaseUrl);
+  const baseProblem = baseUrlProblem(draft.baseUrl, requiresBaseUrl);
   const isCustom = customProtocol !== null;
   const protocol = customProtocol === null ? null : protocolLabel(customProtocol);
   const publishedDefault = publishedDefaultUrl(selected);
-  const effectiveUrl = baseUrl.trim() !== "" ? baseUrl.trim() : publishedDefault;
-  const showOverride = overrideOpen || requiresBaseUrl || isCustom;
+  const effectiveUrl = draft.baseUrl.trim() !== "" ? draft.baseUrl.trim() : publishedDefault;
   const codeIssue = codeProblemFor(code, providers, selected?.id ?? null);
-  const providerName = name.trim();
+  const providerName = draft.name.trim();
   const needsName = isCustom && providerName === "";
-  const needsBaseUrl = isCustom && baseUrl.trim() === "";
+  const needsBaseUrl = isCustom && draft.baseUrl.trim() === "";
 
   const save = useMutation({
     mutationFn: () =>
       api.post<Connection>("/api/connections", {
         provider,
         auth_type: "api_key",
-        name: isCustom ? providerName : name || null,
-        // `null` is the shared pool: instance-wide keys route here, team keys do not.
-        team_id: team === "" ? null : team,
+        name: isCustom ? providerName : providerName || null,
+        team_id: draft.team === "" ? null : draft.team,
         credentials: {
           api_key: key,
-          ...(baseUrl.trim() ? { base_url_override: baseUrl.trim() } : {}),
+          ...(draft.baseUrl.trim() ? { base_url_override: draft.baseUrl.trim() } : {}),
         },
       }),
     onSuccess: (conn) => {
-      invalidate();
       setKey("");
-      onConnected(conn.name ?? protocol ?? conn.provider, null);
+      onSaved(conn, isCustom ? providerName : (fixedDisplay ?? conn.provider));
     },
     onError: setError,
   });
 
-  // The code is a provider-level setting, so it saves on its own instead of riding on the
-  // connection POST: the operator can fix a ref before any account exists.
   const saveCode = useMutation({
     mutationFn: () => {
       if (!selected) return Promise.reject(new Error("no provider selected"));
@@ -628,19 +852,17 @@ function ApiKeyForm({
       className="flex flex-col gap-3"
       onSubmit={(e) => {
         e.preventDefault();
-        // Enter inside a field submits even when the button is disabled; the name and
-        // base URL are required here, so the guard lives with the form, not the button.
         if (!ready) return;
         save.mutate();
       }}
     >
       <Field
-        label={isCustom ? "protocol" : "provider"}
+        label={isCustom ? "Protocol" : "Provider"}
         hint={
           isCustom
             ? `${protocol} wire shape; models are added on the Models page.`
             : fixedProvider === "opencode"
-              ? "OpenCode Console key — Free, pay-as-you-go and Go keys all work."
+              ? "OpenCode Console key for pay-as-you-go or Go. Free models live under Free mode."
               : undefined
         }
       >
@@ -659,110 +881,153 @@ function ApiKeyForm({
           </Select>
         )}
       </Field>
-      <Field
-        label={isCustom ? "provider name (required)" : "label"}
-        hint={
-          isCustom
-            ? `shown in Providers and Models; the protocol stays ${protocol}`
-            : "how this account appears in the table"
-        }
-      >
-        <Input
-          value={name}
-          onChange={setName}
-          placeholder={isCustom ? "Acme Gateway" : "production-key"}
-          ariaLabel={isCustom ? "provider name" : "account label"}
-        />
-      </Field>
-      <Field
-        label="owner"
-        hint="a team account serves only that team's keys; shared serves instance-wide keys"
-      >
-        <Select value={team} onChange={setTeam} ariaLabel="connection owner team">
-          <option value="">Shared / instance-wide</option>
-          {(teams.data ?? []).map((row) => (
-            <option key={row.id} value={row.id}>
-              {row.name}
-            </option>
-          ))}
-        </Select>
-      </Field>
-      <Field label="api key" hint="stored encrypted; never returned by the API">
+
+      {/* API key comes first and takes focus immediately so pasting a key is one gesture. */}
+      <Field label="API key" hint="Stored encrypted; tested immediately after saving.">
         <Input
           value={key}
-          onChange={setKey}
+          onChange={(next) => {
+            setKey(next);
+            setError(null);
+          }}
           type="password"
           placeholder="sk-…"
           ariaLabel="api key"
+          autoFocus
         />
       </Field>
+
+      {isCustom ? (
+        <Field
+          label="Provider name"
+          hint={`Shown in Providers and Models; the protocol stays ${protocol}.`}
+        >
+          <Input
+            value={draft.name}
+            onChange={(name) => onDraftChange({ ...draft, name })}
+            placeholder="Acme Gateway"
+            ariaLabel="provider name"
+          />
+        </Field>
+      ) : null}
+
+      {isCustom || requiresBaseUrl ? (
+        <Field
+          label={requiresBaseUrl ? "Resource base URL" : "Base URL"}
+          hint={
+            requiresBaseUrl
+              ? `Your deployment's endpoint, for example ${example}. The gateway keeps the provider's API path.`
+              : "Endpoint root that serves this protocol."
+          }
+          error={baseProblem ?? undefined}
+        >
+          <Input
+            value={draft.baseUrl}
+            onChange={(baseUrl) => {
+              onDraftChange({ ...draft, baseUrl });
+              setError(null);
+            }}
+            placeholder={requiresBaseUrl ? example : "https://api.example.com/v1"}
+            ariaLabel="base url"
+            mono
+          />
+        </Field>
+      ) : null}
+
+      {!isCustom ? (
+        <Field label="Label" optional hint="How this account appears in the list.">
+          <Input
+            value={draft.name}
+            onChange={(name) => onDraftChange({ ...draft, name })}
+            placeholder="production-key"
+            ariaLabel="account label"
+          />
+        </Field>
+      ) : null}
+
+      {teamList.length > 0 ? (
+        <Field
+          label="Owner"
+          hint="Team accounts serve that team's keys; shared serves instance-wide keys."
+        >
+          <Select
+            value={draft.team}
+            onChange={(team) => onDraftChange({ ...draft, team })}
+            ariaLabel="connection owner team"
+          >
+            <option value="">Shared / instance-wide</option>
+            {teamList.map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      ) : null}
+
       <details className="group rounded-lg border border-line bg-surface-2/60">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-3 py-2 text-small font-medium text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]">
-          <span>advanced</span>
+          <span>Advanced</span>
           <span className="text-caption font-normal text-faint">endpoint · provider code</span>
         </summary>
         <div className="flex flex-col gap-3 border-t border-line px-3 py-3">
-          <div className="flex min-w-0 flex-col gap-1">
-            <span className="text-caption font-semibold text-ink-soft">
-              endpoint this account calls
-            </span>
-            <span className="break-all font-mono text-small text-fg">
-              {effectiveUrl ?? <span className="text-faint">endpoint not published</span>}
-            </span>
-            <span className="text-caption text-faint">
-              {baseUrl.trim() !== ""
-                ? "this account's override"
-                : publishedDefault
-                  ? "the provider's published endpoint"
-                  : requiresBaseUrl || isCustom
-                    ? "this provider needs your own endpoint — fill it in below"
-                    : "the build does not publish a default host for this provider; the gateway uses its compiled route"}
-            </span>
-            {showOverride ? null : (
-              <button
-                type="button"
-                onClick={() => setOverrideOpen(true)}
-                className="mt-0.5 self-start text-caption text-muted underline underline-offset-2 hover:text-fg"
-              >
-                customise for this account
-              </button>
-            )}
-          </div>
-          {showOverride ? (
-            <Field
-              label={
-                requiresBaseUrl
-                  ? "resource base URL (required)"
-                  : isCustom
-                    ? "base url (required)"
-                    : "base url override"
-              }
-              hint={
-                requiresBaseUrl
-                  ? `Your deployment's endpoint, for example ${example}. The gateway keeps the provider's API path.`
-                  : isCustom
-                    ? "required; the endpoint root that serves this protocol"
-                    : "optional, for a self-hosted or proxy endpoint"
-              }
-              error={baseProblem ?? undefined}
-            >
-              <Input
-                value={baseUrl}
-                onChange={(next) => {
-                  setBaseUrl(next);
-                  setError(null);
-                }}
-                placeholder={requiresBaseUrl ? example : "https://api.example.com/v1"}
-                ariaLabel="base url override"
-                mono
-              />
-            </Field>
+          {!isCustom && !requiresBaseUrl ? (
+            <div className="flex min-w-0 flex-col gap-1">
+              <span className="text-caption font-semibold text-ink-soft">
+                Endpoint this account calls
+              </span>
+              <span className="break-all font-mono text-small text-fg">
+                {effectiveUrl ?? <span className="text-faint">endpoint not published</span>}
+              </span>
+              <span className="text-caption text-faint">
+                {draft.baseUrl.trim() !== ""
+                  ? "This account's override"
+                  : publishedDefault
+                    ? "The provider's published endpoint"
+                    : "The gateway uses its compiled route for this provider."}
+              </span>
+              {overrideOpen || draft.baseUrl.trim() !== "" ? (
+                <div className="mt-2">
+                  <Field
+                    label="Base URL override"
+                    optional
+                    hint="For a self-hosted or proxy endpoint."
+                    error={baseProblem ?? undefined}
+                  >
+                    <Input
+                      value={draft.baseUrl}
+                      onChange={(baseUrl) => {
+                        onDraftChange({ ...draft, baseUrl });
+                        setError(null);
+                      }}
+                      placeholder="https://api.example.com/v1"
+                      ariaLabel="base url override"
+                      mono
+                    />
+                  </Field>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setOverrideOpen(true)}
+                  className="mt-0.5 self-start text-caption text-muted underline underline-offset-2 hover:text-fg"
+                >
+                  Customise for this account
+                </button>
+              )}
+            </div>
           ) : null}
 
-          <div className="flex flex-col gap-2 border-t border-line pt-3">
+          <div
+            className={
+              !isCustom && !requiresBaseUrl
+                ? "flex flex-col gap-2 border-t border-line pt-3"
+                : "flex flex-col gap-2"
+            }
+          >
             <Field
-              label="provider code"
-              hint={`the ${selected?.display ?? "provider"} segment in group/code/model`}
+              label="Provider code"
+              hint={`The ${selected?.display ?? "provider"} segment in group/code/model`}
             >
               <div className="flex items-center gap-2">
                 <Input
@@ -779,7 +1044,6 @@ function ApiKeyForm({
                   mono
                   className="max-w-[180px]"
                   onKeyDown={(event) => {
-                    // Enter here saves the code, not the connection the form posts.
                     if (event.key !== "Enter") return;
                     event.preventDefault();
                     if (
@@ -825,16 +1089,21 @@ function ApiKeyForm({
           </div>
         </div>
       </details>
+
       {error ? <ErrorNote error={error} /> : null}
       {isCustom ? (
         <p className="text-caption leading-relaxed text-faint">
           This account is added to the {customProtocol} provider. To give an endpoint its own name
-          and model ref code, create it in Provider codes (Connections card header) first.
+          and model ref code, create it in Provider codes first.
         </p>
       ) : null}
-      <div className="flex justify-end">
+
+      <div className="flex items-center justify-between gap-2 border-t border-line pt-4">
+        <Button variant="quiet" onClick={onBack} disabled={save.isPending}>
+          Back
+        </Button>
         <Button type="submit" variant="primary" loading={save.isPending} disabled={!ready}>
-          {isCustom ? "Add endpoint" : "Save provider"}
+          {isCustom ? "Add endpoint and test" : "Save and test"}
         </Button>
       </div>
     </form>
@@ -941,7 +1210,7 @@ export function ProviderCodesCard({
                 if (createReady) create.mutate();
               }}
             >
-              <Field label="name" hint="shown in every provider list">
+              <Field label="Name" hint="Shown in every provider list">
                 <Input
                   value={form.name}
                   onChange={(name) => setForm((f) => ({ ...f, name }))}
@@ -949,7 +1218,7 @@ export function ProviderCodesCard({
                   ariaLabel="provider name"
                 />
               </Field>
-              <Field label="code" hint="optional; derived from the name">
+              <Field label="Code" hint="Optional; derived from the name">
                 <Input
                   value={form.code}
                   onChange={(code) => setForm((f) => ({ ...f, code }))}
@@ -958,7 +1227,7 @@ export function ProviderCodesCard({
                   mono
                 />
               </Field>
-              <Field label="base url" hint="origin or /v1 root of the chat API">
+              <Field label="Base URL" hint="Origin or /v1 root of the chat API">
                 <Input
                   value={form.base_url}
                   onChange={(base_url) => setForm((f) => ({ ...f, base_url }))}
@@ -967,7 +1236,7 @@ export function ProviderCodesCard({
                   mono
                 />
               </Field>
-              <Field label="protocol" hint="the wire shape the endpoint speaks">
+              <Field label="Protocol" hint="The wire shape the endpoint speaks">
                 <Select
                   value={form.dialect}
                   onChange={(dialect) =>
@@ -995,11 +1264,7 @@ export function ProviderCodesCard({
                 <ProviderIcon provider={provider.id} size={17} />
                 <span className="min-w-0 break-words font-medium">{provider.display}</span>
                 <span className="font-mono text-caption text-faint">{provider.id}</span>
-                {provider.custom ? (
-                  <Badge tone="accent" title="operator-defined endpoint">
-                    custom
-                  </Badge>
-                ) : null}
+                {provider.custom ? <Badge tone="accent">custom</Badge> : null}
                 <span className="ml-auto flex items-center gap-2">
                   {editing === provider.id ? (
                     <>

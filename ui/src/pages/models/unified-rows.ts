@@ -1,5 +1,7 @@
-import type { Alias, Combo, ComboStrategy, Model } from "../../lib/api";
+import type { Alias, Capabilities, Combo, ComboStrategy, Model } from "../../lib/api";
 import type { DraftEntry } from "../../lib/layout-draft";
+import { compact } from "../../lib/format.ts";
+import { isFree, rangeText, type NumberRange } from "./price.ts";
 
 /**
  * One row of the unified Models table. A model is a registry row; an alias or combo is a
@@ -76,13 +78,315 @@ export function nameRef(name: string): string {
 }
 
 /**
- * The second line of a name row: what it resolves to, which its page owns. A combo carries
- * no aggregate metadata in Phase 1, so it says so rather than borrowing a member's numbers.
+ * Per-member resolution from `combo_meta.rs` (additive wire on `/api/combos`).
+ * `Combo` in `lib/api.ts` predates it, so it is read additively with fallback to `models[]`.
+ */
+export type ComboMemberState = "exact" | "fanout" | "core" | "disabled" | "unknown";
+
+export type ComboMember = {
+  ref: string;
+  state: ComboMemberState;
+  via_alias?: string | null;
+  model: Model | null;
+  targets: Model[];
+};
+
+export type ComboPricing = {
+  input: NumberRange;
+  output: NumberRange;
+  cache_read?: NumberRange;
+  cache_write?: NumberRange;
+  known: number;
+  total: number;
+};
+
+/**
+ * The fold `/api/combos` sends (`combo_meta.rs`, additive wire). Older gateways omit it,
+ * in which case the row says `metadata —` rather than borrowing member 1's numbers.
+ */
+export type ComboAggregate = {
+  context: NumberRange | null;
+  max_output: NumberRange | null;
+  pricing: ComboPricing | null;
+  guaranteed_capabilities?: Capabilities | null;
+  supported_capabilities?: Capabilities | null;
+  deprecated_members?: number;
+  all_deprecated?: boolean;
+  availability: "ok" | "no-targets" | "router-unavailable";
+  router?: { ref: string; model: Model | null } | null;
+};
+
+type ComboWithMeta = Combo & {
+  members?: ComboMember[] | null;
+  aggregate?: ComboAggregate | null;
+};
+
+export function aggregateOf(combo: Combo): ComboAggregate | null {
+  return (combo as ComboWithMeta).aggregate ?? null;
+}
+
+export function membersOf(combo: Combo): ComboMember[] | null {
+  const members = (combo as ComboWithMeta).members;
+  return Array.isArray(members) ? members : null;
+}
+
+/**
+ * Qualified token ceiling range for a combo. Never mimics a single model's bare `ctx 256K`:
+ * equal bounds say `all candidates`, unequal bounds say `guaranteed … · up to …`, and
+ * missing bounds stay `null` so nothing is invented.
+ */
+export function qualifiedTokenRange(
+  range: NumberRange | null | undefined,
+  unit: string,
+): string | null {
+  if (!range) return null;
+  if (range.min !== null && range.max !== null) {
+    if (range.min === range.max) return `all candidates ${compact(range.min)} ${unit}`;
+    return `guaranteed ${compact(range.min)} · up to ${compact(range.max)} ${unit}`;
+  }
+  if (range.min !== null) return `guaranteed ${compact(range.min)} ${unit}`;
+  if (range.max !== null) return `up to ${compact(range.max)} ${unit}`;
+  return null;
+}
+
+/**
+ * Free only when every candidate has a known price and the most expensive one is zero on
+ * every published dimension: one unpriced member may route to a paid model, so not free.
+ */
+export function comboIsFree(
+  aggregate: ComboAggregate | null,
+  combo?: Combo,
+  modelByRef?: ReadonlyMap<string, Model>,
+): boolean {
+  const pricing = aggregate?.pricing;
+  if (pricing) {
+    const cacheReadMax = pricing.cache_read?.max ?? 0;
+    const cacheWriteMax = pricing.cache_write?.max ?? 0;
+    return Boolean(
+      pricing.total > 0 &&
+        pricing.known === pricing.total &&
+        pricing.input.max === 0 &&
+        pricing.output.max === 0 &&
+        cacheReadMax === 0 &&
+        cacheWriteMax === 0,
+    );
+  }
+  // Fallback only when an older gateway omits `aggregate`: require every stored candidate
+  // to resolve in the registry with a proven zero price.
+  if (!aggregate && combo && combo.models.length > 0 && modelByRef) {
+    return combo.models.every((ref) => {
+      const m = modelByRef.get(ref);
+      return m !== undefined && isFree(m.cost);
+    });
+  }
+  return false;
+}
+
+/** Qualified candidate price text for a combo; null when free (the badge carries it). */
+export function comboPriceText(aggregate: ComboAggregate | null): string | null {
+  if (!aggregate) return null;
+  if (comboIsFree(aggregate)) return "Free";
+  const pricing = aggregate.pricing;
+  if (!pricing) return "price —";
+  const input = rangeText(pricing.input);
+  const output = rangeText(pricing.output);
+  if (!input || !output) return "price —";
+  const equal =
+    pricing.input.min === pricing.input.max && pricing.output.min === pricing.output.max;
+  const base = equal
+    ? `all candidates ${input} in · ${output} out /1M`
+    : `${input} in · ${output} out /1M · candidate range`;
+  return pricing.known < pricing.total ? `${base} (${pricing.known}/${pricing.total} priced)` : base;
+}
+
+/** Why a combo cannot route right now, in the row's words; null when it can. */
+export function comboBlocked(aggregate: ComboAggregate | null): string | null {
+  if (!aggregate) return null;
+  if (aggregate.availability === "no-targets") return "no candidate is connected";
+  if (aggregate.availability === "router-unavailable") return "router model unavailable";
+  return null;
+}
+
+/**
+ * Capability split for a combo: `guaranteed` (every candidate supports) and `someOnly`
+ * (supported by at least one candidate, not all). Both are `null` when unknown.
+ */
+export function comboCapabilitySplit(aggregate: ComboAggregate | null): {
+  guaranteed: Array<keyof Capabilities>;
+  someOnly: Array<keyof Capabilities>;
+  known: boolean;
+} {
+  const g = aggregate?.guaranteed_capabilities;
+  const s = aggregate?.supported_capabilities;
+  if (!g && !s) return { guaranteed: [], someOnly: [], known: false };
+  const keys = [
+    "vision",
+    "pdf",
+    "audio_input",
+    "video_input",
+    "image_output",
+    "audio_output",
+    "tools",
+    "reasoning",
+    "search",
+  ] as const satisfies ReadonlyArray<keyof Capabilities>;
+  const guaranteed = g ? keys.filter((key) => g[key] === true) : [];
+  const guaranteedSet = new Set(guaranteed);
+  const someOnly = s ? keys.filter((key) => s[key] === true && !guaranteedSet.has(key)) : [];
+  return { guaranteed, someOnly, known: true };
+}
+
+/**
+ * The second line of a name row. An alias names its target. A combo states the candidate
+ * range the gateway folded (guaranteed floor to best case), never one member's numbers;
+ * without the fold it says `metadata —`.
  */
 export function nameDetail(row: AliasRow | ComboRow): string {
   if (row.kind === "alias") return `alias → ${row.alias.target}`;
-  const count = `${row.combo.models.length.toLocaleString()} candidate${row.combo.models.length === 1 ? "" : "s"}`;
-  return `${count} · metadata —`;
+  const n = row.combo.models.length;
+  const count = `${n.toLocaleString()} candidate${n === 1 ? "" : "s"}`;
+  const aggregate = aggregateOf(row.combo);
+  if (!aggregate) return `${count} · metadata —`;
+  const parts = [count];
+  const ctx = qualifiedTokenRange(aggregate.context, "ctx");
+  parts.push(ctx ?? "ctx —");
+  const price = comboPriceText(aggregate);
+  if (price && price !== "Free") parts.push(price);
+  return parts.join(" · ");
+}
+
+/**
+ * Whether a row is proven free: a model priced at zero, an alias whose target is, or a
+ * combo whose every candidate is. A row whose price is unknown is never free.
+ */
+export function rowIsFree(
+  row: UnifiedRow,
+  modelByRef: ReadonlyMap<string, Model>,
+): boolean {
+  if (row.kind === "model") return isFree(row.model?.cost);
+  if (row.kind === "alias") return isFree(modelByRef.get(row.alias.target)?.cost);
+  return comboIsFree(aggregateOf(row.combo), row.combo, modelByRef);
+}
+
+/**
+ * Single source of truth for whether a row can actually serve a request right now.
+ * Separate from preset visibility (`routed`/`hidden`) so header summaries and row badges
+ * can never disagree.
+ */
+export function rowIsAvailable(
+  row: UnifiedRow,
+  modelByRef: ReadonlyMap<string, Model>,
+): boolean {
+  if (row.kind === "model") {
+    return row.model !== null && row.model.enabled && row.model.available;
+  }
+  if (row.kind === "alias") {
+    const target = modelByRef.get(row.alias.target);
+    return target !== undefined && target.enabled && target.available;
+  }
+  const aggregate = aggregateOf(row.combo);
+  if (aggregate) return aggregate.availability === "ok";
+  return row.combo.models.some((ref) => {
+    const candidate = modelByRef.get(ref);
+    return candidate !== undefined && candidate.enabled && candidate.available;
+  });
+}
+
+export type RowsSummary = {
+  total: number;
+  routed: number;
+  available: number;
+  routedAvailable: number;
+  free: number;
+  routedFree: number;
+};
+
+/** One summary pass over the unified row set so subtitle and badges always agree. */
+export function summarizeRows(
+  rows: readonly UnifiedRow[],
+  modelByRef: ReadonlyMap<string, Model>,
+): RowsSummary {
+  let routed = 0;
+  let available = 0;
+  let routedAvailable = 0;
+  let free = 0;
+  let routedFree = 0;
+  for (const row of rows) {
+    const isRouted = row.status === "routed";
+    const isAvail = rowIsAvailable(row, modelByRef);
+    const freeRow = rowIsFree(row, modelByRef);
+    if (isRouted) routed += 1;
+    if (isAvail) available += 1;
+    if (isRouted && isAvail) routedAvailable += 1;
+    if (freeRow) free += 1;
+    if (isRouted && freeRow) routedFree += 1;
+  }
+  return {
+    total: rows.length,
+    routed,
+    available,
+    routedAvailable,
+    free,
+    routedFree,
+  };
+}
+
+export type EmptyStateKind =
+  | "error"
+  | "filtered_free"
+  | "filtered"
+  | "preset_empty"
+  | "all_disabled"
+  | "all_hidden"
+  | "no_routed"
+  | "none_hidden"
+  | "none_disabled"
+  | "none_unrouted"
+  | "empty";
+
+/**
+ * Pure empty-state classifier so filters (`kind`, `free`, `provider`, `custom`, `q`) and
+ * API errors never produce a false "This preset has no models" message.
+ */
+export function emptyStateKind({
+  hasError,
+  query,
+  providerIsAll,
+  kindIsAll,
+  customOnly,
+  freeOnly,
+  statusAware,
+  statuses,
+  draftEntryCount,
+  counts,
+}: {
+  hasError: boolean;
+  query: string;
+  providerIsAll: boolean;
+  kindIsAll: boolean;
+  customOnly: boolean;
+  freeOnly: boolean;
+  statusAware: boolean;
+  statuses: ReadonlySet<string>;
+  draftEntryCount: number;
+  counts: { routed: number; hidden: number; disabled: number; unrouted: number };
+}): EmptyStateKind {
+  if (hasError) return "error";
+  if (freeOnly) return "filtered_free";
+  if (query !== "" || !providerIsAll || !kindIsAll || customOnly) return "filtered";
+  if (statusAware && statuses.size === 1) {
+    if (statuses.has("routed")) {
+      if (draftEntryCount === 0 && counts.unrouted > 0) return "preset_empty";
+      if (counts.disabled > 0 && counts.hidden === 0) return "all_disabled";
+      if (counts.hidden > 0) return "all_hidden";
+      if (counts.unrouted > 0) return "preset_empty";
+      return "no_routed";
+    }
+    if (statuses.has("hidden")) return "none_hidden";
+    if (statuses.has("disabled")) return "none_disabled";
+    if (statuses.has("unrouted")) return "none_unrouted";
+  }
+  return "empty";
 }
 
 /**
@@ -126,9 +430,7 @@ export function rowsFor({
     const ref = nameRef(alias.alias);
     // One ref renders once. Routing resolves an alias before a combo of the same name
     // (alias → explicit provider/model → combo), so when a name exists as both, the
-    // alias row owns the ref and the combo row is dropped. Registry refs are
-    // provider-qualified and `rrouter` is reserved as the name namespace, so this guard
-    // is a guarantee rather than the expected path.
+    // alias row owns the ref and the combo row is dropped.
     if (claimed.has(ref)) continue;
     claimed.add(ref);
     const entry = entries.get(ref);
@@ -143,8 +445,6 @@ export function rowsFor({
   }
   for (const combo of combos ?? []) {
     const ref = nameRef(combo.name);
-    // Already claimed by an alias (or a duplicate combo): same rule as above — the ref
-    // is the row identity for React keys, the group select and the /v1 toggle.
     if (claimed.has(ref)) continue;
     claimed.add(ref);
     const entry = entries.get(ref);

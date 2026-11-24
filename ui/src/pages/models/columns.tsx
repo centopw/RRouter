@@ -1,21 +1,34 @@
 import { useMemo } from "react";
-import { Trash } from "@phosphor-icons/react";
+import { Link } from "react-router-dom";
 import { Badge, CopyIconButton, cx } from "../../components/ui";
-import { IconButton, Toggle } from "../../components/atoms";
+import { Toggle } from "../../components/atoms";
 import { CapabilityChips } from "../../components/capability-chips";
 import type { Column } from "../../components/table";
-import { compact } from "../../lib/format";
 import type { Model } from "../../lib/api";
 import type { DraftGroup } from "../../lib/layout-draft";
-import { RowMenu, TestButton, groupProviderRef, priceLabel } from "./rows";
+import { alsoMatches, canonicalRef } from "../../lib/model-ref";
+import type { ModelTestOutcome } from "./actions";
+import {
+  AvailabilityBadge,
+  FreeBadge,
+  ModelMetaLine,
+  ModelPreviewBody,
+  PROVIDER_LINK,
+  RowMenu,
+  RowPreview,
+  TestButton,
+  TestOutcomeInline,
+} from "./rows";
+import { isFree } from "./price";
 
 /**
- * The registry row, shared by the sortable board and the plain table: one definition, so a
+ * The registry row, shared by the sortable board and the flat table: one definition, so a
  * price, a capability or a badge can never drift between the two.
  */
 export type ModelColumnsOptions = {
   isAdmin: boolean;
   testTarget: string | null;
+  testResults?: ReadonlyMap<string, ModelTestOutcome>;
   toggleTarget: string | null;
   removeTarget: string | null;
   onTest: (model: Model) => void;
@@ -38,6 +51,7 @@ export type ModelColumnsOptions = {
 export function useModelColumns({
   isAdmin,
   testTarget,
+  testResults,
   toggleTarget,
   removeTarget,
   onTest,
@@ -60,73 +74,90 @@ export function useModelColumns({
       {
         key: "model",
         title: "model",
+        wrap: true,
         render: (m) => {
-          const reference = groupProviderRef(m, groupOf?.(m.ref), groups);
+          const groupId = groupOf?.(m.ref);
+          const reference = canonicalRef(m, groups, groupId);
+          const otherSpellings = alsoMatches(m, groups, groupId);
+          const outcome = testResults?.get(m.ref);
           return (
-          <div className="flex min-w-0 flex-col">
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <span className="sr-only">Model </span>
-              {/* The badge never shrinks: a truncated provider reads as a different one. */}
-              <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-caption uppercase tracking-[0.06em] text-muted">
-                {m.provider}
-              </span>
-              <span
-                title={m.ref}
-                className={cx(
-                  // Break instead of truncating: long ids are the norm and a clipped
-                  // name reads as a different model. `min-w-0` lets the flex item wrap
-                  // inside the cell rather than widen the table.
-                  "min-w-0 break-all font-mono text-small",
-                  m.enabled ? "text-fg" : "text-faint",
-                )}
-              >
-                {m.id}
-              </span>
-              <CopyIconButton
-                value={reference}
-                label={`Copy model reference ${reference}`}
-              />
-              {m.source === "custom" ? (
-                <span className="shrink-0">
-                  <Badge tone="accent" title="added by an operator, not synced from the provider">
-                    custom
-                  </Badge>
-                </span>
-              ) : null}
-              {m.deprecated ? (
-                <span className="shrink-0">
-                  <Badge tone="warn" title="this family is retired by its provider">
-                    deprecated
-                  </Badge>
-                </span>
-              ) : null}
-              {m.enabled ? null : (
-                <span className="shrink-0">
-                  <Badge tone="neutral" title="the gateway refuses this id on every endpoint">
-                    disabled
-                  </Badge>
-                </span>
-              )}
-            </div>
-            {m.display && m.display !== m.id ? (
-              <div className="mt-0.5 min-w-0 truncate text-caption text-faint">{m.display}</div>
-            ) : null}
-            {reference !== m.ref ? (
-              <div className="mt-0.5 min-w-0 break-all font-mono text-caption text-faint">
-                {reference}
+            <div className="flex min-w-0 flex-col">
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                <span className="sr-only">Model </span>
+                <Link
+                  to="/providers"
+                  aria-label={`View ${m.provider} on Providers`}
+                  className={PROVIDER_LINK}
+                >
+                  {m.provider}
+                </Link>
+                <RowPreview
+                  label={`Details for ${reference}`}
+                  trigger={
+                    <span
+                      className={cx(
+                        // Break instead of truncating: long ids are the norm and a clipped
+                        // name reads as a different model.
+                        "min-w-0 break-all font-mono text-small",
+                        m.enabled ? "text-fg" : "text-faint",
+                      )}
+                    >
+                      {m.id}
+                    </span>
+                  }
+                  content={
+                    <ModelPreviewBody
+                      model={m}
+                      reference={reference}
+                      otherSpellings={otherSpellings}
+                      testOutcome={outcome}
+                    />
+                  }
+                />
+                <CopyIconButton
+                  value={reference}
+                  label={`Copy model name ${reference}`}
+                />
+                {m.source === "custom" ? (
+                  <span className="shrink-0">
+                    <Badge tone="accent" title="added by an operator, not synced from the provider">
+                      custom
+                    </Badge>
+                  </span>
+                ) : null}
+                {m.deprecated ? (
+                  <span className="shrink-0">
+                    <Badge tone="warn" title="this family is retired by its provider">
+                      deprecated
+                    </Badge>
+                  </span>
+                ) : null}
+                {!m.enabled ? (
+                  <span className="shrink-0">
+                    <Badge tone="neutral" title="the gateway refuses this id on every endpoint">
+                      disabled
+                    </Badge>
+                  </span>
+                ) : !m.available ? (
+                  <AvailabilityBadge linked={isAdmin} />
+                ) : null}
+                {isFree(m.cost) ? <FreeBadge linked={isAdmin} /> : null}
               </div>
-            ) : null}
-            {/* The metadata rides here and nowhere else: the table has no separate
-                context, max-output, price or capability columns. */}
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption text-faint">
-              <span className="whitespace-nowrap tnum">ctx {compact(m.context)}</span>
-              <span className="whitespace-nowrap tnum">max {compact(m.max_output)}</span>
-              {priceLabel(m) ? (
-                <span className="whitespace-nowrap tnum">{priceLabel(m)}</span>
+              {m.display && m.display !== m.id ? (
+                <div className="mt-0.5 min-w-0 truncate text-caption text-faint">{m.display}</div>
               ) : null}
-              <CapabilityChips capabilities={m.capabilities} max={2} subject={m.ref} />
+              {reference !== m.ref ? (
+                <div className="mt-0.5 min-w-0 break-all font-mono text-caption text-faint">
+                  {reference}
+                </div>
+              ) : null}
+              {/* The metadata rides here and nowhere else: the table has no separate
+                  context, max-output, price or capability columns. */}
+              <ModelMetaLine model={m}>
+                <CapabilityChips capabilities={m.capabilities} max={2} subject={m.ref} />
+                <TestOutcomeInline outcome={outcome} />
+              </ModelMetaLine>
             </div>
-          </div>
           );
         },
       },
@@ -155,8 +186,8 @@ export function useModelColumns({
         title: "Actions",
         srOnlyTitle: true,
         align: "right",
-        // Test + delete (custom only) + overflow, plus the cell's horizontal padding.
-        width: "8.5rem",
+        // Test + overflow menu (custom delete lives inside the menu, never duplicated).
+        width: "6.5rem",
         render: (m) => (
           <div className="flex items-center justify-end gap-0.5">
             <TestButton
@@ -164,16 +195,6 @@ export function useModelColumns({
               pending={testTarget === m.ref}
               onTest={() => onTest(m)}
             />
-            {m.source === "custom" ? (
-              <IconButton
-                label={`Delete custom model ${m.ref}`}
-                disabled={removeTarget === m.ref}
-                onClick={() => onDelete(m)}
-                className="hover:bg-[var(--color-neg-tint)] hover:text-[var(--color-neg-ink)]"
-              >
-                <Trash size={15} aria-hidden />
-              </IconButton>
-            ) : null}
             <RowMenu
               model={m}
               pendingDelete={removeTarget === m.ref}
@@ -189,6 +210,9 @@ export function useModelColumns({
               onMoveGroup={
                 onMoveGroup && movable ? (next: string | null) => onMoveGroup(m.ref, next) : undefined
               }
+              // Desktop md+ shows an inline Group select column; keep Move to group only
+              // on narrower viewports where that column is hidden.
+              groupMenuClassName="md:hidden"
             />
           </div>
         ),
@@ -199,6 +223,7 @@ export function useModelColumns({
   }, [
     isAdmin,
     testTarget,
+    testResults,
     toggleTarget,
     removeTarget,
     onTest,

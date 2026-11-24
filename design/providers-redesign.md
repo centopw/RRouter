@@ -218,3 +218,93 @@ separately landed provider-codes dialog, limits-as-row-action and `advanced` end
 
 Limitations: see § Known limitations. Every anchor above was re-read at this revision of the
 working tree; `providers.tsx` anchors move with that file.
+
+---
+
+## 2026-11-23 — Anti-Vibecode pass: the Providers screen
+
+### Job
+
+"What can I route to, is it healthy, and how do I add one in under a minute." An operator opens
+Providers because a request failed or fell back, because a key ran out, or to add an account.
+They usually have Usage, Activity or a client's error message open beside it.
+
+### The four answers
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | Why open it | To see which accounts can take traffic right now, and to add one. |
+| 2 | How it is used | Next to a failing client or the Usage page. Glanced at, not read; phone width happens (on-call). |
+| 3 | What they want next | *Why* a row is not ready (error, which window, when it resets) without leaving the list; then fix it (drawer) or add another account. |
+| 4 | What we leave out | Spend per provider, weight per row, auth kind per row, collapse/expand, a separate "plan window" column, the always-on team-scope essay, a page-top banner for test results. |
+
+### Audit (before → decision)
+
+| Finding | Tell / tier | Decision |
+|---|---|---|
+| Row quota number used the operator quota first, while the plan column beside it named the worst *plan* window: an account at 12 % of its operator cap and 95 % of its weekly window read "12 %" next to "plan · weekly". Two numbers disagreed. | Floor (wrong number) | One limit cell: the worst bar from `usage/quota.tsx` `worstQuotaBar` (both sources), its own label, `QuotaMeter`, shared `barText` ladder. |
+| Header state counted ≥ 90 % plan windows but not "no endpoint"; rows used a separate `stateOf`. Header and rows could disagree. | Floor | One `accountStatus()` in `providers/types.ts`; the header counts its `ready` flag. |
+| "—" meant both "nothing reported" and "you may not read quotas"; a reader saw "no quota or plan limit reported" for accounts that do have one. | Floor (false empty) | `—` only when the source is unreadable; "no cap set" only when both sources answered; "unavailable" when the provider's usage call failed. |
+| Header counts and the `healthy/degraded/down` word answered the same question; counts were hover-only below `lg`. | T1 same-question; Floor hover-only | One visible readout in the status column: "2 of 3 ready", toned. |
+| Test results appeared in a page-top banner, away from the row that was tested, and again in the drawer. | T1 | The row's status cell shows the last test ("works · 412 ms" / "test failed · 401"); the banner no longer carries tests. |
+| Account name was plain text; "Configure", the `p·w` button and the name answered "open this account" three ways; the action menu disappeared below 820 px. | T1, T3 | The name is a link (`?inspect=<id>`, deep-linkable) with a task-scoped preview; the menu is visible at every width; "Configure" and the `p·w` button are gone. |
+| Auth column ("oauth"/"api key") and weight on every row. | T1 explain test | Removed from the row: auth kind is in the drawer; weight only matters under `RROUTER_STRATEGY=weighted`, so it lives in the drawer. Priority stays (lg+), because it is routing order. |
+| Spend summed per provider was computed and never shown. | dead code | Deleted. |
+| Collapse carets on every provider. | T1 | Deleted: accounts stay visible; pagination already bounds the list. |
+| Add flow closed on save and posted "connected": a wrong key looked like success until the first request failed. | T2 | "Save and test" runs the real probe (`POST /api/connections/{id}/test`, one token) and keeps the dialog open on the result, with the next action for each outcome. |
+| Key form asked label and owner before the key. Owner select shown with zero teams. | T2 | Key first (focused), label optional, owner only when teams exist. |
+| OpenCode guide said free models only work inside the OpenCode client. | Floor (honesty, now stale) | Points to Free mode, which finds and routes free models; the key here is for pay-as-you-go and Go. |
+| Always-on paragraph about team scope, shown with no teams. | T2 | One sentence, only when teams exist. |
+| Drawer showed no limits at all ("they live on /usage"). | T3 | Drawer shows this account's limits with the shared Usage `QuotaCell` (operator caps and plan windows, reset times), and links to Usage for history. |
+| Free-mode proxy and RPM fields open in every account's drawer. | T1 | Folded under "Egress & free mode" unless the account has a proxy or belongs to free mode. |
+
+### Deliberate trade-offs
+
+- **The status cell shows the last test instead of the standing status for that one row.** Some
+  operators will lose sight of "over quota" for a moment after testing. We accept it: the test
+  is the answer they just asked for, and the preview and drawer still show the standing state.
+- **No collapse.** Someone with 30 accounts under one provider scrolls more. We accept it:
+  collapsing hid exactly the unhealthy rows people came to find; pagination bounds the page.
+- **Weight leaves the row.** Operators running `weighted` must open the drawer to see shares.
+  Accepted: it is meaningless under every other strategy and was noise on every row.
+- **The account is created before the test.** A failing key is saved, in rotation, until the
+  operator removes it. Accepted: the result panel offers "Remove and re-enter" in one click, and
+  testing before saving would need a new probe-without-saving endpoint (not this slice).
+- **OAuth sign-ins are not auto-tested.** The sign-in itself proves the credential; a probe
+  stays one menu click away.
+
+### Exclusions
+
+No new endpoint or wire field. No "in use" marker (needs a usage join per account; S1). No live
+breaker state (S1, `health`). No provider-level toggle or quota (non-goal above). No free-model
+discovery here: Free mode owns it, the empty state and OpenCode guide link to it.
+
+### Preview contract
+
+Hovering (after ~350 ms, mouse only) or keyboard-focusing an account name opens a non-modal,
+non-focus-stealing preview scoped to "why is this account (not) ready":
+
+1. Status word and its reason (refusal copy, or the last upstream error).
+2. Every limit bar for the account (`usage/quota.tsx` `QuotaCell`: operator caps, then plan
+   windows, each with "resets in").
+3. Last test result from this session, if any.
+4. Owner (team or shared) and priority.
+
+It never contains controls. Click/Enter goes to `?inspect=<id>` (the drawer); touch taps go
+straight there. Escape or blur closes it.
+
+### Click counts (top questions)
+
+| Question | Clicks |
+|---|---|
+| Is anything not ready? | 0 (status column, header "N of M ready") |
+| Why is this account not ready? | 0 (hover/focus preview) |
+| How close to a limit, and when does it reset? | 0 (limit cell + preview) |
+| Does this key work? | 2 (menu → Test), result in the row |
+| Add a provider with an API key, tested | 3 (Add provider → pick → Save and test), result in the dialog |
+
+### Deep links kept
+
+`?inspect=<id>`, `?add=<provider>`, `?add=custom&protocol=openai|anthropic`, legacy
+`?custom=`, `?team=` / `?team_id=`. Limit cells link to `/usage?provider=<id>`; a provider name
+links to `/models?provider=<id>`.

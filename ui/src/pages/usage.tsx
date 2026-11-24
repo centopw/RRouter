@@ -1,15 +1,17 @@
 /**
- * `/usage` — the consolidated consumption surface.
+ * `/usage` — multi-provider limits board and consumption breakdown.
  *
- * One range query feeds the table: `/api/usage/summary?group_by=connection`. Account
- * rows group it by connection; provider and model rows fold the same rows, so the
- * provider row is always the exact sum of its accounts. Quota is each account's
- * current window from the account APIs, never a range total, so a provider with quota
- * stays in the table even when the range has no traffic for it.
+ * Top band: summary strip (at-risk / failing / healthy / no-limit counts + total range
+ * spend) over a risk-sorted Limits Board showing EVERY account of EVERY provider and ALL
+ * of its quota windows at once, alongside per-account range activity. Clicking "Forecast
+ * chart" on any card lazily fetches that window's daily history without N-per-card polling.
+ *
+ * Below: the detailed provider → account → model drill-down table fed by the same
+ * `/api/usage/summary?group_by=connection` query, so totals never disagree.
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { Button, Card, ErrorNote, Segmented, PageHeader } from "../components/ui";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button, Card, ErrorNote, PageHeader, Segmented } from "../components/ui";
 import { RANGES, rangeOf, type RangeId } from "../lib/activity";
 import { useUrlFilterState } from "../lib/url-state";
 import {
@@ -17,9 +19,10 @@ import {
   useAccountSubscriptions,
   useConnections,
   useIsAdmin,
+  useModelProviders,
+  useUsage,
   useUsageSummaryByConnection,
 } from "../lib/queries";
-import { providerLabel } from "./providers/types";
 import {
   addTotals,
   buildAccountNodes,
@@ -29,12 +32,19 @@ import {
   withQuotaShells,
   type ProviderNode,
 } from "./usage/aggregate";
-import { Headline } from "./usage/headline";
-import { LimitsCard } from "./usage/limits";
+import {
+  buildBoardAccounts,
+  filterBoardAccounts,
+  resolveProviderDisplay,
+  summarizeBoard,
+  type BoardFilter,
+} from "./usage/board-model";
+import { LimitsBoard, SummaryStrip } from "./usage/limits";
 import { worstQuotaPercent } from "./usage/quota";
 import { UsageTable, type AccountInfo } from "./usage/table";
 
 const DEFAULT_RANGE: RangeId = "30d";
+const RECENT_EVENTS_LIMIT = 200;
 
 export default function UsagePage() {
   const isAdmin = useIsAdmin();
@@ -48,22 +58,36 @@ export default function UsagePage() {
   const providerFilter = values.provider;
 
   const summary = useUsageSummaryByConnection(range.hours);
+  const recentEvents = useUsage(RECENT_EVENTS_LIMIT, range.hours);
   const connections = useConnections();
+  const modelProviders = useModelProviders();
   const quotas = useAccountQuotas(isAdmin);
   const subscriptions = useAccountSubscriptions(isAdmin);
-  // Both sources answered: only then may a bar-less account read "no limit".
-  const quotaLoaded = isAdmin && quotas.isSuccess && subscriptions.isSuccess;
 
+  // Both sources answered: only then may a bar-less account read "Not reported".
+  const quotaLoaded = isAdmin && quotas.isSuccess && subscriptions.isSuccess;
+  const quotaError = isAdmin && (quotas.isError || subscriptions.isError);
+
+  const [statusFilter, setStatusFilter] = useState<BoardFilter>("all");
+  const [expandedCharts, setExpandedCharts] = useState<Set<string>>(() => new Set());
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(() => new Set());
   const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(() => new Set());
 
-  // A `/providers` deep link opens that provider instead of leaving the reader to hunt.
+  // A `/providers` deep link opens that provider in the breakdown table automatically.
   useEffect(() => {
     if (!providerFilter) return;
     setExpandedProviders((prev) =>
       prev.has(providerFilter) ? prev : new Set(prev).add(providerFilter),
     );
   }, [providerFilter]);
+
+  const providerDisplayMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const provider of modelProviders.data ?? []) {
+      if (provider.display.trim()) map.set(provider.id, provider.display.trim());
+    }
+    return map;
+  }, [modelProviders.data]);
 
   /** Providers with at least one active account that reports a limit right now. */
   const providersWithQuota = useMemo(() => {
@@ -104,6 +128,52 @@ export default function UsagePage() {
   const totals = useMemo(
     () => providers.reduce((acc, node) => addTotals(acc, node.totals), emptyTotals()),
     [providers],
+  );
+
+  // Compute one shared clock snapshot whenever data refreshes so pace comparisons stay coherent.
+  const snapshotNow = useMemo(
+    () => Date.now(),
+    [summary.dataUpdatedAt, subscriptions.dataUpdatedAt, quotas.dataUpdatedAt, connections.dataUpdatedAt],
+  );
+
+  const boardAccounts = useMemo(
+    () =>
+      buildBoardAccounts({
+        connections: connections.data ?? [],
+        subscriptions: subscriptions.data ?? [],
+        quotas: quotas.data ?? [],
+        summaryRows: summary.data ?? [],
+        recentEvents: recentEvents.data ?? [],
+        providerDisplayMap,
+        providerFilter,
+        isAdmin,
+        quotaLoaded,
+        quotaError,
+        now: snapshotNow,
+      }),
+    [
+      connections.data,
+      subscriptions.data,
+      quotas.data,
+      summary.data,
+      recentEvents.data,
+      providerDisplayMap,
+      providerFilter,
+      isAdmin,
+      quotaLoaded,
+      quotaError,
+      snapshotNow,
+    ],
+  );
+
+  const boardSummary = useMemo(
+    () => summarizeBoard(boardAccounts, totals),
+    [boardAccounts, totals],
+  );
+
+  const visibleBoardAccounts = useMemo(
+    () => filterBoardAccounts(boardAccounts, statusFilter),
+    [boardAccounts, statusFilter],
   );
 
   const accountsByProvider = useMemo(() => {
@@ -159,9 +229,45 @@ export default function UsagePage() {
     [subscriptions.data],
   );
 
+  const handleToggleChart = useCallback((key: string) => {
+    setExpandedCharts((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const handleToggleProvider = useCallback((provider: string) => {
+    setExpandedProviders((prev) => {
+      const next = new Set(prev);
+      if (next.has(provider)) next.delete(provider);
+      else next.add(provider);
+      return next;
+    });
+  }, []);
+
+  const handleToggleAccount = useCallback((key: string) => {
+    setExpandedAccounts((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const handleClearFilter = useCallback(() => setStatusFilter("all"), []);
+
+  const filteredProviderLabel = providerFilter
+    ? resolveProviderDisplay(providerFilter, providerDisplayMap).label
+    : "";
+
   const emptyText = providerFilter
-    ? `No usage for ${providerLabel(providerFilter)} in the last ${range.id}.`
+    ? `No usage for ${filteredProviderLabel} in the last ${range.id}.`
     : `No requests in the last ${range.id}.`;
+
+  const boardLoading =
+    connections.isLoading && summary.isLoading && (!isAdmin || subscriptions.isLoading);
 
   return (
     <>
@@ -184,67 +290,75 @@ export default function UsagePage() {
             variant="quiet"
             size="sm"
             onClick={() => setFilter("provider", null)}
-            ariaLabel={`Clear the ${providerLabel(providerFilter)} filter`}
+            ariaLabel={`Clear the ${filteredProviderLabel} filter`}
           >
-            {providerLabel(providerFilter)} <span aria-hidden>×</span>
+            {filteredProviderLabel} <span aria-hidden>×</span>
           </Button>
         </div>
       ) : null}
 
-      {/* Plan windows are current, not range-gated: this band ignores the range control.
-          Both render nothing without a reported window (non-admins get none), and the
-          band collapses with them. */}
-      <section
-        className="mb-4 grid items-start gap-4 empty:hidden lg:grid-cols-[minmax(0,1fr)_minmax(320px,400px)]"
-      >
-        <Headline accounts={subscriptions.data ?? []} connections={connections.data} />
-        <LimitsCard accounts={subscriptions.data ?? []} connections={connections.data} />
+      <SummaryStrip
+        summary={boardSummary}
+        rangeLabel={range.id}
+        filter={statusFilter}
+        isAdmin={isAdmin}
+        onFilterChange={setStatusFilter}
+      />
+
+      <LimitsBoard
+        items={visibleBoardAccounts}
+        rangeLabel={range.id}
+        isAdmin={isAdmin}
+        quotaLoaded={quotaLoaded}
+        quotaError={quotaError}
+        loading={boardLoading}
+        activeFilter={statusFilter}
+        onClearFilter={handleClearFilter}
+        expandedCharts={expandedCharts}
+        onToggleChart={handleToggleChart}
+        now={snapshotNow}
+      />
+
+      <section aria-labelledby="usage-breakdown-heading">
+        <div className="mb-2.5 flex flex-wrap items-baseline justify-between gap-2">
+          <h2 id="usage-breakdown-heading" className="text-small font-semibold text-fg">
+            Breakdown by provider, account and model
+          </h2>
+          <span className="text-caption text-faint">Last {range.id}</span>
+        </div>
+
+        <Card className="overflow-hidden">
+          {summary.isError ? (
+            <div className="px-4 pt-3">
+              <ErrorNote error={summary.error} onRetry={() => void summary.refetch()} />
+            </div>
+          ) : null}
+
+          <UsageTable
+            providers={providers}
+            totals={totals}
+            accountsByProvider={accountsByProvider}
+            accountInfo={accountInfo}
+            quotaByConnection={quotaByConnection}
+            subscriptionByConnection={subscriptionByConnection}
+            providerDisplayMap={providerDisplayMap}
+            showQuota={isAdmin}
+            quotaLoaded={quotaLoaded}
+            loading={summary.isLoading}
+            emptyText={emptyText}
+            expandedProviders={expandedProviders}
+            expandedAccounts={expandedAccounts}
+            onToggleProvider={handleToggleProvider}
+            onToggleAccount={handleToggleAccount}
+          />
+
+          {quotaError ? (
+            <div className="border-t border-line px-4 py-2.5 text-caption text-warn">
+              Quota data unavailable; usage totals are unaffected.
+            </div>
+          ) : null}
+        </Card>
       </section>
-
-      <Card>
-        {summary.isError ? (
-          <div className="px-4 pt-3">
-            <ErrorNote error={summary.error} onRetry={() => void summary.refetch()} />
-          </div>
-        ) : null}
-
-        <UsageTable
-          providers={providers}
-          totals={totals}
-          accountsByProvider={accountsByProvider}
-          accountInfo={accountInfo}
-          quotaByConnection={quotaByConnection}
-          subscriptionByConnection={subscriptionByConnection}
-          showQuota={isAdmin}
-          quotaLoaded={quotaLoaded}
-          loading={summary.isLoading}
-          emptyText={emptyText}
-          expandedProviders={expandedProviders}
-          expandedAccounts={expandedAccounts}
-          onToggleProvider={(provider) =>
-            setExpandedProviders((prev) => {
-              const next = new Set(prev);
-              if (next.has(provider)) next.delete(provider);
-              else next.add(provider);
-              return next;
-            })
-          }
-          onToggleAccount={(key) =>
-            setExpandedAccounts((prev) => {
-              const next = new Set(prev);
-              if (next.has(key)) next.delete(key);
-              else next.add(key);
-              return next;
-            })
-          }
-        />
-
-        {isAdmin && (quotas.isError || subscriptions.isError) ? (
-          <div className="border-t border-line px-4 py-2.5 text-caption text-warn">
-            Quota data unavailable; usage totals are unaffected.
-          </div>
-        ) : null}
-      </Card>
     </>
   );
 }

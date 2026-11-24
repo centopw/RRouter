@@ -17,7 +17,12 @@ import {
   statusText,
 } from "../../components/ui";
 import { compact, pct } from "../../lib/format";
-import { modelRefFor } from "../../lib/model-ref";
+import {
+  modelRefFor,
+  requestedRefOf,
+  routedTargetOf,
+  sameAsRef,
+} from "../../lib/model-ref";
 import { RANGES, incidentOf, rangeOf, type Incident, type RangeId } from "../../lib/activity";
 import {
   useAccountQuotas,
@@ -144,26 +149,32 @@ export default function Activity() {
 
   const events = usage.data ?? [];
   const failedEvents = useMemo(() => events.filter(isFailure), [events]);
-  const filtered = useMemo(
+  const enriched = useMemo(
     () =>
-      events.filter(
+      events.map((e) => ({
+        ...e,
+        requested: requestedRefOf(e),
+        routedTo: routedTargetOf(e, models.data),
+        sameAs: sameAsRef(e, models.data),
+      })),
+    [events, models.data],
+  );
+  const logRows = useMemo(
+    () =>
+      enriched.filter(
         (e) =>
           (!errorsOnly || isFailure(e)) &&
           (!providerFilter || providerOf(e) === providerFilter) &&
-          (!modelFilter || modelRefFor(e.provider, e.model, models.data) === modelFilter) &&
+          (!modelFilter ||
+            e.requested === modelFilter ||
+            e.routedTo === modelFilter ||
+            modelRefFor(e.provider, e.model, models.data) === modelFilter) &&
           (!keyFilter || e.key_id === keyFilter),
       ),
-    [events, errorsOnly, providerFilter, providerOf, modelFilter, models.data, keyFilter],
-  );
-  const logRows = useMemo(
-    () => filtered.map((e) => ({ ...e, model: modelRefFor(e.provider, e.model, models.data) })),
-    [filtered, models.data],
+    [enriched, errorsOnly, providerFilter, providerOf, modelFilter, models.data, keyFilter],
   );
   // A request is opened by clicking a row; nothing is selected until then.
-  const selected = filtered.find((e) => e.id !== null && e.id === selectedId) ?? null;
-  const selectedRow = selected
-    ? { ...selected, model: modelRefFor(selected.provider, selected.model, models.data) }
-    : null;
+  const selectedRow = logRows.find((e) => e.id !== null && e.id === selectedId) ?? null;
   const selectedIndex =
     selectedId === null ? -1 : logRows.findIndex((row) => row.id !== null && row.id === selectedId);
   // Stepping past the last row of a page turns the page, so the drawer never shows a
@@ -191,13 +202,21 @@ export default function Activity() {
   const modelOptions = useMemo(() => {
     const agg = new Map<string, { ref: string; requests: number }>();
     for (const row of summary.data ?? []) {
-      const ref = modelRefFor(row.provider, row.model, models.data);
+      const ref = routedTargetOf(row, models.data) || modelRefFor(row.provider, row.model, models.data);
       const entry = agg.get(ref);
       if (entry) entry.requests += row.requests;
       else agg.set(ref, { ref, requests: row.requests });
     }
-    return [...agg.values()].sort((a, b) => b.requests - a.requests);
-  }, [summary.data, models.data]);
+    for (const event of enriched) {
+      if (event.requested && !agg.has(event.requested)) {
+        agg.set(event.requested, { ref: event.requested, requests: 0 });
+      }
+      if (event.routedTo && !agg.has(event.routedTo)) {
+        agg.set(event.routedTo, { ref: event.routedTo, requests: 0 });
+      }
+    }
+    return [...agg.values()].sort((a, b) => b.requests - a.requests || a.ref.localeCompare(b.ref));
+  }, [summary.data, enriched, models.data]);
 
   const incident: Incident | null = incidentOf(summary.data ?? []);
   const incidentRef = incident ? modelRefFor(incident.provider, incident.model, models.data) : null;
@@ -552,7 +571,7 @@ export default function Activity() {
                     </div>
                   ) : null}
                 </EmptyState>
-              ) : filtered.length === 0 ? (
+              ) : logRows.length === 0 ? (
                 <EmptyState>
                   No loaded requests match these filters.
                   {errorsOnly && failedEvents.length === 0
@@ -571,7 +590,7 @@ export default function Activity() {
                   size={pageSize}
                   onPage={setPage}
                   onSize={setPageSize}
-                  selectedId={selected?.id ?? null}
+                  selectedId={selectedRow?.id ?? null}
                   onSelect={(row) => {
                     if (row.id !== null) setSelectedId(row.id);
                   }}

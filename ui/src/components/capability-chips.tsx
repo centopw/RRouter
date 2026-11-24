@@ -78,7 +78,7 @@ export function CapabilityChips({
               aria-label={`Hidden capabilities${who}`}
               className="popover-panel z-[var(--z-popover-portal)] w-64 rounded-[var(--radius-card)] border border-line-strong bg-surface p-2 shadow-[var(--shadow-popover)] focus:outline-none"
             >
-              <p className="px-1.5 pb-1 text-caption font-semibold uppercase tracking-[0.08em] text-faint">
+              <p className="px-1.5 pb-1 text-caption font-medium text-muted">
                 Also supports
               </p>
               <ul className="flex flex-col">

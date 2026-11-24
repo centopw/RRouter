@@ -10,13 +10,14 @@
  *
  * Provider plan windows (`/api/accounts/usage`) are deliberately absent: they are percent
  * only, with no absolute budget, so they cannot be summed honestly. They are shown per
- * account on /usage (Limits card) instead.
+ * account on /usage (Limits Board) instead.
  */
 
 import type { AccountQuotaRow, AccountQuotaWindow, Connection } from "../../lib/api";
 import { cx } from "../../components/ui";
 import { compact, pct, usd } from "../../lib/format";
-import { barFill, barText, QUOTA_WINDOWS, until } from "../providers/types";
+import { barText, QUOTA_WINDOWS } from "../providers/types";
+import { QuotaMeter, resetsIn } from "../usage/quota";
 
 type Unit = "cost" | "tokens" | "requests";
 
@@ -115,28 +116,19 @@ export function quotaTotals(quotas: AccountQuotaRow[], connections: Connection[]
 }
 
 function TotalLine({ total }: { total: QuotaTotal }) {
-  const width = Math.min(100, Math.max(0, total.percent));
   const name = `${total.window.charAt(0).toUpperCase()}${total.window.slice(1)} ${total.noun}`;
-  const reset = until(total.resets_at);
+  const reset = resetsIn(total.resets_at);
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-small">
       <span className="w-[112px] shrink-0 font-medium text-fg">{name}</span>
       <span className={cx("tnum", barText(total.percent))}>{total.detail}</span>
-      <span
-        role="progressbar"
-        aria-label={`${name} quota used${reset ? `, resets in ${reset}` : ""}`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(total.percent)}
-        className="h-1.5 w-full max-w-[220px] overflow-hidden rounded-full bg-rule"
-      >
-        <span
-          className={cx("block h-full rounded-full", barFill(total.percent))}
-          style={{ width: `${width}%` }}
-        />
-      </span>
+      <QuotaMeter
+        percent={total.percent}
+        label={reset ? `${name} quota used, ${reset}` : `${name} quota used`}
+        className="max-w-[220px]"
+      />
       <span className={cx("tnum", barText(total.percent))}>{pct(total.percent)}</span>
-      {reset ? <span className="text-faint tnum">resets in {reset}</span> : null}
+      {reset ? <span className="text-faint tnum">{reset}</span> : null}
       <span className="text-faint tnum">
         {total.limited} of {total.accounts} active{" "}
         {total.accounts === 1 ? "account" : "accounts"} {total.limited === 1 ? "has" : "have"} a{" "}

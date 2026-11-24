@@ -1,17 +1,35 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type Model, type ModelTest, type SyncResult } from "../../lib/api";
 import { qk } from "../../lib/queries";
-import { useToast } from "../../components/toast";
+
+/** Inline result recorded on a model row after the operator runs a test completion. */
+export type ModelTestOutcome = {
+  ok: boolean;
+  status: number;
+  latency_ms: number;
+  error?: string;
+  at: number;
+};
 
 /**
  * The registry mutations every model row can reach: enable, test, delete a custom row,
- * and sync metadata. One hook so the board and the registry table
- * behave identically, and so a view never mounts a mutation it cannot reach.
+ * and sync metadata. One hook so the board and flat table behave identically, and test
+ * outcomes stay visible inline on the tested row instead of vanishing in a toast.
  */
 export function useModelActions() {
   const client = useQueryClient();
-  const toast = useToast();
+  const [testResults, setTestResults] = useState<ReadonlyMap<string, ModelTestOutcome>>(
+    () => new Map(),
+  );
+
+  const recordTest = useCallback((ref: string, outcome: ModelTestOutcome) => {
+    setTestResults((previous) => {
+      const next = new Map(previous);
+      next.set(ref, outcome);
+      return next;
+    });
+  }, []);
 
   const invalidateRegistry = useCallback(() => {
     void client.invalidateQueries({ queryKey: qk.models });
@@ -49,14 +67,23 @@ export function useModelActions() {
   const test = useMutation({
     mutationFn: (model: Model) => api.post<ModelTest>("/api/models/test", { model: model.ref }),
     onSuccess: (result, model) => {
-      if (result.ok) {
-        toast.success(`Test passed · ${model.ref}`, `${result.status} · ${result.latency_ms}ms`);
-      } else {
-        toast.error(`Test failed · ${model.ref}`, result.error ?? `status ${result.status}`);
-      }
+      recordTest(model.ref, {
+        ok: result.ok,
+        status: result.status,
+        latency_ms: result.latency_ms,
+        error: result.error ?? undefined,
+        at: Date.now(),
+      });
     },
-    onError: (error, model) =>
-      toast.error(`Test failed · ${model.ref}`, error instanceof Error ? error.message : String(error)),
+    onError: (error, model) => {
+      recordTest(model.ref, {
+        ok: false,
+        status: 0,
+        latency_ms: 0,
+        error: error instanceof Error ? error.message : String(error),
+        at: Date.now(),
+      });
+    },
   });
 
   const remove = useMutation({
@@ -79,6 +106,7 @@ export function useModelActions() {
     test,
     remove,
     invalidateRegistry,
+    testResults,
     testTarget: test.isPending ? (test.variables?.ref ?? null) : null,
     toggleTarget: toggle.isPending ? (toggle.variables?.id ?? null) : null,
     removeTarget: remove.isPending ? (remove.variables?.ref ?? null) : null,

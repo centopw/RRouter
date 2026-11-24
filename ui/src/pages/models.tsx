@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import {
   AlertBanner,
   Button,
@@ -9,8 +10,7 @@ import {
   ErrorNote,
   PageHeader,
 } from "../components/ui";
-import { DataTable, PaginationBar } from "../components/table";
-import { ConnectionCard } from "../components/connection-card";
+import { PaginationBar } from "../components/table";
 import { useFeatureFlag } from "../lib/flags";
 import { effectiveGroups, groupForEntry, layoutFor, useLayoutDraft } from "../lib/layout-draft";
 import { usePhone, useReducedMotion } from "../lib/media";
@@ -28,8 +28,9 @@ import {
   usePresetIndex,
   usePresetLayout,
 } from "../lib/queries";
-import { api, type Combo, type Model } from "../lib/api";
+import { api, type Alias, type Combo, type Model } from "../lib/api";
 import { useModelActions } from "./models/actions";
+import { type ModelColumnsOptions } from "./models/columns";
 import { useUnifiedColumns } from "./models/columns-unified";
 import { CustomModelModal } from "./models/custom-model";
 import { KINDS, ModelFilters, type KindKey } from "./models/filters";
@@ -48,30 +49,40 @@ import {
 } from "./models/params";
 import {
   AddMenu,
+  AliasCreateDialog,
   ComboCreateDialog,
   PresetControls,
   PresetManagerDrawer,
   SaveAsNewDialog,
+  type AliasCreatePayload,
   type ComboCreatePayload,
 } from "./models/preset-header";
 import { EmptyRegistry } from "./models/rows";
 import {
   BoardSection,
+  FlatTable,
   UnifiedCards,
   UnifiedRowProvider,
   type LayoutControls,
   type ModelActions,
 } from "./models/table-unified";
-import { matchesSearch, rowsFor, type UnifiedRow } from "./models/unified-rows";
+import {
+  emptyStateKind,
+  matchesSearch,
+  rowIsFree,
+  rowsFor,
+  summarizeRows,
+  type UnifiedRow,
+} from "./models/unified-rows";
 
 /**
  * Models: one page, one table.
  *
  * The table is the union of registry models, live aliases, live combos, and preset entries
- * nothing live answers (stale rows). `Status`, `Kind`, `Custom`, `Provider` and `q` narrow
- * that one row set; none of them swaps the surface. The preset header edits the draft that
- * group and `/v1` controls write to, and it is shared by every filter, so a save that is
- * still debouncing survives a filter change.
+ * nothing live answers (stale rows). `Status`, `Kind`, `Free`, `Custom`, `Provider` and `q`
+ * narrow that one row set; none of them swaps the surface. The preset header edits the draft
+ * that group and `/v1` controls write to, and it is shared by every filter, so a save that
+ * is still debouncing survives a filter change.
  */
 const KIND_OF_ROW: Record<Exclude<KindKey, "all">, UnifiedRow["kind"]> = {
   models: "model",
@@ -111,6 +122,7 @@ export default function Models() {
       kind: "all",
       status: "routed",
       custom: "0",
+      free: "0",
       size: String(DEFAULT_SIZE),
       page: "1",
       preset: "",
@@ -141,6 +153,7 @@ export default function Models() {
     ? (rawKind as KindKey)
     : "all";
   const customOnly = urlFilters.custom === "1";
+  const freeOnly = urlFilters.free === "1";
   const requestedStatus = useMemo(() => statusesOf(params), [params]);
   const size = sizeOf(params);
 
@@ -168,6 +181,9 @@ export default function Models() {
     [client],
   );
   const layoutDraft = useLayoutDraft(layout.data, invalidatePresetList);
+  const draftRef = useRef(layoutDraft);
+  draftRef.current = layoutDraft;
+
   const aliases = useAliases(isAdmin);
   const combos = useCombos(isAdmin);
   const actions = useModelActions();
@@ -185,6 +201,7 @@ export default function Models() {
   const [copyOpen, setCopyOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
+  const [aliasOpen, setAliasOpen] = useState(false);
   const [comboOpen, setComboOpen] = useState(false);
   const [editing, setEditing] = useState<Model | null>(null);
   const [deleting, setDeleting] = useState<Model | null>(null);
@@ -275,6 +292,11 @@ export default function Models() {
     ],
   );
 
+  const summary = useMemo(
+    () => summarizeRows(allRows, modelByRef),
+    [allRows, modelByRef],
+  );
+
   const groupChoices = useMemo(() => {
     const knownProviders = new Set(all.map((model) => model.provider));
     if (hasNames) knownProviders.add("rrouter");
@@ -295,7 +317,7 @@ export default function Models() {
     [entryByRef, groupChoices],
   );
 
-  const filteredRows = useMemo(() => {
+  const baseFilteredRows = useMemo(() => {
     return allRows.filter((row) => {
       if (requestedKind !== "all" && row.kind !== KIND_OF_ROW[requestedKind]) return false;
       // A combo containing an Anthropic model is still an RRouter row: provider filters on
@@ -316,6 +338,24 @@ export default function Models() {
   ]);
 
   const statusAware = isAdmin && hasPreset;
+
+  const freeCount = useMemo(() => {
+    let count = 0;
+    for (const row of baseFilteredRows) {
+      if (statusAware && !requestedStatus.has(row.status as StatusKey)) continue;
+      if (rowIsFree(row, modelByRef)) count += 1;
+    }
+    return count;
+  }, [baseFilteredRows, statusAware, requestedStatus, modelByRef]);
+
+  const filteredRows = useMemo(
+    () =>
+      freeOnly
+        ? baseFilteredRows.filter((row) => rowIsFree(row, modelByRef))
+        : baseFilteredRows,
+    [baseFilteredRows, freeOnly, modelByRef],
+  );
+
   const statusRows = useMemo(
     () =>
       statusAware
@@ -333,14 +373,15 @@ export default function Models() {
     return result;
   }, [filteredRows]);
 
-  const routedTotal = allRows.filter((row) => row.status === "routed").length;
-
-  const outside =
-    statusAware && appliedQuery !== ""
-      ? filteredRows.filter(
-          (row) => !requestedStatus.has(row.status as StatusKey),
-        ).length
-      : 0;
+  const outside = useMemo(
+    () =>
+      statusAware && (appliedQuery !== "" || freeOnly)
+        ? filteredRows.filter(
+            (row) => !requestedStatus.has(row.status as StatusKey),
+          ).length
+        : 0,
+    [statusAware, appliedQuery, freeOnly, filteredRows, requestedStatus],
+  );
 
   const boardMode =
     statusAware && requestedStatus.size === 1 && requestedStatus.has("routed");
@@ -348,6 +389,7 @@ export default function Models() {
     boardMode &&
     editable &&
     !customOnly &&
+    !freeOnly &&
     requestedKind === "all" &&
     appliedQuery === "" &&
     effectiveProvider === ALL;
@@ -434,8 +476,7 @@ export default function Models() {
     if (!draftReady || !isAdmin || !hasPreset || !layoutDraft.autoInclude || newRefKey === "") {
       return;
     }
-    layoutDraft.adopt(newRefKey.split("|"));
-    // `adopt` is stable in spirit; rerunning it for the same refs is a no-op.
+    draftRef.current.adopt(newRefKey.split("|"));
   }, [draftReady, isAdmin, hasPreset, layoutDraft.autoInclude, newRefKey]);
 
   // Undo is local: hiding is a layout change, so after the debounced save there is nothing
@@ -446,11 +487,25 @@ export default function Models() {
     return () => window.clearTimeout(timer);
   }, [undo]);
 
-  const hideRow = useRef<(ref: string) => void>(() => {});
-  hideRow.current = (ref) => {
-    layoutDraft.hide(ref);
+  // Stabilized draft callbacks so Shell's 5s health poll, 15s background polls, and search
+  // keystrokes never invalidate column definitions or memoized table rows.
+  const assignGroup = useCallback(
+    (ref: string, group: string | null) => draftRef.current.assignGroup(ref, group),
+    [],
+  );
+  const setVisible = useCallback(
+    (ref: string, visible: boolean) => draftRef.current.setVisible(ref, visible),
+    [],
+  );
+  const reorder = useCallback(
+    (from: string, to: string) => draftRef.current.reorder(from, to),
+    [],
+  );
+  const hideRow = useCallback((ref: string) => {
+    draftRef.current.hide(ref);
     setUndo({ ref });
-  };
+  }, []);
+  const hideFor = useCallback((ref: string) => entryByRef.has(ref), [entryByRef]);
 
   // Add → Combo creates the combo and writes its group in the same draft the row select
   // writes, so the new row lands in that section without a second step. On a conflicted
@@ -468,9 +523,27 @@ export default function Models() {
       void client.invalidateQueries({ queryKey: qk.models });
       void client.invalidateQueries({ queryKey: qk.system });
       if (editable) {
-        layoutDraft.assignGroup(`rrouter/${combo.name}`, payload.group);
+        draftRef.current.assignGroup(`rrouter/${combo.name}`, payload.group);
       }
       setComboOpen(false);
+    },
+  });
+
+  // Add → Alias mirrors Combo: creates the alias and assigns it to the chosen group.
+  const createAlias = useMutation({
+    mutationFn: (payload: AliasCreatePayload) =>
+      api.post<Alias>("/api/aliases", {
+        alias: payload.alias,
+        target: payload.target,
+      }),
+    onSuccess: (created, payload) => {
+      void client.invalidateQueries({ queryKey: qk.aliases });
+      void client.invalidateQueries({ queryKey: qk.models });
+      void client.invalidateQueries({ queryKey: qk.system });
+      if (editable) {
+        draftRef.current.assignGroup(`rrouter/${created.alias}`, payload.group);
+      }
+      setAliasOpen(false);
     },
   });
 
@@ -479,6 +552,14 @@ export default function Models() {
     : layoutDraft.state === "conflict"
       ? "Resolve the layout conflict below before assigning a group."
       : null;
+
+  const customGroupOptions = useMemo(
+    () =>
+      groupChoices
+        .filter((group) => !group.provider)
+        .map((group) => ({ id: group.id, name: group.name })),
+    [groupChoices],
+  );
 
   // Built from the same row set the board renders, so a name that is both an alias and a
   // combo appears once (alias wins, as in rowsFor) and no candidate is unassignable.
@@ -519,21 +600,18 @@ export default function Models() {
     [allRows],
   );
 
-  const openGroups = () => {
-    layoutDraft.ensureProviderGroups(
+  const openGroups = useCallback(() => {
+    draftRef.current.ensureProviderGroups(
       groupChoices
         .filter((group) => group.provider)
         .map((group) => ({ provider: group.provider as string, name: group.name })),
     );
     setGroupsOpen(true);
-  };
-
-  const reorderRow = useRef(layoutDraft.reorder);
-  reorderRow.current = layoutDraft.reorder;
+  }, [groupChoices]);
 
   const groupRowsById = useMemo(() => {
     const map = new Map<string, UnifiedRow[]>();
-    if (!dragEnabled) return map;
+    if (!boardMode) return map;
     for (const row of boardRows) {
       const id = groupOf(row.ref);
       const bucket = map.get(id);
@@ -541,7 +619,7 @@ export default function Models() {
       else map.set(id, [row]);
     }
     return map;
-  }, [dragEnabled, boardRows, groupOf]);
+  }, [boardMode, boardRows, groupOf]);
 
   const canMoveTop = useCallback(
     (ref: string) => {
@@ -566,7 +644,7 @@ export default function Models() {
       if (!dragEnabled) return;
       const list = groupRowsById.get(groupOf(ref));
       const first = list?.[0];
-      if (first && first.ref !== ref) reorderRow.current(ref, first.ref);
+      if (first && first.ref !== ref) draftRef.current.reorder(ref, first.ref);
     },
     [dragEnabled, groupRowsById, groupOf],
   );
@@ -576,67 +654,126 @@ export default function Models() {
       if (!dragEnabled) return;
       const list = groupRowsById.get(groupOf(ref));
       const last = list?.[list.length - 1];
-      if (last && last.ref !== ref) reorderRow.current(ref, last.ref);
+      if (last && last.ref !== ref) draftRef.current.reorder(ref, last.ref);
     },
     [dragEnabled, groupRowsById, groupOf],
   );
 
+  const onMoveDelta = useCallback(
+    (ref: string, delta: number) => {
+      const list = groupRowsById.get(groupOf(ref));
+      if (!list) return;
+      const index = list.findIndex((row) => row.ref === ref);
+      const target = list[index + delta];
+      if (target) draftRef.current.reorder(ref, target.ref);
+    },
+    [groupRowsById, groupOf],
+  );
+
   // ---- columns and row controls ----------------------------------------------------
-  const columns = useUnifiedColumns({
-    model: {
+  const modelColumnOptions = useMemo<ModelColumnsOptions>(
+    () => ({
       isAdmin,
       testTarget: actions.testTarget,
+      testResults: actions.testResults,
       toggleTarget: actions.toggleTarget,
       removeTarget: actions.removeTarget,
       onTest: actions.onTest,
       onToggle: actions.onToggle,
       onEdit: setEditing,
       onDelete: setDeleting,
-      hide: editable ? hideRow.current : undefined,
-      hideFor: (ref) => entryByRef.has(ref),
+      hide: editable ? hideRow : undefined,
+      hideFor,
       onMoveTop: dragEnabled ? onMoveTop : undefined,
       onMoveBottom: dragEnabled ? onMoveBottom : undefined,
       canMoveTop: dragEnabled ? canMoveTop : undefined,
       canMoveBottom: dragEnabled ? canMoveBottom : undefined,
       groups: isAdmin && hasPreset ? groupChoices : undefined,
       groupOf,
-      onMoveGroup: (ref, group) => layoutDraft.assignGroup(ref, group),
-    },
+      onMoveGroup: assignGroup,
+    }),
+    [
+      isAdmin,
+      actions.testTarget,
+      actions.testResults,
+      actions.toggleTarget,
+      actions.removeTarget,
+      actions.onTest,
+      actions.onToggle,
+      editable,
+      hideRow,
+      hideFor,
+      dragEnabled,
+      onMoveTop,
+      onMoveBottom,
+      canMoveTop,
+      canMoveBottom,
+      hasPreset,
+      groupChoices,
+      groupOf,
+      assignGroup,
+    ],
+  );
+
+  const columns = useUnifiedColumns({
+    model: modelColumnOptions,
     isAdmin,
     editable,
     presetScoped: hasPreset,
     groups: groupChoices,
     groupOf,
-    onAssignGroup: (ref, group) => layoutDraft.assignGroup(ref, group),
-    onVisible: (ref, visible) => layoutDraft.setVisible(ref, visible),
-    onHide: (ref) => hideRow.current(ref),
+    onAssignGroup: assignGroup,
+    onVisible: setVisible,
+    onHide: hideRow,
   });
 
-  const rowActions: ModelActions = {
-    isAdmin,
-    testTarget: actions.testTarget,
-    toggleTarget: actions.toggleTarget,
-    removeTarget: actions.removeTarget,
-    onTest: actions.onTest,
-    onToggle: actions.onToggle,
-    onEdit: setEditing,
-    onDelete: setDeleting,
-    onHide: (ref) => hideRow.current(ref),
-    onMoveTop: dragEnabled ? onMoveTop : undefined,
-    onMoveBottom: dragEnabled ? onMoveBottom : undefined,
-    canMoveTop: dragEnabled ? canMoveTop : undefined,
-    canMoveBottom: dragEnabled ? canMoveBottom : undefined,
-  };
+  const rowActions = useMemo<ModelActions>(
+    () => ({
+      isAdmin,
+      testTarget: actions.testTarget,
+      testResults: actions.testResults,
+      toggleTarget: actions.toggleTarget,
+      removeTarget: actions.removeTarget,
+      onTest: actions.onTest,
+      onToggle: actions.onToggle,
+      onEdit: setEditing,
+      onDelete: setDeleting,
+      onHide: hideRow,
+      onMoveTop: dragEnabled ? onMoveTop : undefined,
+      onMoveBottom: dragEnabled ? onMoveBottom : undefined,
+      canMoveTop: dragEnabled ? canMoveTop : undefined,
+      canMoveBottom: dragEnabled ? canMoveBottom : undefined,
+    }),
+    [
+      isAdmin,
+      actions.testTarget,
+      actions.testResults,
+      actions.toggleTarget,
+      actions.removeTarget,
+      actions.onTest,
+      actions.onToggle,
+      hideRow,
+      dragEnabled,
+      onMoveTop,
+      onMoveBottom,
+      canMoveTop,
+      canMoveBottom,
+    ],
+  );
 
-  const controls: LayoutControls | undefined = hasPreset
-    ? {
-        editable,
-        groups: groupChoices,
-        groupOf,
-        onAssignGroup: (ref, group) => layoutDraft.assignGroup(ref, group),
-        onVisible: (ref, visible) => layoutDraft.setVisible(ref, visible),
-      }
-    : undefined;
+  const controls = useMemo<LayoutControls | undefined>(
+    () =>
+      hasPreset
+        ? {
+            editable,
+            groups: groupChoices,
+            groupOf,
+            onAssignGroup: assignGroup,
+            onVisible: setVisible,
+          }
+        : undefined,
+    [hasPreset, editable, groupChoices, groupOf, assignGroup, setVisible],
+  );
 
   // ---- states ----------------------------------------------------------------------
   const loading =
@@ -655,76 +792,123 @@ export default function Models() {
   const caption = statusAware
     ? `${statusCaption} rows in ${presetName}`
     : "Every model this gateway can serve";
-  const subtitle = hasPreset
-    ? `Every model this gateway can serve. ${routedTotal.toLocaleString()} routed · ${allRows.length.toLocaleString()} rows`
-    : "Every model this gateway can serve.";
 
-  const rowsNothing = total === 0;
-  const hasRowFilters =
-    appliedQuery !== "" ||
-    effectiveProvider !== ALL ||
-    requestedKind !== "all" ||
-    customOnly ||
-    (statusAware && statusParam(requestedStatus) !== null);
-  const clearFilters = () => {
-    resetFilters(["q", "provider", "status", "kind", "custom", "page"]);
-  };
-  const showStatus = (status: StatusKey) =>
-    setFilters({ status: statusParam(new Set<StatusKey>([status])), page: "1" });
+  const subtitle = useMemo(() => {
+    if (summary.total === 0) return "Models, aliases and combos this gateway can serve.";
+    const freePart = summary.free > 0 ? ` · ${summary.free.toLocaleString()} free` : "";
+    if (hasPreset) {
+      return `${summary.routed.toLocaleString()} routed (${summary.routedAvailable.toLocaleString()} available)${freePart} · ${summary.total.toLocaleString()} total`;
+    }
+    return `${summary.available.toLocaleString()} of ${summary.total.toLocaleString()} available${freePart}`;
+  }, [hasPreset, summary]);
+
+  const clearFilters = useCallback(() => {
+    resetFilters(["q", "provider", "status", "kind", "custom", "free", "page"]);
+  }, [resetFilters]);
+
+  const showStatus = useCallback(
+    (status: StatusKey) =>
+      setFilters({ status: statusParam(new Set<StatusKey>([status])), page: "1" }),
+    [setFilters],
+  );
+
   const canClear =
     urlQuery !== "" ||
     params.has("provider") ||
     params.has("status") ||
     params.has("kind") ||
-    params.has("custom");
+    params.has("custom") ||
+    params.has("free");
 
-  const emptyState =
-    appliedQuery !== "" || effectiveProvider !== ALL || customOnly ? (
-      <div className="flex flex-col items-center gap-2">
-        <p>No rows match these filters.</p>
-        <Button variant="ghost" onClick={clearFilters}>
-          Clear filters
-        </Button>
-      </div>
-    ) : statusAware && requestedStatus.size === 1 && requestedStatus.has("routed") ? (
-      layoutDraft.entries.length === 0 ? (
-        <div className="flex flex-col items-center gap-2">
-          <p>This preset has no models.</p>
-          <Button variant="ghost" onClick={() => showStatus("unrouted")}>
-            Show not-in-preset models
-          </Button>
-        </div>
-      ) : counts.disabled > 0 ? (
-        <div className="flex flex-col items-center gap-2">
-          <p>Every model in this preset is disabled.</p>
-          <Button variant="ghost" onClick={() => showStatus("disabled")}>
-            Show disabled models
-          </Button>
-        </div>
-      ) : (
-        <div className="flex flex-col items-center gap-2">
-          <p>No model is visible in this preset.</p>
-          <Button variant="ghost" onClick={() => showStatus("hidden")}>
-            Show hidden models
-          </Button>
-        </div>
-      )
-    ) : statusAware && requestedStatus.size === 1 && requestedStatus.has("hidden") ? (
-      <p>Nothing is hidden from this preset. Rows you hide appear here.</p>
-    ) : statusAware && requestedStatus.size === 1 && requestedStatus.has("disabled") ? (
-      <p>No model is disabled. The gateway refuses a disabled id on every endpoint.</p>
-    ) : statusAware && requestedStatus.size === 1 && requestedStatus.has("unrouted") ? (
-      <p>Every model this gateway knows is already in this preset.</p>
-    ) : rowsNothing && hasRowFilters ? (
-      <div className="flex flex-col items-center gap-2">
-        <p>No rows match these filters.</p>
-        <Button variant="ghost" onClick={clearFilters}>
-          Clear filters
-        </Button>
-      </div>
-    ) : (
-      "no rows here yet"
-    );
+  const emptyKind = emptyStateKind({
+    hasError: models.isError,
+    query: appliedQuery,
+    providerIsAll: effectiveProvider === ALL,
+    kindIsAll: requestedKind === "all",
+    customOnly,
+    freeOnly,
+    statusAware,
+    statuses: requestedStatus,
+    draftEntryCount: layoutDraft.entries.length,
+    counts,
+  });
+
+  const emptyState = (() => {
+    switch (emptyKind) {
+      case "error":
+        return (
+          <div className="flex flex-col items-center gap-2">
+            <p>Could not load the model registry.</p>
+            <Button variant="ghost" onClick={() => void models.refetch()}>
+              Retry
+            </Button>
+          </div>
+        );
+      case "filtered_free":
+        return (
+          <div className="flex flex-col items-center gap-2">
+            <p>No free ($0) models match these filters.</p>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button variant="ghost" onClick={clearFilters}>
+                Clear filters
+              </Button>
+              {isAdmin ? (
+                <Link
+                  to="/free-mode"
+                  className="inline-flex h-8 items-center rounded-full bg-accent px-3.5 text-small font-semibold text-[var(--color-accent-ink)] transition-colors hover:bg-fg"
+                >
+                  Set up Free mode →
+                </Link>
+              ) : null}
+            </div>
+          </div>
+        );
+      case "filtered":
+        return (
+          <div className="flex flex-col items-center gap-2">
+            <p>No rows match these filters.</p>
+            <Button variant="ghost" onClick={clearFilters}>
+              Clear filters
+            </Button>
+          </div>
+        );
+      case "preset_empty":
+        return (
+          <div className="flex flex-col items-center gap-2">
+            <p>This preset has no routed models yet.</p>
+            <Button variant="ghost" onClick={() => showStatus("unrouted")}>
+              Show not-in-preset models
+            </Button>
+          </div>
+        );
+      case "all_disabled":
+        return (
+          <div className="flex flex-col items-center gap-2">
+            <p>Every model in this preset is disabled.</p>
+            <Button variant="ghost" onClick={() => showStatus("disabled")}>
+              Show disabled models
+            </Button>
+          </div>
+        );
+      case "all_hidden":
+        return (
+          <div className="flex flex-col items-center gap-2">
+            <p>No model is visible in this preset.</p>
+            <Button variant="ghost" onClick={() => showStatus("hidden")}>
+              Show hidden models
+            </Button>
+          </div>
+        );
+      case "none_hidden":
+        return <p>Nothing is hidden from this preset. Rows you hide appear here.</p>;
+      case "none_disabled":
+        return <p>No model is disabled. The gateway refuses a disabled id on every endpoint.</p>;
+      case "none_unrouted":
+        return <p>Every model this gateway knows is already in this preset.</p>;
+      default:
+        return <p>No rows here yet.</p>;
+    }
+  })();
 
   const pagination = {
     page,
@@ -757,6 +941,10 @@ export default function Models() {
               ) : null}
               <AddMenu
                 onAddCustom={() => setCustomOpen(true)}
+                onAddAlias={() => {
+                  createAlias.reset();
+                  setAliasOpen(true);
+                }}
                 onAddCombo={() => {
                   createCombo.reset();
                   setComboOpen(true);
@@ -767,18 +955,16 @@ export default function Models() {
         }
       />
 
-      <ConnectionCard />
-
       {presets.isError ? (
         <AlertBanner
           title="Presets could not be loaded"
           actions={
             <Button variant="ghost" onClick={() => void presets.refetch()}>
-              retry
+              Retry
             </Button>
           }
         >
-          The table still lists every model; preset order, groups and `/v1` visibility are
+          The table still lists every model; preset order, groups and /v1 visibility are
           unavailable until the library answers.
         </AlertBanner>
       ) : null}
@@ -860,7 +1046,7 @@ export default function Models() {
         </div>
       ) : null}
 
-      {!models.isLoading && allRows.length === 0 ? (
+      {!models.isLoading && !models.isError && allRows.length === 0 ? (
         <EmptyRegistry
           onSync={actions.onSync}
           syncing={actions.sync.isPending}
@@ -868,105 +1054,86 @@ export default function Models() {
           onAddCustom={isAdmin ? () => setCustomOpen(true) : undefined}
         />
       ) : (
-        <UnifiedRowProvider modelByRef={modelByRef}>
+        <UnifiedRowProvider modelByRef={modelByRef} isAdmin={isAdmin}>
           <Card>
-          <ModelFilters
-            query={draft}
-            onQuery={setDraft}
-            providers={providerOptions}
-            provider={effectiveProvider}
-            onProvider={(next) => setFilters({ provider: next, page: "1" })}
-            kind={requestedKind}
-            onKind={(next) => setFilters({ kind: next, page: "1" })}
-            statuses={requestedStatus}
-            counts={counts}
-            showStatus={statusAware}
-            onStatus={(next) => setFilters({ status: statusParam(next), page: "1" })}
-            custom={customOnly}
-            onCustom={() => setFilters({ custom: customOnly ? null : "1", page: "1" })}
-            extra={
-              isAdmin ? (
-                <span className="flex items-center gap-2">
-                  {hasPreset ? (
-                    <Button variant="quiet" onClick={openGroups}>
-                      groups
-                    </Button>
-                  ) : null}
-                </span>
-              ) : undefined
-            }
-            outside={outside}
-            onShowOutside={() =>
-              setFilters({ status: STATUSES.join(","), page: "1" })
-            }
-            canClear={canClear}
-            onClear={clearFilters}
-          />
+            <ModelFilters
+              query={draft}
+              onQuery={setDraft}
+              providers={providerOptions}
+              provider={effectiveProvider}
+              onProvider={(next) => setFilters({ provider: next, page: "1" })}
+              kind={requestedKind}
+              onKind={(next) => setFilters({ kind: next, page: "1" })}
+              statuses={requestedStatus}
+              counts={counts}
+              showStatus={statusAware}
+              onStatus={(next) => setFilters({ status: statusParam(next), page: "1" })}
+              free={freeOnly}
+              onFree={() => setFilters({ free: freeOnly ? null : "1", page: "1" })}
+              freeCount={freeCount}
+              showFreeModeLink={isAdmin}
+              custom={customOnly}
+              onCustom={() => setFilters({ custom: customOnly ? null : "1", page: "1" })}
+              extra={
+                isAdmin && hasPreset ? (
+                  <Button variant="quiet" onClick={openGroups}>
+                    groups
+                  </Button>
+                ) : undefined
+              }
+              outside={outside}
+              onShowOutside={() =>
+                setFilters({ status: STATUSES.join(","), page: "1" })
+              }
+              canClear={canClear}
+              onClear={clearFilters}
+            />
 
-          {loading ? (
-            <div
-              aria-busy="true"
-              className="min-h-[240px] px-5 py-12 text-center text-body text-faint"
-            >
-              loading models…
-            </div>
-          ) : boardMode ? (
-            boardGroups.length === 0 ? (
+            {loading ? (
+              <div
+                aria-busy="true"
+                className="min-h-[240px] px-5 py-12 text-center text-body text-faint"
+              >
+                loading models…
+              </div>
+            ) : boardMode ? (
+              boardGroups.length === 0 ? (
+                <EmptyState>{emptyState}</EmptyState>
+              ) : (
+                boardGroups.map(({ group, rows }, index) => (
+                  <BoardSection
+                    key={group.id}
+                    group={group}
+                    count={groupCounts.get(group.id) ?? rows.length}
+                    rows={rows}
+                    columns={columns}
+                    actions={rowActions}
+                    controls={controls}
+                    phone={phone}
+                    drag={!phone && dragEnabled}
+                    reducedMotion={reduceMotion}
+                    onReorder={reorder}
+                    onHide={hideRow}
+                    showHeader={index === 0}
+                    deferLayout={index > 0}
+                    onMove={onMoveDelta}
+                  />
+                ))
+              )
+            ) : pageSlice.length === 0 ? (
               <EmptyState>{emptyState}</EmptyState>
-            ) : (
-              boardGroups.map(({ group, rows }, index) => (
-                <BoardSection
-                  key={group.id}
-                  group={group}
-                  count={groupCounts.get(group.id) ?? rows.length}
-                  rows={rows}
-                  columns={columns}
-                  actions={rowActions}
-                  controls={controls}
-                  phone={phone}
-                  drag={!phone && dragEnabled}
-                  reducedMotion={reduceMotion}
-                  onReorder={layoutDraft.reorder}
-                  onHide={(ref) => hideRow.current(ref)}
-                  showHeader={index === 0}
-                  onMove={(ref, delta) => {
-                    const index = rows.findIndex((row) => row.ref === ref);
-                    const target = rows[index + delta];
-                    if (target) layoutDraft.reorder(ref, target.ref);
-                  }}
-                />
-              ))
-            )
-          ) : phone ? (
-            pageSlice.length === 0 ? (
-              <EmptyState>{emptyState}</EmptyState>
-            ) : (
+            ) : phone ? (
               <UnifiedCards
                 rows={pageSlice}
                 actions={rowActions}
                 controls={controls}
-                onHide={(ref) => hideRow.current(ref)}
+                onHide={hideRow}
               />
-            )
-          ) : (
-            <DataTable
-              columns={columns}
-              rows={loading ? undefined : pageSlice}
-              rowKey={(row) => row.ref}
-              loading={loading}
-              stickyRight="actions"
-              rowHeaderKey="model"
-              tableLayout="fixed"
-              scrollLabel="Models"
-              caption={caption}
-              empty={emptyState}
-              pagination={pagination}
-            />
-          )}
+            ) : (
+              <FlatTable caption={caption} rows={pageSlice} columns={columns} />
+            )}
 
-          {boardMode && !loading && boardRows.length > 0 ? (
-            <PaginationBar pagination={pagination} />
-          ) : null}
+            {!loading && total > 0 ? <PaginationBar pagination={pagination} /> : null}
           </Card>
         </UnifiedRowProvider>
       )}
@@ -1019,12 +1186,27 @@ export default function Models() {
         />
       ) : null}
 
+      {aliasOpen ? (
+        <AliasCreateDialog
+          groups={customGroupOptions}
+          editable={editable}
+          groupDisabledReason={groupDisabledReason}
+          busy={createAlias.isPending}
+          error={createAlias.error}
+          onClose={() => {
+            if (!createAlias.isPending) {
+              createAlias.reset();
+              setAliasOpen(false);
+            }
+          }}
+          onSubmit={(payload) => createAlias.mutate(payload)}
+        />
+      ) : null}
+
       {comboOpen ? (
         <ComboCreateDialog
           models={all}
-          groups={groupChoices
-            .filter((group) => !group.provider)
-            .map((group) => ({ id: group.id, name: group.name }))}
+          groups={customGroupOptions}
           editable={editable}
           groupDisabledReason={groupDisabledReason}
           busy={createCombo.isPending}
@@ -1097,7 +1279,7 @@ export default function Models() {
         onDelete={(id) => layoutDraft.deleteGroup(id)}
         entries={layoutDraft.entries}
         candidates={groupCandidates}
-        onAssign={(ref, group) => layoutDraft.assignGroup(ref, group)}
+        onAssign={assignGroup}
         onSetVisible={(id, visible) => layoutDraft.setGroupVisible(id, visible)}
         isDefault={presetId === presets.data?.default_id}
       />

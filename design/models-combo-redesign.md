@@ -283,14 +283,14 @@ Verified 2026-11-18 against the working tree; nothing outside the table is impli
 | Name collision rule (alias > combo, both create paths) | **Shipped, tests green** | `routes/combos.rs:61-69`, `routes/models.rs:709-726`; `alias_and_combo_cannot_claim_one_name`, `colliding_alias_and_combo_list_once_and_the_combo_still_routes` |
 | Phase 1 row union, dedupe, Kind filter, board groups, group counts, `/v1` toggles | **Shipped, build green** | `rowsFor` (`unified-rows.ts:97-175`) called at `models.tsx:248-266`; `KINDS` (`filters.tsx:8-15`); counts count rows per group (`models.tsx:403-410`), heading says `N entries` (`groups.tsx:39`); `bun run build` passes |
 | Add→Combo with preset group; assigning a group implies `visible: true` | **Shipped, build green** | `models.tsx:448-471`, `:958-976`; `layout-draft.ts:410-432` |
-| **T1** — combo row renders `aggregate`/`members` (context range, price range, capability split) | **Not shipped** | `nameDetail` returns `… · metadata —` (`unified-rows.ts:82-86`); `api.ts` `Combo` has no `members`/`aggregate`; member list joins `modelByRef` only (`table-unified.tsx:379-423`). The wire fields exist and are unused. |
+| **T1** — combo row renders `aggregate`/`members` (context range, price range, capability split) | **Shipped (2026-11-23)** | `unified-rows.ts` (`aggregateOf`, `membersOf`, `comboMetaSummary`, `comboCapabilitySplit`), `table-unified.tsx` (`NameIdentity`, `ComboMemberList`, `FlatTable`). Wire fields read additively with fallback when absent. |
 | **S1** — a multi-provider name gives two different answers | **Bug, open** | An alias is advertised from `resolve_one` = first enabled target, sorted by provider (`routes/models.rs:85`, `:547`), while the same members as a combo fold over the whole set. Observed through the real router with a seeded registry (rows `openai/gpt-4.1` 256k + `deepseek/gpt-4.1` 1M): `/v1/models` `fast` (alias) → `owned_by:"rrouter"`, `context_window:1000000`, no `aggregate`; `duo` (combo) → `256000`, `aggregate.context {min:256000,max:1000000}`. `GET /v1/models/fast` → 200 with the alias view. |
 | **T2** — `/api/combos` is not on the admin router | **Defect, open** | Registered at `crates/rrouter-gateway/src/lib.rs:206-211` while `/api/aliases` sits on the admin router (`:161-167`), so a non-admin reader's `GET /api/combos` is refused (the route accepts no credential a reader holds) and the page's `useCombos(isAdmin)` never loads for a reader: alias rows appear, combo rows do not. Move it next to `/aliases`. |
-| **T3** — the `preset group` select offers provider buckets as custom groups | **Defect, open** | The dialog maps `entry.id` → value and `entry.name` → text correctly (`preset-header.tsx:365-372`), but `models.tsx:961-963` filters `groupChoices` for `!group.provider` **after** reducing them to `{id, name}` (`models.tsx:961-963`), where no `provider` key exists, so `provider:…` buckets are offered; choosing one writes an explicit item assignment that `group_id_for` resolves back to the bucket (`presets.rs:218-237`). Cosmetic, not a data loss. |
+| **T3** — the `preset group` select offers provider buckets as custom groups | **Fixed** | `models.tsx` filters `!group.provider` before mapping `{id, name}` so only custom groups appear in `ComboCreateDialog` and `AliasCreateDialog`. |
 | T4 — delete-from-board for a combo | **Not shipped** | The board's hide/remove path only writes layout entries; deleting the combo is the `/routing/combos` page or the API. |
-| Group-manager candidate dedupe ("shadowed by …") | **Not needed after D4** | Store-level collisions can still be written directly; `rowsFor` renders them once (`unified-rows.ts:122-149`). |
+| Group-manager candidate dedupe ("shadowed by …") | **Not needed after D4** | Store-level collisions can still be written directly; `rowsFor` renders them once (`unified-rows.ts`). |
 | Phase 3 lifecycle (`renameRef`, delete-entry cleanup) | **Design only** | No `renameRef` in `layout-draft.ts`. |
-| UI test runner (`vitest`) | **Follow-up, deliberately not added** | `ui/package.json` scripts: `dev`, `build`, `preview`, `typecheck` only. |
+| UI test runner | **Shipped (`node --test`)** | `ui/package.json` runs `node --test "tests/**/*.test.ts"`; Models pure logic pinned in `ui/src/pages/models/models.test.ts`. |
 
 Known limitations, stated plainly:
 
@@ -300,10 +300,104 @@ Known limitations, stated plainly:
 - Live breaker state has no API (only the persisted probe `backoff_level`).
 - Non-default presets have no `/v1/models` group parity (D3).
 - Grouped combos get no group/provider prefix (D10).
-- `ui/` has no test runner (Q5).
+- Non-admin readers still do not see combos until gateway T2 moves `/api/combos` onto the admin router.
 
-Footer: rewritten from the three section files and re-checked against the tree
-(2026-11-18). Commands run here: `cargo test -p rrouter-gateway --lib combo_meta`,
-`cargo test -p rrouter-gateway --test models combo_`, `cd ui && bun run build`. S1, T2 and T3
-were confirmed by reading the current source and, for S1, by a seeded-registry probe through
-the real router (throwaway test, deleted).
+---
+
+## 2026-11-23 — Anti-Vibecode pass: the Models screen
+
+Extends the shipped combo unification above without contradicting any closed decision (one table,
+one preset board, `rrouter/<name>` identity, alias > combo, derived combo ranges, no `group/<combo>`
+prefix). Decisions, not pixels.
+
+### Job
+
+"Which model should my request use, what does it cost, is it available right now, and how do I
+make a group, alias, or combo of them."
+
+### The four answers
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | **Why open it?** | To pick and copy the exact model reference for a client or agent, check what it costs per 1M tokens (including whether it is **Free**), verify whether it can serve traffic right now, and group/alias/combine models into a preset. |
+| 2 | **How is it used?** | Open beside an editor, coding agent config, or Providers / Free mode. Scanned in seconds, copied, toggled, or tested inline, then closed. |
+| 3 | **What do they want next?** | Confirm *why* a row is unavailable (disabled vs disconnected provider vs broken combo chain), test a model and see the result on that row, jump straight to `/providers` to fix a disconnected provider or `/free-mode` to set up free models, or create a group/alias/combo without leaving the preset. |
+| 4 | **What are we willing to leave out?** | The `ConnectionCard` (base URLs / auth headers belong on Quick start and API Keys), duplicate "shown in `<group>`" text under every group select, the duplicate standalone custom-delete trash button beside the row menu, tracked-caps eyebrow styling, virtualisation (pagination already bounds DOM rows), and free-mode discovery/fallback logic (lives on `/free-mode`). |
+
+### Audit (before → tell/tier → decision)
+
+| Finding | Tell / tier | Decision |
+|---|---|---|
+| `<ConnectionCard />` occupied ~220 px above the toolbar on `/models`, pushing the model table below the fold. | T1 (borrowed component) | Deleted from `/models`. Base URLs and auth headers live on `/quickstart` and `/access/keys`. |
+| `model.available === false` was completely hidden on registry rows, while alias targets and combo members marked the same model `unavailable`. Two surfaces disagreed on availability. | Floor (honesty, disagreeing states) | Render an explicit `unavailable` warn badge (`no healthy connection`) whenever `model.enabled && !model.available`, and report `M available` in the header summary from one shared `summarizeRows` function. |
+| Non-board desktop views (readers, `Status: All/Hidden/Disabled/Not in preset`) used `DataTable` without `wrap: true` and without combo sub-rows: multi-line identity cells clipped and clicking `Show N members` did nothing. | Floor (broken control, clipped text) | Replaced the flat desktop `DataTable` branch with `FlatTable` sharing `StaticRow` and `ComboMemberList`; combo expansion and multi-line identity rows work identically across every filter and for readers. |
+| Combo rows still showed `N candidates · metadata —` even though `combo_meta.rs` ships `aggregate` + `members`; combo member list fell back to `modelByRef` only and broke when `priceLabel` was removed. | T1 (unshipped wire), Floor (broken import) | Wired `aggregate` + `members` additively: qualified bounds (`guaranteed 256K · up to 1M`, `all candidates 256K`), price range + coverage (`2/3 priced`), guaranteed vs supported capability split, `no-targets` / `router-unavailable` warn badges, deprecation count, and per-member `targets[]` expansion. |
+| Price units differed between desktop (`$2.50 / $10.00`, unit missing), phone card (`in / out per 1M`), and combo (`—`); zero-priced models had no visible `Free` marker or filter. | T1, T2, product goal | One price module (`price.ts`): `Free` emerald badge strictly for zero catalog price (never unknown), `$X in · $Y out /1M` (+ quiet cache line), `price —` for unknown. Added `?free=1` filter chip with live count, linking to `/free-mode` (admin only) and marking free models in `ModelSelect` / `ModelPicker`. |
+| Empty-state branches ignored `kind` and `free` filters (showing "This preset has no models" when `kind=combos` or `free=1` matched 0 rows) and rendered `EmptyRegistry` when `/api/models` errored. | Floor (false empty states) | Pure `emptyStateKind(...)` classifier: error state never renders `EmptyRegistry`; filtered-free empty state offers Clear filters + link to `/free-mode`; every preset status branch checks actual counts. |
+| `Test` button reported pass/fail only in a disappearing toast; nothing on the row recorded the result. | T1, T3 | Store last test outcome per ref in `useModelActions` and render it inline on the row (`✓ 412ms` / `✗ 429 …`) with a polite live region. |
+| Group `<Select>` repeated `"shown in <group>"` directly beneath the select inside that group's section; custom rows had both a standalone Trash icon and `RowMenu → Delete custom model`; `RowMenu → Move to group` duplicated the inline Group select on desktop and cards. | T1 (same-question) | Deleted `"shown in <group>"` on desktop and phone cards; deleted duplicate Trash icon button; hide `Move to group` inside `RowMenu` whenever the inline Group select is visible (kept only at `sm`–`md` where the group column hides). |
+| Tracked-caps eyebrow styling (`uppercase tracking-[0.06em/0.08em]`) on provider chips, `preset` label, `GroupAccessDialog` headings, `ModelPicker`, and `CapabilityChips`. | Floor (tracked-caps) | Replaced with plain small/monospace labels across all owned files. |
+| `GroupManager` disabled the Access button on non-default presets with only a hover `title` explanation. | Floor (hover-only) | Added an inline visible note in `GroupManager` whenever `!isDefault`. |
+| `Add → Alias` navigated away to `/routing/aliases` while `Add → Combo` stayed in-page. | T3 | Added in-page `AliasCreateDialog` (`POST /api/aliases` + optional preset group assignment) inside `preset-header.tsx`; `/routing/aliases` stays for full edit/delete. |
+| Provider pill was static text; no task-scoped hover/focus preview on rows. | T3 | Provider pill links to `/providers`; hovering (~350 ms mouse) or focusing a model/alias/combo name opens a lightweight, non-modal, control-free preview scoped to ref, availability, limits, full pricing, capabilities, and test/member state. |
+| **Performance**: `models.tsx` passed fresh inline closures (`onAssignGroup`, `onVisible`, `onHide`, `hideFor`, `rowActions`, `controls`) into `useUnifiedColumns` and `BoardSection` every render, defeating every `useMemo` on Shell's 5 s `useHealth` poll, 15 s background polls, and every search keystroke. `UnifiedRowContext` put `expanded` with `modelByRef`, re-rendering every row on one combo toggle. `ComboMemberList` mounted even while collapsed. `GroupManager` ran O(N²) `entries.find` over all candidates. | Performance | Stabilized draft callbacks via `draftRef` + `useCallback`, memoized `rowActions`/`controls`/`summary`, wrapped `BoardSection`/`StaticRow`/`SortableRow`/`UnifiedCard` in `React.memo`, split `UnifiedRowContext` (data vs expanded), lazy-mounted collapsed `ComboMemberList`, applied `content-visibility: auto` + `contain-intrinsic-size` on below-the-fold `BoardSection`s (`index > 0`, off while dragging), and indexed `GroupManager` entries with a `Map` + 100-row initial cap ("Show all"). |
+
+### Deliberate trade-offs
+
+- **Pagination over virtualisation (`DEFAULT_SIZE = 50`, max `200`).** Operators scrolling through
+  500 models must click Next or raise page size to 200 rather than infinitely scroll. We accept
+  this because pagination preserves semantic `<table>` structure, native sticky headers, keyboard
+  `dnd-kit` board reordering, and browser Find-in-page, while `content-visibility: auto` on
+  below-the-fold sections keeps 100–200 row pages responsive.
+- **Zero-price only for `Free`; unknown price is never `Free`.** A free endpoint whose provider
+  catalog omits pricing shows `price —`, not `Free`. We accept this because marking an unpriced
+  model as free is a billing lie; Free mode discovery populates zero pricing for known free models.
+- **No `Free` link for non-admin readers.** `/free-mode` is an admin-only route (`main.tsx:235`),
+  so readers see a plain emerald `Free` badge instead of a dead link.
+- **`Add → Alias` creates new aliases in-page; editing/deleting existing aliases and combos still
+  links to `/routing/aliases` and `/routing/combos`.** Some operators will dislike leaving `/models`
+  to edit a combo chain; we accept it to avoid duplicating full CRUD editors in two places while
+  making *creation into a group* zero-navigation.
+- **Inline test results are session-local.** Reloading clears the row's `✓ 412ms` badge. Accepted:
+  probing every model on load would burn quota and add latency; the badge answers the test the
+  operator just ran.
+
+### Exclusions
+
+No free-mode discovery, probing, or fallback settings on `/models` (`/free-mode` owns them). No
+`ConnectionCard`. No virtual scroll library. No per-model quota/spend columns (`/usage` owns spend;
+`/providers` owns account quota). No edits to `api.ts`, `queries.ts`, or shared `DataTable`.
+
+### Preview contract
+
+Hovering (~350 ms delay, mouse only) or keyboard-focusing a model, alias, or combo name opens a
+non-modal, non-focus-stealing popover (`role="tooltip"` / descriptive panel) with **zero
+interactive controls inside** (click/touch never traps; Escape or blur closes):
+
+- **Model**: full callable ref (`group/code/id`), availability (`available` / `unavailable — no
+  healthy connection` / `disabled`), context window & max output, input/output/cache pricing (or
+  `Free · $0.00 /1M` / `price —`), all enabled capabilities, reasoning effort levels when present,
+  and the last inline test result if run.
+- **Alias**: `rrouter/<alias> → <target>`, target availability, target context & pricing.
+- **Combo**: strategy (+ router model for smart), availability status, qualified context & max
+  output ranges, candidate price range & coverage, guaranteed vs supported capabilities, and the
+  ordered candidate refs.
+
+### Click counts (top questions)
+
+| Question | Clicks |
+|---|---|
+| Which models are available and what do they cost? | 0 (header summary + inline availability badge + unified `/1M` price line) |
+| Which models are free right now? | 1 (`Free` filter chip, or 0 via `Free` badge + count in chip) |
+| Copy the exact model ref for my client | 1 (`Copy` icon next to the model/alias/combo name) |
+| Does this model actually answer right now? | 1 (`Play` test icon → inline `✓ latency` / `✗ status` on the row) |
+| Create a combo or alias inside a preset group | 2 (`Add → Combo/Alias` → fill & Create) |
+| Set up free models or paid-quota fallback | 1 (click any `Free` badge or the Free mode link → `/free-mode`) |
+
+### Deep links kept
+
+`?q=`, `?provider=`, `?kind=all|models|aliases|combos`, `?status=routed|hidden|disabled|unrouted|all`,
+`?custom=1`, `?free=1`, `?preset=<id>`, `?page=`, `?size=`, plus legacy rewrites (`?view=`,
+`?names=`, `?ipage=`, `?dpage=`).
+
+Footer: combo redesign verified 2026-11-18; Anti-Vibecode Models redesign added 2026-11-23.

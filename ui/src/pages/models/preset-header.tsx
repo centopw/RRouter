@@ -3,7 +3,7 @@ import * as Popover from "@radix-ui/react-popover";
 import { CaretDown, Copy, DotsThree, PencilSimple, Plus, Star, Trash } from "@phosphor-icons/react";
 import { Link } from "react-router-dom";
 import { IconButton } from "../../components/atoms";
-import { ModelChain } from "../../components/model-select";
+import { ModelChain, ModelSelect } from "../../components/model-select";
 import { useToast } from "../../components/toast";
 import {
   Badge,
@@ -549,7 +549,7 @@ export function PresetControls({
   return (
     <>
       <label className="flex min-w-0 items-center gap-2">
-        <span className="text-caption uppercase tracking-[0.08em] text-faint">preset</span>
+        <span className="text-small text-muted">Preset</span>
         <span className="w-[180px] max-w-full">
           <Select ariaLabel="preset being edited" value={presetId} onChange={pick} disabled={busy}>
             {presets.map((preset) => (
@@ -935,9 +935,12 @@ export function PresetManagerDrawer({
 /** The one primary action on the page: add a row the registry cannot sync. */
 export function AddMenu({
   onAddCustom,
+  onAddAlias,
   onAddCombo,
 }: {
   onAddCustom: () => void;
+  /** Opens the alias editor on this page, so a new alias can be grouped as it is made. */
+  onAddAlias: () => void;
   /** Opens the combo editor on this page, so a new combo can be grouped as it is made. */
   onAddCombo: () => void;
 }) {
@@ -969,9 +972,9 @@ export function AddMenu({
             </button>
           </Popover.Close>
           <Popover.Close asChild>
-            <Link to="/routing/aliases" role="menuitem" className={menuItem}>
+            <button type="button" role="menuitem" onClick={onAddAlias} className={menuItem}>
               Alias
-            </Link>
+            </button>
           </Popover.Close>
           <Popover.Close asChild>
             <button type="button" role="menuitem" onClick={onAddCombo} className={menuItem}>
@@ -981,6 +984,113 @@ export function AddMenu({
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
+  );
+}
+
+/** What the page needs to create an alias and place it in the active preset draft. */
+export type AliasCreatePayload = {
+  alias: string;
+  target: string;
+  group: string | null;
+};
+
+/**
+ * Add → Alias, without leaving the preset. Same draft-assignment flow as `ComboCreateDialog`
+ * so a new alias lands in the chosen group without a second step.
+ */
+export function AliasCreateDialog({
+  groups,
+  editable,
+  groupDisabledReason,
+  busy,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  groups: Array<{ id: string; name: string }>;
+  editable: boolean;
+  groupDisabledReason: string | null;
+  busy: boolean;
+  error: unknown;
+  onClose: () => void;
+  onSubmit: (payload: AliasCreatePayload) => void;
+}) {
+  const form = useRef<HTMLFormElement>(null);
+  const [alias, setAlias] = useState("");
+  const [target, setTarget] = useState("");
+  const [group, setGroup] = useState("");
+  const ready = alias.trim() !== "" && target !== "" && !busy;
+
+  const submit = () => {
+    if (!ready) return;
+    onSubmit({
+      alias: alias.trim(),
+      target,
+      group: group === "" ? null : group,
+    });
+  };
+
+  return (
+    <Modal
+      open
+      title="New alias"
+      description="A stable model name clients send. It points at one model and joins the group you choose."
+      width="md"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="quiet" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            onClick={() => form.current?.requestSubmit()}
+            disabled={!ready}
+          >
+            {busy ? "Creating…" : "Create alias"}
+          </Button>
+        </>
+      }
+    >
+      <form
+        ref={form}
+        className="flex flex-col gap-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          submit();
+        }}
+      >
+        <Field label="alias name" hint="the name clients send">
+          <Input value={alias} onChange={setAlias} placeholder="fast" ariaLabel="alias name" autoFocus />
+        </Field>
+        <Field label="target model" hint="the model this alias resolves to">
+          <ModelSelect
+            ariaLabel="target model"
+            value={target}
+            onChange={setTarget}
+            allowEmpty="choose a model"
+          />
+        </Field>
+        <Field
+          label="preset group"
+          hint={
+            editable
+              ? "The alias is added to this group in the active preset."
+              : (groupDisabledReason ?? "Open a preset to assign a group.")
+          }
+        >
+          <Select ariaLabel="preset group" value={group} onChange={setGroup} disabled={!editable}>
+            <option value="">Ungrouped (RRouter)</option>
+            {groups.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {error ? <ErrorNote error={error} /> : null}
+      </form>
+    </Modal>
   );
 }
 

@@ -11,7 +11,7 @@ import {
   type QuotaPingRow,
 } from "../../lib/api";
 import { qk } from "../../lib/queries";
-import { refusalView } from "../../lib/refusal";
+import { refusalView, type RefusalView } from "../../lib/refusal";
 
 export type ProviderNotice = { tone: "pos" | "neg"; text: string };
 
@@ -22,6 +22,28 @@ export type ConnectionTestResult = {
   latency_ms: number;
   error?: string;
 };
+
+/**
+ * Single source of truth for whether one account can take traffic right now, and why not.
+ * Both the provider header's "N of M ready" count, each account row, the hover/focus
+ * preview, and the connection drawer read from this function so they can never disagree.
+ */
+export type AccountStatus =
+  | {
+      kind: "refusal";
+      ready: false;
+      label: string;
+      tone: "neg" | "warn" | "info";
+      reason: string;
+      refusal: RefusalView;
+    }
+  | {
+      kind: "disabled" | "backoff" | "no_endpoint" | "over_quota" | "plan_at_limit" | "ready";
+      ready: boolean;
+      label: string;
+      tone: "muted" | "warn" | "neg";
+      reason: string | null;
+    };
 
 /**
  * Grouping is a read projection over the connection list, never a routing entity: the
@@ -38,13 +60,13 @@ export type ProviderGroup = {
   connections: Connection[];
   /** Distinct priorities, ascending, with how many accounts sit at each. */
   tiers: Array<{ priority: number; count: number }>;
+  /** Accounts whose `accountStatus().ready` is true right now. */
+  ready: number;
   enabled: number;
   backoff: number;
   overQuota: number;
   /** Accounts a provider retired (`refusal` set): out of rotation, and not by an operator. */
   refused: number;
-  /** Current-window spend, summed; `null` until the admin-only quota list has arrived. */
-  spend: { cost_micros: number; tokens: number; requests: number } | null;
   /** Worst subscription window in the group; `null` when no account reported one. */
   subscription: { percent: number; resets_at: number | null; reporting: number } | null;
   state: "healthy" | "degraded" | "down";
@@ -441,6 +463,93 @@ export function pingBadgeText(ping: QuotaPingRow): string {
 }
 
 /**
+ * Standing readiness of one connection: what stops it routing, else that it is ready.
+ *
+ * A provider refusal comes first and reads as its own badge, because it is not the same
+ * fact as an operator disable. Live breaker state has no API yet (S1); persisted probe
+ * backoff, missing required base URL, exhausted operator quota, and a plan window at the
+ * 90% reserve threshold are every signal the page can observe honestly.
+ */
+export function accountStatus(
+  connection: Connection,
+  quota?: AccountQuotaRow,
+  subscription?: AccountSubscription,
+  providers?: ModelProvider[],
+): AccountStatus {
+  const refusal = refusalView(connection.refusal);
+  if (refusal) {
+    return {
+      kind: "refusal",
+      ready: false,
+      label: refusal.label,
+      tone: refusal.tone,
+      reason: refusal.description,
+      refusal,
+    };
+  }
+  if (!connection.is_active) {
+    return {
+      kind: "disabled",
+      ready: false,
+      label: "disabled",
+      tone: "muted",
+      reason: "Disabled by an operator; excluded from routing.",
+    };
+  }
+  if (connection.backoff_level > 0) {
+    return {
+      kind: "backoff",
+      ready: false,
+      label: `backoff ${connection.backoff_level}`,
+      tone: "warn",
+      reason: connection.last_error ?? "In probe backoff after a recent upstream error.",
+    };
+  }
+  if (needsBaseUrlOverride(connection, providers)) {
+    return {
+      kind: "no_endpoint",
+      ready: false,
+      label: "no endpoint",
+      tone: "warn",
+      reason: "Resource base URL is not configured yet.",
+    };
+  }
+  if (quota?.exhausted) {
+    const reset = until(quota.resets_at);
+    return {
+      kind: "over_quota",
+      ready: false,
+      label: "over quota",
+      tone: "neg",
+      reason: `Operator ${WINDOW_LABEL[quota.window] ?? quota.window} cap reached${reset ? ` · resets in ${reset}` : ""}.`,
+    };
+  }
+  const worstWindow =
+    subscription && subscription.windows.length > 0
+      ? subscription.windows.reduce((worst, window) =>
+          window.used_percent > worst.used_percent ? window : worst,
+        )
+      : null;
+  if (worstWindow && worstWindow.used_percent >= 90) {
+    const reset = until(worstWindow.resets_at);
+    return {
+      kind: "plan_at_limit",
+      ready: false,
+      label: "plan at limit",
+      tone: "warn",
+      reason: `${worstWindow.label} at ${Math.round(worstWindow.used_percent)}%${reset ? ` · resets in ${reset}` : ""}.`,
+    };
+  }
+  return {
+    kind: "ready",
+    ready: true,
+    label: "ready",
+    tone: "muted",
+    reason: null,
+  };
+}
+
+/**
  * Build one summary entry per provider or custom endpoint in server order
  * (`provider, priority, created_at`). Everything here is a read over queries the page
  * already makes; nothing is routed differently.
@@ -483,41 +592,35 @@ export function buildProviderGroups(
       ([priority, count]) => ({ priority, count }),
     ).sort((a, b) => a.priority - b.priority);
 
-    let spend: ProviderGroup["spend"] = null;
+    let ready = 0;
+    let enabled = 0;
+    let flagged = 0;
     let overQuota = 0;
     let backoff = 0;
     let refused = 0;
     let worstPercent = 0;
     let worstResets: number | null = null;
     let reporting = 0;
-    let flagged = 0;
-    let eligible = 0;
+
     for (const account of connections) {
       const quota = quotaBy.get(account.id);
-      if (quota) {
-        spend ??= { cost_micros: 0, tokens: 0, requests: 0 };
-        spend.cost_micros += quota.cost_micros;
-        spend.tokens += quota.tokens;
-        spend.requests += quota.requests;
-        if (quota.exhausted) overQuota += 1;
+      const subscription = subscriptionBy.get(account.id);
+      const status = accountStatus(account, quota, subscription, providers);
+      if (status.ready) ready += 1;
+      if (account.is_active) {
+        enabled += 1;
+        if (!status.ready) flagged += 1;
       }
+      if (quota?.exhausted) overQuota += 1;
       if (account.backoff_level > 0) backoff += 1;
-      if (refusalView(account.refusal)) refused += 1;
-      const windows = subscriptionBy.get(account.id)?.windows ?? [];
+      if (status.kind === "refusal") refused += 1;
+      const windows = subscription?.windows ?? [];
       if (windows.length > 0) reporting += 1;
       const accountWorst = windows.reduce((max, window) => Math.max(max, window.used_percent), 0);
       if (accountWorst > worstPercent) {
         worstPercent = accountWorst;
         worstResets =
           windows.find((window) => window.used_percent === accountWorst)?.resets_at ?? null;
-      }
-      if (account.is_active) {
-        eligible += 1;
-        // Live breaker state has no API yet; the persisted probe backoff, an exhausted
-        // operator quota and a window at the reserve threshold are what the page can see.
-        if (account.backoff_level > 0 || quota?.exhausted === true || accountWorst >= 90) {
-          flagged += 1;
-        }
       }
     }
 
@@ -528,11 +631,11 @@ export function buildProviderGroups(
       code: providerRow?.code ?? null,
       connections,
       tiers,
-      enabled: connections.filter((account) => account.is_active).length,
+      ready,
+      enabled,
       backoff,
       overQuota,
       refused,
-      spend,
       subscription:
         reporting === 0
           ? null
@@ -541,12 +644,7 @@ export function buildProviderGroups(
               resets_at: worstResets,
               reporting,
             },
-      state:
-        eligible === 0 || flagged === eligible
-          ? "down"
-          : flagged > 0
-            ? "degraded"
-            : "healthy",
+      state: ready === 0 ? "down" : flagged > 0 ? "degraded" : "healthy",
     };
   });
 }
@@ -615,6 +713,12 @@ export function useConnectionMutations(onNotice: (notice: ProviderNotice) => voi
   const client = useQueryClient();
   const { invalidate, refreshRegistrySoon } = useInvalidateProviders();
   const [lastTest, setLastTest] = useState<ConnectionTestResult | null>(null);
+  const [testsById, setTestsById] = useState<Record<string, ConnectionTestResult>>({});
+
+  const recordTest = useCallback((result: ConnectionTestResult) => {
+    setLastTest(result);
+    setTestsById((prev) => ({ ...prev, [result.id]: result }));
+  }, []);
 
   const remove = useMutation({
     mutationFn: (id: string) => api.del<{ deleted: boolean }>(`/api/connections/${id}`),
@@ -646,22 +750,13 @@ export function useConnectionMutations(onNotice: (notice: ProviderNotice) => voi
         `/api/connections/${id}/test`,
       ),
     onSuccess: (res, id) => {
-      setLastTest({ id, ...res });
-      onNotice(
-        res.ok
-          ? { tone: "pos", text: `Connection works · ${res.status} · ${res.latency_ms}ms` }
-          : {
-              tone: "neg",
-              text: `Connection failed · ${res.status}${res.error ? ` · ${res.error}` : ""}`,
-            },
-      );
+      recordTest({ id, ...res });
     },
     onError: (error, id) => {
       const msg = error instanceof Error ? error.message : String(error);
-      setLastTest({ id, ok: false, status: 0, latency_ms: 0, error: msg });
-      onNotice({ tone: "neg", text: `Connection test failed: ${msg}` });
+      recordTest({ id, ok: false, status: 0, latency_ms: 0, error: msg });
     },
   });
 
-  return { invalidate, refreshRegistrySoon, remove, toggle, test, lastTest };
+  return { invalidate, refreshRegistrySoon, remove, toggle, test, lastTest, testsById, recordTest };
 }

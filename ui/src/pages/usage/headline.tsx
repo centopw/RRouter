@@ -1,21 +1,18 @@
 /**
- * The one sentence at the top of /usage: which plan window is closest to running out,
- * and when. The headline account is the one whose limit is hit earliest at its current
- * pace (exhausted counts as now); with no forecast anywhere, the highest used share.
- * Colour is spent only on `on_pace_to_hit` / `exhausted`. Renders nothing when no account
- * reports a window. Accounts come from the page; the headline window's daily history (for
- * the chart under the sentence) is fetched here, since only this card knows which window
- * that is.
+ * Shared pace/plan/account formatting helpers for `/usage` and `/providers` previews.
+ *
+ * The single-account `<Headline>` hero card was deleted in the multi-provider Limits Board
+ * redesign (`design/usage-redesign.md`); these pure formatters and `AccountLink` stay here
+ * with stable export names and signatures because `providers/account-preview.tsx` imports
+ * `paceSentence` from this module.
  */
 
 import { Link } from "react-router-dom";
 import type { AccountSubscription, Connection } from "../../lib/api";
-import { Card, cx } from "../../components/ui";
-import { useAccountUsageHistory } from "../../lib/queries";
+import { cx } from "../../components/ui";
 import { connectionLabel, providerLabel } from "../providers/types";
-import { chartable, LimitChart } from "./limit-chart";
-import { isAlarming, rankAccounts, type Pace, type WindowRisk } from "./pace";
-import { capitalized, resetsIn, shortDate, windowLabel } from "./quota";
+import type { Pace, WindowRisk } from "./pace";
+import { capitalized, resetsIn, shortDate } from "./quota";
 
 const DAY_MS = 86_400_000;
 
@@ -26,7 +23,8 @@ function clock(ms: number): string {
 /** "Nov 27", or "at 14:30" when it is less than a day away; "~" when the window is a guess. */
 export function hitWhen(pace: Pace, now: number): string {
   if (pace.limitHitAt === null) return "";
-  const at = pace.limitHitAt - now < DAY_MS ? `at ${clock(pace.limitHitAt)}` : shortDate(pace.limitHitAt);
+  const at =
+    pace.limitHitAt - now < DAY_MS ? `at ${clock(pace.limitHitAt)}` : shortDate(pace.limitHitAt);
   return pace.approximate ? `~${at}` : at;
 }
 
@@ -88,69 +86,5 @@ export function AccountLink({
     >
       {accountName(account, connections)}
     </Link>
-  );
-}
-
-export function Headline({
-  accounts,
-  connections,
-  now,
-  className,
-}: {
-  /** `/api/accounts/usage` rows. */
-  accounts: AccountSubscription[];
-  /** Connection roster, used only to name the account the way /providers does. */
-  connections?: Connection[];
-  /** Clock override in ms, for tests; defaults to render time. */
-  now?: number;
-  className?: string;
-}) {
-  const at = now ?? Date.now();
-  const top = rankAccounts(accounts, at)[0];
-  const showChart = top !== undefined && chartable(top.worst.window);
-  const history = useAccountUsageHistory(
-    showChart ? top.account.connection_id : null,
-    showChart ? top.worst.window.id : null,
-  );
-  if (!top) return null;
-
-  const { account, worst } = top;
-  const label = windowLabel(worst.window);
-  const used = Math.round(worst.window.used_percent);
-  const renewal = renewalText(worst);
-  const forecast = paceSentence(worst.pace, at);
-  const alarm = isAlarming(worst.pace.state);
-
-  return (
-    <Card className={cx("flex flex-col gap-4 px-5 py-4", className)}>
-      <p className="text-lead text-fg">
-        <span className="font-medium">{planTitle(account)}</span>
-        <span className="text-faint"> · </span>
-        <AccountLink account={account} connections={connections} />
-        <span className="text-faint"> — </span>
-        <span className="tnum">
-          {used}% of {label.charAt(0).toLowerCase() + label.slice(1)} used
-        </span>
-        {renewal ? (
-          <>
-            <span className="text-faint"> · </span>
-            <span className="text-muted tnum">{renewal}</span>
-          </>
-        ) : null}
-        {forecast ? (
-          <>
-            <span className="text-faint"> · </span>
-            <span className={cx("tnum", alarm ? "font-medium text-[var(--color-warn)]" : "text-muted")}>
-              {forecast}
-            </span>
-          </>
-        ) : null}
-      </p>
-      {!showChart ? null : history.data ? (
-        <LimitChart window={worst.window} label={label} pace={worst.pace} history={history.data} now={at} />
-      ) : history.isError ? (
-        <p className="text-small text-faint">Usage history is unavailable right now.</p>
-      ) : null}
-    </Card>
   );
 }

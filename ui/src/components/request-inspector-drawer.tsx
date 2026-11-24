@@ -14,7 +14,12 @@ import {
 } from "./ui";
 import { CaptureViewer } from "./capture-viewer";
 import { ms, splitRef, usd, when } from "../lib/format";
-import { modelRefFor } from "../lib/model-ref";
+import {
+  canonicalEventRef,
+  requestedRefOf,
+  routedTargetOf,
+  sameAsRef,
+} from "../lib/model-ref";
 import { useModels, useUsageDetail } from "../lib/queries";
 import type { UsageEvent } from "../lib/api";
 
@@ -135,12 +140,14 @@ function RequestInspectorBody({
     (detail.isPending || detail.isError || attempts.length > 1 || failedAttempts.length > 0);
   const maxAttemptLatency = attempts.reduce((max, a) => Math.max(max, a.latency_ms), 0);
 
-  const modelRef = modelRefFor(row.provider, row.model, registry.data);
+  const requestedRef = requestedRefOf(row);
+  const routedTo = routedTargetOf(row, registry.data);
+  const sameAs = sameAsRef(row, registry.data);
+  const modelRef = canonicalEventRef(row, registry.data) || requestedRef;
   const inspectConnectionId =
     row.connection_id ?? attempts.find((attempt) => attempt.connection_id)?.connection_id ?? null;
   const hasStepper = onPrev !== undefined || onNext !== undefined;
-  const { provider: parsedProvider, id: parsedId } = splitRef(row.model);
-  const titleText = parsedProvider ? `${parsedProvider}/${parsedId}` : row.model;
+  const titleText = requestedRef;
   const descriptionText = row.request_id ? `request ${row.request_id.slice(0, 8)}` : "request";
 
   return (
@@ -236,11 +243,15 @@ function RequestInspectorBody({
 
         <dl className="divide-y divide-[var(--color-rule)] text-body">
           <DetailRow k="When" v={when(row.ts)} />
+          <DetailRow
+            k="Model"
+            v={requestedRef}
+            note={sameAs ? `same as ${sameAs}` : undefined}
+            mono
+          />
+          <DetailRow k="Routed to" v={routedTo || "—"} mono />
           <DetailRow k="Provider" v={providerName ?? row.provider} />
           <DetailRow k="API key" v={(row.key_id ? keyNames?.get(row.key_id) : undefined) ?? "—"} />
-          {row.requested_model && row.requested_model !== row.model ? (
-            <DetailRow k="Requested" v={row.requested_model} mono />
-          ) : null}
           {row.endpoint ? <DetailRow k="Endpoint" v={`${row.method} ${row.endpoint}`} mono /> : null}
           {row.protocol ? <DetailRow k="Protocol" v={row.protocol} mono /> : null}
           <DetailRow
@@ -449,12 +460,25 @@ function LatencyBreakdown({
   );
 }
 
-function DetailRow({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
+function DetailRow({
+  k,
+  v,
+  note,
+  mono,
+}: {
+  k: string;
+  v: string;
+  note?: string;
+  mono?: boolean;
+}) {
   return (
-    <div className="flex items-center justify-between gap-3 py-2">
-      <dt className="text-faint">{k}</dt>
-      <dd className={cx("min-w-0 truncate text-right text-muted tnum", mono && "font-mono text-small")}>
-        {v}
+    <div className="flex items-start justify-between gap-3 py-2">
+      <dt className="shrink-0 text-faint">{k}</dt>
+      <dd className="min-w-0 text-right tnum">
+        <span className={cx("block truncate text-muted", mono && "font-mono text-small")}>{v}</span>
+        {note ? (
+          <span className="mt-0.5 block truncate font-mono text-caption text-faint">{note}</span>
+        ) : null}
       </dd>
     </div>
   );

@@ -56,6 +56,7 @@ export function useUnifiedColumns({
     columns.push({
       key: "model",
       title: "provider / name",
+      wrap: true,
       render: (row) => {
         if (row.kind !== "model") return <NameIdentity row={row} />;
         if (row.model === null) return <StaleIdentity row={row} />;
@@ -70,35 +71,27 @@ export function useUnifiedColumns({
         width: "9.5rem",
         className: "hidden md:table-cell",
         render: (row) => {
+          const explicit = customGroups.find((group) => group.id === groupOf(row.ref));
           if (!editable) {
-            const explicit = customGroups.find((group) => group.id === groupOf(row.ref));
             return (
               <span className="text-caption text-muted">
                 {row.entry ? (explicit?.name ?? "ungrouped") : "—"}
               </span>
             );
           }
-          const explicit = customGroups.find((group) => group.id === groupOf(row.ref));
           return (
-            <div className="flex flex-col gap-1">
-              <Select
-                ariaLabel={`Group for ${row.ref}`}
-                value={explicit?.id ?? ""}
-                onChange={(next) => onAssignGroup(row.ref, next === "" ? null : next)}
-              >
-                <option value="">Ungrouped</option>
-                {customGroups.map((group) => (
-                  <option key={group.id} value={group.id}>
-                    {group.name}
-                  </option>
-                ))}
-              </Select>
-              {explicit && row.entry?.visible ? (
-                <span className="truncate text-caption text-faint">
-                  shown in {explicit.name}
-                </span>
-              ) : null}
-            </div>
+            <Select
+              ariaLabel={`Group for ${row.ref}`}
+              value={explicit?.id ?? ""}
+              onChange={(next) => onAssignGroup(row.ref, next === "" ? null : next)}
+            >
+              <option value="">Ungrouped</option>
+              {customGroups.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.name}
+                </option>
+              ))}
+            </Select>
           );
         },
       });
@@ -145,7 +138,7 @@ export function useUnifiedColumns({
           row.kind === "model" && row.model ? (
             dim(row, enabled.render(row.model))
           ) : (
-            <span className="text-faint">—</span>
+            <span className="text-faint" aria-label="not applicable">—</span>
           ),
         cellTitle: (row) =>
           row.kind === "model" && row.model ? enabled.cellTitle?.(row.model) : undefined,
@@ -158,8 +151,7 @@ export function useUnifiedColumns({
         title: "Actions",
         srOnlyTitle: true,
         align: "right",
-        // Test + delete (custom only) + overflow, plus the cell's horizontal padding.
-        width: "10.5rem",
+        width: "10rem",
         render: (row) => {
           if (row.kind !== "model") {
             return (

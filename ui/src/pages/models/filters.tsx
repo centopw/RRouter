@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { CaretDown } from "@phosphor-icons/react";
+import { Link } from "react-router-dom";
 import { Checkbox } from "../../components/atoms";
 import { Button, FilterChip, Input, Select } from "../../components/ui";
 import { ALL, STATUSES, STATUS_LABELS, type StatusKey } from "./params";
@@ -33,6 +34,10 @@ export function ModelFilters({
   counts,
   showStatus,
   onStatus,
+  free,
+  onFree,
+  freeCount,
+  showFreeModeLink,
   custom,
   onCustom,
   extra,
@@ -54,9 +59,15 @@ export function ModelFilters({
   /** The status filter is preset-scoped: members have no preset, so they get no menu. */
   showStatus: boolean;
   onStatus: (next: Set<StatusKey>) => void;
+  free: boolean;
+  onFree: () => void;
+  /** Free rows matching the other active filters, so the count is visible before clicking. */
+  freeCount: number;
+  /** Admins get a direct link to Free mode to discover free models or configure fallback. */
+  showFreeModeLink: boolean;
   custom: boolean;
   onCustom: () => void;
-  /** Page-level controls that belong beside the filters (groups, alias/combo links). */
+  /** Page-level controls that belong beside the filters (groups). */
   extra?: ReactNode;
   /** Rows a search found outside the current status filter. */
   outside: number;
@@ -75,7 +86,7 @@ export function ModelFilters({
             ariaLabel="Search rows"
           />
         </div>
-        <div className="w-[180px]">
+        <div className="w-[170px]">
           <Select
             ariaLabel="provider filter"
             value={provider}
@@ -89,7 +100,7 @@ export function ModelFilters({
             ))}
           </Select>
         </div>
-        <div className="w-[140px]">
+        <div className="w-[130px]">
           <Select
             ariaLabel="kind filter"
             value={kind}
@@ -105,6 +116,12 @@ export function ModelFilters({
         {showStatus ? (
           <StatusMenu statuses={statuses} counts={counts} onStatus={onStatus} />
         ) : null}
+        <FilterChip on={free} onClick={onFree} ariaLabel="Only free ($0) models, aliases and combos">
+          <span>Free</span>
+          {freeCount > 0 ? (
+            <span className="text-caption opacity-80 tnum">{freeCount.toLocaleString()}</span>
+          ) : null}
+        </FilterChip>
         <FilterChip on={custom} onClick={onCustom} ariaLabel="Only custom model rows">
           custom
         </FilterChip>
@@ -115,6 +132,17 @@ export function ModelFilters({
           </Button>
         </div>
       </div>
+      {free && showFreeModeLink ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-surface-2 px-4 py-1.5 text-caption text-muted">
+          <span>
+            Showing models with a $0 catalog price. Find more free endpoints or enable automatic
+            fallback when paid quota runs out in{" "}
+            <Link to="/free-mode" className="font-medium text-accent-text underline underline-offset-2">
+              Free mode →
+            </Link>
+          </span>
+        </div>
+      ) : null}
       {outside > 0 ? (
         <div className="flex flex-wrap items-center gap-2 border-b border-line bg-surface-2 px-4 py-1.5 text-caption text-muted">
           <span className="tnum">
@@ -179,7 +207,7 @@ function StatusMenu({
           side="bottom"
           align="start"
           sideOffset={4}
-          className="popover-panel z-50 flex w-60 flex-col gap-1 rounded-[var(--radius-card)] border border-line bg-surface p-2 shadow-lg"
+          className="popover-panel z-[var(--z-popover-portal)] flex w-60 flex-col gap-1 rounded-[var(--radius-card)] border border-line bg-surface p-2 shadow-[var(--shadow-popover)]"
         >
           {STATUSES.map((status) => (
             <div

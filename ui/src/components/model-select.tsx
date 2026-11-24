@@ -25,6 +25,7 @@ import { DotsSixVertical } from "@phosphor-icons/react";
 import type { Model } from "../lib/api";
 import { useReducedMotion } from "../lib/media";
 import { useModelProviders, useModels } from "../lib/queries";
+import { isFree } from "../pages/models/price";
 import { Select, cx } from "./ui";
 
 /**
@@ -85,6 +86,7 @@ export function ModelSelect({
           {items.map((m) => (
             <option key={m.ref} value={m.ref}>
               {m.id}
+              {isFree(m.cost) ? " · Free" : ""}
               {m.deprecated ? " (deprecated)" : ""}
               {m.available ? "" : " · unavailable"}
             </option>

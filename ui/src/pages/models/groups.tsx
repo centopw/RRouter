@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Badge,
@@ -13,6 +13,10 @@ import { Checkbox, Toggle } from "../../components/atoms";
 import { useIsAdmin, useKeys, useTeams, useUsers } from "../../lib/queries";
 import { setGroupAccess } from "../../lib/api";
 import type { DraftEntry, DraftGroup } from "../../lib/layout-draft";
+import { PROVIDER_PILL } from "./rows";
+
+/** Cap initial DOM rows in the group candidate checklist so 1,000+ models open instantly. */
+const INITIAL_CANDIDATE_CAP = 100;
 
 /** A section title above one group's table; the controls live in the group manager. */
 export function GroupHeading({
@@ -36,10 +40,13 @@ export function GroupHeading({
           </Badge>
         ) : null}
       </div>
-      <span className="text-caption text-faint tnum">{count.toLocaleString()} entries</span>
+      <span className="text-caption text-faint tnum">
+        {count.toLocaleString()} {count === 1 ? "entry" : "entries"}
+      </span>
     </div>
   );
 }
+
 /** One group row in the manager; local text state keeps every keystroke cheap. */
 export function GroupNameField({ name, onCommit }: { name: string; onCommit: (name: string) => void }) {
   const [value, setValue] = useState(name);
@@ -70,6 +77,7 @@ export type GroupCandidate = {
   provider: string;
   kind: "model" | "alias" | "combo";
 };
+
 /** Create, rename, reorder and remove the groups of the active preset. */
 export function GroupManager({
   open,
@@ -101,23 +109,60 @@ export function GroupManager({
   const [name, setName] = useState("");
   const [openModels, setOpenModels] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [showAllCandidates, setShowAllCandidates] = useState(false);
   const [accessFor, setAccessFor] = useState<DraftGroup | null>(null);
+
   useEffect(() => {
     if (open) {
       setName("");
       setOpenModels(null);
       setFilter("");
+      setShowAllCandidates(false);
     }
   }, [open]);
+
+  // Index once so rendering large candidate lists stays O(N) instead of O(N²).
+  const entryByRef = useMemo(
+    () => new Map(entries.map((entry) => [entry.ref, entry] as const)),
+    [entries],
+  );
+  const countByGroup = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const entry of entries) {
+      if (entry.group) counts.set(entry.group, (counts.get(entry.group) ?? 0) + 1);
+    }
+    return counts;
+  }, [entries]);
+
+  const filteredCandidates = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    if (!needle) return candidates;
+    return candidates.filter(
+      (candidate) =>
+        candidate.ref.toLowerCase().includes(needle) ||
+        candidate.label.toLowerCase().includes(needle),
+    );
+  }, [candidates, filter]);
+
+  const visibleCandidates = showAllCandidates
+    ? filteredCandidates
+    : filteredCandidates.slice(0, INITIAL_CANDIDATE_CAP);
+
   return (
     <Modal
-      title="model groups"
-      description="Groups change this preset's board and the default preset's /v1/models discovery. Routing is unchanged. Adding a model to a group also shows it in this preset. Provider buckets start with every unassigned model of that provider."
+      title="Model groups"
+      description="Groups organize this preset's board and the default preset's /v1/models discovery. Adding a model to a group also shows it in this preset."
       open={open}
       onClose={onClose}
       width="lg"
-      footer={<Button onClick={onClose}>done</Button>}
+      footer={<Button onClick={onClose}>Done</Button>}
     >
+      {!isDefault ? (
+        <p className="mb-3 rounded-[var(--radius-input)] border border-line bg-surface-2 px-3 py-2 text-caption text-muted">
+          Editing a non-default preset. Group access grants and <span className="font-mono">/v1/models</span>{" "}
+          discovery follow the instance default preset.
+        </p>
+      ) : null}
       <ul className="flex flex-col gap-2">
         {groups.map((group, index) => (
           <li
@@ -156,9 +201,12 @@ export function GroupManager({
               <Button
                 variant="quiet"
                 aria-label={`${openModels === group.id ? "Close" : "Edit"} models in ${group.name}`}
-                onClick={() => setOpenModels(openModels === group.id ? null : group.id)}
+                onClick={() => {
+                  setOpenModels(openModels === group.id ? null : group.id);
+                  setShowAllCandidates(false);
+                }}
               >
-                models ({entries.filter((entry) => entry.group === group.id).length})
+                entries ({countByGroup.get(group.id) ?? 0})
               </Button>
             )}
             <Button
@@ -191,56 +239,56 @@ export function GroupManager({
                 <Input
                   value={filter}
                   placeholder="filter models, aliases and combos"
-                  onChange={setFilter}
+                  ariaLabel={`Filter entries for ${group.name}`}
+                  onChange={(next) => {
+                    setFilter(next);
+                    setShowAllCandidates(false);
+                  }}
                 />
                 <div className="mt-2 max-h-64 overflow-y-auto rounded-[var(--radius-input)] border border-line bg-surface">
-                  {candidates
-                    .filter((candidate) => {
-                      const needle = filter.trim().toLowerCase();
-                      return (
-                        !needle ||
-                        candidate.ref.toLowerCase().includes(needle) ||
-                        candidate.label.toLowerCase().includes(needle)
-                      );
-                    })
-                    .map((candidate) => {
-                      const entry = entries.find((item) => item.ref === candidate.ref);
-                      const checked = entry?.group === group.id;
-                      return (
-                        <div
-                          key={candidate.ref}
-                          className="flex items-center gap-2 border-b border-[var(--color-rule)] px-2 py-1.5 last:border-b-0"
-                        >
-                          <Checkbox
-                            checked={checked}
-                            ariaLabel={
-                              checked
-                                ? `Remove ${candidate.ref} from ${group.name}`
-                                : `Add ${candidate.ref} to ${group.name}, showing it in this preset`
-                            }
-                            onChange={(next) =>
-                              onAssign(candidate.ref, next ? group.id : null)
-                            }
-                          />
-                          <span className="shrink-0 rounded-full border border-line bg-surface-2 px-1.5 py-px font-mono text-caption uppercase tracking-[0.06em] text-muted">
-                            {candidate.provider}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate font-mono text-caption">
-                            {candidate.label}
-                          </span>
-                          {candidate.kind !== "model" ? (
-                            <Badge tone="neutral">{candidate.kind}</Badge>
-                          ) : null}
-                          {entry && !entry.visible ? (
-                            <Badge tone="warn">hidden</Badge>
-                          ) : checked ? (
-                            <span className="shrink-0 text-caption text-faint">
-                              shown in {group.name}
-                            </span>
-                          ) : null}
-                        </div>
-                      );
-                    })}
+                  {visibleCandidates.map((candidate) => {
+                    const entry = entryByRef.get(candidate.ref);
+                    const checked = entry?.group === group.id;
+                    return (
+                      <div
+                        key={candidate.ref}
+                        className="flex items-center gap-2 border-b border-[var(--color-rule)] px-2 py-1.5 last:border-b-0"
+                      >
+                        <Checkbox
+                          checked={checked}
+                          ariaLabel={
+                            checked
+                              ? `Remove ${candidate.ref} from ${group.name}`
+                              : `Add ${candidate.ref} to ${group.name}, showing it in this preset`
+                          }
+                          onChange={(next) =>
+                            onAssign(candidate.ref, next ? group.id : null)
+                          }
+                        />
+                        <span className={PROVIDER_PILL}>{candidate.provider}</span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-caption">
+                          {candidate.label}
+                        </span>
+                        {candidate.kind !== "model" ? (
+                          <Badge tone="neutral">{candidate.kind}</Badge>
+                        ) : null}
+                        {entry && !entry.visible ? (
+                          <Badge tone="warn">hidden</Badge>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                  {filteredCandidates.length > visibleCandidates.length ? (
+                    <div className="border-t border-line px-2 py-1.5 text-center">
+                      <button
+                        type="button"
+                        onClick={() => setShowAllCandidates(true)}
+                        className="text-caption text-accent-text underline underline-offset-2"
+                      >
+                        Show all {filteredCandidates.length.toLocaleString()} entries
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ) : null}
@@ -266,7 +314,7 @@ export function GroupManager({
           </Field>
         </div>
         <Button variant="primary" type="submit" disabled={!name.trim()}>
-          add group
+          Add group
         </Button>
       </form>
       {accessFor ? (
@@ -275,6 +323,7 @@ export function GroupManager({
     </Modal>
   );
 }
+
 /** Team/key/user grants for one group. `Everyone` clears the access object. */
 export function GroupAccessDialog({ group, onClose }: { group: DraftGroup; onClose: () => void }) {
   const client = useQueryClient();
@@ -312,7 +361,7 @@ export function GroupAccessDialog({ group, onClose }: { group: DraftGroup; onClo
     set: (next: string[]) => void,
   ) => (
     <div className="min-w-0">
-      <div className="text-caption uppercase tracking-[0.06em] text-faint">{title}</div>
+      <div className="text-small font-medium text-muted">{title}</div>
       <div className="mt-1 max-h-36 overflow-y-auto rounded-lg border border-line bg-surface-2 p-1">
         {rows.length === 0 ? (
           <div className="px-2 py-1.5 text-small text-faint">none</div>
@@ -341,15 +390,15 @@ export function GroupAccessDialog({ group, onClose }: { group: DraftGroup; onClo
   );
   return (
     <Modal
-      title={`access · ${group.name}`}
+      title={`Access · ${group.name}`}
       description="Who may use this group's /v1/models entry and its group/model alias."
       open
       onClose={onClose}
       footer={
         <>
-          <Button onClick={onClose}>cancel</Button>
+          <Button onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
-            save access
+            Save access
           </Button>
         </>
       }
@@ -376,19 +425,19 @@ export function GroupAccessDialog({ group, onClose }: { group: DraftGroup; onClo
         {!everyone ? (
           <>
             {section(
-              "teams",
+              "Teams",
               (teams.data ?? []).map((team) => ({ id: team.id, label: team.name })),
               teamIds,
               setTeamIds,
             )}
             {section(
-              "api keys",
+              "API keys",
               (keys.data ?? []).map((key) => ({ id: key.id, label: key.name ?? key.id.slice(0, 8) })),
               keyIds,
               setKeyIds,
             )}
             {section(
-              "users",
+              "Users",
               (users.data ?? []).map((user) => ({ id: user.id, label: `${user.name} · ${user.email}` })),
               userIds,
               setUserIds,

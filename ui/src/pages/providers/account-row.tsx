@@ -1,59 +1,56 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link } from "react-router-dom";
 import * as Popover from "@radix-ui/react-popover";
-import { CaretRight, DotsThree } from "@phosphor-icons/react";
+import { DotsThree } from "@phosphor-icons/react";
 import { ProviderIcon } from "../../components/provider-icon";
 import { PaginationBar } from "../../components/table";
-import { Badge, Button, Card, CardHeader, Dot, cx } from "../../components/ui";
+import { Badge, Button, Card, Dot, Heading, cx } from "../../components/ui";
 import {
   type AccountQuotaRow,
   type AccountSubscription,
   type Connection,
   type ModelProvider,
 } from "../../lib/api";
-import { compact, usd } from "../../lib/format";
-import { refusalView, type RefusalView } from "../../lib/refusal";
+import { ms } from "../../lib/format";
+import { refusalView } from "../../lib/refusal";
+import { QuotaMeter, resetsIn, worstQuotaBar } from "../usage/quota";
+import { AccountNameLink } from "./account-preview";
 import {
-  barFill,
+  accountStatus,
   barText,
   connectionLabel,
-  credentialShapeOf,
   derivedIdentifiers,
   hostOf,
   isCustomConnection,
-  needsBaseUrlOverride,
   protocolLabel,
-  quotaUsagePercent,
-  subscriptionUsagePercent,
-  until,
+  type AccountStatus,
+  type ConnectionTestResult,
   type ProviderGroup,
 } from "./types";
 
 /**
- * One grid for the provider header and every account row, so a column starts at the same
- * x on every line of the list. Columns, in order: identity | auth | priority·weight |
- * quota | plan window | state | actions. The secondary columns drop out of the grid as
- * the window narrows — plan window at `xl`, auth and priority at `lg`, the quota bar at
- * 820px — and `display: none` takes no track, so the remaining cells keep the same x from
- * row to row at every width.
+ * Aligned column grid from `md` (768px) upward:
+ *   md:  identity | limit | status | actions
+ *   lg+: identity | priority | limit | status | actions
+ *
+ * Below `md` (phone widths), each row stacks cleanly into two readable lines so account
+ * names never collapse to a few letters and the actions menu stays reachable at every width.
  */
-const ROW_GRID =
-  "grid grid-cols-[minmax(0,1fr)_3.5rem_4.25rem_5.5rem] items-center gap-x-2 " +
-  "min-[820px]:grid-cols-[minmax(0,1fr)_7rem_5.5rem_7.5rem] min-[820px]:gap-x-3 " +
-  "lg:grid-cols-[minmax(0,1fr)_4.5rem_5.5rem_7.5rem_6rem_7.5rem] " +
-  "xl:grid-cols-[minmax(0,1fr)_4.5rem_5.5rem_7.5rem_6rem_7rem_7.5rem]";
+const DESKTOP_GRID =
+  "md:grid md:items-center md:gap-x-3 md:grid-cols-[minmax(0,1fr)_13rem_8.5rem_3.25rem] " +
+  "lg:grid-cols-[minmax(0,1fr)_3.25rem_16rem_9.5rem_3.25rem] " +
+  "xl:grid-cols-[minmax(0,1fr)_3.25rem_18rem_9.5rem_3.25rem]";
 
-/** Every row is this tall; nothing in it may wrap, so the height never varies. */
-const ROW_HEIGHT = "h-12";
+const DOT_TONE = { muted: "muted", warn: "warn", neg: "neg" } as const;
+const STATE_TEXT = {
+  muted: "text-muted",
+  warn: "text-[var(--color-warn)]",
+  neg: "text-[var(--color-neg)]",
+} as const;
 
 /**
- * The account column: the operator's name first, then the identifiers that name the
- * upstream account itself. Clearing the name leaves those lines alone, so a row is never
- * blank: the first identifier becomes the primary line.
- *
- * A custom endpoint's name is the provider's name, already on screen in its own cell, so
- * repeating it here would print the same text twice; the host names the account instead.
- * The row is one line, so the rest of the identifiers live in the title.
+ * Kept exported for backwards compatibility with any caller importing `AccountCell`.
+ * Renders the primary label of one account without repeating the provider name on custom rows.
  */
 export function AccountCell({
   connection,
@@ -64,8 +61,6 @@ export function AccountCell({
   display: string;
   custom: boolean;
 }) {
-  // The provider header names the provider and the auth column names the credential, so
-  // the derived `"<display> (OAuth)"` marker would only repeat both.
   const derived = derivedIdentifiers(connection, display).filter(
     (part) => part.text !== `${display} (OAuth)`,
   );
@@ -90,146 +85,141 @@ export function AccountCell({
   );
 }
 
-type AccountState =
-  | { kind: "refusal"; refusal: RefusalView }
-  | { label: string; tone: "muted" | "warn" | "neg"; kind: "text" };
-
-const DOT_TONE = { muted: "muted", warn: "warn", neg: "neg" } as const;
-const STATE_TEXT = {
-  muted: "text-muted",
-  warn: "text-[var(--color-warn)]",
-  neg: "text-[var(--color-neg)]",
-} as const;
-
 /**
- * The one status readout an account gets: what stops it routing, else that it is ready.
- *
- * A provider refusal comes first and reads as its own badge, because it is not the same fact
- * as a disable: the account was retired by the provider and an operator toggle cannot undo it.
- * Only a `refusal` of `NULL` keeps the plain muted “disabled”.
+ * Single limit readout for one account: the worst bar across operator caps and provider
+ * plan windows (`worstQuotaBar`), rendered with the shared `QuotaMeter` and `barText`
+ * ladder. Never mixes two different windows into one cell, and never prints "no cap set"
+ * unless both limit sources have actually answered.
  */
-function stateOf(
-  connection: Connection,
-  quota: AccountQuotaRow | undefined,
-  planPercent: number | null,
-  providers?: ModelProvider[],
-): AccountState {
-  const refusal = refusalView(connection.refusal);
-  if (refusal) return { kind: "refusal", refusal };
-  if (!connection.is_active) return { kind: "text", label: "disabled", tone: "muted" };
-  if (connection.backoff_level > 0)
-    return { kind: "text", label: `backoff ${connection.backoff_level}`, tone: "warn" };
-  if (needsBaseUrlOverride(connection, providers))
-    return { kind: "text", label: "no endpoint", tone: "warn" };
-  if (quota?.exhausted) return { kind: "text", label: "over quota", tone: "neg" };
-  if (planPercent !== null && planPercent >= 90)
-    return { kind: "text", label: "plan at limit", tone: "warn" };
-  return { kind: "text", label: "ready", tone: "muted" };
-}
+function LimitCell({
+  quota,
+  subscription,
+  quotaLoaded,
+  providerId,
+}: {
+  quota?: AccountQuotaRow;
+  subscription?: AccountSubscription;
+  quotaLoaded: boolean;
+  providerId: string;
+}) {
+  const bar = worstQuotaBar(quota, subscription);
+  const href = `/usage?provider=${encodeURIComponent(providerId)}`;
 
-type QuotaView = {
-  /** Worst current-window usage, or `null` when nothing reports a limit. */
-  percent: number | null;
-  /** Full current-window detail, carried as the tooltip of both the bar and the window. */
-  detail: string;
-  /** Which window owns the number: a plan window's name, or the operator quota. */
-  window: string;
-};
+  if (bar) {
+    const reset = resetsIn(bar.resets_at);
+    // Long spend ratios ("$14.2000 / $50.0000") need the label's horizontal room; keep
+    // "resets in" inline when the right-hand detail is compact, and always show it in the
+    // preview and drawer.
+    const showResetInline = Boolean(reset) && bar.detail.length <= 10;
+    return (
+      <Link
+        to={href}
+        className="flex min-w-0 flex-col gap-1 rounded-[var(--radius-input)] text-caption hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+      >
+        <span className="flex min-w-0 items-baseline justify-between gap-2">
+          <span className="min-w-0 truncate text-muted">
+            {bar.label}
+            {showResetInline ? (
+              <span className="hidden text-faint lg:inline"> · {reset}</span>
+            ) : null}
+          </span>
+          <span className={cx("shrink-0 tnum", barText(bar.percent))}>{bar.detail}</span>
+        </span>
+        <QuotaMeter
+          percent={bar.percent}
+          label={reset ? `${bar.label}, ${reset}` : bar.label}
+        />
+      </Link>
+    );
+  }
 
-/**
- * One read of the two limit sources: the operator quota and the provider's own plan
- * windows. The number and the window it belongs to are split out here so the row can
- * give each its own fixed column instead of letting the layout be driven by text length.
- */
-function quotaView(quota?: AccountQuotaRow, subscription?: AccountSubscription): QuotaView {
-  const quotaPercent = quotaUsagePercent(quota);
-  const worstWindow =
-    subscription && subscription.windows.length > 0
-      ? subscription.windows.reduce((worst, window) =>
-          window.used_percent > worst.used_percent ? window : worst,
-        )
-      : null;
-  const detail = [
-    quota && quotaPercent !== null
-      ? [
-          quota.max_requests > 0 ? `req ${compact(quota.requests)}/${compact(quota.max_requests)}` : null,
-          quota.max_tokens > 0 ? `tok ${compact(quota.tokens)}/${compact(quota.max_tokens)}` : null,
-          quota.max_cost_micros > 0
-            ? `${usd(quota.cost_micros)}/${usd(quota.max_cost_micros)}`
-            : null,
-        ]
-          .filter(Boolean)
-          .join(" · ")
-      : null,
-    worstWindow
-      ? `${worstWindow.label} ${Math.round(worstWindow.used_percent)}%${
-          worstWindow.resets_at ? ` · resets in ${until(worstWindow.resets_at)}` : ""
-        }`
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  return {
-    percent: quotaPercent ?? subscriptionUsagePercent(subscription),
-    detail,
-    window: worstWindow
-      ? `plan · ${worstWindow.label}`
-      : quotaPercent !== null
-        ? "operator quota"
-        : "—",
-  };
-}
+  if (subscription?.error) {
+    return (
+      <Link
+        to={href}
+        className="block truncate rounded-[var(--radius-input)] text-caption text-faint underline-offset-2 hover:text-muted hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+      >
+        unavailable
+      </Link>
+    );
+  }
 
-/**
- * Thin magnitude bar at a fixed width + the number in its own right-aligned cell,
- * linking out to the aggregate surface that owns the detail. Below 820px only the number
- * is shown: the bar has no room to be read and the percentage carries the signal.
- */
-function QuotaCell({ view, providerId }: { view: QuotaView; providerId: string }) {
+  if (!quotaLoaded) {
+    return (
+      <span className="block text-caption text-faint" aria-label="Limits unavailable for this role">
+        —
+      </span>
+    );
+  }
+
   return (
     <Link
-      to={`/usage?provider=${encodeURIComponent(providerId)}`}
-      title={view.detail || "no quota or plan limit reported for this account"}
-      className="flex min-w-0 items-center justify-end gap-2 rounded-[var(--radius-input)] sm:justify-start focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+      to={href}
+      className="block truncate rounded-[var(--radius-input)] text-caption text-faint underline-offset-2 hover:text-muted hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
     >
-      <span
-        className="hidden h-1 w-16 shrink-0 overflow-hidden rounded-full bg-rule min-[820px]:block"
-        aria-hidden
-      >
-        {view.percent === null ? null : (
-          <span
-            className={cx("block h-full rounded-full", barFill(view.percent))}
-            style={{ width: `${view.percent}%` }}
-          />
-        )}
-      </span>
-      <span
-        className={cx(
-          "block w-10 shrink-0 text-right text-caption tnum",
-          view.percent === null ? "text-faint" : barText(view.percent),
-        )}
-      >
-        {view.percent === null ? "—" : `${view.percent}%`}
-      </span>
+      no cap set
     </Link>
   );
 }
 
-/** The window the number belongs to: one truncated line, the detail in the title. */
-function PlanCell({ view }: { view: QuotaView }) {
+/**
+ * Standing status, or the live test result from this session when the operator just tested
+ * this account. Standing state stays visible in the preview and drawer.
+ */
+function StatusCell({
+  status,
+  testing,
+  lastTest,
+}: {
+  status: AccountStatus;
+  testing: boolean;
+  lastTest: ConnectionTestResult | null;
+}) {
+  if (testing) {
+    return (
+      <span role="status" className="flex min-w-0 items-center gap-1.5 text-caption text-muted">
+        <Dot tone="muted" />
+        <span className="truncate">testing…</span>
+      </span>
+    );
+  }
+
+  if (lastTest) {
+    return (
+      <span role="status" className="flex min-w-0 items-center gap-1.5 text-caption tnum">
+        <Dot tone={lastTest.ok ? "pos" : "neg"} />
+        <span
+          className={cx(
+            "truncate",
+            lastTest.ok ? "text-[var(--color-pos)]" : "text-[var(--color-neg)]",
+          )}
+        >
+          {lastTest.ok
+            ? `works · ${ms(lastTest.latency_ms)}`
+            : `test failed${lastTest.status ? ` · ${lastTest.status}` : ""}`}
+        </span>
+      </span>
+    );
+  }
+
+  if (status.kind === "refusal") {
+    return (
+      <span className="flex min-w-0 items-center">
+        <Badge tone={status.refusal.tone}>{status.refusal.label}</Badge>
+      </span>
+    );
+  }
+
   return (
-    <span
-      className="hidden min-w-0 truncate text-caption text-muted xl:block"
-      title={view.detail || "no plan window reported for this account"}
-    >
-      {view.window}
+    <span className="flex min-w-0 items-center gap-1.5 text-caption">
+      <Dot tone={DOT_TONE[status.tone]} />
+      <span className={cx("truncate", STATE_TEXT[status.tone])}>{status.label}</span>
     </span>
   );
 }
 
 /**
- * Every per-account action behind one trigger. The drawer below already holds inspection
- * and configuration, so this menu only carries the state changes and the destructive one.
+ * Every per-account action behind one trigger, visible at every viewport width.
  */
 function ConnectionMenu({
   connection,
@@ -321,11 +311,9 @@ function ConnectionMenu({
           className="popover-panel z-[var(--z-popover-portal)] flex w-56 flex-col rounded-[var(--radius-overlay)] border border-[var(--color-line-strong)] bg-surface p-1 shadow-[var(--shadow-popover)] focus:outline-none"
         >
           <div className="px-2 pb-1.5 pt-1 text-caption leading-relaxed text-faint tnum">
-            {scope} · priority {connection.priority} · weight {connection.weight}
+            {scope} · p{connection.priority} · w{connection.weight}
           </div>
           {entry(testing ? "Testing…" : "Test", onTest, false, testing)}
-          {/* A refused account is not a bare toggle: the label names the state, and the page
-              confirms the re-enable with the consequence the token carries. */}
           {entry(
             connection.is_active
               ? "Disable"
@@ -348,12 +336,14 @@ function AccountRow({
   providers,
   quota,
   subscription,
+  quotaLoaded,
   isAdmin,
   selected,
   testing,
+  lastTest,
+  inspectHref,
   teamName,
   displayOf,
-  onConfigure,
   onTest,
   onToggle,
   onRemove,
@@ -363,12 +353,14 @@ function AccountRow({
   providers?: ModelProvider[];
   quota?: AccountQuotaRow;
   subscription?: AccountSubscription;
+  quotaLoaded: boolean;
   isAdmin: boolean;
   selected: boolean;
   testing: boolean;
+  lastTest: ConnectionTestResult | null;
+  inspectHref: string;
   teamName: (id: string | null) => string | null;
   displayOf: (id: string) => string;
-  onConfigure: (connectionId: string) => void;
   onTest: (connectionId: string) => void;
   onToggle: (connection: Connection) => void;
   onRemove: (connection: Connection) => void;
@@ -376,84 +368,41 @@ function AccountRow({
   const custom = isCustomConnection(connection);
   const display = displayOf(connection.provider);
   const providerId = group.provider ?? connection.provider;
-  const view = quotaView(quota, subscription);
-  const state = stateOf(connection, quota, subscriptionUsagePercent(subscription), providers);
-  const label = connectionLabel(connection, display);
-  const auth = connection.auth_type === "oauth" ? "oauth" : "api key";
+  const status = accountStatus(connection, quota, subscription, providers);
+  const ownerLabel = teamName(connection.team_id) ?? "Shared";
+
   return (
     <li
       className={cx(
-        ROW_GRID,
-        ROW_HEIGHT,
-        "px-4",
-        selected && "bg-[var(--color-selected)]",
+        "flex flex-col gap-2 px-4 py-2.5 transition-colors hover:bg-[var(--color-row-hover)] md:min-h-[52px] md:gap-0 md:py-2",
+        DESKTOP_GRID,
+        selected && "bg-[var(--color-selected)] hover:bg-[var(--color-selected)]",
       )}
     >
-      {/* Indented past the group row's caret so an account reads as the provider's child,
-          not as a sibling of it. */}
-      <span className="flex min-w-0 items-center gap-2 pl-5">
-        <ProviderIcon provider={connection.provider} size={17} />
-        <AccountCell connection={connection} display={display} custom={custom} />
-        {custom ? (
-          <Badge
-            tone="neutral"
-            title="keyed account pointing at a custom base URL, not the provider's own API"
-          >
-            custom
-          </Badge>
-        ) : null}
-      </span>
-
-      <span
-        className="hidden truncate text-right text-caption text-faint lg:block"
-        title={credentialShapeOf(connection)}
-      >
-        {auth}
-      </span>
-
-      <button
-        type="button"
-        onClick={() => onConfigure(connection.id)}
-        aria-label={`Routing for ${label}: priority ${connection.priority}, weight ${connection.weight}`}
-        title="priority · weight inside one priority group (lower priority is tried first) — open routing"
-        className="hidden w-full truncate text-right text-caption text-muted tnum underline-offset-2 hover:text-fg hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)] lg:block"
-      >
-        p{connection.priority} · w{connection.weight}
-      </button>
-
-      <QuotaCell view={view} providerId={providerId} />
-
-      <PlanCell view={view} />
-
-      <span className="flex min-w-0 items-center gap-1.5 text-caption">
-        {state.kind === "refusal" ? (
-          <Badge
-            tone={state.refusal.tone}
-            title={`${state.refusal.title}. ${state.refusal.description} ${state.refusal.fix}`}
-          >
-            {state.refusal.label}
-          </Badge>
-        ) : (
-          <>
-            <Dot tone={DOT_TONE[state.tone]} />
-            <span className={cx("truncate", STATE_TEXT[state.tone])} title={`${label}: ${state.label}`}>
-              {state.label}
-            </span>
-          </>
-        )}
-      </span>
-
-      <span className="flex items-center justify-end gap-1">
-        <Button variant="quiet" size="sm" onClick={() => onConfigure(connection.id)}>
-          {isAdmin ? "Configure" : "Details"}
-        </Button>
-        {/* The phone width has no room for both; the drawer carries test/toggle/remove. */}
+      {/* Mobile top row: identity + menu. Desktop col 1: indented identity. */}
+      <div className="flex min-w-0 items-center justify-between gap-2 md:pl-4">
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <ProviderIcon provider={connection.provider} size={17} />
+          <AccountNameLink
+            connection={connection}
+            display={display}
+            custom={custom}
+            inspectHref={inspectHref}
+            status={status}
+            quota={quota}
+            subscription={subscription}
+            quotaLoaded={quotaLoaded}
+            lastTest={lastTest}
+            ownerLabel={ownerLabel}
+          />
+          {custom ? <Badge tone="neutral">custom</Badge> : null}
+        </span>
         {isAdmin ? (
-          <span className="hidden min-[820px]:block">
+          <span className="md:hidden">
             <ConnectionMenu
               connection={connection}
               display={display}
-              scope={teamName(connection.team_id) ?? "shared"}
+              scope={ownerLabel}
               testing={testing}
               onTest={() => onTest(connection.id)}
               onToggle={() => onToggle(connection)}
@@ -461,82 +410,93 @@ function AccountRow({
             />
           </span>
         ) : null}
+      </div>
+
+      {/* Desktop lg+ col 2: priority */}
+      <span className="hidden truncate text-right text-caption text-muted tnum lg:block">
+        p{connection.priority}
+      </span>
+
+      {/* Mobile bottom row / Desktop cols 3 & 4: limit + status */}
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 pl-6 md:contents md:pl-0">
+        <div className="min-w-0 flex-1">
+          <LimitCell
+            quota={quota}
+            subscription={subscription}
+            quotaLoaded={quotaLoaded}
+            providerId={providerId}
+          />
+        </div>
+        <div className="shrink-0 md:min-w-0">
+          <StatusCell status={status} testing={testing} lastTest={lastTest} />
+        </div>
+      </div>
+
+      {/* Desktop col 5: actions menu */}
+      <span className="hidden items-center justify-end md:flex">
+        {isAdmin ? (
+          <ConnectionMenu
+            connection={connection}
+            display={display}
+            scope={ownerLabel}
+            testing={testing}
+            onTest={() => onTest(connection.id)}
+            onToggle={() => onToggle(connection)}
+            onRemove={() => onRemove(connection)}
+          />
+        ) : null}
       </span>
     </li>
   );
 }
 
 /**
- * Provider header: identity, one status readout, counts, and the link to aggregate usage.
- * It shares the account grid, and pins each cell to its column with an explicit
- * `col-start` so a cell that is hidden at a narrow width never shifts the others.
+ * Provider header: name links to `/models?provider=<id>`, one visible readiness readout
+ * ("2 of 3 ready", toned by `group.state`) at every width, and a direct link to Usage.
+ * Accounts stay expanded underneath — no collapse caret.
  */
-function ProviderHeader({
-  group,
-  open,
-  onToggle,
-}: {
-  group: ProviderGroup;
-  open: boolean;
-  onToggle: () => void;
-}) {
+function ProviderHeader({ group }: { group: ProviderGroup }) {
   const providerId = group.provider ?? group.connections[0]?.provider ?? "";
-  const stateTone = group.state === "healthy" ? "muted" : group.state === "degraded" ? "warn" : "neg";
-  const counts = [
-    `${group.connections.length} account${group.connections.length === 1 ? "" : "s"}`,
-    `${group.enabled} enabled`,
-    group.refused > 0 ? `${group.refused} refused` : null,
-    group.backoff > 0 ? `${group.backoff} in backoff` : null,
-    group.overQuota > 0 ? `${group.overQuota} over quota` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const stateTone =
+    group.state === "healthy" ? "muted" : group.state === "degraded" ? "warn" : "neg";
+  const readiness = `${group.ready} of ${group.connections.length} ready`;
+
   return (
-    <div className={cx(ROW_GRID, ROW_HEIGHT, "px-4")}>
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={`accounts-${group.key}`}
-        onClick={onToggle}
-        className="col-start-1 flex min-w-0 items-center gap-2 rounded-[var(--radius-input)] text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
-      >
-        <CaretRight
-          size={12}
-          weight="bold"
-          aria-hidden
-          className={cx("shrink-0 text-faint transition-transform", open && "rotate-90")}
-        />
+    <div
+      className={cx(
+        "flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 bg-surface-2/70 px-4 py-2.5 md:min-h-[44px] md:py-2",
+        DESKTOP_GRID,
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-2 md:col-start-1">
         <ProviderIcon provider={group.provider ?? "custom"} size={18} />
-        <span className="min-w-0 truncate font-medium text-fg">{group.label}</span>
-        {group.code ? (
-          <Badge tone="neutral" title="shorthand used in this provider's model refs">
-            {group.code}
-          </Badge>
-        ) : null}
-      </button>
-      <span
-        className="col-start-2 hidden min-w-0 truncate text-caption text-faint tnum lg:col-span-3 lg:block xl:col-span-4"
-        title={counts}
-      >
-        {counts}
+        <Link
+          to={`/models?provider=${encodeURIComponent(providerId)}`}
+          className="min-w-0 truncate font-medium text-fg underline-offset-2 hover:text-[var(--color-accent-text)] hover:underline focus-visible:text-[var(--color-accent-text)] focus-visible:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+        >
+          {group.label}
+        </Link>
+        {group.code ? <Badge tone="neutral">{group.code}</Badge> : null}
       </span>
-      <span className="col-start-3 flex min-w-0 items-center gap-1.5 text-caption lg:col-start-5 xl:col-start-6">
-        <Dot tone={stateTone === "muted" ? "muted" : stateTone} />
-        <span className={cx("truncate", STATE_TEXT[stateTone])}>{group.state}</span>
+
+      <span className="flex items-center gap-3 md:contents">
+        <span className="flex min-w-0 items-center gap-1.5 text-caption tnum md:col-start-3 lg:col-start-4">
+          <Dot tone={DOT_TONE[stateTone]} />
+          <span className={cx("truncate", STATE_TEXT[stateTone])}>{readiness}</span>
+        </span>
+        <Link
+          to={`/usage?provider=${encodeURIComponent(providerId)}`}
+          className="justify-self-end whitespace-nowrap rounded-[var(--radius-input)] text-caption text-muted underline-offset-2 hover:text-fg hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)] md:col-start-4 lg:col-start-5"
+        >
+          usage
+        </Link>
       </span>
-      <Link
-        to={`/usage?provider=${encodeURIComponent(providerId)}`}
-        className="col-start-4 justify-self-end whitespace-nowrap text-caption text-muted underline underline-offset-2 hover:text-fg lg:col-start-6 xl:col-start-7"
-      >
-        usage
-      </Link>
     </div>
   );
 }
 
 /**
- * Loading state on the same grid and the same row height, so the list does not move when
- * the accounts land. Placeholders sit in the columns they will be replaced by.
+ * Loading state on the same grid so rows do not shift when accounts land.
  */
 function InventorySkeleton() {
   return (
@@ -546,18 +506,19 @@ function InventorySkeleton() {
         <div
           key={index}
           aria-hidden="true"
-          className={cx(ROW_GRID, ROW_HEIGHT, "border-b border-line px-4 last:border-b-0")}
+          className={cx(
+            "flex min-h-[52px] items-center justify-between gap-3 border-b border-line px-4 py-2 last:border-b-0",
+            DESKTOP_GRID,
+          )}
         >
           <span className="flex min-w-0 items-center gap-2">
             <span className="h-4 w-4 shrink-0 animate-pulse rounded bg-surface-3" />
             <span className="h-3 w-28 max-w-full animate-pulse rounded bg-surface-3" />
           </span>
-          <span className="hidden h-3 w-10 animate-pulse rounded bg-surface-3 lg:block" />
-          <span className="hidden h-3 w-12 animate-pulse rounded bg-surface-3 lg:ml-auto lg:block" />
-          <span className="h-3 w-16 max-w-full animate-pulse rounded bg-surface-3 lg:justify-self-start" />
-          <span className="hidden h-3 w-14 animate-pulse rounded bg-surface-3 xl:block" />
-          <span className="h-3 w-10 max-w-full animate-pulse rounded bg-surface-3" />
-          <span className="ml-auto h-3 w-10 animate-pulse rounded bg-surface-3" />
+          <span className="hidden h-3 w-8 animate-pulse rounded bg-surface-3 lg:ml-auto lg:block" />
+          <span className="h-3 w-24 max-w-full animate-pulse rounded bg-surface-3" />
+          <span className="h-3 w-16 max-w-full animate-pulse rounded bg-surface-3" />
+          <span className="ml-auto hidden h-3 w-6 animate-pulse rounded bg-surface-3 md:block" />
         </div>
       ))}
     </div>
@@ -568,23 +529,24 @@ const PAGE_SIZES = [10, 25, 50, 100];
 const DEFAULT_PAGE_SIZE = 10;
 
 /**
- * The inventory: one section per provider, its accounts underneath, all expanded until the
- * operator folds one away. Providers are paged — every list in the app has a footer — and
- * the page boundary is drawn between provider groups, never inside one, so a header is
- * never separated from its own accounts.
+ * The inventory: one section per provider, its accounts underneath, always expanded so
+ * unhealthy accounts are never hidden behind a toggle. Providers are paged cleanly on
+ * group boundaries.
  */
 export function ProviderInventory({
   groups,
   quotas,
   subscriptions,
+  quotaLoaded,
   providers,
   isAdmin,
   testingId,
+  testsById,
+  inspectHrefFor,
   displayOf,
   teamName,
   selectedId,
   loading,
-  onConfigure,
   onTest,
   onToggle,
   onRemove,
@@ -593,20 +555,21 @@ export function ProviderInventory({
   groups: ProviderGroup[];
   quotas?: AccountQuotaRow[];
   subscriptions?: AccountSubscription[];
+  quotaLoaded: boolean;
   providers?: ModelProvider[];
   isAdmin: boolean;
   testingId: string | null;
+  testsById: Record<string, ConnectionTestResult>;
+  inspectHrefFor: (connectionId: string) => string;
   displayOf: (id: string) => string;
   teamName: (id: string | null) => string | null;
   selectedId?: string;
   loading: boolean;
-  onConfigure: (connectionId: string) => void;
   onTest: (connectionId: string) => void;
   onToggle: (connection: Connection) => void;
   onRemove: (connection: Connection) => void;
   onOpenCodes: () => void;
 }) {
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const [page, setPage] = useState(1);
   const [size, setSize] = useState(DEFAULT_PAGE_SIZE);
   const quotaBy = useMemo(
@@ -618,12 +581,12 @@ export function ProviderInventory({
     [subscriptions],
   );
   const accountCount = groups.reduce((total, group) => total + group.connections.length, 0);
+  const readyCount = groups.reduce((total, group) => total + group.ready, 0);
   const lastPage = Math.max(1, Math.ceil(groups.length / size));
   const current = Math.min(page, lastPage);
   const visible = groups.slice((current - 1) * size, current * size);
   const previousTotal = useRef(groups.length);
 
-  // A smaller list starts at the top; a page-size change does too.
   useEffect(() => {
     if (groups.length < previousTotal.current) setPage(1);
     previousTotal.current = groups.length;
@@ -632,74 +595,85 @@ export function ProviderInventory({
     setPage(1);
   }, [size]);
 
-  const toggle = (key: string) =>
-    setCollapsed((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+  const summaryTone =
+    accountCount === 0
+      ? "text-faint"
+      : readyCount === 0
+        ? "text-[var(--color-neg)]"
+        : readyCount < accountCount
+          ? "text-[var(--color-warn)]"
+          : "text-faint";
 
   return (
     <Card className="overflow-hidden">
-      <CardHeader
-        title="Connections"
-        action={
-          <span className="flex items-center gap-3">
-            {isAdmin ? (
-              <Button
-                variant="quiet"
-                size="sm"
-                title="shorthand codes and operator-defined providers"
-                onClick={onOpenCodes}
-              >
-                provider codes…
-              </Button>
-            ) : null}
-            <span className="text-caption text-faint tnum">
-              {groups.length} provider{groups.length === 1 ? "" : "s"} · {accountCount} account
-              {accountCount === 1 ? "" : "s"}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-3 sm:px-5">
+        <Heading level={2}>Connections</Heading>
+        <span className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          {isAdmin ? (
+            <Button variant="quiet" size="sm" onClick={onOpenCodes}>
+              Provider codes
+            </Button>
+          ) : null}
+          {!loading ? (
+            <span className={cx("text-caption tnum", summaryTone)}>
+              {readyCount} of {accountCount} ready · {groups.length} provider
+              {groups.length === 1 ? "" : "s"}
             </span>
-          </span>
-        }
-      />
+          ) : null}
+        </span>
+      </div>
       <div id="providers-connected">
         {loading ? (
           <InventorySkeleton />
         ) : (
-          <ul className="divide-y divide-line border-t border-line">
-            {visible.map((group) => {
-              const open = !collapsed.has(group.key);
-              return (
+          <>
+            <div
+              aria-hidden="true"
+              className={cx(
+                "hidden border-t border-line bg-surface px-4 py-2 text-caption font-medium text-faint md:grid",
+                DESKTOP_GRID,
+              )}
+            >
+              <span>Account</span>
+              <span className="hidden text-right lg:block">Priority</span>
+              <span>Limit</span>
+              <span>Status</span>
+              <span className="sr-only">Actions</span>
+            </div>
+            <ul className="divide-y divide-line border-t border-line">
+              {visible.map((group) => (
                 <li key={group.key}>
-                  <ProviderHeader group={group} open={open} onToggle={() => toggle(group.key)} />
-                  {open ? (
-                    <ul id={`accounts-${group.key}`} className="divide-y divide-line border-t border-line">
-                      {group.connections.map((connection) => (
-                        <AccountRow
-                          key={connection.id}
-                          connection={connection}
-                          group={group}
-                          providers={providers}
-                          quota={quotaBy.get(connection.id)}
-                          subscription={subscriptionBy.get(connection.id)}
-                          isAdmin={isAdmin}
-                          selected={selectedId === connection.id}
-                          testing={testingId === connection.id}
-                          teamName={teamName}
-                          displayOf={displayOf}
-                          onConfigure={onConfigure}
-                          onTest={onTest}
-                          onToggle={onToggle}
-                          onRemove={onRemove}
-                        />
-                      ))}
-                    </ul>
-                  ) : null}
+                  <ProviderHeader group={group} />
+                  <ul
+                    id={`accounts-${group.key}`}
+                    className="divide-y divide-rule border-t border-line"
+                  >
+                    {group.connections.map((connection) => (
+                      <AccountRow
+                        key={connection.id}
+                        connection={connection}
+                        group={group}
+                        providers={providers}
+                        quota={quotaBy.get(connection.id)}
+                        subscription={subscriptionBy.get(connection.id)}
+                        quotaLoaded={quotaLoaded}
+                        isAdmin={isAdmin}
+                        selected={selectedId === connection.id}
+                        testing={testingId === connection.id}
+                        lastTest={testsById[connection.id] ?? null}
+                        inspectHref={inspectHrefFor(connection.id)}
+                        teamName={teamName}
+                        displayOf={displayOf}
+                        onTest={onTest}
+                        onToggle={onToggle}
+                        onRemove={onRemove}
+                      />
+                    ))}
+                  </ul>
                 </li>
-              );
-            })}
-          </ul>
+              ))}
+            </ul>
+          </>
         )}
         <PaginationBar
           pagination={{

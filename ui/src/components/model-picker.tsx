@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import type { Model } from "../lib/api";
 import { useModelProviders, useModels } from "../lib/queries";
+import { isFree } from "../pages/models/price";
 import { Badge, cx } from "./ui";
 import { Checkbox } from "./atoms";
 import { compareModels } from "../lib/models";
@@ -45,9 +46,7 @@ export function ModelPicker({
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-3">
-        <span className="text-caption font-medium uppercase tracking-[0.08em] text-faint">
-          allowed models
-        </span>
+        <span className="text-small font-medium text-muted">Allowed models</span>
         <span className="text-caption text-faint tnum" aria-live="polite">
           {selected.length} of {models.data?.length ?? 0} selected
         </span>
@@ -58,7 +57,7 @@ export function ModelPicker({
         value={query}
         disabled={disabled}
         aria-label="filter models"
-        placeholder="filter models"
+        placeholder="filter models (or type free)"
         onChange={(e) => setQuery(e.target.value)}
         className="h-8 w-full min-w-0 rounded-[var(--radius-input)] border border-line-strong bg-surface px-2.5 text-body text-fg placeholder:text-faint hover:border-[var(--color-fg)]/40 focus:border-[var(--color-accent-text)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-text)]/25 disabled:bg-surface-3 disabled:text-muted"
       />
@@ -88,7 +87,7 @@ export function ModelPicker({
           ) : (
             <>
               {missing.length > 0 && !query ? (
-                <Group label="unlisted">
+                <Group label="Unlisted">
                   {missing.map((ref) => (
                     <Row
                       key={ref}
@@ -101,15 +100,17 @@ export function ModelPicker({
                   ))}
                 </Group>
               ) : null}
-              {groups.map((group) => (
-                <Group key={group.provider} label={display.get(group.provider) ?? group.provider}>
-                  {group.models.map((m) => (
+              {groups.map((bucket) => (
+                <Group key={bucket.provider} label={display.get(bucket.provider) ?? bucket.provider}>
+                  {bucket.models.map((m) => (
                     <Row
                       key={m.ref}
                       ref_={m.ref}
                       label={m.display ?? m.id}
                       dim={!m.enabled}
+                      free={isFree(m.cost)}
                       deprecated={m.deprecated}
+                      unavailable={m.enabled && !m.available}
                       checked={chosen.has(m.ref)}
                       disabled={disabled}
                       onToggle={() => toggle(m.ref)}
@@ -128,7 +129,7 @@ export function ModelPicker({
 function Group({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div>
-      <div className="sticky top-0 z-10 bg-surface-2 px-2.5 py-1 text-caption font-medium uppercase tracking-[0.08em] text-faint">
+      <div className="sticky top-0 z-10 bg-surface-2 px-2.5 py-1 text-caption font-medium text-muted">
         {label}
       </div>
       {children}
@@ -142,7 +143,9 @@ function Row({
   checked,
   disabled,
   dim,
+  free,
   deprecated,
+  unavailable,
   onToggle,
 }: {
   ref_: string;
@@ -150,7 +153,9 @@ function Row({
   checked: boolean;
   disabled?: boolean;
   dim?: boolean;
+  free?: boolean;
   deprecated?: boolean;
+  unavailable?: boolean;
   onToggle: () => void;
 }) {
   return (
@@ -160,6 +165,8 @@ function Row({
     >
       <Checkbox checked={checked} disabled={disabled} onChange={onToggle} />
       <span className={cx("truncate", dim ? "text-faint" : "text-muted")}>{label}</span>
+      {free ? <Badge tone="pos">Free</Badge> : null}
+      {unavailable ? <Badge tone="warn">unavailable</Badge> : null}
       {deprecated ? (
         <Badge tone="warn" title="this family is retired by its provider">
           deprecated
@@ -169,12 +176,18 @@ function Row({
   );
 }
 
-/** Models grouped under their provider, narrowed by the filter on the full ref. */
+/** Models grouped under their provider, narrowed by ref, display name, or "free". */
 function group(models: Model[] | undefined, query: string) {
   const needle = query.trim().toLowerCase();
   const buckets = new Map<string, Model[]>();
   for (const m of models ?? []) {
-    if (needle && !m.ref.toLowerCase().includes(needle)) continue;
+    if (needle) {
+      const matchFree = needle === "free" && isFree(m.cost);
+      const matchText =
+        m.ref.toLowerCase().includes(needle) ||
+        (m.display ?? "").toLowerCase().includes(needle);
+      if (!matchFree && !matchText) continue;
+    }
     const list = buckets.get(m.provider);
     if (list) list.push(m);
     else buckets.set(m.provider, [m]);

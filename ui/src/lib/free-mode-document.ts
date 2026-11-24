@@ -1,41 +1,23 @@
 /**
- * The free-mode document as the dashboard edits it: its shape, its local checks and the
- * small edits the knobs and the model picker make.
+ * The advanced free-mode JSON document: its shape, local schema validation and example.
  *
  * Kept free of network imports so Node's test runner can load it directly (the UI has no
  * bundler in its test path). The gateway validates the same document authoritatively — this
  * is the subset that can be checked before a request is sent at all.
  */
 
-/** The knobs that decide how `free` spreads load once accounts are imported. */
+/** Routing knobs stored on the server alongside an optional imported document. */
 export type FreeRouting = {
   enabled: boolean;
+  fallback_on_quota?: boolean;
   /** Proactive cap per account, requests per minute; `null` means no local cap. */
   per_account_rpm: number | null;
   max_attempts: number;
-  prefer: FreePrefer;
-  /**
-   * Model ids the operator picked explicitly. Empty means bare `free` reaches every
-   * discovered free model; a populated list narrows it to those ids.
-   */
-  models: string[];
-};
-
-/** `spread` rotates accounts; `cheapest` orders them by the registry price. */
-export type FreePrefer = "spread" | "cheapest";
-
-export const FREE_PREFERS: ReadonlyArray<{ id: FreePrefer; label: string; hint: string }> = [
-  { id: "spread", label: "Spread", hint: "Rotate accounts so consecutive requests use different proxies." },
-  { id: "cheapest", label: "Cheapest", hint: "Order candidates by the published price first." },
-];
-
-/** Defaults the gateway applies when the document omits a knob. */
-export const ROUTING_DEFAULTS: FreeRouting = {
-  enabled: true,
-  per_account_rpm: null,
-  max_attempts: 8,
-  prefer: "spread",
-  models: [],
+  prefer: "spread" | "cheapest";
+  /** Model ids the operator picked explicitly in a legacy document. */
+  models?: string[];
+  /** `"provider/model"` keys disabled via the per-model switches. */
+  disabled_models?: string[];
 };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -117,6 +99,9 @@ export function validateFreeDocument(text: string): FreeDocumentCheck {
     } else {
       if (routing.enabled !== undefined && typeof routing.enabled !== "boolean") {
         push("routing.enabled", "must be true or false");
+      }
+      if (routing.fallback_on_quota !== undefined && typeof routing.fallback_on_quota !== "boolean") {
+        push("routing.fallback_on_quota", "must be true or false");
       }
       if (routing.per_account_rpm !== undefined && routing.per_account_rpm !== null) {
         const rpm = routing.per_account_rpm;
@@ -216,102 +201,9 @@ export function validateFreeDocument(text: string): FreeDocumentCheck {
   return { document: parsed, problems, providers: providerCount, accounts: accountCount };
 }
 
-// ---------------------------------------------------------------- document edits
-
 /** Pretty-print for the editor; the gateway stores whatever JSON object it is sent. */
 export function documentText(document: Record<string, unknown>): string {
   return `${JSON.stringify(document, null, 2)}\n`;
-}
-
-/**
- * The knobs for the form: the document's `routing` block wins, the stored knobs fill a
- * document that does not name them, and the documented defaults fill the rest.
- */
-export function routingOf(
-  document: Record<string, unknown> | null,
-  stored: Partial<FreeRouting> | null,
-): FreeRouting {
-  const fromDocument = isObject(document?.routing) ? document.routing : {};
-  const merged: Record<string, unknown> = { ...(stored ?? {}), ...fromDocument };
-  return {
-    enabled: typeof merged.enabled === "boolean" ? merged.enabled : ROUTING_DEFAULTS.enabled,
-    per_account_rpm:
-      typeof merged.per_account_rpm === "number" && merged.per_account_rpm >= 1
-        ? merged.per_account_rpm
-        : null,
-    max_attempts:
-      typeof merged.max_attempts === "number" && merged.max_attempts >= 1
-        ? merged.max_attempts
-        : ROUTING_DEFAULTS.max_attempts,
-    prefer: merged.prefer === "cheapest" ? "cheapest" : "spread",
-    models: Array.isArray(merged.models)
-      ? merged.models.filter((id): id is string => typeof id === "string" && id.trim() !== "")
-      : [],
-  };
-}
-
-/** The same document with its routing block replaced; the knobs live inside the document. */
-export function withRouting(
-  document: Record<string, unknown>,
-  routing: FreeRouting,
-): Record<string, unknown> {
-  const current = isObject(document.routing) ? document.routing : {};
-  return { ...document, routing: { ...current, ...routing } };
-}
-
-/** `""` (no cap) or a positive whole number; the knob shows this inline. */
-export function rpmProblem(value: string): string | null {
-  const text = value.trim();
-  if (text === "") return null;
-  return /^\d+$/.test(text) && Number(text) >= 1
-    ? null
-    : "whole number of requests per minute, or empty for no cap";
-}
-
-/** `max_attempts`: always present, always a positive whole number. */
-export function attemptsProblem(value: string): string | null {
-  const text = value.trim();
-  if (text === "") return "required";
-  return /^\d+$/.test(text) && Number(text) >= 1 ? null : "a whole number of attempts";
-}
-
-/** A registry price in USD per million tokens, or `—` when no catalogue priced the model. */
-export function priceLabel(price: number | null): string {
-  if (price === null) return "—";
-  if (price === 0) return "$0";
-  return `$${price.toFixed(price < 1 ? 4 : 2)}`;
-}
-
-/** How a model became a free one, in the words the badge uses. */
-export function sourceLabel(source: string): string {
-  switch (source) {
-    case "document":
-      return "document";
-    case "provider-list":
-      return "provider list";
-    case "registry":
-      return "registry";
-    default:
-      return source === "" ? "unknown" : source;
-  }
-}
-
-export type FreeRefHint = { ref: string; hint: string };
-
-/**
- * The four refs `/v1` accepts for free mode, in the order the docs explain them. A real id
- * is used wherever one is known; the caller decides the sample, and `null` leaves
- * placeholders that show the shape without inventing a model.
- */
-export function freeRefHints(sample: { provider: string; model: string } | null): FreeRefHint[] {
-  const provider = sample?.provider ?? "<provider>";
-  const model = sample?.model ?? "<model-id>";
-  return [
-    { ref: "free", hint: "every free model discovery recorded, across every free account" },
-    { ref: `free:${provider}`, hint: "one provider's free models" },
-    { ref: `free/${model}`, hint: "one exact model across every free account" },
-    { ref: `free:${provider}/${model}`, hint: "one model on one provider" },
-  ];
 }
 
 /** Smallest free-mode example that imports cleanly; placeholders only, never a real key. */
@@ -324,13 +216,11 @@ export const FREE_DOCUMENT_EXAMPLE = `${JSON.stringify(
       per_account_rpm: 10,
       max_attempts: 8,
       prefer: "spread",
-      models: ["deepseek-v4.1-flash"],
     },
-    proxies: { "p1": "http://user:pass@10.0.0.1:8080" },
+    proxies: { p1: "http://user:pass@10.0.0.1:8080" },
     providers: [
       {
         provider: "openrouter",
-        models: ["deepseek-v4.1-flash"],
         accounts: [
           { label: "free-1", api_key: "sk-REPLACE", proxy: "p1", rpm: 5 },
           { label: "free-2", api_key: "sk-REPLACE", proxy: "socks5h://10.0.0.2:1080", rpm: 5 },

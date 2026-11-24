@@ -46,12 +46,14 @@ export default function Providers() {
 
   const connections = useConnections(true, teamFilter);
   const providers = useModelProviders();
-  // OAuth sign-in, subscription plans and operator quotas are admin surface; a reader
+  // OAuth sign-in, subscription plans and operator quotas are admin surfaces; a reader
   // must not fire requests that would only answer 403.
   const oauth = useOAuthProviders(isAdmin);
   const teams = useTeams();
   const quotas = useAccountQuotas(isAdmin);
-  const subscriptions = useAccountSubscriptions();
+  const subscriptions = useAccountSubscriptions(isAdmin);
+  // Both limit sources answered: only then may an account without bars read "no cap set".
+  const quotaLoaded = isAdmin && quotas.isSuccess && subscriptions.isSuccess;
 
   const [adding, setAdding] = useState(false);
   const [initialCustomProtocol, setInitialCustomProtocol] = useState<
@@ -66,20 +68,13 @@ export default function Providers() {
   /** The refused account whose re-enable is waiting on its consequence being read. */
   const [reenabling, setReenabling] = useState<Connection | null>(null);
 
-  const { invalidate, refreshRegistrySoon, remove, toggle, test, lastTest } =
+  const { invalidate, refreshRegistrySoon, remove, toggle, test, testsById, recordTest } =
     useConnectionMutations(setNotice);
   const testingId = test.isPending ? (test.variables ?? null) : null;
 
   const accounts = useMemo(() => connections.data ?? [], [connections.data]);
+  const teamList = teams.data ?? [];
 
-  /**
-   * The one place a connection changes state, for the row menu and the drawer alike.
-   *
-   * Disabling is the same immediate toggle it always was. Re-enabling a *refused* account is
-   * not: it first shows the consequence that token carries, because re-enabling a suspended
-   * account, an unentitled credential or a rejected build gets the same refusal again. The
-   * request that follows is unchanged — `{ is_active: true }` on the same endpoint.
-   */
   const requestToggle = (connection: Connection) => {
     if (!connection.is_active && refusalView(connection.refusal)) {
       toggle.reset();
@@ -107,6 +102,15 @@ export default function Providers() {
     [accounts, providers.data, quotas.data, subscriptions.data],
   );
 
+  const quotaById = useMemo(
+    () => new Map((quotas.data ?? []).map((row) => [row.connection_id, row])),
+    [quotas.data],
+  );
+  const subscriptionById = useMemo(
+    () => new Map((subscriptions.data ?? []).map((row) => [row.connection_id, row])),
+    [subscriptions.data],
+  );
+
   const setTeamFilter = useCallback(
     (team: string) => {
       const next = new URLSearchParams(params);
@@ -118,17 +122,13 @@ export default function Providers() {
     [params, setParams],
   );
 
-  const openInspect = useCallback(
+  const inspectHrefFor = useCallback(
     (connectionId: string) => {
       const next = new URLSearchParams(params);
-      if (teamFilter && isAdmin && !accounts.some((a) => a.id === connectionId)) {
-        next.delete("team");
-        next.delete("team_id");
-      }
       next.set("inspect", connectionId);
-      setParams(next, { replace: true });
+      return `?${next.toString()}`;
     },
-    [params, setParams, teamFilter, isAdmin, accounts],
+    [params],
   );
 
   const closeInspect = useCallback(() => {
@@ -162,8 +162,7 @@ export default function Providers() {
   };
 
   // Deep links land here as `?add=custom&protocol=openai|anthropic`; the older
-  // `?custom=openai|anthropic` spelling stays accepted. A reader cannot add a connection,
-  // so the link is dropped rather than opening a form that would 403.
+  // `?custom=openai|anthropic` spelling stays accepted.
   useEffect(() => {
     const legacy = params.get("custom");
     const custom = params.get("add") === "custom" ? params.get("protocol") : legacy;
@@ -181,15 +180,11 @@ export default function Providers() {
     setParams(next, { replace: true });
   }, [params, setParams, isAdmin]);
 
-  // `?add=<provider-id>` opens the same add flow already on that provider's credential
-  // step. The catalog must be loaded first: an unknown id is refused rather than silently
-  // opening the fallback provider's form.
+  // `?add=<provider-id>` opens the add flow straight on that provider's key form.
   useEffect(() => {
     const requested = params.get("add");
     if (!requested || requested === "custom") return;
     if (!providers.data) return;
-    // Only an API-key provider has a credential form to land on; an OAuth-only provider
-    // is not offered by this link, so the flow stays on the picker.
     const found = providers.data.find((provider) => provider.id === requested);
     if (isAdmin && found && found.kind !== "oauth") {
       setInitialCustomProtocol(null);
@@ -209,7 +204,7 @@ export default function Providers() {
     setParams(next, { replace: true });
   }, [params, setParams, isAdmin, providers.data]);
 
-  const handleConnected = useCallback(
+  const handleOAuthConnected = useCallback(
     (label: string, warning: string | null) => {
       setAdding(false);
       setSignIn(null);
@@ -223,8 +218,11 @@ export default function Providers() {
     [invalidate, refreshRegistrySoon],
   );
 
-  // API-key providers stay in this list even when they also offer a sign-in. OpenRouter
-  // is both: an operator can paste a key, or use the OAuth flow under Sign in.
+  const handleAccountCreated = useCallback(() => {
+    invalidate();
+    refreshRegistrySoon();
+  }, [invalidate, refreshRegistrySoon]);
+
   const keyProviders = (providers.data ?? []).filter((p) => p.kind !== "oauth");
   const subscriptionProviders = (oauth.data ?? []).map((p) => ({
     ...p,
@@ -235,18 +233,18 @@ export default function Providers() {
     <>
       <PageHeader
         title="Providers"
-        subtitle="Accounts this gateway can route through. Each one is an upstream the router may pick."
+        subtitle="Upstream accounts this gateway can route through."
         actions={
           <>
-            {(teams.data ?? []).length > 0 ? (
+            {teamList.length > 0 ? (
               <div className="w-[180px]">
                 <Select
                   ariaLabel="filter accounts by owner team"
                   value={teamFilter ?? ""}
                   onChange={setTeamFilter}
                 >
-                  <option value="">{isAdmin ? "all accounts" : "my teams"}</option>
-                  {(teams.data ?? []).map((team) => (
+                  <option value="">{isAdmin ? "All accounts" : "My teams"}</option>
+                  {teamList.map((team) => (
                     <option key={team.id} value={team.id}>
                       {team.name}
                     </option>
@@ -264,16 +262,17 @@ export default function Providers() {
       />
 
       {!isAdmin ? (
-        <p className="mb-2 text-small text-muted">
-          Read-only: these are the provider accounts your team may route through. An administrator
-          adds, edits and assigns them.
+        <p className="mb-3 text-small text-muted">
+          Read-only: these are the accounts your team can route through. An administrator manages
+          credentials and limits.
         </p>
       ) : null}
-      <p className="mb-4 text-small text-muted">
-        A team key routes only to its own team's accounts. A team key with no team-owned account
-        fails with “no eligible upstream” until an administrator assigns one, and shared accounts
-        serve instance-wide keys only.
-      </p>
+      {teamList.length > 0 ? (
+        <p className="mb-4 text-small text-muted">
+          Team keys route only to their own team's accounts; shared accounts serve instance-wide
+          keys.
+        </p>
+      ) : null}
 
       <ProviderCodesModal
         open={isAdmin && codesOpen}
@@ -397,14 +396,16 @@ export default function Providers() {
           groups={groups}
           quotas={quotas.data}
           subscriptions={subscriptions.data}
+          quotaLoaded={quotaLoaded}
           providers={providers.data}
           selectedId={inspected?.id}
           loading={connections.isLoading}
           isAdmin={isAdmin}
           testingId={testingId}
+          testsById={testsById}
+          inspectHrefFor={inspectHrefFor}
           displayOf={displayOf}
           teamName={teamName}
-          onConfigure={openInspect}
           onTest={(id) => test.mutate(id)}
           onToggle={requestToggle}
           onRemove={(c) => {
@@ -427,7 +428,8 @@ export default function Providers() {
         subscriptionProviders={subscriptionProviders}
         keyProviders={keyProviders}
         providers={providers.data ?? []}
-        onConnected={handleConnected}
+        onAccountCreated={handleAccountCreated}
+        onTestRecorded={recordTest}
       />
 
       {inspected ? (
@@ -436,11 +438,14 @@ export default function Providers() {
           connection={inspected}
           spec={providers.data?.find((p) => p.id === inspected.provider)}
           display={displayOf(inspected.provider)}
-          teams={teams.data ?? []}
+          quota={quotaById.get(inspected.id)}
+          subscription={subscriptionById.get(inspected.id)}
+          quotaLoaded={quotaLoaded}
+          teams={teamList}
           isAdmin={isAdmin}
           testing={testingId === inspected.id}
           toggling={toggle.isPending && toggle.variables?.id === inspected.id}
-          lastTest={lastTest}
+          lastTest={testsById[inspected.id] ?? null}
           onTest={() => test.mutate(inspected.id)}
           onToggle={() => requestToggle(inspected)}
           onRemove={() => {
@@ -455,7 +460,7 @@ export default function Providers() {
         <OAuthDialog
           provider={signIn}
           onClose={() => setSignIn(null)}
-          onConnected={handleConnected}
+          onConnected={handleOAuthConnected}
           onViewProviders={() => {
             setSignIn(null);
             window.requestAnimationFrame(() =>

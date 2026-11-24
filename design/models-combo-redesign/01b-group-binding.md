@@ -244,3 +244,44 @@ the status quo — reject that shape.
    `/v1` on; reload the page and the row is still there; `curl /v1/models` shows
    `{"id":"<combo>","owned_by":"rrouter","group":"<g-id>"}` when the preset is the default
    one. Today step 3 ends with no row and no section — that is the reproduction.
+
+
+---
+
+## 6. Opinion ledger — Activity requested vs routed refs & canonical Copy model name (2026-11-24)
+
+Extends `01b-group-binding.md` and `#70` (`route-inv`) for Phase 1 UI work (S1 Activity log, S4 Models copy/preview).
+
+### Job
+An operator watching `/activity` sees rows alternating between `main/ocg/<id>` and `opencode-go/<id>` and thinks routing is randomly hopping between custom and ungrouped buckets. On `/models`, copying a model name produces inconsistent shapes (`ocg/<id>` vs `main/ocg/<id>`), and there is no way to see which other spellings reach the same model without reading gateway source code.
+
+### The four answers
+1. **Why open this?**
+   - `/activity`: verify what each client actually sent and confirm which provider/model actually served it — without guessing whether two spellings hit different destinations.
+   - `/models`: copy the one canonical model string to paste into a client config, and check which legacy/shorthand spellings still resolve to that row.
+2. **How are they using it (what is open beside it)?**
+   - A terminal or editor with client config (`flow-roles.json`, `.env`, IDE model settings) open beside the browser. They copy once from `/models`, run a request, and check `/activity` to confirm the exact spelling and served target.
+3. **What do they want to know next?**
+   - On `/activity`: "Did `main/ocg/deepseek-v4.1-flash` and `opencode-go/deepseek-v4.1-flash` hit the same upstream?" → answered inline by the separate `Routed to` column and neutral `same as <canonical>` note, without leaving the table.
+   - On `/models`: "If an older client still sends `ocg/deepseek-v4` or `opencode-go/deepseek-v4`, will it still work?" → answered inside the existing row hover/focus preview (`Also matches`), without adding columns.
+4. **What are we willing to leave out?**
+   - No new table columns on `/models` for alternate spellings or group prefixes.
+   - No warning/amber styling on `same as <canonical>` (multiple spellings of the same destination are normal, not an error or risk).
+   - No duplicate copy actions in row overflow menus or mobile cards — one `CopyIconButton` per row.
+   - No client-side rewriting of `UsageEvent.model` through `modelRefFor` for display.
+   - No tracked-caps table headers or section eyebrows.
+
+### Deliberate trade-offs
+- **Separate `Model` (requested verbatim) and `Routed to` (`provider/model`) columns on `/activity`**: some users with narrow desktop windows lose horizontal space compared to a single merged column. We accept this because merging requested and resolved into one rewritten cell was the exact cause of the "routing is switching" bug; on mobile (`< 640px`), rows stack cleanly into cards so neither field clips.
+- **Neutral `same as <canonical>` sub-line in `Model` cell**: adds a second line on rows whose requested spelling differs from canonical. We accept this because it answers "are these two rows the same destination?" at a glance without using amber/warning colour or requiring a click into the drawer.
+- **`canonicalRef` returns `provider/id` for ungrouped rows and `<group>/<code-or-provider>/<id>` for custom-grouped rows**: ungrouped rows no longer copy `code/id` shorthand (`ocg/id`). Some users prefer the shorter `ocg/id` form; we accept this because `provider/id` matches the registry's own identity (`m.ref`) and `code/id` remains visible under `Also matches` in the row preview.
+- **`Also matches` lives in the existing `RowPreview` popover**: not visible at rest in the table. We accept this because most rows only need one copyable string; alternate spellings are secondary lookup info that belongs in a task-scoped preview.
+
+### Preview contract (`ModelPreviewBody`)
+- Trigger: hover (~350 ms) or keyboard focus on the model id (`RowPreview`, non-modal, no interactive controls, closes on blur/leave/Escape).
+- Shows: canonical `reference`, display name, availability status, context/max-output, unified price, capabilities, reasoning efforts, **`Also matches`** (only when at least one alternate spelling exists: `code/id`, `provider/id`, legacy `group.name/code/id` when `slug` differs), and last test outcome.
+
+### Exclusions & deleted list
+- **Deleted**: client-side `modelRefFor` rewriting of `logRows` and `selectedRow` in `ui/src/pages/activity/index.tsx` (replaced with unmutated `UsageEvent` + `requested`, `routedTo`, `sameAs`).
+- **Deleted**: ad-hoc `${code}/${model.id}` ungrouped ref construction in `groupProviderRef` (`ui/src/pages/models/rows.tsx`), replaced by pure, tested `canonicalRef(row, groups)` in `ui/src/lib/model-ref.ts`.
+- **Excluded (deferred to Phase 2 after S2/S3 backend contract)**: stable group `slug` persistence from `/api/model-presets`, `also_matches` from `/api/models` wire response (pure client derivation is used in Phase 1 and already prefers `group.slug` when present), and Keys page `default_group` selector.
