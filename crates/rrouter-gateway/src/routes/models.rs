@@ -227,16 +227,24 @@ async fn grouped_models(
 
     // Explicit groups keep their stored order; implicit provider buckets follow in
     // first-seen order. Only groups with a listed model are advertised.
-    let mut group_order: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut group_order: Vec<(String, String, Option<String>, Option<String>)> = Vec::new();
     for group in explicit_groups {
         if !used_groups.contains(&group.id) {
             continue;
         }
-        group_order.push((group.id.clone(), group.name.clone(), group.provider.clone()));
+        group_order.push((
+            group.id.clone(),
+            group.name.clone(),
+            group.effective_slug().map(str::to_string),
+            group.provider.clone(),
+        ));
     }
     for provider in implicit {
         let id = format!("provider:{provider}");
-        if !used_groups.contains(&id) || group_order.iter().any(|(existing, _, _)| *existing == id)
+        if !used_groups.contains(&id)
+            || group_order
+                .iter()
+                .any(|(existing, _, _, _)| *existing == id)
         {
             continue;
         }
@@ -247,12 +255,12 @@ async fn grouped_models(
                 .map(|spec| spec.display.to_string())
                 .unwrap_or_else(|| provider.to_string())
         };
-        group_order.push((id, name, Some(provider.to_string())));
+        group_order.push((id, name, None, Some(provider.to_string())));
     }
     let index: HashMap<&str, usize> = group_order
         .iter()
         .enumerate()
-        .map(|(index, (id, _, _))| (id.as_str(), index))
+        .map(|(index, (id, _, _, _))| (id.as_str(), index))
         .collect();
 
     resolved.sort_by(|a, b| {
@@ -267,10 +275,11 @@ async fn grouped_models(
     let groups: Vec<Value> = group_order
         .iter()
         .enumerate()
-        .map(|(position, (id, name, provider))| {
+        .map(|(position, (id, name, slug, provider))| {
             json!({
                 "id": id,
                 "name": name,
+                "slug": slug,
                 "provider": provider,
                 "position": position,
             })
@@ -287,9 +296,14 @@ async fn grouped_models(
                 .map(|meta| ((model.provider.as_str(), model.id.as_str()), meta))
         })
         .collect();
-    let group_meta: HashMap<&str, (&str, Option<&str>)> = group_order
+    let group_meta: HashMap<&str, (&str, Option<&str>, Option<&str>)> = group_order
         .iter()
-        .map(|(id, name, provider)| (id.as_str(), (name.as_str(), provider.as_deref())))
+        .map(|(id, name, slug, provider)| {
+            (
+                id.as_str(),
+                (name.as_str(), slug.as_deref(), provider.as_deref()),
+            )
+        })
         .collect();
     let combo_by_ref: HashMap<(&str, &str), &ComboMetadata> = models
         .iter()
@@ -306,19 +320,21 @@ async fn grouped_models(
             let (canonical, bare) = if provider == "rrouter" {
                 (id.clone(), None)
             } else {
-                let (name, source) = group_meta
-                    .get(group.as_str())
-                    .copied()
-                    .unwrap_or((provider.as_str(), Some(provider.as_str())));
+                let (name, slug, source) = group_meta.get(group.as_str()).copied().unwrap_or((
+                    provider.as_str(),
+                    None,
+                    Some(provider.as_str()),
+                ));
                 // A provider bucket advertises the provider's shorthand. A free-form
-                // group namespaces the ref but still pins the provider:
-                // `group/code/model` leaves no ambiguity when several providers serve
-                // the same id.
+                // group namespaces the ref with its stable slug and still pins the
+                // provider: `slug/code/model` leaves no ambiguity when several providers
+                // serve the same id, and renaming `name` never breaks clients.
                 let code = state.provider_code(&provider);
                 let qualifier = if source.is_some() {
                     code
                 } else {
-                    format!("{name}/{code}")
+                    let prefix = slug.unwrap_or(name);
+                    format!("{prefix}/{code}")
                 };
                 (format!("{qualifier}/{id}"), Some(id.clone()))
             };
@@ -591,7 +607,13 @@ async fn routable_model(
                 if !id.is_empty() {
                     if let Some(provider) = state.provider_by_ref(segment) {
                         if let Some(layout) = snapshot.layout.as_ref() {
-                            if let Some(group) = layout.group_by_name(head) {
+                            if let Some((group, matched_by_name)) =
+                                layout.resolve_group_prefix(head)
+                            {
+                                let slug = group.effective_slug().unwrap_or(&group.name);
+                                if matched_by_name {
+                                    crate::state::log_legacy_group_prefix_once(head, slug);
+                                }
                                 if !rrouter_store::LayoutDocument::allows(
                                     group,
                                     caller.key_id(),
@@ -600,6 +622,8 @@ async fn routable_model(
                                 ) {
                                     return Ok(None);
                                 }
+                                let code = state.provider_code(&provider);
+                                let canonical = format!("{slug}/{code}/{id}");
                                 return Ok(snapshot
                                     .items
                                     .iter()
@@ -609,7 +633,7 @@ async fn routable_model(
                                     .map(|item| {
                                         (
                                             item.provider.clone(),
-                                            reference.to_string(),
+                                            canonical,
                                             Some(id.to_string()),
                                             Some(item.clone()),
                                             None,
@@ -774,10 +798,88 @@ async fn set_disabled(state: &AppState, model: &str, disabled: bool) -> Response
 
 // ----- model registry --------------------------------------------------------------
 
+/// Compute `(reference, also_matches)` for one registry row against the default preset
+/// layout.
+///
+/// - A model in a free-form group gets canonical `<slug>/<code>/<id>`, with its other
+///   accepted spellings (`<slug>/<provider>/<id>`, legacy `<name>/...` when renamed,
+///   `<code>/<id>`, `<provider>/<id>`, and bare `<id>`) in `also_matches`.
+/// - An ungrouped / provider-bucket model gets canonical `<provider>/<id>`, with
+///   `<code>/<id>` (when different) and bare `<id>` in `also_matches`.
+fn canonical_refs_for(
+    item: &models_registry::ModelItem,
+    layout: Option<&rrouter_store::LayoutDocument>,
+) -> (String, Vec<String>) {
+    let free_group = layout.and_then(|doc| {
+        let gid = doc.group_id_for(&item.provider, &item.id);
+        doc.group_by_id(&gid).filter(|g| g.provider.is_none())
+    });
+
+    let mut candidates: Vec<String> = Vec::new();
+    let canonical = if let Some(group) = free_group {
+        let slug = group.effective_slug().unwrap_or(&group.name);
+        let canonical = format!("{slug}/{}/{}", item.code, item.id);
+        if item.code != item.provider {
+            candidates.push(format!("{slug}/{}/{}", item.provider, item.id));
+        }
+        if group.name != slug {
+            candidates.push(format!("{}/{}/{}", group.name, item.code, item.id));
+            if item.code != item.provider {
+                candidates.push(format!("{}/{}/{}", group.name, item.provider, item.id));
+            }
+        }
+        if item.code != item.provider {
+            candidates.push(format!("{}/{}", item.code, item.id));
+        }
+        candidates.push(format!("{}/{}", item.provider, item.id));
+        candidates.push(item.id.clone());
+        canonical
+    } else {
+        let canonical = format!("{}/{}", item.provider, item.id);
+        if item.code != item.provider {
+            candidates.push(format!("{}/{}", item.code, item.id));
+        }
+        candidates.push(item.id.clone());
+        canonical
+    };
+
+    let mut also_matches: Vec<String> = Vec::with_capacity(candidates.len());
+    for spelling in candidates {
+        if spelling != canonical && !also_matches.contains(&spelling) {
+            also_matches.push(spelling);
+        }
+    }
+    (canonical, also_matches)
+}
+
 /// `GET /api/models`: the merged registry, sorted by `provider`, then `id`.
+///
+/// Each row preserves `"ref"` (`provider/id`, the layout item key) and adds `"reference"`
+/// (the canonical callable ref) plus `"also_matches"` (the other accepted spellings).
 pub async fn registry_list(State(state): State<Arc<AppState>>) -> Response {
+    let layout = state
+        .store
+        .default_model_preset()
+        .await
+        .ok()
+        .flatten()
+        .map(|preset| preset.layout);
     match models_registry::list(&state).await {
-        Ok(items) => ok_json(json!({ "data": items })),
+        Ok(items) => {
+            let data: Vec<Value> = items
+                .iter()
+                .filter_map(|item| {
+                    let mut value = serde_json::to_value(item).ok()?;
+                    if let Value::Object(ref mut map) = value {
+                        let (reference, also_matches) = canonical_refs_for(item, layout.as_ref());
+                        map.insert("reference".into(), Value::String(reference));
+                        map.insert("also_matches".into(), json!(also_matches));
+                    }
+                    Some(value)
+                })
+                .collect();
+            ok_json(json!({ "data": data }))
+        }
         Err(e) => admin_error(&e),
     }
 }
@@ -1011,6 +1113,11 @@ async fn fetch_upstream(
                 context: None,
                 max_output: None,
                 caps: Value::Object(Map::new()),
+                cost: None,
+                model_type: None,
+                recommended_api: None,
+                apis: Vec::new(),
+                chat_usable: true,
             })
             .collect();
         return store_fetched(state, conn, status, items).await;
@@ -1049,6 +1156,11 @@ async fn fetch_upstream(
                     "reasoning": block.get("is_reasoning").and_then(Value::as_bool).unwrap_or(false),
                     "tools": true,
                 }),
+                cost: None,
+                model_type: None,
+                recommended_api: None,
+                apis: Vec::new(),
+                chat_usable: true,
             })
             .collect();
         return store_fetched(state, conn, 200, items).await;
@@ -1175,8 +1287,7 @@ async fn store_fetched(
                 context: item.context,
                 max_output: item.max_output,
                 caps: item.caps.clone(),
-                // A provider's own list carries ids, not prices; models.dev supplies them.
-                cost: None,
+                cost: item.cost.clone(),
                 source: SOURCE_UPSTREAM.to_string(),
                 updated_at: 0,
             })
@@ -1497,5 +1608,130 @@ mod tests {
             "{err:?}"
         );
         assert!(!err.to_string().contains("at-secret"), "{err}");
+    }
+
+    fn test_state(store: Arc<rrouter_store::Store>) -> Arc<AppState> {
+        let config = crate::config::Config::resolve(&|_| None, None)
+            .expect("default config")
+            .config;
+        let data_dir = std::env::temp_dir().join(format!("rrouter-models-test-{}", Uuid::new_v4()));
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("http");
+        Arc::new(AppState {
+            store,
+            catalog: Arc::new(rrouter_router::Catalog::builtin()),
+            refresher: Arc::new(rrouter_auth::Refresher::new(http.clone())),
+            planner: rrouter_router::Planner::new(),
+            dispatcher: Arc::new(rrouter_router::Dispatcher::new(
+                rrouter_router::Breaker::new(),
+            )),
+            http,
+            proxy_clients: Default::default(),
+            config: crate::config::ConfigSnapshot::from(config),
+            started: std::time::Instant::now(),
+            oauth: rrouter_auth::OAuthFlows::new(),
+            counters: Default::default(),
+            envelope_drops: Default::default(),
+            providers: Default::default(),
+            concurrency: std::sync::RwLock::new(None),
+            auth: crate::auth::Auth::load(&data_dir, false),
+        })
+    }
+
+    /// `store_fetched` persists live catalog pricing (including zero-cost models like
+    /// OpenCode's `big-pickle` and OpenRouter's `:free` models) while preserving existing
+    /// synced prices for providers whose `/models` response carries no pricing.
+    #[tokio::test]
+    async fn store_fetched_persists_live_pricing_and_keeps_unpriced_providers_unchanged() {
+        let store = Arc::new(rrouter_store::Store::open_in_memory().expect("store"));
+        let state = test_state(Arc::clone(&store));
+        let conn = store
+            .create_connection(
+                "opencode",
+                "api_key",
+                rrouter_auth::Credentials::default(),
+                None,
+            )
+            .await
+            .expect("opencode connection");
+
+        // Seed a synced price for an unpriced upstream entry to prove `cost: None`
+        // preserves existing pricing (via coalesce) instead of wiping it.
+        store
+            .upsert_model(&ModelRow {
+                provider: "opencode".into(),
+                model: "legacy-synced".into(),
+                display: None,
+                context: None,
+                max_output: None,
+                caps: json!({}),
+                cost: Some(json!({"input": 2.0, "output": 8.0})),
+                source: models_registry::SOURCE_SYNCED.into(),
+                updated_at: 0,
+            })
+            .await
+            .expect("seed synced");
+
+        let body = json!({
+            "data": [
+                {
+                    "id": "big-pickle",
+                    "name": "Big Pickle",
+                    "recommended_api": "chat-completions",
+                    "api": {
+                        "chat-completions": { "base_url": "https://opencode.ai/inference/openai/v1" }
+                    },
+                    "cost": { "text": { "input": { "price": 0 }, "output": { "price": 0 } } }
+                },
+                {
+                    "id": "jev-1.13-free",
+                    "name": "Jev 1.13 Free",
+                    "type": "decision",
+                    "recommended_api": "systemone",
+                    "api": {
+                        "systemone": { "base_url": "https://opencode.ai/inference/systemone/v1" }
+                    },
+                    "cost": { "text": { "input": { "price": 0 }, "output": { "price": 0 } } }
+                },
+                {
+                    "id": "legacy-synced"
+                }
+            ]
+        });
+        let parsed = models_registry::parse_models(&body);
+        store_fetched(&state, &conn, 200, parsed)
+            .await
+            .expect("store fetched");
+
+        let rows = store.list_models().await.expect("list");
+        let by_id = |id: &str| {
+            rows.iter()
+                .find(|r| r.provider == "opencode" && r.model == id)
+                .expect("stored row")
+        };
+
+        let pickle = by_id("big-pickle");
+        assert_eq!(pickle.cost, Some(json!({"input": 0.0, "output": 0.0})));
+        assert!(models_registry::is_probe_usable_row(
+            pickle,
+            Dialect::OpenAiChat
+        ));
+
+        let jev = by_id("jev-1.13-free");
+        assert_eq!(jev.cost, Some(json!({"input": 0.0, "output": 0.0})));
+        assert_eq!(jev.caps["chat_usable"], false);
+        assert!(!models_registry::is_probe_usable_row(
+            jev,
+            Dialect::OpenAiChat
+        ));
+
+        let legacy = by_id("legacy-synced");
+        assert_eq!(
+            legacy.cost,
+            Some(json!({"input": 2.0, "output": 8.0})),
+            "unpriced upstream entry preserves existing synced price"
+        );
     }
 }

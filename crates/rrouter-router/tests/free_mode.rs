@@ -447,3 +447,68 @@ async fn max_attempts_caps_the_free_plan() {
     let plan = plan(&planner(), &store, "free/deepseek-v4.1-flash").await;
     assert_eq!(plan.candidates.len(), 2, "{:?}", plan.candidates);
 }
+
+/// `disabled_models` ("off" in Free mode) means never used — even for a pinned ref. Unlike
+/// `routing.models` (a narrowing of the *unqualified* pool), a toggled-off model must not
+/// be reachable by spelling `free/<model>`.
+#[tokio::test]
+async fn disabled_models_blocks_a_pinned_ref() {
+    let store = Store::open_in_memory().unwrap();
+    free_account(&store, "openrouter", None).await;
+    discover(&store, "openrouter", "deepseek-v4.1-flash", true).await;
+
+    // Off, keyed the way `PATCH /api/free-mode/models` stores it (`provider/model`).
+    store
+        .save_free_mode_config(
+            &json!({ "version": 1 }),
+            &json!({ "disabled_models": ["openrouter/deepseek-v4.1-flash"] }),
+        )
+        .await
+        .unwrap();
+
+    let error = plan_error(&planner(), &store, "free/deepseek-v4.1-flash").await;
+    assert!(
+        matches!(error, Error::NoRoute { .. }),
+        "a disabled model must not route, even pinned: {error}"
+    );
+}
+
+/// A Go-hosted row only counts as "served on opencode-go" when it is itself marked free: a
+/// paid `opencode-go` row sharing a Zen-free id must not make the opencode-go guard think
+/// `/inference/go` serves it.
+#[tokio::test]
+async fn opencode_go_guard_requires_the_go_row_to_be_free() {
+    let store = Store::open_in_memory().unwrap();
+    // The id is proven Zen-free on `opencode` (public catalog).
+    store
+        .upsert_free_model(&FreeModel {
+            provider: "opencode".to_string(),
+            model: "big-pickle".to_string(),
+            free: true,
+            price: Some(0.0),
+            source: "public-catalog".to_string(),
+            connection_id: None,
+            discovered_at: 0,
+        })
+        .await
+        .expect("zen-free row");
+    // A *paid* opencode-go row for the same id (free: false) — the id is not on /inference/go.
+    store
+        .upsert_free_model(&FreeModel {
+            provider: "opencode-go".to_string(),
+            model: "big-pickle".to_string(),
+            free: false,
+            price: Some(1.0),
+            source: "catalog".to_string(),
+            connection_id: None,
+            discovered_at: 0,
+        })
+        .await
+        .expect("paid go row");
+    paid_account(&store, "opencode-go").await;
+
+    // Asking for opencode-go/big-pickle must be refused: the id is Zen-free (opencode only),
+    // and the go row is paid, so /inference/go does not serve it.
+    let error = plan_error(&planner(), &store, "opencode-go/big-pickle").await;
+    assert!(matches!(error, Error::NoRoute { .. }), "{error}");
+}

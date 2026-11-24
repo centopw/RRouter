@@ -211,6 +211,8 @@ pub struct ApiKey {
     pub kind: KeyKind,
     /// Last successful authentication, unix seconds; `0` = never used.
     pub last_used_at: i64,
+    /// Optional default free-form group slug for this key; `None` = no default group.
+    pub default_group: Option<String>,
 }
 
 impl ApiKey {
@@ -346,6 +348,8 @@ pub struct ApiKeyPatch {
     pub guardrails: Option<Option<Guardrails>>,
     /// `Some(None)` clears the owner.
     pub owner_user_id: Option<Option<Uuid>>,
+    /// `Some(None)` clears the default group; a string is trimmed before storage.
+    pub default_group: Option<Option<String>>,
 }
 
 impl ApiKeyPatch {
@@ -393,6 +397,13 @@ impl ApiKeyPatch {
         }
         if let Some(v) = self.owner_user_id {
             key.owner_user_id = v;
+        }
+        if let Some(v) = &self.default_group {
+            key.default_group = v
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
         }
     }
 }
@@ -830,6 +841,9 @@ pub struct UsageRecord {
     pub reasoning_tokens: u32,
     /// Conversation id the client sent, when it sent one.
     pub session_id: Option<String>,
+    /// Reason the request fell back to the free pool (`quota`, `rate_limit`,
+    /// `payment_required`), or `None` when served normally.
+    pub fallback_reason: Option<String>,
 }
 
 /// Outcome class for [`UsageQuery::status`]. `Success` is a 2xx answer with no error text;
@@ -1901,7 +1915,7 @@ impl Store {
     const KEY_COLUMNS: &'static str =
         "id, key_hash, name, is_active, created_at, rpm, tpm, budget_tokens, allowed_models, \
          expires_at, budget_micros, budget_window, guardrails, scope, team_id, owner_user_id, kind, \
-         last_used_at";
+         last_used_at, default_group";
 
     /// Generate `sk-rr-<32 hex>`, persist `SHA-256(plaintext)` only, return both.
     ///
@@ -1926,6 +1940,18 @@ impl Store {
         team_id: Option<Uuid>,
         owner_user_id: Option<Uuid>,
     ) -> Result<(String, ApiKey)> {
+        self.create_api_key_with_group(name, team_id, owner_user_id, None)
+            .await
+    }
+
+    /// Same, with an optional default free-form group slug.
+    pub async fn create_api_key_with_group(
+        &self,
+        name: Option<&str>,
+        team_id: Option<Uuid>,
+        owner_user_id: Option<Uuid>,
+        default_group: Option<&str>,
+    ) -> Result<(String, ApiKey)> {
         // A key must never point at a team that does not exist: the row would be invisible
         // to every team report and impossible to release.
         if let Some(team) = team_id {
@@ -1938,6 +1964,10 @@ impl Store {
                 return Err(Error::NotFound(format!("user {user}")));
             }
         }
+        let default_group = default_group
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let plaintext = generate_api_key();
         let key_hash = hash_api_key(&plaintext);
         let id = Uuid::new_v4();
@@ -1945,15 +1975,16 @@ impl Store {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO api_keys \
-             (id, key_hash, name, is_active, created_at, team_id, owner_user_id) \
-             VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)",
+             (id, key_hash, name, is_active, created_at, team_id, owner_user_id, default_group) \
+             VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7)",
             params![
                 id.to_string(),
                 key_hash,
                 name,
                 created_at,
                 team_id.map(|t| t.to_string()),
-                owner_user_id.map(|u| u.to_string())
+                owner_user_id.map(|u| u.to_string()),
+                default_group.as_deref(),
             ],
         )
         .map_err(migrations::db_err)?;
@@ -1978,6 +2009,7 @@ impl Store {
                 owner_user_id,
                 kind: KeyKind::User,
                 last_used_at: 0,
+                default_group,
             },
         ))
     }
@@ -2009,7 +2041,7 @@ impl Store {
                     Self::KEY_COLUMNS
                 ),
                 params![kind.as_str()],
-                |r| Ok((row_to_api_key(r)?, r.get(18)?)),
+                |r| Ok((row_to_api_key(r)?, r.get(19)?)),
             )
             .optional()
             .map_err(migrations::db_err)?;
@@ -2284,7 +2316,8 @@ impl Store {
         conn.execute(
             "UPDATE api_keys SET is_active = ?2, rpm = ?3, tpm = ?4, budget_tokens = ?5, \
              allowed_models = ?6, expires_at = ?7, budget_micros = ?8, budget_window = ?9, \
-             guardrails = ?10, scope = ?11, name = ?12, owner_user_id = ?13 WHERE id = ?1",
+             guardrails = ?10, scope = ?11, name = ?12, owner_user_id = ?13, \
+             default_group = ?14 WHERE id = ?1",
             params![
                 id.to_string(),
                 key.is_active as i64,
@@ -2299,6 +2332,7 @@ impl Store {
                 key.scope.as_str(),
                 key.name,
                 key.owner_user_id.map(|user| user.to_string()),
+                key.default_group,
             ],
         )
         .map_err(migrations::db_err)?;
@@ -2956,6 +2990,69 @@ impl Store {
         }
         .map_err(migrations::db_err)?;
         Ok(removed)
+    }
+
+    /// Replace one provider's public-catalog discovery rows with the freshly parsed set in a
+    /// single `IMMEDIATE` transaction.
+    ///
+    /// Only rows that a previous public-catalog sync created (`source` is `public-catalog` or
+    /// `public-catalog-unusable`) and that are NOT in `live_models` are deleted, then every
+    /// new row is upserted. Document/account rows for the same provider are never touched,
+    /// and a reader never observes a half-applied sweep. An empty `live_models` deletes no
+    /// rows (the caller treats an empty parse as a fetch failure, not an empty catalog).
+    pub async fn sync_public_catalog(
+        &self,
+        provider: &str,
+        live_models: &[FreeModel],
+    ) -> Result<()> {
+        if live_models.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(migrations::db_err)?;
+        // Delete stale public-catalog rows for this provider that are absent from the live
+        // set. Binding one `?` per live model keeps the `NOT IN` list honest without string
+        // interpolation; a provider catalog is small (tens of rows).
+        let live_ids: Vec<&str> = live_models.iter().map(|r| r.model.as_str()).collect();
+        let placeholders = std::iter::repeat_n("?", live_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let params: Vec<String> = std::iter::once(provider.to_string())
+            .chain(live_ids.into_iter().map(str::to_string))
+            .collect();
+        tx.execute(
+            &format!(
+                "DELETE FROM free_models WHERE provider = ?1 \
+                 AND source IN ('public-catalog', 'public-catalog-unusable') \
+                 AND model NOT IN ({placeholders})"
+            ),
+            params_from_iter(params.iter()),
+        )
+        .map_err(migrations::db_err)?;
+        // Upsert the freshly parsed rows.
+        for row in live_models {
+            tx.execute(
+                "INSERT INTO free_models (provider, model, free, price, source, connection_id, \
+                 discovered_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT(provider, model) DO UPDATE SET free = excluded.free, \
+                 price = excluded.price, source = excluded.source, \
+                 connection_id = excluded.connection_id, discovered_at = excluded.discovered_at",
+                params![
+                    row.provider,
+                    row.model,
+                    i64::from(row.free),
+                    row.price,
+                    row.source,
+                    row.connection_id.map(|id| id.to_string()),
+                    row.discovered_at,
+                ],
+            )
+            .map_err(migrations::db_err)?;
+        }
+        tx.commit().map_err(migrations::db_err)?;
+        Ok(())
     }
 
     /// Store the imported free-mode document and its routing knobs.
@@ -3870,9 +3967,9 @@ impl Store {
              (ts, request_id, provider, model, connection_id, endpoint, key_id, input_tokens, \
               output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, \
               streamed, error, cost_micros, upstream_ms, trace_id, team_id, requested_model, \
-              finish_reason, reasoning_effort, reasoning_tokens, session_id) \
+              finish_reason, reasoning_effort, reasoning_tokens, session_id, fallback_reason) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-                     ?19, (SELECT team_id FROM api_keys WHERE id = ?7), ?20, ?21, ?22, ?23, ?24)",
+                     ?19, (SELECT team_id FROM api_keys WHERE id = ?7), ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
                 r.ts,
                 r.request_id.map(|u| u.to_string()).unwrap_or_default(),
@@ -3898,6 +3995,7 @@ impl Store {
                 r.reasoning_effort,
                 r.reasoning_tokens,
                 r.session_id,
+                r.fallback_reason,
             ],
         )
         .map_err(migrations::db_err)?;
@@ -4890,7 +4988,7 @@ fn opt_uuid_col(raw: Option<String>) -> rusqlite::Result<Option<Uuid>> {
 const USAGE_COLUMNS: &str = "id, ts, request_id, provider, model, connection_id, endpoint, \
      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, \
      status, streamed, error, key_id, cost_micros, upstream_ms, trace_id, requested_model, \
-     finish_reason, reasoning_effort, reasoning_tokens, session_id";
+     finish_reason, reasoning_effort, reasoning_tokens, session_id, fallback_reason";
 
 /// Empty `request_id` is the v8 "unknown" default written before request ids existed.
 fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
@@ -4923,6 +5021,7 @@ fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         reasoning_effort: r.get(22)?,
         reasoning_tokens: r.get(23)?,
         session_id: r.get(24)?,
+        fallback_reason: r.get(25)?,
     })
 }
 
@@ -4987,6 +5086,7 @@ fn row_to_api_key(r: &Row<'_>) -> rusqlite::Result<ApiKey> {
         owner_user_id: opt_uuid_col(r.get(15)?)?,
         kind: KeyKind::from_stored(&r.get::<_, String>(16)?),
         last_used_at: r.get(17)?,
+        default_group: r.get(18)?,
     })
 }
 
@@ -5218,6 +5318,88 @@ fn parse_caps(raw: String) -> serde_json::Value {
     match serde_json::from_str::<serde_json::Value>(&raw) {
         Ok(v @ serde_json::Value::Object(_)) => v,
         _ => serde_json::Value::Object(serde_json::Map::new()),
+    }
+}
+
+#[cfg(test)]
+mod free_model_tests {
+    use super::{FreeModel, Store};
+
+    fn block<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    fn row(provider: &str, model: &str, source: &str) -> FreeModel {
+        FreeModel {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            free: source == "public-catalog",
+            price: Some(0.0),
+            source: source.to_string(),
+            connection_id: None,
+            discovered_at: 1,
+        }
+    }
+
+    /// `sync_public_catalog` replaces only stale public-catalog rows for the provider and
+    /// leaves document/account rows and other providers untouched, in one transaction.
+    #[test]
+    fn sync_public_catalog_replaces_only_stale_public_rows() {
+        let store = Store::open_in_memory().expect("store");
+        // A prior sync left two public rows plus a document row and an unusable row.
+        block(store.upsert_free_model(&row("opencode", "keep", "public-catalog"))).expect("seed");
+        block(store.upsert_free_model(&row("opencode", "stale", "public-catalog"))).expect("seed");
+        block(store.upsert_free_model(&row(
+            "opencode",
+            "stale-unusable",
+            "public-catalog-unusable",
+        )))
+        .expect("seed");
+        block(store.upsert_free_model(&row("opencode", "doc", "document"))).expect("seed");
+        block(store.upsert_free_model(&row("openrouter", "other", "public-catalog")))
+            .expect("seed");
+
+        // The fresh catalog keeps `keep` and drops `stale`/`stale-unusable`.
+        block(store.sync_public_catalog("opencode", &[row("opencode", "keep", "public-catalog")]))
+            .expect("sync");
+
+        let remaining = block(store.list_free_models()).expect("list");
+        let models: Vec<&str> = remaining.iter().map(|r| r.model.as_str()).collect();
+        assert!(models.contains(&"keep"));
+        assert!(
+            models.contains(&"doc"),
+            "document row must survive: {models:?}"
+        );
+        assert!(
+            models.contains(&"other"),
+            "another provider's row must survive: {models:?}"
+        );
+        assert!(
+            !models.contains(&"stale"),
+            "stale public row deleted: {models:?}"
+        );
+        assert!(
+            !models.contains(&"stale-unusable"),
+            "stale unusable row deleted: {models:?}"
+        );
+    }
+
+    /// An empty live set is a no-op: it never wipes the pool (the caller treats an empty
+    /// parse as a fetch failure).
+    #[test]
+    fn sync_public_catalog_empty_live_set_is_a_no_op() {
+        let store = Store::open_in_memory().expect("store");
+        block(store.upsert_free_model(&row("opencode", "keep", "public-catalog"))).expect("seed");
+        block(store.sync_public_catalog("opencode", &[])).expect("sync");
+        let remaining = block(store.list_free_models()).expect("list");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "empty sync must not delete: {remaining:?}"
+        );
     }
 }
 
@@ -5550,6 +5732,7 @@ mod capture_tests {
             reasoning_effort: None,
             reasoning_tokens: 0,
             session_id: None,
+            fallback_reason: None,
         }
     }
 

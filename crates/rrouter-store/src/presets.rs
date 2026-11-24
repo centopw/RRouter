@@ -67,6 +67,8 @@ pub const MAX_LAYOUT_GROUPS: usize = 500;
 pub const MAX_LAYOUT_GROUP_ID: usize = 64;
 /// Longest group display name.
 pub const MAX_LAYOUT_GROUP_NAME: usize = 80;
+/// Longest group routing slug.
+pub const MAX_LAYOUT_GROUP_SLUG: usize = 64;
 /// Longest preset name.
 pub const MAX_PRESET_NAME: usize = 80;
 /// Longest preset description, in characters.
@@ -152,6 +154,11 @@ pub struct LayoutGroup {
     /// free-form group.
     pub id: String,
     pub name: String,
+    /// Stable routing slug for a free-form group (`<slug>/<code>/<model>`). Immutable once
+    /// assigned so renaming `name` never breaks existing client configs. Omitted for
+    /// provider buckets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     /// Provider whose unassigned models belong here. Omitted for a free-form group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -162,6 +169,163 @@ pub struct LayoutGroup {
     /// Who may use the group alias. `None` = everyone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<GroupAccess>,
+}
+
+impl LayoutGroup {
+    /// The canonical routing prefix for a free-form group: its stable `slug`, falling back
+    /// to `name` only for an un-migrated in-memory document. `None` for provider buckets.
+    pub fn effective_slug(&self) -> Option<&str> {
+        if self.provider.is_some() {
+            return None;
+        }
+        self.slug
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or(Some(self.name.as_str()))
+    }
+}
+
+/// Whether `slug` is a valid stable group routing prefix: 1..=64 ASCII characters,
+/// starting with `[a-z0-9]`, containing only `[a-z0-9_-]`, and not starting with `provider:`.
+pub fn is_valid_group_slug(slug: &str) -> bool {
+    if slug.is_empty() || slug.len() > MAX_LAYOUT_GROUP_SLUG || slug.starts_with("provider:") {
+        return false;
+    }
+    let mut bytes = slug.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return false;
+    }
+    bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// Derive a deterministic, URL/path-safe routing slug from a group display name.
+pub fn slugify_group_name(name: &str, fallback: &str) -> String {
+    fn clean(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        let mut last_dash = false;
+        for ch in raw.chars() {
+            let lower = ch.to_ascii_lowercase();
+            if lower.is_ascii_lowercase() || lower.is_ascii_digit() || lower == '_' {
+                out.push(lower);
+                last_dash = false;
+            } else if !out.is_empty() && !last_dash {
+                out.push('-');
+                last_dash = true;
+            }
+        }
+        let trimmed = out.trim_matches(|c| c == '-' || c == '_');
+        let mut result = trimmed.to_string();
+        if result.len() > MAX_LAYOUT_GROUP_SLUG {
+            result.truncate(MAX_LAYOUT_GROUP_SLUG);
+            result = result.trim_end_matches(['-', '_']).to_string();
+        }
+        result
+    }
+    let candidate = clean(name);
+    if is_valid_group_slug(&candidate) {
+        return candidate;
+    }
+    let fallback_clean = clean(fallback);
+    if is_valid_group_slug(&fallback_clean) {
+        return fallback_clean;
+    }
+    "group".to_string()
+}
+
+/// Ensure every free-form group in `layout` has a valid, unique, immutable `slug`.
+///
+/// When `previous` is supplied (on layout update), any existing group keeps its stored
+/// slug: omitting `slug` preserves it, and sending a different `slug` is rejected with
+/// `400 BadRequest` so renaming a group can never silently change clients' callable refs.
+pub(crate) fn normalize_group_slugs(
+    layout: &mut LayoutDocument,
+    previous: Option<&LayoutDocument>,
+) -> Result<()> {
+    let prev_by_id: std::collections::HashMap<&str, &str> = previous
+        .map(|doc| {
+            doc.groups
+                .iter()
+                .filter(|g| g.provider.is_none())
+                .filter_map(|g| g.slug.as_deref().map(|slug| (g.id.as_str(), slug)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut used: HashSet<String> = HashSet::with_capacity(layout.groups.len());
+
+    // Pass 1: preserve existing groups' slugs and reject explicit slug changes.
+    for group in &mut layout.groups {
+        if group.provider.is_some() {
+            if group.slug.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+                return Err(Error::BadRequest(format!(
+                    "provider group {} cannot have a routing slug",
+                    group.id
+                )));
+            }
+            group.slug = None;
+            continue;
+        }
+        if let Some(&stored) = prev_by_id.get(group.id.as_str()) {
+            if let Some(incoming) = group
+                .slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if incoming != stored {
+                    return Err(Error::BadRequest(format!(
+                        "group {} slug is immutable (stored {:?}, got {:?}); rename its display name instead",
+                        group.id, stored, incoming
+                    )));
+                }
+            }
+            group.slug = Some(stored.to_string());
+            used.insert(stored.to_string());
+        }
+    }
+
+    // Pass 2: validate explicit slugs on new groups, or derive them from `name`.
+    for group in &mut layout.groups {
+        if group.provider.is_some() || prev_by_id.contains_key(group.id.as_str()) {
+            continue;
+        }
+        if let Some(incoming) = group
+            .slug
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let slug = incoming.to_string();
+            if !is_valid_group_slug(&slug) {
+                return Err(Error::BadRequest(format!(
+                    "invalid layout group slug {:?}: must start with [a-z0-9] and contain only [a-z0-9_-] (max {MAX_LAYOUT_GROUP_SLUG} chars)",
+                    slug
+                )));
+            }
+            if !used.insert(slug.clone()) {
+                return Err(Error::BadRequest(format!(
+                    "duplicate layout group slug: {slug}"
+                )));
+            }
+            group.slug = Some(slug);
+        } else {
+            let base = slugify_group_name(&group.name, &group.id);
+            let mut candidate = base.clone();
+            let mut suffix = 2usize;
+            while !used.insert(candidate.clone()) {
+                let tail = format!("-{suffix}");
+                let max_prefix = MAX_LAYOUT_GROUP_SLUG.saturating_sub(tail.len());
+                let prefix = &base[..base.len().min(max_prefix)];
+                candidate = format!("{prefix}{tail}");
+                suffix += 1;
+            }
+            group.slug = Some(candidate);
+        }
+    }
+    Ok(())
 }
 
 /// A model preset layout document, exactly as stored in `layout_json`.
@@ -194,9 +358,39 @@ impl Default for LayoutDocument {
 }
 
 impl LayoutDocument {
-    /// The group whose display name is `name`, for `<group>/<model>` routing.
+    /// The group whose stable id is `id`.
+    pub fn group_by_id(&self, id: &str) -> Option<&LayoutGroup> {
+        self.groups.iter().find(|group| group.id == id)
+    }
+
+    /// The free-form group whose stable routing slug is `slug`.
+    pub fn group_by_slug(&self, slug: &str) -> Option<&LayoutGroup> {
+        self.groups
+            .iter()
+            .find(|group| group.provider.is_none() && group.slug.as_deref() == Some(slug))
+    }
+
+    /// The group whose display name is `name`, for legacy `<group>/<model>` routing.
     pub fn group_by_name(&self, name: &str) -> Option<&LayoutGroup> {
         self.groups.iter().find(|group| group.name == name)
+    }
+
+    /// Resolve a routing group prefix: matches stable `slug` first, then falls back to
+    /// legacy display `name` for free-form groups.
+    ///
+    /// Returns `(group, matched_by_legacy_name)` where `matched_by_legacy_name` is `true`
+    /// only when a group has a stable `slug` that differs from `prefix` and was matched via
+    /// its display `name`.
+    pub fn resolve_group_prefix(&self, prefix: &str) -> Option<(&LayoutGroup, bool)> {
+        if let Some(group) = self.group_by_slug(prefix) {
+            return Some((group, false));
+        }
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.provider.is_none() && group.name == prefix)?;
+        let legacy = group.slug.as_deref().is_some_and(|slug| slug != prefix);
+        Some((group, legacy))
     }
 
     /// Whether `group` lets this caller use its alias.
@@ -291,6 +485,7 @@ impl LayoutDocument {
         let mut group_by_id: std::collections::HashMap<&str, &LayoutGroup> =
             std::collections::HashMap::with_capacity(self.groups.len());
         let mut names: HashSet<&str> = HashSet::with_capacity(self.groups.len());
+        let mut slugs: HashSet<&str> = HashSet::with_capacity(self.groups.len());
         let mut providers = HashSet::with_capacity(self.groups.len());
         for group in &self.groups {
             let id = group.id.trim();
@@ -321,6 +516,24 @@ impl LayoutDocument {
                 return Err(Error::BadRequest(format!(
                     "duplicate layout group name: {name}"
                 )));
+            }
+            if let Some(slug) = group.slug.as_deref() {
+                let slug = slug.trim();
+                if group.provider.is_some() {
+                    return Err(Error::BadRequest(format!(
+                        "provider group {id} cannot have a routing slug"
+                    )));
+                }
+                if !is_valid_group_slug(slug) {
+                    return Err(Error::BadRequest(format!(
+                        "invalid layout group slug {slug:?}: must start with [a-z0-9] and contain only [a-z0-9_-] (max {MAX_LAYOUT_GROUP_SLUG} chars)"
+                    )));
+                }
+                if !slugs.insert(slug) {
+                    return Err(Error::BadRequest(format!(
+                        "duplicate layout group slug: {slug}"
+                    )));
+                }
             }
             if let Some(access) = &group.access {
                 for (label, ids) in [
@@ -743,7 +956,9 @@ impl Store {
         let name = check_name(name)?;
         let description = check_description(description)?;
         let actor = check_actor(actor)?;
-        let layout_json = encode_layout(layout)?;
+        let mut layout = layout.clone();
+        normalize_group_slugs(&mut layout, None)?;
+        let layout_json = encode_layout(&layout)?;
         let stamp = now();
         let preset = ModelPreset {
             id: Uuid::new_v4(),
@@ -754,7 +969,7 @@ impl Store {
             team_id: None,
             is_default: false,
             revision: 1,
-            layout: layout.clone(),
+            layout,
             created_by: Some(actor.clone()),
             created_at: stamp,
             updated_at: stamp,
@@ -848,7 +1063,6 @@ impl Store {
         actor: &str,
     ) -> Result<PresetUpdateOutcome> {
         let actor = check_actor(actor)?;
-        let layout_json = encode_layout(layout)?;
         let stamp = now();
         let mut conn = self.conn();
         let tx = conn
@@ -862,6 +1076,9 @@ impl Store {
                 current_revision: current.revision,
             });
         }
+        let mut layout = layout.clone();
+        normalize_group_slugs(&mut layout, Some(&current.layout))?;
+        let layout_json = encode_layout(&layout)?;
         let revision = current.revision + 1;
         tx.execute(
             "UPDATE model_presets SET layout_json = ?2, revision = ?3, updated_at = ?4 \
@@ -1054,6 +1271,7 @@ mod tests {
         LayoutGroup {
             id: id.into(),
             name: name.into(),
+            slug: None,
             provider: provider.map(str::to_string),
             visible: true,
             access: None,

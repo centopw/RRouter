@@ -68,6 +68,7 @@ pub async fn explain(
                 canary: config.canary.as_ref(),
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
             Some(&capacity),
             f64::from(config.subscription_reserve_percent),
@@ -86,7 +87,9 @@ pub async fn explain(
             json!({
                 "provider": candidate.provider,
                 "model": candidate.model,
-                "connection_id": candidate.connection.to_string(),
+                // Anonymous keyless candidates carry the nil UUID internally; expose the
+                // absence of a stored connection instead of leaking that sentinel.
+                "connection_id": rrouter_router::free_mode::logged_connection_id(candidate.connection),
                 "priority": candidate.priority,
                 "dialect": candidate.dialect.as_str(),
                 "subscription_used_percent": hint.map(|hint| hint.used_percent),

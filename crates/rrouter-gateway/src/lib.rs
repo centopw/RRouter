@@ -81,6 +81,7 @@ pub fn auth_header(headers: &HeaderMap) -> Option<String> {
 /// Build the full application router.
 pub fn app(state: Arc<AppState>) -> Router {
     spawn_model_sync(&state);
+    spawn_free_catalog_sync(&state);
     spawn_provider_usage(&state);
     spawn_quota_ping(&state);
     updates::spawn_daily(&state);
@@ -205,13 +206,16 @@ pub fn app(state: Arc<AppState>) -> Router {
             post(routes::models::custom).delete(routes::models::delete_custom),
         )
         .route("/models/test", post(routes::models::test))
-        // Free mode: the imported document, its discovery run and teardown. Admin-only at
-        // the gate above, because a document names accounts and the proxies they leave
-        // through.
+        // Free mode: zero-config public catalog discovery, toggles, live probes, plus
+        // Advanced JSON document import and teardown. Admin-only at the gate above.
         .route(
             "/free-mode",
-            get(routes::free_mode::get).delete(routes::free_mode::remove),
+            get(routes::free_mode::get)
+                .patch(routes::free_mode::patch)
+                .delete(routes::free_mode::remove),
         )
+        .route("/free-mode/models", patch(routes::free_mode::patch_model))
+        .route("/free-mode/probe", post(routes::free_mode::probe))
         .route("/free-mode/import", post(routes::free_mode::import))
         .route("/free-mode/discover", post(routes::free_mode::discover))
         .route("/route/explain", post(routes::explain::explain))
@@ -432,6 +436,16 @@ fn spawn_model_sync(state: &Arc<AppState>) {
         return;
     }
     START.call_once(|| models_registry::spawn_daily_sync(Arc::clone(state)));
+}
+
+/// Starts the public free-model catalog refresh loop once per process (skipped for
+/// ephemeral `port == 0` test harnesses so offline tests never hit the network).
+fn spawn_free_catalog_sync(state: &Arc<AppState>) {
+    static START: std::sync::Once = std::sync::Once::new();
+    if tokio::runtime::Handle::try_current().is_err() || state.config.load().port == 0 {
+        return;
+    }
+    START.call_once(|| free_mode::spawn_catalog_sync(Arc::clone(state)));
 }
 
 /// Starts the subscription-usage refresh loop exactly once per process.

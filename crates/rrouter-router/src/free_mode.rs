@@ -29,6 +29,48 @@ use uuid::Uuid;
 /// provider's own counter age out together.
 pub const WINDOW: Duration = Duration::from_secs(60);
 
+/// Source tag stored in `free_models.source` for models discovered from a public keyless
+/// catalog (OpenCode Zen, OpenRouter `:free`) that speak a dialect RRouter supports.
+pub const SOURCE_PUBLIC_CATALOG: &str = "public-catalog";
+
+/// Source tag stored in `free_models.source` for zero-priced public catalog models that
+/// RRouter cannot route (for example `jev-1.13-free`, which only speaks `systemone`).
+/// Stored with `free = false` so the planner never admits them, while the UI can still
+/// disclose them under "Not usable here".
+pub const SOURCE_PUBLIC_CATALOG_UNUSABLE: &str = "public-catalog-unusable";
+
+/// Synthetic connection id representing an anonymous (keyless) free-tier send — currently
+/// OpenCode Zen (`Authorization: Bearer public`).
+///
+/// Using the nil UUID keeps [`crate::Candidate`] wire-compatible across every existing
+/// caller while giving the anonymous pool its own breaker/cooldown bucket. Callers that
+/// persist usage or attempt rows **must** convert through [`logged_connection_id`] so this
+/// marker never leaks into the database as a fake connection UUID.
+pub const ANONYMOUS_CONNECTION: Uuid = Uuid::nil();
+
+/// `true` when `connection` is the anonymous keyless free-tier marker rather than a stored
+/// connection row.
+pub fn is_anonymous_connection(connection: Uuid) -> bool {
+    connection.is_nil()
+}
+
+/// Connection id suitable for durable `usage` / `attempts` rows (`None` for anonymous sends).
+pub fn logged_connection_id(connection: Uuid) -> Option<Uuid> {
+    (!connection.is_nil()).then_some(connection)
+}
+
+/// Providers whose verified-free public-catalog models can be dispatched anonymously
+/// (keyless `Bearer public`) when the operator has not added an account on Providers.
+pub fn supports_anonymous_free(provider: &str) -> bool {
+    provider == "opencode"
+}
+
+/// `true` when `model` is one of the reserved free-mode refs (`free`, `free:<provider>`,
+/// `free/<model>`, `free:<provider>/<model>`).
+pub fn is_free_ref(model: &str) -> bool {
+    model == "free" || model.starts_with("free:") || model.starts_with("free/")
+}
+
 /// Shared free-mode rotation state.
 ///
 /// Cloneable by design: the handle wraps an `Arc`, so a second planner (a reload, a test)
@@ -51,6 +93,12 @@ struct State {
     /// Free-plan rotation cursor. Successive free plans start at successive models, so
     /// two requests in a row never spend the same account first.
     turn: u64,
+    /// Provider-wide free-usage cooldowns keyed by `(connection, provider)`.
+    ///
+    /// OpenCode's `FreeUsageLimitError` applies across *every* free model for that IP or
+    /// key: cooling only `(connection, model)` would let one request waste up to
+    /// `max_attempts` sends against 8 different models on the same exhausted bucket.
+    provider_limits: HashMap<(Uuid, String), Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -148,6 +196,55 @@ impl FreeRotation {
         turn
     }
 
+    /// Record a provider-wide free-tier quota cooldown (for example OpenCode's
+    /// `FreeUsageLimitError`) for `(connection, provider)`.
+    pub fn record_provider_limit(&self, connection: Uuid, provider: &str, wait: Duration) {
+        self.record_provider_limit_at(connection, provider, wait, Instant::now());
+    }
+
+    pub fn record_provider_limit_at(
+        &self,
+        connection: Uuid,
+        provider: &str,
+        wait: Duration,
+        now: Instant,
+    ) {
+        let mut state = self.lock();
+        let until = now + wait.max(Duration::from_secs(1));
+        state
+            .provider_limits
+            .insert((connection, provider.to_string()), until);
+    }
+
+    /// Remaining provider-wide free-tier cooldown for `(connection, provider)`, if any.
+    pub fn provider_limit_wait(&self, connection: Uuid, provider: &str) -> Option<Duration> {
+        self.provider_limit_wait_at(connection, provider, Instant::now())
+    }
+
+    pub fn provider_limit_wait_at(
+        &self,
+        connection: Uuid,
+        provider: &str,
+        now: Instant,
+    ) -> Option<Duration> {
+        let mut state = self.lock();
+        let key = (connection, provider.to_string());
+        let until = *state.provider_limits.get(&key)?;
+        if now >= until {
+            state.provider_limits.remove(&key);
+            return None;
+        }
+        Some(until.duration_since(now))
+    }
+
+    /// Clear any provider-wide free-tier cooldown (e.g. after a manual probe succeeds).
+    pub fn clear_provider_limit(&self, connection: Uuid, provider: &str) {
+        let mut state = self.lock();
+        state
+            .provider_limits
+            .remove(&(connection, provider.to_string()));
+    }
+
     /// A panic elsewhere must not disable free routing for the process lifetime, so a
     /// poisoned lock is recovered rather than propagated: the windows are a best-effort
     /// count, not an invariant.
@@ -156,5 +253,62 @@ impl FreeRotation {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anonymous_marker_never_leaks_a_uuid() {
+        assert!(is_anonymous_connection(ANONYMOUS_CONNECTION));
+        assert_eq!(logged_connection_id(ANONYMOUS_CONNECTION), None);
+        let real = Uuid::new_v4();
+        assert!(!is_anonymous_connection(real));
+        assert_eq!(logged_connection_id(real), Some(real));
+        assert!(supports_anonymous_free("opencode"));
+        assert!(!supports_anonymous_free("opencode-go"));
+        assert!(!supports_anonymous_free("openrouter"));
+    }
+
+    #[test]
+    fn provider_limit_expires_and_can_be_cleared() {
+        let rot = FreeRotation::new();
+        let now = Instant::now();
+        rot.record_provider_limit_at(
+            ANONYMOUS_CONNECTION,
+            "opencode",
+            Duration::from_secs(60),
+            now,
+        );
+        assert_eq!(
+            rot.provider_limit_wait_at(
+                ANONYMOUS_CONNECTION,
+                "opencode",
+                now + Duration::from_secs(10)
+            ),
+            Some(Duration::from_secs(50))
+        );
+        assert_eq!(
+            rot.provider_limit_wait_at(
+                ANONYMOUS_CONNECTION,
+                "opencode",
+                now + Duration::from_secs(60)
+            ),
+            None
+        );
+
+        rot.record_provider_limit_at(
+            ANONYMOUS_CONNECTION,
+            "opencode",
+            Duration::from_secs(60),
+            now,
+        );
+        rot.clear_provider_limit(ANONYMOUS_CONNECTION, "opencode");
+        assert_eq!(
+            rot.provider_limit_wait_at(ANONYMOUS_CONNECTION, "opencode", now),
+            None
+        );
     }
 }

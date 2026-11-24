@@ -564,7 +564,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         id: "opencode",
         display: "OpenCode",
         kind: ProviderKind::ApiKey,
-        // OpenCode translates every text model through its OpenAI-compatible surface.
+        // OpenCode translates chat models — including all 10 usable zero-price Zen free
+        // models (`big-pickle`, `deepseek-v4.1-flash-free`, etc.) — through its
+        // OpenAI-compatible surface. Non-chat `systemone` models (`jev-1.13-free`) live at
+        // `/inference/systemone/v1` and are excluded by free-mode discovery.
         base_url: "https://opencode.ai/inference/openai/v1/chat/completions",
         base_url_requires_override: false,
         responses_url: Some("https://opencode.ai/inference/openai/v1/responses"),

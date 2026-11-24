@@ -803,6 +803,7 @@ async fn special_inner(
                 canary: config.canary.as_ref(),
                 canary_seed,
                 combo_start: None,
+                default_group: caller.default_group(),
             },
         )
         .await?;
@@ -951,8 +952,14 @@ async fn send_special(
         .map_err(transport_error)?;
     let status = resp.status();
     if !status.is_success() {
+        let retry_after = crate::free_mode::parse_retry_after_secs(resp.headers());
         let bytes = resp.bytes().await.map_err(transport_error)?;
-        return Err(upstream_error(&candidate, status.as_u16(), &bytes));
+        return Err(upstream_error(
+            &candidate,
+            status.as_u16(),
+            &bytes,
+            retry_after,
+        ));
     }
     let bytes = resp.bytes().await.map_err(transport_error)?;
     Ok(serde_json::from_slice(&bytes)?)
@@ -1252,6 +1259,7 @@ async fn json_plan(
                 canary: config.canary.as_ref(),
                 canary_seed,
                 combo_start: None,
+                default_group: caller.default_group(),
             },
         )
         .await?;
@@ -1378,8 +1386,14 @@ async fn send_speech(
         .map_err(transport_error)?;
     let status = resp.status();
     if !status.is_success() {
+        let retry_after = crate::free_mode::parse_retry_after_secs(resp.headers());
         let bytes = resp.bytes().await.map_err(transport_error)?;
-        return Err(upstream_error(&candidate, status.as_u16(), &bytes));
+        return Err(upstream_error(
+            &candidate,
+            status.as_u16(),
+            &bytes,
+            retry_after,
+        ));
     }
     let content_type = resp.headers().get(header::CONTENT_TYPE).cloned();
     Ok(Audio {
@@ -1435,8 +1449,14 @@ async fn send_voices(
 async fn read_json(candidate: &Candidate, resp: reqwest::Response) -> Result<(StatusCode, Value)> {
     let status = resp.status();
     if !status.is_success() {
+        let retry_after = crate::free_mode::parse_retry_after_secs(resp.headers());
         let bytes = resp.bytes().await.map_err(transport_error)?;
-        return Err(upstream_error(candidate, status.as_u16(), &bytes));
+        return Err(upstream_error(
+            candidate,
+            status.as_u16(),
+            &bytes,
+            retry_after,
+        ));
     }
     let bytes = resp.bytes().await.map_err(transport_error)?;
     Ok((status, serde_json::from_slice(&bytes)?))
@@ -1489,6 +1509,7 @@ async fn transcriptions_inner(
                         canary: config.canary.as_ref(),
                         canary_seed,
                         combo_start: None,
+                        default_group: caller.default_group(),
                     },
                 )
                 .await?
@@ -1681,6 +1702,265 @@ fn record_passthrough(
     );
 }
 
+/// Fallback reason token when a paid request fails with quota/429/402 and automatic
+/// free-mode fallback is turned on. Any other error (auth, 400, 5xx, rate-limit RPM/TPM)
+/// returns `None` and is surfaced untouched to the client.
+fn free_fallback_reason(err: &Error) -> Option<&'static str> {
+    match err {
+        Error::Limited { code, .. } => match *code {
+            // The admission/planner codes actually emitted for durable spend exhaustion
+            // and account-quota exhaustion.
+            "budget_exhausted" | "team_budget_exhausted" | "quota_exhausted" => Some("quota"),
+            "all_candidates_cooling_down" => Some("rate_limit"),
+            _ => None,
+        },
+        Error::Upstream { status: 429, .. } => Some("rate_limit"),
+        Error::Upstream { status: 402, .. } => Some("payment_required"),
+        _ => None,
+    }
+}
+
+fn attach_fallback_headers(resp: &mut Response, reason: &str, candidate: &Candidate) {
+    let headers = resp.headers_mut();
+    headers.insert("x-rrouter-fallback", HeaderValue::from_static("free"));
+    if let Ok(val) = HeaderValue::from_str(reason) {
+        headers.insert("x-rrouter-fallback-reason", val);
+    }
+    let model = format!("{}/{}", candidate.provider, candidate.model);
+    if let Ok(val) = HeaderValue::from_str(&model) {
+        headers.insert("x-rrouter-fallback-model", val);
+    }
+}
+
+/// Restore the paid attempt's provider/connection labels after a failed free fallback, so
+/// the usage/failure row is attributed to the provider that actually took the paid request
+/// rather than the last (failed) free candidate.
+fn restore_paid_labels(trace: &RequestTrace, paid: &(String, Option<Uuid>)) {
+    let mut labels = trace.labels();
+    labels.provider.clone_from(&paid.0);
+    labels.connection = paid.1;
+}
+
+/// Retry a failed paid request once against the `"free"` pool when automatic fallback is
+/// opted in. Returns the original paid error unchanged if fallback is disabled, not
+/// allowed by policy, or the free pool itself fails.
+#[allow(clippy::too_many_arguments)]
+async fn try_free_fallback(
+    state: &Arc<AppState>,
+    inbound: Dialect,
+    headers: &HeaderMap,
+    caller: &Caller,
+    body: &Value,
+    canonical: &ChatRequest,
+    original_model: &str,
+    policy: Option<&ProviderPolicy>,
+    trace: &RequestTrace,
+    started: Instant,
+    permit: Option<OwnedSemaphorePermit>,
+    redact_pii: bool,
+    paid_err: Error,
+) -> Result<Response> {
+    if rrouter_router::free_mode::is_free_ref(original_model)
+        || policy.is_some_and(|p| p.allow_fallbacks == Some(false))
+    {
+        return Err(paid_err);
+    }
+    // A key whose allowlist does not admit the `free` pool may never be served by it: an
+    // allowlist of `["gpt-4o"]` with an exhausted budget is still a 403, not an anonymous
+    // OpenCode send. `model_allowed` also honours `*`.
+    if let Some(allowed) = caller.allowed_models() {
+        if !rrouter_router::model_allowed(allowed, "free") {
+            return Err(paid_err);
+        }
+    }
+    let Some(reason) = free_fallback_reason(&paid_err) else {
+        return Err(paid_err);
+    };
+    if !crate::free_mode::fallback_enabled(state.store.as_ref()).await {
+        return Err(paid_err);
+    }
+
+    // Snapshot the paid attempt's labels before any free dispatch overwrites them, so a
+    // failed fallback still reports the *paid* provider/connection on the usage row.
+    let paid_labels = {
+        let labels = trace.labels();
+        (labels.provider.clone(), labels.connection)
+    };
+
+    let config = state.config.load();
+    let affinity = affinity_of(canonical);
+    let capacity = crate::provider_usage::cached_hints();
+    // The request's routing policy (only/ignore/zdr/data_collection/max_price) applies to
+    // the free plan too: a fallback must not silently route around an explicit
+    // `provider.only` / `data_collection: deny` / `max_price` ceiling. `only`/`ignore`
+    // will usually leave no free candidates, in which case the original paid error is
+    // returned below.
+    let policy_owned = policy.cloned();
+    let Ok(plan) = state
+        .planner
+        .plan_with_capacity(
+            state.catalog.as_ref(),
+            state.store.as_ref(),
+            PlanRequest {
+                model: "free",
+                stream: canonical.stream,
+                affinity: Some(affinity),
+                strategy: config.strategy,
+                policy: policy_owned.as_ref(),
+                allowed_models: None,
+                team_id: caller.team_id(),
+                canary: None,
+                canary_seed: 0,
+                combo_start: None,
+                default_group: None,
+            },
+            Some(&capacity),
+            f64::from(config.subscription_reserve_percent),
+        )
+        .await
+    else {
+        return Err(paid_err);
+    };
+    if plan.candidates.is_empty() {
+        return Err(paid_err);
+    }
+
+    tracing::info!(
+        request_id = %trace.request_id,
+        requested_model = %original_model,
+        fallback_reason = reason,
+        candidates = plan.candidates.len(),
+        "falling back to free model pool"
+    );
+    trace.set_fallback_reason(Some(reason));
+    // Free fallback costs 0; release any paid budget hold so it does not serialize free traffic.
+    let _ = trace.take_budget_hold();
+
+    let client_stream = plan.stream || canonical.stream;
+    let upstream_stream = client_stream || plan.candidates.iter().any(|c| stream_only(state, c));
+    let attempt = Attempt {
+        state,
+        inbound,
+        canonical: canonical.clone(),
+        raw: body,
+        upstream_stream,
+        trace,
+        strip_provider: policy.is_some(),
+        client_headers: Some(headers),
+        redact_pii,
+        recovered: Mutex::new(Vec::new()),
+        resolved_dialects: Mutex::new(std::collections::HashMap::new()),
+    };
+    let key_id = caller.key_id();
+
+    if !client_stream {
+        let outcome: Result<(Candidate, rrouter_core::ChatResponse)> = if upstream_stream {
+            match state
+                .dispatcher
+                .run_streaming(&plan, |c| attempt.open_stream(c))
+                .await
+            {
+                Ok((candidate, bytes)) => {
+                    let open = StreamRoute {
+                        upstream: attempt.route_dialect(&candidate),
+                        client_model: candidate.model.clone(),
+                    };
+                    reassemble(&open, bytes)
+                        .await
+                        .map(|assembled| (candidate, assembled))
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            match state.dispatcher.run(&plan, |c| attempt.send_once(c)).await {
+                Ok(out) => out.result.map(|resp| (out.candidate, resp)),
+                Err(e) => Err(e),
+            }
+        };
+        let (candidate, mut resp) = match outcome {
+            Ok(pair) => pair,
+            Err(_) => {
+                trace.set_fallback_reason(None);
+                restore_paid_labels(trace, &paid_labels);
+                return Err(paid_err);
+            }
+        };
+        let served_model = format!("{}/{}", candidate.provider, candidate.model);
+        let recorded = Recorded {
+            candidate: &candidate,
+            model: &served_model,
+            endpoint: endpoint_of(inbound),
+            usage: resp.usage,
+            key: key_id,
+            request_id: trace.request_id,
+            trace_id: trace.trace_id(),
+            meta: trace.meta(),
+            finish_reason: Some(resp.finish_reason.openai()),
+            started,
+            upstream_ms: trace.upstream_ms(),
+            ttft: None,
+            streamed: false,
+            status: 200,
+            error: None,
+            budget_hold: None,
+        };
+        if let Some(guardrails) = caller.output_guardrails() {
+            guard_output(state, guardrails, &response_text(&resp), &recorded)?;
+        }
+        if redact_pii {
+            let report = crate::redaction::redact_chat_response(&mut resp);
+            if report.redacted {
+                crate::metrics::pii_redacted(crate::metrics::RedactStage::Output, &report);
+            }
+        }
+        record_once(state, recorded);
+        let out = rrouter_translate::build_response(inbound, &resp)?;
+        let mut http_resp = json_text_response(out.to_string());
+        attach_fallback_headers(&mut http_resp, reason, &candidate);
+        return Ok(http_resp);
+    }
+
+    let (candidate, bytes) = match state
+        .dispatcher
+        .run_streaming(&plan, |c| attempt.open_stream(c))
+        .await
+    {
+        Ok(pair) => pair,
+        Err(_) => {
+            trace.set_fallback_reason(None);
+            restore_paid_labels(trace, &paid_labels);
+            return Err(paid_err);
+        }
+    };
+    let open = StreamRoute {
+        upstream: attempt.route_dialect(&candidate),
+        client_model: candidate.model.clone(),
+    };
+    let served_model = format!("{}/{}", candidate.provider, candidate.model);
+    let mut http_resp = stream_response(
+        inbound,
+        PendingRecord {
+            state: Arc::clone(state),
+            candidate: candidate.clone(),
+            model: served_model,
+            started,
+            upstream_ms: trace.upstream_ms(),
+            key: key_id,
+            request_id: trace.request_id,
+            trace_id: trace.trace_id().to_string(),
+            meta: trace.meta(),
+            _permit: permit,
+            budget_hold: None,
+        },
+        open,
+        bytes,
+        caller.output_guardrails().cloned(),
+        redact_pii,
+    );
+    attach_fallback_headers(&mut http_resp, reason, &candidate);
+    Ok(http_resp)
+}
+
 /// `permit` is this request's concurrency slot. It is moved into the streamed response
 /// when there is one (the stream owns it), and simply dropped otherwise — after the body
 /// has been built.
@@ -1725,9 +2005,30 @@ async fn handle(
             canonical = rrouter_translate::parse_request(inbound, &body)?;
         }
     }
+    // Routing preferences are read early enough that a budget-exhausted fallback respects
+    // an explicit `allow_fallbacks: false`.
+    let policy = provider_policy(&body, headers)?;
     // Governance runs before planning: an inactive/expired key, a model outside the
-    // allowlist, or an exhausted quota must not reach a provider.
-    admit_or_explain(state, &caller, &model, trace).await?;
+    // allowlist, or an exhausted quota must not reach a paid provider. When the key's or
+    // team's paid budget is exhausted and automatic free fallback is on, route to `free`.
+    if let Err(err) = admit_or_explain(state, &caller, &model, trace).await {
+        return try_free_fallback(
+            state,
+            inbound,
+            headers,
+            &caller,
+            &body,
+            &canonical,
+            &model,
+            policy.as_ref(),
+            trace,
+            started,
+            permit,
+            redact_pii,
+            err,
+        )
+        .await;
+    }
     // Token Saver runs on the wire body after guardrails: same-dialect forwarding sends
     // this body unchanged, and the canonical parse is refreshed from the compressed text.
     let mut rtk_stats: Option<rrouter_rtk::Stats> = None;
@@ -1761,9 +2062,6 @@ async fn handle(
         );
     }
     let key_id = caller.key_id();
-    // Routing preferences are read after authentication and after the wire body settled
-    // (Token Saver may have rewritten it), so the policy and the stripped body agree.
-    let policy = provider_policy(&body, headers)?;
     let affinity = affinity_of(&canonical);
     let canary_seed = canary_seed_for(trace, Some(affinity));
     // Combo strategy is request-scoped: round-robin advances its durable cursor and a
@@ -1772,7 +2070,7 @@ async fn handle(
     // Subscription headroom is a cached, per-account hint. Reading it never performs a
     // provider call: the background refresh owns that traffic.
     let capacity = crate::provider_usage::cached_hints();
-    let plan = state
+    let plan = match state
         .planner
         .plan_with_capacity(
             state.catalog.as_ref(),
@@ -1788,11 +2086,33 @@ async fn handle(
                 canary: config.canary.as_ref(),
                 canary_seed,
                 combo_start,
+                default_group: caller.default_group(),
             },
             Some(&capacity),
             f64::from(config.subscription_reserve_percent),
         )
-        .await?;
+        .await
+    {
+        Ok(plan) => plan,
+        Err(err) => {
+            return try_free_fallback(
+                state,
+                inbound,
+                headers,
+                &caller,
+                &body,
+                &canonical,
+                &model,
+                policy.as_ref(),
+                trace,
+                started,
+                permit,
+                redact_pii,
+                err,
+            )
+            .await;
+        }
+    };
     let client_stream = plan.stream || canonical.stream;
     // A stream-only upstream (codex) refuses every non-streaming request, so a
     // non-streaming client is served by streaming upstream and reassembling.
@@ -1801,7 +2121,7 @@ async fn handle(
     let attempt = Attempt {
         state,
         inbound,
-        canonical,
+        canonical: canonical.clone(),
         raw: &body,
         upstream_stream,
         trace,
@@ -1809,6 +2129,7 @@ async fn handle(
         client_headers: Some(headers),
         redact_pii,
         recovered: Mutex::new(Vec::new()),
+        resolved_dialects: Mutex::new(std::collections::HashMap::new()),
     };
 
     // Cache eligibility is decided once, before anything is sent: a non-streaming
@@ -1946,10 +2267,31 @@ async fn handle(
         // Two ways to get one JSON body: a plain non-streaming dispatch, or a
         // stream-only upstream whose stream is folded back into one response.
         let (served, out) = if upstream_stream {
-            let (candidate, bytes) = state
+            let (candidate, bytes) = match state
                 .dispatcher
                 .run_streaming(&plan, |c| attempt.open_stream(c))
-                .await?;
+                .await
+            {
+                Ok(pair) => pair,
+                Err(err) => {
+                    return try_free_fallback(
+                        state,
+                        inbound,
+                        headers,
+                        &caller,
+                        &body,
+                        &canonical,
+                        &model,
+                        policy.as_ref(),
+                        trace,
+                        started,
+                        permit,
+                        redact_pii,
+                        err,
+                    )
+                    .await;
+                }
+            };
             let open = StreamRoute {
                 upstream: attempt.route_dialect(&candidate),
                 client_model: candidate.model.clone(),
@@ -1993,7 +2335,7 @@ async fn handle(
                 rrouter_translate::build_response(inbound, &assembled)?,
             )
         } else {
-            let (candidate, mut resp) = complete_traced(
+            let (candidate, mut resp) = match complete_traced(
                 state,
                 inbound,
                 &body,
@@ -2007,7 +2349,28 @@ async fn handle(
                 trace,
                 redact_pii,
             )
-            .await?;
+            .await
+            {
+                Ok(pair) => pair,
+                Err(err) => {
+                    return try_free_fallback(
+                        state,
+                        inbound,
+                        headers,
+                        &caller,
+                        &body,
+                        &canonical,
+                        &model,
+                        policy.as_ref(),
+                        trace,
+                        started,
+                        permit,
+                        redact_pii,
+                        err,
+                    )
+                    .await;
+                }
+            };
             if redact_pii {
                 let report = crate::redaction::redact_chat_response(&mut resp);
                 if report.redacted {
@@ -2084,10 +2447,31 @@ async fn handle(
 
     // The dispatcher only sees `Result<ByteStream>`; which dialect that stream speaks is
     // carried alongside by [`OpenStream`], so the wrapper never guesses.
-    let (candidate, bytes) = state
+    let (candidate, bytes) = match state
         .dispatcher
         .run_streaming(&plan, |c| attempt.open_stream(c))
-        .await?;
+        .await
+    {
+        Ok(pair) => pair,
+        Err(err) => {
+            return try_free_fallback(
+                state,
+                inbound,
+                headers,
+                &caller,
+                &body,
+                &canonical,
+                &model,
+                policy.as_ref(),
+                trace,
+                started,
+                permit,
+                redact_pii,
+                err,
+            )
+            .await;
+        }
+    };
     let open = StreamRoute {
         upstream: attempt.route_dialect(&candidate),
         client_model: candidate.model.clone(),
@@ -2236,6 +2620,7 @@ async fn complete_traced(
                 canary: config.canary.as_ref(),
                 canary_seed,
                 combo_start,
+                default_group: None,
             },
             Some(&capacity),
             f64::from(config.subscription_reserve_percent),
@@ -2254,6 +2639,7 @@ async fn complete_traced(
         client_headers: client,
         redact_pii,
         recovered: Mutex::new(Vec::new()),
+        resolved_dialects: Mutex::new(std::collections::HashMap::new()),
     };
 
     if !upstream_stream {
@@ -2662,7 +3048,7 @@ fn outbound_headers(
 /// OpenCode asks clients for a stable conversation id and rejects a missing header. A
 /// native client header wins when it is a sane value; otherwise the gateway hashes its
 /// conversation affinity into the `ses_<32 hex>` shape OpenCode uses.
-fn opencode_session(client: Option<&HeaderMap>, affinity: u64) -> String {
+pub(crate) fn opencode_session(client: Option<&HeaderMap>, affinity: u64) -> String {
     if let Some(value) = client
         .and_then(|headers| headers.get("x-opencode-session"))
         .and_then(|value| value.to_str().ok())
@@ -2742,7 +3128,12 @@ fn transport_error(e: reqwest::Error) -> Error {
     }
 }
 
-fn upstream_error(candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
+fn upstream_error(
+    candidate: &Candidate,
+    status: u16,
+    bytes: &Bytes,
+    retry_after: Option<u64>,
+) -> Error {
     let text = String::from_utf8_lossy(bytes);
     let body = if text.len() > MAX_ERROR_BODY {
         let mut cut = MAX_ERROR_BODY;
@@ -2753,11 +3144,23 @@ fn upstream_error(candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
     } else {
         text.into_owned()
     };
+    let mut payload: Option<Value> = serde_json::from_slice(bytes).ok();
+    if let Some(secs) = retry_after {
+        match payload.as_mut() {
+            Some(Value::Object(obj)) => {
+                obj.entry("retry_after".to_string())
+                    .or_insert_with(|| serde_json::json!(secs));
+            }
+            _ => {
+                payload = Some(serde_json::json!({ "retry_after": secs }));
+            }
+        }
+    }
     Error::Upstream {
         provider: candidate.provider.clone(),
         status,
         body,
-        payload: serde_json::from_slice(bytes).ok(),
+        payload,
     }
 }
 
@@ -2771,7 +3174,13 @@ fn upstream_error(candidate: &Candidate, status: u16, bytes: &Bytes) -> Error {
 /// `rate_limited` is `true` when the answer carried `anthropic-ratelimit-*` headers: a
 /// `429` with them is a real throttle and must stay an ordinary error, which is the whole
 /// reason the classifier is told about them.
-fn answered(candidate: &Candidate, status: u16, bytes: &Bytes, rate_limited: bool) -> Error {
+fn answered(
+    candidate: &Candidate,
+    status: u16,
+    bytes: &Bytes,
+    rate_limited: bool,
+    retry_after: Option<u64>,
+) -> Error {
     if is_google_cca(&candidate.provider) {
         if let Some(refusal) = rrouter_translate::google_cca::refusal(Some(status), bytes) {
             let detail = rrouter_translate::google_cca::refusal_detail(bytes);
@@ -2786,7 +3195,7 @@ fn answered(candidate: &Candidate, status: u16, bytes: &Bytes, rate_limited: boo
             return Error::account_refused(&candidate.provider, refusal, &detail);
         }
     }
-    upstream_error(candidate, status, bytes)
+    upstream_error(candidate, status, bytes, retry_after)
 }
 
 fn json_response(status: StatusCode, body: Value) -> Response {
@@ -2986,7 +3395,7 @@ fn record_cache_hit(
             trace_id: Some(trace.trace_id().to_string()),
             provider: candidate.provider.clone(),
             model: model.to_string(),
-            connection_id: Some(candidate.connection),
+            connection_id: rrouter_router::free_mode::logged_connection_id(candidate.connection),
             endpoint: Some(endpoint_of(inbound).to_string()),
             key_id: key,
             cost_micros: 0,
@@ -3005,6 +3414,7 @@ fn record_cache_hit(
             reasoning_effort: meta.reasoning_effort,
             reasoning_tokens: 0,
             session_id: meta.session_id,
+            fallback_reason: meta.fallback_reason,
         },
         budget_hold,
     );
@@ -3089,6 +3499,9 @@ struct Attempt<'a> {
     /// connection down. A second account rejected in the same request is a different
     /// credential and gets its own recovery.
     recovered: Mutex<Vec<Uuid>>,
+    /// Per-candidate outbound dialect overrides recorded by [`Self::prepare`] (for
+    /// chat-only free OpenCode models called via `/v1/responses`).
+    resolved_dialects: Mutex<std::collections::HashMap<(Uuid, String), Dialect>>,
 }
 
 impl Attempt<'_> {
@@ -3107,6 +3520,7 @@ impl Attempt<'_> {
         status: u16,
         bytes: &Bytes,
         rate_limited: bool,
+        retry_after: Option<u64>,
     ) -> Error {
         if self.redact_pii {
             let text = String::from_utf8_lossy(bytes);
@@ -3114,10 +3528,10 @@ impl Attempt<'_> {
             if report.redacted {
                 crate::metrics::pii_redacted(crate::metrics::RedactStage::Output, &report);
                 let redacted = Bytes::from(redacted.into_owned());
-                return answered(candidate, status, &redacted, rate_limited);
+                return answered(candidate, status, &redacted, rate_limited, retry_after);
             }
         }
-        answered(candidate, status, bytes, rate_limited)
+        answered(candidate, status, bytes, rate_limited, retry_after)
     }
 
     fn provider(&self, candidate: &Candidate) -> Result<&'static ProviderSpec> {
@@ -3131,6 +3545,17 @@ impl Attempt<'_> {
 
     /// Dialect the upstream speaks for this candidate and inbound path.
     fn route_dialect(&self, candidate: &Candidate) -> Dialect {
+        if rrouter_router::free_mode::is_anonymous_connection(candidate.connection) {
+            return Dialect::OpenAiChat;
+        }
+        if let Some(&dialect) = self
+            .resolved_dialects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(candidate.connection, candidate.model.clone()))
+        {
+            return dialect;
+        }
         if is_google_cca(&candidate.provider) {
             return Dialect::GoogleCodeAssist;
         }
@@ -3274,6 +3699,96 @@ impl Attempt<'_> {
     }
 
     async fn prepare(&self, candidate: &Candidate, trace: &AttemptTrace) -> Result<Prepared> {
+        // Short-circuit free-tier candidates whose `(connection, provider)` already hit a
+        // provider-wide `FreeUsageLimitError` so one exhausted IP/key does not waste 8
+        // upstream calls across 8 free models on the same provider.
+        if let Some(wait) = self
+            .state
+            .planner
+            .free_rotation()
+            .provider_limit_wait(candidate.connection, &candidate.provider)
+        {
+            let is_free_model =
+                rrouter_router::free_mode::is_anonymous_connection(candidate.connection)
+                    || crate::free_mode::anonymous_endpoint_for(
+                        self.state.store.as_ref(),
+                        &candidate.provider,
+                        &candidate.model,
+                    )
+                    .await
+                    .is_some();
+            if is_free_model {
+                let secs = wait.as_secs().max(1);
+                return Err(Error::Upstream {
+                    provider: candidate.provider.clone(),
+                    status: 429,
+                    body: format!(
+                        "Free usage limit cooldown active for {} ({secs}s remaining)",
+                        candidate.provider
+                    ),
+                    payload: Some(serde_json::json!({ "retry_after": secs })),
+                });
+            }
+        }
+
+        // Anonymous keyless free-tier send (OpenCode Zen `Bearer public`): strictly guarded
+        // to verified public-catalog free models so it can never be used for a paid model.
+        if rrouter_router::free_mode::is_anonymous_connection(candidate.connection) {
+            let url = crate::free_mode::anonymous_endpoint_for(
+                self.state.store.as_ref(),
+                &candidate.provider,
+                &candidate.model,
+            )
+            .await
+            .ok_or_else(|| {
+                Error::Unauthorized(format!(
+                    "anonymous free dispatch is only permitted for verified free models ({}/{})",
+                    candidate.provider, candidate.model
+                ))
+            })?;
+            tracing::info!(
+                provider = %candidate.provider,
+                model = %candidate.model,
+                auth_mode = "anonymous",
+                "dispatching verified free model anonymously"
+            );
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer public"),
+            );
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            headers.insert(
+                header::USER_AGENT,
+                HeaderValue::from_static("rrouter-free-mode/1.0"),
+            );
+            if matches!(candidate.provider.as_str(), "opencode" | "opencode-go") {
+                let session = opencode_session(self.client_headers, affinity_of(&self.canonical));
+                if let Ok(value) = HeaderValue::from_str(&session) {
+                    headers.insert("x-opencode-session", value);
+                }
+            }
+            inject_trace_headers(&mut headers, trace);
+            self.resolved_dialects
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    (candidate.connection, candidate.model.clone()),
+                    Dialect::OpenAiChat,
+                );
+            return Ok(Prepared {
+                urls: vec![url],
+                dialect: Dialect::OpenAiChat,
+                headers,
+                project: None,
+                qoder: None,
+                http: self.state.http.clone(),
+            });
+        }
+
         let spec = self.provider(candidate)?;
         // The refresh is an authenticated call on this account's credential, so it leaves
         // through this account's proxy too; a token minted from another address is exactly
@@ -3349,7 +3864,28 @@ impl Attempt<'_> {
                 .prepare_qoder(spec, creds, candidate, trace, http)
                 .await;
         }
-        let (url, dialect) = endpoint(spec, creds.base_url_override.as_deref(), self.inbound);
+        let target_inbound = if self.inbound == Dialect::OpenAiResponses
+            && candidate.provider == "opencode"
+            && crate::free_mode::is_chat_only_free_model(
+                self.state.store.as_ref(),
+                &candidate.provider,
+                &candidate.model,
+            )
+            .await
+        {
+            // Chat-only OpenCode free models do not support `/inference/openai/v1/responses`:
+            // translate to OpenAI Chat so `/v1/responses` clients still succeed.
+            Dialect::OpenAiChat
+        } else {
+            self.inbound
+        };
+        let (url, dialect) = endpoint(spec, creds.base_url_override.as_deref(), target_inbound);
+        if target_inbound != self.inbound {
+            self.resolved_dialects
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((candidate.connection, candidate.model.clone()), dialect);
+        }
         let mut headers = outbound_headers(spec, creds, self.client_headers)?;
         // OpenCode Go rejects requests without a session id (`MissingSessionID`). The
         // affinity hash is stable for one conversation and unique across conversations,
@@ -3446,7 +3982,7 @@ impl Attempt<'_> {
         wire: &Value,
     ) -> std::result::Result<reqwest::Response, Box<Failure>> {
         let mut transport: Option<Error> = None;
-        let mut last_server_error: Option<(u16, Bytes)> = None;
+        let mut last_server_error: Option<(u16, Bytes, Option<u64>)> = None;
         for url in &prepared.urls {
             let sent = Instant::now();
             // COSY signs the *obfuscated* body bytes, so the body is encoded and the
@@ -3477,27 +4013,46 @@ impl Attempt<'_> {
                         return Ok(resp);
                     }
                     // Read before the body is consumed: these headers are the only thing
-                    // that tells a real throttle from the subscription gate's fake 429.
+                    // that tells a real throttle from the subscription gate's fake 429,
+                    // and `Retry-After` drives the breaker cooldown on OpenCode 429s.
                     let rate_limited = carries_rate_limit_headers(resp.headers());
+                    let retry_after = crate::free_mode::parse_retry_after_secs(resp.headers());
                     let bytes = resp
                         .bytes()
                         .await
                         .map_err(|e| Box::new(Failure::transport(transport_error(e))))?;
+                    if status.as_u16() == 429 {
+                        let text = String::from_utf8_lossy(&bytes);
+                        if crate::free_mode::is_free_usage_limit_error(429, &text) {
+                            let wait =
+                                Duration::from_secs(retry_after.unwrap_or(300).clamp(30, 3600));
+                            self.state.planner.free_rotation().record_provider_limit(
+                                candidate.connection,
+                                &candidate.provider,
+                                wait,
+                            );
+                        }
+                    }
                     if status.as_u16() < 500 {
-                        let error =
-                            self.upstream_error(candidate, status.as_u16(), &bytes, rate_limited);
+                        let error = self.upstream_error(
+                            candidate,
+                            status.as_u16(),
+                            &bytes,
+                            rate_limited,
+                            retry_after,
+                        );
                         return Err(Box::new(Failure::answer(error, status.as_u16(), bytes)));
                     }
-                    last_server_error = Some((status.as_u16(), bytes));
+                    last_server_error = Some((status.as_u16(), bytes, retry_after));
                     transport = None;
                 }
                 Err(e) => transport = Some(transport_error(e)),
             }
         }
-        if let Some((status, bytes)) = last_server_error {
+        if let Some((status, bytes, retry_after)) = last_server_error {
             // 5xx only: a `429` took the branch above, and no refusal class is ever read
             // from a server error (see the 5xx guard in the classifiers).
-            let error = self.upstream_error(candidate, status, &bytes, false);
+            let error = self.upstream_error(candidate, status, &bytes, false, retry_after);
             return Err(Box::new(Failure::answer(error, status, bytes)));
         }
         Err(Box::new(Failure::transport(transport.unwrap_or_else(
@@ -3899,6 +4454,9 @@ struct TraceLabels {
     reasoning_effort: Option<String>,
     /// Conversation id the client sent, when it sent one.
     session_id: Option<String>,
+    /// Reason this request fell back to the free pool (`"quota"`, `"rate_limit"`,
+    /// `"payment_required"`), or `None` for direct routing.
+    fallback_reason: Option<String>,
     /// Provider of the most recent attempt, empty before any dispatch.
     provider: String,
     /// Account the most recent attempt went through. A request that fails after dispatch
@@ -3950,7 +4508,12 @@ impl RequestTrace {
             requested_model: labels.requested_model.clone(),
             reasoning_effort: labels.reasoning_effort.clone(),
             session_id: labels.session_id.clone(),
+            fallback_reason: labels.fallback_reason.clone(),
         }
+    }
+
+    fn set_fallback_reason(&self, reason: Option<&str>) {
+        self.labels().fallback_reason = reason.map(str::to_string);
     }
 
     /// The 32-hex trace id the client sees as `x-trace-id`.
@@ -4101,10 +4664,16 @@ impl RequestTrace {
         status: u16,
         error: Option<String>,
     ) {
+        let logged_conn = rrouter_router::free_mode::logged_connection_id(candidate.connection);
+        let auth_mode = if logged_conn.is_some() {
+            "account"
+        } else {
+            "anonymous"
+        };
         let key = {
             let mut labels = self.labels();
             labels.provider.clone_from(&candidate.provider);
-            labels.connection = Some(candidate.connection);
+            labels.connection = logged_conn;
             labels.key
         };
         crate::metrics::attempt_finished(&candidate.provider, status);
@@ -4116,18 +4685,22 @@ impl RequestTrace {
             parent_span_id = %child.parent_span_id.as_deref().unwrap_or(""),
             provider = %candidate.provider,
             model = %candidate.model,
+            auth_mode,
             status,
             latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32,
             "attempt"
         );
         // Every successful attempt feeds `least_latency`. Fire and forget: a routing
-        // hint must never delay or fail the response.
+        // hint must never delay or fail the response. Anonymous sends have no stored
+        // connection row, so skip latency recording for them.
         if status == 200 {
-            spawn_latency(
-                state,
-                candidate.connection,
-                started.elapsed().as_millis().min(u32::MAX as u128) as u32,
-            );
+            if let Some(conn_id) = logged_conn {
+                spawn_latency(
+                    state,
+                    conn_id,
+                    started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+                );
+            }
         }
         spawn_attempt(
             state,
@@ -4138,7 +4711,7 @@ impl RequestTrace {
                 attempt: number,
                 provider: candidate.provider.clone(),
                 model: candidate.model.clone(),
-                connection_id: Some(candidate.connection),
+                connection_id: logged_conn,
                 status,
                 error,
                 latency_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
@@ -4219,7 +4792,11 @@ impl RequestTrace {
         // on this path: neither may delay the failover that is already in progress.
         if let Err(e) = &result {
             if let Some(refusal) = e.refusal() {
-                record_account_refusal(state, target.connection, refusal, &e.to_string());
+                if let Some(conn_id) =
+                    rrouter_router::free_mode::logged_connection_id(target.connection)
+                {
+                    record_account_refusal(state, conn_id, refusal, &e.to_string());
+                }
             }
         }
         result
@@ -4311,6 +4888,7 @@ impl RequestTrace {
             reasoning_effort: meta.reasoning_effort,
             reasoning_tokens: 0,
             session_id: meta.session_id,
+            fallback_reason: meta.fallback_reason,
         };
         let store = Arc::clone(&state.store);
         let access_log = state.config.load().access_log;
@@ -4877,12 +5455,11 @@ impl ResponseStream {
                 .as_ref()
                 .map(|(_, message)| message.as_str())
                 .unwrap_or_default();
-            record_account_refusal(
-                &pending.state,
-                pending.candidate.connection,
-                refusal,
-                detail,
-            );
+            if let Some(conn_id) =
+                rrouter_router::free_mode::logged_connection_id(pending.candidate.connection)
+            {
+                record_account_refusal(&pending.state, conn_id, refusal, detail);
+            }
         }
         // A stream a guardrail stopped is a refusal that happens to have a body: the row
         // says 403 with the reason the client read in the terminal error frame.
@@ -5002,6 +5579,8 @@ struct RequestMeta {
     reasoning_effort: Option<String>,
     /// Conversation id the client sent, when it sent one.
     session_id: Option<String>,
+    /// Reason this request fell back to the free pool, if any.
+    fallback_reason: Option<String>,
 }
 
 /// One finished request, ready to turn into a usage row.
@@ -5052,7 +5631,7 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
         trace_id: Some(r.trace_id.to_string()),
         provider: candidate.provider.clone(),
         model: r.model.to_string(),
-        connection_id: Some(candidate.connection),
+        connection_id: rrouter_router::free_mode::logged_connection_id(candidate.connection),
         endpoint: Some(r.endpoint.to_string()),
         key_id: r.key,
         // Priced in `spawn_record`: the registry read happens off the response path.
@@ -5075,6 +5654,7 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
         reasoning_effort: r.meta.reasoning_effort,
         reasoning_tokens: usage.reasoning_tokens,
         session_id: r.meta.session_id,
+        fallback_reason: r.meta.fallback_reason,
     };
     spawn_record(state, rec, r.budget_hold);
 }
@@ -5163,11 +5743,18 @@ fn spawn_record(
 /// and attempt log on `request_id`. Carries no prompt, response or token material.
 fn access_line(rec: &UsageRecord) {
     let request_id = rec.request_id.map(|id| id.to_string()).unwrap_or_default();
+    let auth_mode = if rec.connection_id.is_some() {
+        "account"
+    } else {
+        "anonymous"
+    };
     tracing::info!(
         request_id = %request_id,
         trace_id = rec.trace_id.as_deref().unwrap_or(""),
         provider = %rec.provider,
         model = %rec.model,
+        auth_mode,
+        fallback_reason = rec.fallback_reason.as_deref(),
         status = rec.status,
         latency_ms = rec.latency_ms,
         ttft_ms = rec.ttft_ms,
@@ -5206,6 +5793,7 @@ async fn embed_text(
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await?;
@@ -5383,6 +5971,7 @@ async fn embeddings_inner(
                 canary: config.canary.as_ref(),
                 canary_seed,
                 combo_start: None,
+                default_group: caller.default_group(),
             },
         )
         .await?;
@@ -5722,6 +6311,7 @@ mod tests {
             reasoning_effort: None,
             reasoning_tokens: 0,
             session_id: None,
+            fallback_reason: None,
         }
     }
 
@@ -6006,5 +6596,54 @@ mod tests {
         let (text, truncated) = capture_text(&audio, audio.len());
         assert_eq!(text, "[binary body: 5 bytes not stored]");
         assert!(!truncated);
+    }
+
+    /// Automatic fallback fires for exactly the paid failures the contract names
+    /// (budget/quota, upstream 429, upstream 402) and never for auth/400/5xx.
+    #[test]
+    fn fallback_reason_names_only_quota_rate_limit_and_payment() {
+        let quota = |code: &'static str| Error::Limited {
+            code,
+            message: "x".into(),
+            retry_after_secs: 0,
+        };
+        assert_eq!(
+            free_fallback_reason(&quota("budget_exhausted")),
+            Some("quota")
+        );
+        assert_eq!(
+            free_fallback_reason(&quota("team_budget_exhausted")),
+            Some("quota")
+        );
+        assert_eq!(
+            free_fallback_reason(&quota("quota_exhausted")),
+            Some("quota")
+        );
+        assert_eq!(
+            free_fallback_reason(&quota("all_candidates_cooling_down")),
+            Some("rate_limit")
+        );
+
+        let upstream = |status: u16| Error::Upstream {
+            provider: "opencode".into(),
+            status,
+            body: "{}".into(),
+            payload: None,
+        };
+        assert_eq!(free_fallback_reason(&upstream(429)), Some("rate_limit"));
+        assert_eq!(
+            free_fallback_reason(&upstream(402)),
+            Some("payment_required")
+        );
+
+        // Everything else is surfaced untouched: no fallback, no reason.
+        assert_eq!(free_fallback_reason(&upstream(401)), None);
+        assert_eq!(free_fallback_reason(&upstream(400)), None);
+        assert_eq!(free_fallback_reason(&upstream(500)), None);
+        assert_eq!(free_fallback_reason(&quota("rate_limited_by_rpm")), None);
+        assert_eq!(
+            free_fallback_reason(&Error::Unauthorized("nope".into())),
+            None
+        );
     }
 }

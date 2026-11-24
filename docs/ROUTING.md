@@ -10,15 +10,34 @@ fallback and a per-account breaker.
   Every provider has a short code (`oai`, `gh`, `ocg`, `ant`, …), editable in
   **Providers → Provider codes**; it is unique across compiled and operator-defined
   providers. The id and the code both resolve, so existing refs keep working.
-- **`group/code/model`** — a preset group namespaces the ref and still pins the
-  provider: `main/oai/gpt-4.1`. The provider segment is required, so a model id
-  served by several providers is never ambiguous.
+- **`slug/code/model`** — a free-form preset group namespaces the ref with its **stable
+  slug** (`main/oai/gpt-4.1`, `main/ocg/deepseek-v4.1-flash`) and still pins the
+  provider. The slug is assigned when the group is created (or backfilled on migration)
+  and is **immutable**, so renaming a group's display name never breaks existing client
+  configs. Legacy display-name prefixes remain accepted as a fallback (resolved via
+  name → slug lookup and logged once at `debug` level). Inbound group refs are
+  normalized to their canonical `<slug>/<code>/<model>` form for routing while usage
+  logs keep the client's literal `requested_model`.
+- **`GET /api/models`** emits each row's canonical `reference` (`<slug>/<code>/<id>` for
+  grouped models, `<provider>/<id>` for ungrouped models) alongside `also_matches`
+  listing the other accepted spellings (`<code>/<id>`, `<provider>/<id>`, legacy group
+  name prefixes, and bare `<id>`).
+- **Per-key `default_group`** — an inference key may set a nullable `default_group`
+  (stored as a free-form group's stable slug). When a request on that key has no explicit
+  group prefix (and is not `free*`, an alias, or a combo):
+  - a bare model id (`deepseek-v4.1-flash`) scopes to that group's members in layout
+    order and never widens to unrelated providers (falling back to normal catalog
+    resolution if the group has no member for that id);
+  - an explicit `provider/model` or `code/model` keeps its pinned provider (never widens
+    to another provider);
+  - the group's access grants (`GroupAccess`) are enforced at admission.
 - **Aliases** — a stable name (`prod-default`) mapped to one target.
 - **Combos** — `combo:<name>` or a bare combo name; strategies are `fallback`,
   `round_robin` and `smart`. Combining providers is a combo, not a model row.
 
-A bare model id expands to every connected provider that serves it. Explicit
-`provider/model`, `code/model` and `group/code/model` never widen to another provider.
+A bare model id expands to every connected provider that serves it (unless scoped by the
+key's `default_group`). Explicit `provider/model`, `code/model` and `slug/code/model`
+never widen to another provider.
 
 ## Custom providers
 

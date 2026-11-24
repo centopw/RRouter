@@ -126,8 +126,8 @@ impl Capabilities {
     }
 }
 
-/// Published price per million tokens, in USD. models.dev is the only source; a
-/// provider's own `/models` response does not carry pricing.
+/// Published price per million tokens, in USD, from models.dev or a provider's own
+/// `/models` catalog (such as OpenCode or OpenRouter).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Cost {
     pub input: f64,
@@ -853,12 +853,25 @@ pub struct FetchedModel {
     pub max_output: Option<u32>,
     /// Normalized capability flags plus the provider-native keys `/v1/models` echoes.
     pub caps: Value,
+    /// Published per-million-token pricing (`{input, output, cache_read?, cache_write?}`),
+    /// when the provider's catalog carries it (e.g. OpenCode, OpenRouter).
+    pub cost: Option<Value>,
+    /// Provider-declared model type (e.g. OpenCode `"decision"`), when published.
+    pub model_type: Option<String>,
+    /// Provider-declared recommended API (e.g. `"chat-completions"`, `"systemone"`).
+    pub recommended_api: Option<String>,
+    /// API dialect keys declared under `api` (e.g. `["chat-completions"]`, `["systemone"]`).
+    pub apis: Vec<String>,
+    /// `false` when the catalog explicitly declares a non-chat type or an unsupported API
+    /// dialect such as OpenCode `systemone`.
+    pub chat_usable: bool,
 }
 
 /// Extract models from a provider's model-list response, dropping empty ids and
 /// duplicates. Also accepts a bare array of strings. Metadata is optional: OpenAI's
-/// list carries only ids, while DeepSeek and 9router-style gateways publish limits,
-/// modalities, reasoning effort and Anthropic API quirks.
+/// list carries only ids, while DeepSeek, OpenCode, OpenRouter and 9router-style
+/// gateways publish limits, modalities, pricing, API dialects, reasoning effort and
+/// Anthropic API quirks.
 pub fn parse_models(body: &Value) -> Vec<FetchedModel> {
     let entries = match body {
         Value::Array(entries) => entries,
@@ -877,6 +890,11 @@ pub fn parse_models(body: &Value) -> Vec<FetchedModel> {
                 context: None,
                 max_output: None,
                 caps: Value::Object(Map::new()),
+                cost: None,
+                model_type: None,
+                recommended_api: None,
+                apis: Vec::new(),
+                chat_usable: true,
             },
             Value::Object(object) => fetched_model(object),
             _ => continue,
@@ -910,6 +928,38 @@ fn fetched_model(object: &Map<String, Value>) -> FetchedModel {
                     .and_then(token_limit)
             })
     };
+    let model_type = text("type");
+    let recommended_api = text("recommended_api");
+    let apis: Vec<String> = object
+        .get("api")
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.keys()
+                .map(|k| k.trim())
+                .filter(|k| !k.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let chat_usable = is_chat_usable(model_type.as_deref(), recommended_api.as_deref(), &apis);
+    let mut caps = upstream_caps(object);
+    if let Some(map) = caps.as_object_mut() {
+        if let Some(kind) = &model_type {
+            map.insert("model_type".to_string(), Value::String(kind.clone()));
+        }
+        if let Some(rec) = &recommended_api {
+            map.insert("recommended_api".to_string(), Value::String(rec.clone()));
+        }
+        if !apis.is_empty() {
+            let api_values = Value::Array(apis.iter().cloned().map(Value::String).collect());
+            if bounded(&api_values, 1024) {
+                map.insert("apis".to_string(), api_values);
+            }
+        }
+        if !chat_usable {
+            map.insert("chat_usable".to_string(), Value::Bool(false));
+        }
+    }
     FetchedModel {
         id: text("id").unwrap_or_default(),
         display: text("name"),
@@ -926,7 +976,212 @@ fn fetched_model(object: &Map<String, Value>) -> FetchedModel {
             ],
             "maxOutput",
         ),
-        caps: upstream_caps(object),
+        caps,
+        cost: upstream_cost(object),
+        model_type,
+        recommended_api,
+        apis,
+        chat_usable,
+    }
+}
+
+/// Whether a provider's declared API dialect name is a chat/inference surface RRouter speaks.
+fn is_supported_api_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "chat-completions"
+            | "chat_completions"
+            | "responses"
+            | "messages"
+            | "chat"
+            | "openai"
+            | "anthropic"
+    )
+}
+
+/// Whether a catalog model entry is usable on RRouter's chat/inference dialects.
+///
+/// Providers that omit `type`/`api`/`recommended_api` stay `true` (default chat assumption).
+/// Models that declare a non-chat `type` (e.g. OpenCode `"decision"`), an `api` map with no
+/// supported dialect (e.g. only `"systemone"`), or an unsupported `recommended_api` when no
+/// supported `api` entry exists are flagged `false`.
+pub fn is_chat_usable(
+    model_type: Option<&str>,
+    recommended_api: Option<&str>,
+    apis: &[String],
+) -> bool {
+    if let Some(kind) = model_type {
+        let lower = kind.trim().to_ascii_lowercase();
+        if !lower.is_empty()
+            && !matches!(
+                lower.as_str(),
+                "chat" | "text" | "llm" | "model" | "completion" | "completions" | "language"
+            )
+        {
+            return false;
+        }
+    }
+    if !apis.is_empty() {
+        return apis.iter().any(|api| is_supported_api_name(api));
+    }
+    if let Some(rec) = recommended_api {
+        return is_supported_api_name(rec);
+    }
+    true
+}
+
+/// Whether a stored registry row is usable for a connectivity probe speaking `dialect`.
+///
+/// Rejects rows flagged `chat_usable: false` / `usable: false`, non-chat `model_type`,
+/// unsupported `recommended_api` (such as `systemone`), or an `apis` list that does not
+/// include the probe's wire dialect.
+pub fn is_probe_usable_row(row: &ModelRow, dialect: rrouter_core::Dialect) -> bool {
+    let Some(caps) = row.caps.as_object() else {
+        return true;
+    };
+    if caps.get("chat_usable").and_then(Value::as_bool) == Some(false)
+        || caps.get("usable").and_then(Value::as_bool) == Some(false)
+        || caps.get("deprecated").and_then(Value::as_bool) == Some(true)
+    {
+        return false;
+    }
+    let model_type = caps.get("model_type").and_then(Value::as_str);
+    let recommended_api = caps.get("recommended_api").and_then(Value::as_str);
+    let apis: Vec<String> = caps
+        .get("apis")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !is_chat_usable(model_type, recommended_api, &apis) {
+        return false;
+    }
+    if !apis.is_empty() {
+        let supports_dialect = apis.iter().any(|api| {
+            let lower = api.trim().to_ascii_lowercase();
+            match dialect {
+                rrouter_core::Dialect::OpenAiChat => {
+                    matches!(
+                        lower.as_str(),
+                        "chat-completions" | "chat_completions" | "chat" | "openai"
+                    )
+                }
+                rrouter_core::Dialect::OpenAiResponses => lower == "responses",
+                rrouter_core::Dialect::AnthropicMessages => {
+                    matches!(lower.as_str(), "messages" | "anthropic")
+                }
+                _ => is_supported_api_name(&lower),
+            }
+        });
+        if !supports_dialect {
+            return false;
+        }
+    }
+    true
+}
+
+/// Extract normalized per-million-token pricing (`{input, output, cache_read?, cache_write?}`)
+/// from a live provider model object.
+///
+/// Supports:
+/// - OpenCode's nested `cost.text.{input,output}.price` (USD per million tokens, numeric).
+/// - Flat `cost.{input,output}` (USD per million tokens, numeric).
+/// - OpenRouter's `pricing.{prompt,completion}` (USD per single token, string or numeric),
+///   converted to USD per million tokens. Negative sentinels (e.g. `"-1"`) are ignored.
+fn upstream_cost(entry: &Map<String, Value>) -> Option<Value> {
+    if let Some(cost) = entry.get("cost").and_then(Value::as_object) {
+        // OpenCode shape: cost.text.{input,output,cache_read?,cache_write?}.price
+        if let Some(text) = cost.get("text").and_then(Value::as_object) {
+            let nested_price = |key: &str| {
+                text.get(key).and_then(|v| {
+                    v.get("price")
+                        .and_then(non_negative_f64)
+                        .or_else(|| non_negative_f64(v))
+                })
+            };
+            if let (Some(input), Some(output)) = (nested_price("input"), nested_price("output")) {
+                return Some(cost_json(
+                    input,
+                    output,
+                    nested_price("cache_read").or_else(|| nested_price("cached_input")),
+                    nested_price("cache_write"),
+                ));
+            }
+        }
+        // Flat USD/Mtok shape: cost.{input,output}
+        if let (Some(input), Some(output)) = (
+            cost.get("input").and_then(non_negative_f64),
+            cost.get("output").and_then(non_negative_f64),
+        ) {
+            return Some(cost_json(
+                input,
+                output,
+                cost.get("cache_read").and_then(non_negative_f64),
+                cost.get("cache_write").and_then(non_negative_f64),
+            ));
+        }
+    }
+    // OpenRouter shape: pricing.{prompt,completion} as USD/token strings (or numbers).
+    if let Some(pricing) = entry.get("pricing").and_then(Value::as_object) {
+        let per_million = |key: &str| {
+            pricing
+                .get(key)
+                .and_then(non_negative_f64_or_str)
+                .map(per_token_to_per_million)
+        };
+        if let (Some(input), Some(output)) = (per_million("prompt"), per_million("completion")) {
+            return Some(cost_json(
+                input,
+                output,
+                per_million("input_cache_read"),
+                per_million("input_cache_write"),
+            ));
+        }
+    }
+    None
+}
+
+fn cost_json(input: f64, output: f64, cache_read: Option<f64>, cache_write: Option<f64>) -> Value {
+    let mut map = Map::new();
+    map.insert("input".to_string(), Value::from(input));
+    map.insert("output".to_string(), Value::from(output));
+    if let Some(v) = cache_read {
+        map.insert("cache_read".to_string(), Value::from(v));
+    }
+    if let Some(v) = cache_write {
+        map.insert("cache_write".to_string(), Value::from(v));
+    }
+    Value::Object(map)
+}
+
+fn non_negative_f64(value: &Value) -> Option<f64> {
+    value.as_f64().filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+fn non_negative_f64_or_str(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => n.as_f64().filter(|v| v.is_finite() && *v >= 0.0),
+        Value::String(s) => s
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite() && *v >= 0.0),
+        _ => None,
+    }
+}
+
+/// Convert a USD-per-token rate to USD-per-million-tokens without binary-float dust
+/// (e.g. `0.00000015 * 1e6` becomes `0.15`, and `0.0` stays `0.0`).
+fn per_token_to_per_million(per_token: f64) -> f64 {
+    let per_million = per_token * 1_000_000.0;
+    if per_million == 0.0 {
+        0.0
+    } else {
+        (per_million * 1_000_000.0).round() / 1_000_000.0
     }
 }
 
@@ -1537,5 +1792,146 @@ mod tests {
             cost_micros(&store, "claude", "claude-haiku-4-5", usage).await,
             28
         );
+    }
+
+    /// OpenCode's live `/inference/v1/models` publishes nested `cost.text.{input,output}.price`
+    /// plus `api` / `recommended_api` / `type`. `big-pickle` must parse as zero-cost chat;
+    /// `jev-1.13-free` (type=decision, api.systemone) must be flagged non-chat.
+    #[test]
+    fn parse_models_reads_opencode_cost_and_flags_non_chat_systemone() {
+        let body = json!({
+            "object": "list",
+            "data": [
+                {
+                    "id": "big-pickle",
+                    "name": "Big Pickle",
+                    "recommended_api": "chat-completions",
+                    "api": {
+                        "chat-completions": {
+                            "base_url": "https://opencode.ai/inference/openai/v1"
+                        }
+                    },
+                    "cost": {
+                        "text": {
+                            "input": { "price": 0 },
+                            "output": { "price": 0 }
+                        }
+                    }
+                },
+                {
+                    "id": "jev-1.13-free",
+                    "name": "Jev 1.13 Free",
+                    "type": "decision",
+                    "recommended_api": "systemone",
+                    "api": {
+                        "systemone": {
+                            "base_url": "https://opencode.ai/inference/systemone/v1"
+                        }
+                    },
+                    "cost": {
+                        "text": {
+                            "input": { "price": 0 },
+                            "output": { "price": 0 }
+                        }
+                    }
+                },
+                {
+                    "id": "claude-sonnet-4-5",
+                    "recommended_api": "chat-completions",
+                    "api": {
+                        "chat-completions": {
+                            "base_url": "https://opencode.ai/inference/openai/v1"
+                        }
+                    },
+                    "cost": {
+                        "text": {
+                            "input": { "price": 3.0 },
+                            "output": { "price": 15.0 },
+                            "cache_read": { "price": 0.3 }
+                        }
+                    }
+                }
+            ]
+        });
+
+        let parsed = parse_models(&body);
+        assert_eq!(parsed.len(), 3);
+
+        let pickle = &parsed[0];
+        assert_eq!(pickle.id, "big-pickle");
+        assert!(pickle.chat_usable);
+        assert_eq!(pickle.recommended_api.as_deref(), Some("chat-completions"));
+        assert_eq!(pickle.apis, vec!["chat-completions"]);
+        let pickle_cost = parse_cost(pickle.cost.as_ref().expect("zero cost")).expect("valid cost");
+        assert_eq!(pickle_cost.input, 0.0);
+        assert_eq!(pickle_cost.output, 0.0);
+
+        let jev = &parsed[1];
+        assert_eq!(jev.id, "jev-1.13-free");
+        assert!(!jev.chat_usable, "systemone decision model is not chat");
+        assert_eq!(jev.model_type.as_deref(), Some("decision"));
+        assert_eq!(jev.recommended_api.as_deref(), Some("systemone"));
+        assert_eq!(jev.apis, vec!["systemone"]);
+        assert_eq!(jev.caps["chat_usable"], false);
+        let jev_cost = parse_cost(jev.cost.as_ref().expect("zero cost")).expect("valid cost");
+        assert_eq!(jev_cost.input, 0.0);
+        assert_eq!(jev_cost.output, 0.0);
+
+        let sonnet = &parsed[2];
+        assert!(sonnet.chat_usable);
+        let sonnet_cost =
+            parse_cost(sonnet.cost.as_ref().expect("paid cost")).expect("valid paid cost");
+        assert_eq!(sonnet_cost.input, 3.0);
+        assert_eq!(sonnet_cost.output, 15.0);
+        assert_eq!(sonnet_cost.cache_read, Some(0.3));
+    }
+
+    /// OpenRouter's `/api/v1/models` publishes string USD-per-token rates under `pricing`.
+    /// Free models (`"0"` / `"0"`) become zero USD/Mtok, paid models scale by 1e6, and
+    /// negative sentinels (`"-1"`) stay unknown (`None`).
+    #[test]
+    fn parse_models_reads_openrouter_string_pricing() {
+        let body = json!({
+            "data": [
+                {
+                    "id": "deepseek/deepseek-r1:free",
+                    "name": "DeepSeek R1 (free)",
+                    "pricing": { "prompt": "0", "completion": "0" }
+                },
+                {
+                    "id": "anthropic/claude-3.5-sonnet",
+                    "pricing": {
+                        "prompt": "0.000003",
+                        "completion": "0.000015",
+                        "input_cache_read": "0.0000003"
+                    }
+                },
+                {
+                    "id": "openrouter/auto",
+                    "pricing": { "prompt": "-1", "completion": "-1" }
+                },
+                {
+                    "id": "plain-no-pricing"
+                }
+            ]
+        });
+
+        let parsed = parse_models(&body);
+        assert_eq!(parsed.len(), 4);
+
+        let free_cost =
+            parse_cost(parsed[0].cost.as_ref().expect("free cost")).expect("valid free cost");
+        assert_eq!(free_cost.input, 0.0);
+        assert_eq!(free_cost.output, 0.0);
+        assert!(parsed[0].chat_usable);
+
+        let paid_cost =
+            parse_cost(parsed[1].cost.as_ref().expect("paid cost")).expect("valid paid cost");
+        assert_eq!(paid_cost.input, 3.0);
+        assert_eq!(paid_cost.output, 15.0);
+        assert_eq!(paid_cost.cache_read, Some(0.3));
+
+        assert_eq!(parsed[2].cost, None, "negative sentinel is unknown price");
+        assert_eq!(parsed[3].cost, None, "provider without pricing stays None");
     }
 }

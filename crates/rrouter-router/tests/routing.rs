@@ -89,6 +89,7 @@ async fn least_latency_order(planner: &Planner, store: &Store) -> Vec<Uuid> {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -162,6 +163,7 @@ async fn alias_resolves_one_hop_without_looping() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -195,6 +197,7 @@ async fn self_referential_alias_does_not_loop() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -226,6 +229,7 @@ async fn a_dotted_bare_id_with_no_catalog_entry_widens_to_active_providers() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -264,6 +268,7 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -289,6 +294,7 @@ async fn explicit_provider_is_not_widened_for_unknown_ids() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -326,6 +332,7 @@ async fn antigravity_explicit_id_resolves_with_the_cca_dialect() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -355,6 +362,7 @@ async fn antigravity_explicit_id_resolves_with_the_cca_dialect() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -397,6 +405,7 @@ async fn combo_start_rotates_the_expanded_candidates() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: Some(1),
+                default_group: None,
             },
         )
         .await
@@ -420,6 +429,7 @@ async fn combo_start_rotates_the_expanded_candidates() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: Some(4),
+                default_group: None,
             },
         )
         .await
@@ -449,6 +459,7 @@ async fn combo_start_rotates_the_expanded_candidates() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: Some(1),
+                default_group: None,
             },
         )
         .await
@@ -471,6 +482,7 @@ async fn group_ref_pins_the_provider_segment() {
         groups: vec![LayoutGroup {
             id: "g-main".into(),
             name: "main".into(),
+            slug: None,
             provider: None,
             visible: true,
             access: None,
@@ -516,6 +528,7 @@ async fn group_ref_pins_the_provider_segment() {
         canary: None,
         canary_seed: 0,
         combo_start: None,
+        default_group: None,
     };
 
     let pinned = planner
@@ -544,6 +557,139 @@ async fn group_ref_pins_the_provider_segment() {
     let _ = openai;
 }
 
+/// Full ref-resolution matrix covering stable slug, legacy display name (after rename),
+/// provider shorthand (`ocg/x`), full provider id (`opencode-go/x`), and bare `x` — each
+/// tested both without and with a per-key `default_group`.
+#[tokio::test]
+async fn group_slug_legacy_name_and_default_group_matrix() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .seed_provider_profile("opencode-go", "ocg")
+        .await
+        .expect("ocg code");
+    let ocg = conn(&store, "opencode-go", "deepseek-v4.1-flash", 0).await;
+    let openai = conn(&store, "openai", "gpt-4.1", 0).await;
+    let github = conn(&store, "github", "gpt-4.1", 1).await;
+
+    let initial = LayoutDocument {
+        schema_version: LAYOUT_SCHEMA_VERSION,
+        auto_include_new: true,
+        groups: vec![LayoutGroup {
+            id: "g-main".into(),
+            name: "main".into(),
+            slug: None,
+            provider: None,
+            visible: true,
+            access: None,
+        }],
+        items: vec![
+            LayoutItem {
+                provider: "opencode-go".into(),
+                id: "deepseek-v4.1-flash".into(),
+                group: Some("g-main".into()),
+                position: 0,
+                visible: true,
+                last_visible_position: None,
+                hidden_at: None,
+            },
+            // Only github's gpt-4.1 is in `main`; openai's gpt-4.1 is NOT in `main`.
+            LayoutItem {
+                provider: "github".into(),
+                id: "gpt-4.1".into(),
+                group: Some("g-main".into()),
+                position: 1,
+                visible: true,
+                last_visible_position: None,
+                hidden_at: None,
+            },
+        ],
+    };
+    let preset = store
+        .create_model_preset("matrix", None, &initial, "test")
+        .await
+        .expect("preset");
+    // Rename display name from "main" to "Primary": slug stays "main".
+    let mut renamed = preset.layout.clone();
+    renamed.groups[0].name = "Primary".into();
+    store
+        .update_model_preset_layout(preset.id, preset.revision, &renamed, "test")
+        .await
+        .expect("rename");
+    store
+        .set_default_model_preset(preset.id, "test")
+        .await
+        .expect("default");
+
+    let planner = Planner::new();
+    let catalog = Catalog::builtin();
+    let plan_for = |model: &'static str, default_group: Option<&'static str>| {
+        let mut req = PlanRequest::new(model);
+        req.default_group = default_group;
+        planner.plan(&catalog, &store, req)
+    };
+
+    // 1. All spellings resolve to opencode-go/deepseek-v4.1-flash, both with and without
+    //    `default_group = Some("main")`.
+    for default_group in [None, Some("main")] {
+        for spelling in [
+            "main/ocg/deepseek-v4.1-flash",         // stable slug + code
+            "main/opencode-go/deepseek-v4.1-flash", // stable slug + provider id
+            "Primary/ocg/deepseek-v4.1-flash",      // display name fallback + code
+            "ocg/deepseek-v4.1-flash",              // provider code
+            "opencode-go/deepseek-v4.1-flash",      // full provider id
+            "deepseek-v4.1-flash",                  // bare id
+        ] {
+            let plan = plan_for(spelling, default_group).await.unwrap_or_else(|e| {
+                panic!("spelling={spelling} default_group={default_group:?}: {e}")
+            });
+            assert!(
+                plan.candidates.iter().any(|c| c.connection == ocg),
+                "spelling={spelling} default_group={default_group:?} should hit ocg"
+            );
+            if spelling != "deepseek-v4.1-flash" || default_group.is_some() {
+                assert_eq!(
+                    plan.candidates.len(),
+                    1,
+                    "spelling={spelling} default_group={default_group:?} must not widen"
+                );
+                assert_eq!(plan.candidates[0].connection, ocg);
+            }
+        }
+    }
+
+    // 2. Bare `gpt-4.1`:
+    //    - without default_group: fans out to both openai and github.
+    //    - with default_group = "main": scopes strictly to `main`'s member (github only).
+    let bare_no_group = plan_for("gpt-4.1", None).await.expect("bare no group");
+    let providers_no_group: Vec<&str> = bare_no_group
+        .candidates
+        .iter()
+        .map(|c| c.provider.as_str())
+        .collect();
+    assert!(providers_no_group.contains(&"openai") && providers_no_group.contains(&"github"));
+
+    let bare_with_group = plan_for("gpt-4.1", Some("main"))
+        .await
+        .expect("bare with default_group");
+    assert_eq!(bare_with_group.candidates.len(), 1);
+    assert_eq!(bare_with_group.candidates[0].connection, github);
+
+    // 3. Explicit `openai/gpt-4.1` with default_group = "main" still pins openai (never
+    //    widens or redirects to github).
+    let pinned_with_group = plan_for("openai/gpt-4.1", Some("main"))
+        .await
+        .expect("pinned with default_group");
+    assert_eq!(pinned_with_group.candidates.len(), 1);
+    assert_eq!(pinned_with_group.candidates[0].connection, openai);
+
+    // 4. Bare model NOT in `main` falls back to normal catalog resolution.
+    let _oai_mini = conn(&store, "openai", "gpt-4.1-mini", 0).await;
+    let fallback = plan_for("gpt-4.1-mini", Some("main"))
+        .await
+        .expect("bare not in default_group falls back");
+    assert!(fallback.candidates.iter().any(|c| c.provider == "openai"));
+}
+
 #[tokio::test]
 async fn explicit_provider_wins_over_catalog_guess() {
     let store = Store::open_in_memory().unwrap();
@@ -565,6 +711,7 @@ async fn explicit_provider_wins_over_catalog_guess() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -599,6 +746,7 @@ async fn combo_preserves_declared_order() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -623,6 +771,7 @@ async fn combo_preserves_declared_order() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -653,6 +802,7 @@ async fn round_robin_alternates_equal_priority_connections() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -672,6 +822,7 @@ async fn round_robin_alternates_equal_priority_connections() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -721,6 +872,7 @@ async fn weighted_puts_the_heavy_account_first_eight_times_in_ten() {
                     canary: None,
                     canary_seed: 0,
                     combo_start: None,
+                    default_group: None,
                 },
             )
             .await
@@ -772,6 +924,7 @@ async fn weighted_and_latency_never_override_priority() {
                     canary: None,
                     canary_seed: 0,
                     combo_start: None,
+                    default_group: None,
                 },
             )
             .await
@@ -838,6 +991,7 @@ async fn order(store: &Store, model: &str, strategy: Strategy) -> Vec<Uuid> {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await
@@ -993,6 +1147,7 @@ async fn affinity_pins_one_conversation_but_spreads_conversations() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
     };
@@ -1038,6 +1193,7 @@ async fn disabled_model_is_excluded() {
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: None,
             },
         )
         .await

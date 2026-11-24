@@ -165,6 +165,7 @@ async fn run(
                 canary: None,
                 canary_seed: 0,
                 combo_start: None,
+                default_group: caller.default_group(),
             },
         )
         .await?;
@@ -700,6 +701,7 @@ async fn record_usage(
         reasoning_effort: None,
         reasoning_tokens: 0,
         session_id: None,
+        fallback_reason: None,
     };
     if let Err(e) = state.store.record_usage(&record).await {
         tracing::warn!(error = %e, "search usage row failed");

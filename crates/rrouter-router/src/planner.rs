@@ -65,7 +65,10 @@ use uuid::Uuid;
 use crate::candidate::{Candidate, CapacityHints, Plan};
 use crate::capabilities::capabilities;
 use crate::catalog::Catalog;
-use crate::free_mode::FreeRotation;
+use crate::free_mode::{
+    is_anonymous_connection, supports_anonymous_free, FreeRotation, ANONYMOUS_CONNECTION,
+    SOURCE_PUBLIC_CATALOG,
+};
 use crate::policy::{candidate_allowed, DataCollection, ProviderPolicy};
 
 /// A connection's dialect, from the provider's registry entry.
@@ -178,7 +181,7 @@ enum FreePrefer {
     Cheapest,
 }
 
-/// Ordering knobs from the imported document's `routing` object.
+/// Ordering knobs from the stored `free_mode.routing` object.
 #[derive(Debug, Clone)]
 struct FreeKnobs {
     enabled: bool,
@@ -190,16 +193,27 @@ struct FreeKnobs {
     /// Model ids a bare `free` may use, from `routing.models`. Empty = the whole pool.
     /// A pin (`free/<model>`) supersedes it: the client named the model explicitly.
     models: Vec<String>,
+    /// Models explicitly switched off in Free mode (`"provider/model"` or bare `"model"`).
+    disabled_models: HashSet<String>,
+    /// Models marked unusable by catalog inspection (`"provider/model"` or bare `"model"`),
+    /// e.g. `opencode/jev-1.13-free` (unsupported `systemone` dialect).
+    unusable_models: HashSet<String>,
+    /// Last live probe result per `"provider/model"` (`(ok, latency_ms)`), used to put
+    /// working models fastest-first ahead of unprobed and failed ones.
+    probes: HashMap<String, (bool, u32)>,
 }
 
 impl Default for FreeKnobs {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             prefer: FreePrefer::Spread,
             max_attempts: DEFAULT_FREE_ATTEMPTS,
             per_account_rpm: None,
             models: Vec::new(),
+            disabled_models: HashSet::new(),
+            unusable_models: HashSet::new(),
+            probes: HashMap::new(),
         }
     }
 }
@@ -207,11 +221,14 @@ impl Default for FreeKnobs {
 impl FreeKnobs {
     /// Read the knobs, tolerating a partial or absent object.
     ///
-    /// The import path validates the document; a planner that refused to route because a
-    /// knob was missing would take free mode down over a field it can default around. An
-    /// unknown `prefer` falls back to `spread` for the same reason.
-    fn from_routing(routing: Option<&serde_json::Value>) -> Self {
-        let mut knobs = Self::default();
+    /// `default_enabled` is `false` on a fresh database (opt-in free mode) and `true` when
+    /// an imported document or legacy `free_mode` accounts already exist without an explicit
+    /// `routing.enabled` key. An explicit `routing.enabled` boolean always wins.
+    fn from_routing(routing: Option<&serde_json::Value>, default_enabled: bool) -> Self {
+        let mut knobs = Self {
+            enabled: default_enabled,
+            ..Self::default()
+        };
         let Some(routing) = routing else {
             return knobs;
         };
@@ -246,16 +263,80 @@ impl FreeKnobs {
                     .collect()
             })
             .unwrap_or_default();
+        if let Some(disabled) = routing
+            .get("disabled_models")
+            .and_then(serde_json::Value::as_array)
+        {
+            for item in disabled.iter().filter_map(serde_json::Value::as_str) {
+                let item = item.trim();
+                if !item.is_empty() {
+                    knobs.disabled_models.insert(item.to_string());
+                }
+            }
+        }
+        if let Some(unusable) = routing
+            .get("unusable_models")
+            .and_then(serde_json::Value::as_array)
+        {
+            for item in unusable.iter().filter_map(serde_json::Value::as_str) {
+                let item = item.trim();
+                if !item.is_empty() {
+                    knobs.unusable_models.insert(item.to_string());
+                }
+            }
+        }
+        if let Some(probes) = routing.get("probes").and_then(serde_json::Value::as_object) {
+            for (key, value) in probes {
+                if let Some(ok) = value.get("ok").and_then(serde_json::Value::as_bool) {
+                    let latency = value
+                        .get("latency_ms")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|ms| u32::try_from(ms).ok())
+                        .unwrap_or(u32::MAX);
+                    knobs.probes.insert(key.clone(), (ok, latency));
+                }
+            }
+        }
         knobs
     }
+
+    fn is_disabled(&self, provider: &str, model: &str) -> bool {
+        self.disabled_models
+            .contains(&format!("{provider}/{model}"))
+            || self.disabled_models.contains(model)
+    }
+
+    fn is_unusable(&self, provider: &str, model: &str) -> bool {
+        self.unusable_models
+            .contains(&format!("{provider}/{model}"))
+            || self.unusable_models.contains(model)
+    }
+
+    fn probe_rank(&self, provider: &str, model: &str) -> (u8, u32) {
+        match self.probes.get(&format!("{provider}/{model}")) {
+            Some((true, latency)) => (0, *latency),
+            None => (1, u32::MAX),
+            Some((false, latency)) => (2, *latency),
+        }
+    }
+}
+
+/// One target resolved inside a free-mode plan.
+#[derive(Debug, Clone)]
+struct FreeTarget {
+    provider: String,
+    model: String,
+    /// `true` when proven zero-price by a public catalog (`SOURCE_PUBLIC_CATALOG`), which
+    /// may also use a normal connected account on that provider or anonymous keyless access
+    /// where supported. Legacy/document rows stay strictly isolated to `free_mode` accounts.
+    public_catalog: bool,
 }
 
 /// One resolved reserved ref: the discovered rows it expands to, plus the knobs that
 /// order them.
 struct FreePlan {
-    /// `(provider, model)` pairs, already restricted to providers with an active free-mode
-    /// account and rotated for this request.
-    targets: Vec<(String, String)>,
+    /// Targets already filtered to eligible providers and ordered for this request.
+    targets: Vec<FreeTarget>,
     knobs: FreeKnobs,
 }
 
@@ -439,6 +520,11 @@ pub struct PlanRequest<'a> {
     /// resolves, before its entries are expanded, so allowlist/policy/team filters still
     /// see every expanded candidate.
     pub combo_start: Option<usize>,
+    /// The paying key's default free-form group slug, when configured. Scopes bare model
+    /// names to members of that group (in layout order, never widening to other providers
+    /// when a member exists) and leaves explicit `group/...`, `free*`, aliases, combos,
+    /// and `provider/model` provider pinning unchanged.
+    pub default_group: Option<&'a str>,
 }
 
 impl<'a> PlanRequest<'a> {
@@ -455,6 +541,7 @@ impl<'a> PlanRequest<'a> {
             canary: None,
             canary_seed: 0,
             combo_start: None,
+            default_group: None,
         }
     }
 }
@@ -577,14 +664,22 @@ impl Planner {
         let pool = free.as_ref().map(|plan| {
             plan.targets
                 .iter()
-                .map(|(provider, model_id)| (provider.clone(), model_id.clone(), true))
+                .map(|target| (target.provider.clone(), target.model.clone(), true))
                 .collect::<Vec<(String, String, bool)>>()
         });
         let targets = match pool {
             Some(targets) => targets,
             None => {
-                self.targets(catalog, store, model, &aliases, req.combo_start, &providers)
-                    .await?
+                self.targets(
+                    catalog,
+                    store,
+                    model,
+                    &aliases,
+                    req.combo_start,
+                    &providers,
+                    req.default_group,
+                )
+                .await?
             }
         };
         if targets.is_empty() {
@@ -676,6 +771,54 @@ impl Planner {
         }
         let seen_pairs = admitted;
 
+        // Guard against routing a Zen-only free OpenCode model through `opencode-go`:
+        // `/inference/go` only hosts a small subset of free models and rejects the rest.
+        // Only paid when `opencode-go` is actually in this plan, so normal requests pay
+        // no extra store read.
+        let seen_pairs = if free.is_none()
+            && seen_pairs
+                .iter()
+                .any(|(provider, _)| *provider == "opencode-go")
+        {
+            let free_rows = store.list_free_models().await?;
+            let mut filtered = Vec::with_capacity(seen_pairs.len());
+            let mut zen_only_rejected: Vec<String> = Vec::new();
+            for (provider, model_id) in seen_pairs {
+                if provider == "opencode-go" {
+                    let is_zen_free = free_rows.iter().any(|row| {
+                        row.provider == "opencode"
+                            && row.model == model_id
+                            && row.free
+                            && row.source == SOURCE_PUBLIC_CATALOG
+                    });
+                    // A Go-hosted row only counts when it is itself marked free: a paid
+                    // opencode-go row for a Zen-free id must not make the guard think
+                    // `/inference/go` serves it.
+                    let is_go_free = free_rows.iter().any(|row| {
+                        row.provider == "opencode-go" && row.model == model_id && row.free
+                    });
+                    if is_zen_free && !is_go_free {
+                        zen_only_rejected.push(format!(
+                            "{model_id} is a free OpenCode model served on opencode \
+                             (/inference/openai/v1), not opencode-go; use free/{model_id} or \
+                             opencode/{model_id}"
+                        ));
+                        continue;
+                    }
+                }
+                filtered.push((provider, model_id));
+            }
+            if filtered.is_empty() && !zen_only_rejected.is_empty() {
+                return Err(Error::NoRoute {
+                    model: model.to_string(),
+                    detail: summarize(&zen_only_rejected),
+                });
+            }
+            filtered
+        } else {
+            seen_pairs
+        };
+
         // Only `least_latency` needs the extra read; the other strategies must not pay
         // a query per plan for a table they never consult.
         let latencies = match strategy {
@@ -685,45 +828,77 @@ impl Planner {
         let mut candidates = Vec::with_capacity(active.len());
         let offset = affinity.unwrap_or_else(|| self.next_offset());
         let target_count = seen_pairs.len();
-        // A free plan may only be served by free-mode accounts. Read once, before the
-        // loop, because the closure below runs per candidate pair.
+        // A free plan may only be served by free-mode accounts — except verified
+        // `public-catalog` free models, which may also use an existing connected account on
+        // that provider or anonymous keyless dispatch where the provider supports it.
         let free_accounts = free.is_some();
         let default_rpm = free.as_ref().and_then(|plan| plan.knobs.per_account_rpm);
+        let public_pairs: HashSet<(&str, &str)> = free
+            .as_ref()
+            .map(|plan| {
+                plan.targets
+                    .iter()
+                    .filter(|target| target.public_catalog)
+                    .map(|target| (target.provider.as_str(), target.model.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
         for &(provider, model_id) in &seen_pairs {
             if disabled.contains(model_id) {
                 continue;
             }
+            let is_public_free = free_accounts && public_pairs.contains(&(provider, model_id));
             let mut matching: Vec<&Connection> = active
                 .iter()
                 .copied()
                 .filter(|c| c.provider == provider && (!free_accounts || c.credentials.free_mode))
                 .collect();
-            if matching.is_empty() {
+            let mut normal_public: Vec<&Connection> = if is_public_free {
+                active
+                    .iter()
+                    .copied()
+                    .filter(|c| c.provider == provider && !c.credentials.free_mode)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if matching.is_empty() && normal_public.is_empty() {
+                if is_public_free && supports_anonymous_free(provider) {
+                    candidates.push(Candidate {
+                        provider: provider.to_string(),
+                        model: model_id.to_string(),
+                        connection: ANONYMOUS_CONNECTION,
+                        priority: i32::MAX,
+                        dialect: providers.dialect(provider),
+                    });
+                }
                 continue;
             }
-            // Priority ascending; the strategy only orders inside each equal-priority
-            // group so the configured preference stays authoritative.
-            matching.sort_by_key(|c| c.priority);
-            let mut group_start = 0;
-            while group_start < matching.len() {
-                let priority = matching[group_start].priority;
-                let mut group_end = group_start;
-                while group_end < matching.len() && matching[group_end].priority == priority {
-                    group_end += 1;
-                }
-                let group = &mut matching[group_start..group_end];
-                if free_accounts {
-                    free_order(group, &self.free, default_rpm);
-                } else {
-                    match strategy {
-                        Strategy::Priority | Strategy::Cheapest => rotate(group, offset),
-                        Strategy::Weighted => weighted_order(group, offset),
-                        Strategy::LeastLatency => latency_order(group, &latencies),
+            let order_group = |list: &mut Vec<&Connection>| {
+                list.sort_by_key(|c| c.priority);
+                let mut group_start = 0;
+                while group_start < list.len() {
+                    let priority = list[group_start].priority;
+                    let mut group_end = group_start;
+                    while group_end < list.len() && list[group_end].priority == priority {
+                        group_end += 1;
                     }
+                    let group = &mut list[group_start..group_end];
+                    if free_accounts {
+                        free_order(group, &self.free, default_rpm);
+                    } else {
+                        match strategy {
+                            Strategy::Priority | Strategy::Cheapest => rotate(group, offset),
+                            Strategy::Weighted => weighted_order(group, offset),
+                            Strategy::LeastLatency => latency_order(group, &latencies),
+                        }
+                    }
+                    group_start = group_end;
                 }
-                group_start = group_end;
-            }
-            for conn in matching {
+            };
+            order_group(&mut matching);
+            order_group(&mut normal_public);
+            for conn in matching.into_iter().chain(normal_public) {
                 candidates.push(Candidate {
                     provider: provider.to_string(),
                     model: model_id.to_string(),
@@ -759,7 +934,7 @@ impl Planner {
                 let resolved: Vec<String> = plan
                     .targets
                     .iter()
-                    .map(|(provider, model_id)| format!("{provider}/{model_id}"))
+                    .map(|target| format!("{}/{}", target.provider, target.model))
                     .collect();
                 format!(
                     "free mode resolved {} discovered free model(s) but none has an active \
@@ -901,7 +1076,9 @@ impl Planner {
             // dispatcher tries first. A real 429 is still the breaker's business, and this
             // module never refuses a request.
             if let Some(head) = candidates.first() {
-                self.free.note(head.connection);
+                if !is_anonymous_connection(head.connection) {
+                    self.free.note(head.connection);
+                }
             }
         }
 
@@ -963,23 +1140,56 @@ impl Planner {
         };
 
         let config = store.free_mode_config().await?;
-        let knobs = FreeKnobs::from_routing(config.as_ref().map(|config| &config.routing));
+        let has_free_accounts = connections
+            .iter()
+            .any(|connection| connection.credentials.free_mode);
+        let has_imported_doc = config
+            .as_ref()
+            .and_then(|cfg| cfg.document.get("version"))
+            .is_some();
+        let default_enabled = has_free_accounts || has_imported_doc;
+        let knobs = FreeKnobs::from_routing(
+            config.as_ref().map(|config| &config.routing),
+            default_enabled,
+        );
         if !knobs.enabled {
             return Err(no_route(
                 model,
-                "free-mode routing is switched off (`routing.enabled: false` in the imported \
-                 document); set it to `true` and re-import",
+                "free-mode routing is switched off; turn it on in Free mode (PATCH /api/free-mode \
+                 {\"enabled\": true}) or set `routing.enabled: true` in an imported document",
             ));
         }
 
         // One read for the whole pool, from the same scoped list the rest of planning
         // uses: a team key therefore cannot reach an instance-wide free account, and the
         // credential was already decrypted by that read.
-        let accounts: HashSet<&str> = connections
+        let free_accounts: HashSet<&str> = connections
             .iter()
             .filter(|connection| connection.is_active && connection.credentials.free_mode)
             .map(|connection| connection.provider.as_str())
             .collect();
+        let normal_accounts: HashSet<&str> = connections
+            .iter()
+            .filter(|connection| connection.is_active && !connection.credentials.free_mode)
+            .map(|connection| connection.provider.as_str())
+            .collect();
+
+        let rows = store.list_free_models().await?;
+        let free_rows: Vec<rrouter_store::FreeModel> = rows
+            .into_iter()
+            .filter(|row| row.free && !knobs.is_unusable(&row.provider, &row.model))
+            .collect();
+
+        let row_can_route = |row: &rrouter_store::FreeModel| -> bool {
+            if free_accounts.contains(row.provider.as_str()) {
+                return true;
+            }
+            if row.source == SOURCE_PUBLIC_CATALOG {
+                return normal_accounts.contains(row.provider.as_str())
+                    || supports_anonymous_free(&row.provider);
+            }
+            false
+        };
 
         let wanted_provider = match raw_provider {
             Some("") => {
@@ -999,7 +1209,13 @@ impl Planner {
                         ),
                     ));
                 };
-                if !accounts.contains(provider.as_str()) {
+                let has_public_route = free_rows.iter().any(|row| {
+                    row.provider == provider
+                        && row.source == SOURCE_PUBLIC_CATALOG
+                        && (normal_accounts.contains(provider.as_str())
+                            || supports_anonymous_free(&provider))
+                });
+                if !free_accounts.contains(provider.as_str()) && !has_public_route {
                     return Err(no_route(
                         model,
                         format!(
@@ -1014,9 +1230,6 @@ impl Planner {
             None => None,
         };
 
-        let rows = store.list_free_models().await?;
-        let free_rows: Vec<rrouter_store::FreeModel> =
-            rows.into_iter().filter(|row| row.free).collect();
         if free_rows.is_empty() {
             return Err(no_route(
                 model,
@@ -1044,16 +1257,17 @@ impl Planner {
 
         // `routing.models` narrows the *unqualified* pool only: a client that pinned a
         // model has already chosen, and applying the knob too would fail a valid pin for a
-        // reason the client cannot see.
+        // reason the client cannot see. `disabled_models` removes models toggled off in
+        // Free mode from unqualified pool routing too.
         let narrowed = raw_provider.is_none() && model_filter.is_none();
         let knob_matches = knobs
             .models
             .iter()
             .any(|allowed| free_rows.iter().any(|row| &row.model == allowed));
 
-        let mut targets: Vec<(String, String)> = free_rows
+        let mut targets: Vec<FreeTarget> = free_rows
             .iter()
-            .filter(|row| accounts.contains(row.provider.as_str()))
+            .filter(|row| row_can_route(row))
             .filter(|row| {
                 wanted_provider
                     .as_deref()
@@ -1062,12 +1276,19 @@ impl Planner {
             .filter(|row| {
                 model_filter.is_none_or(|wanted| model_matches(&row.provider, &row.model, wanted))
             })
+            // `disabled_models` ("off" in Free mode) means never used — even for a pinned
+            // ref (`free/big-pickle`): the operator toggled that model off on purpose.
+            .filter(|row| !knobs.is_disabled(&row.provider, &row.model))
             .filter(|row| {
                 !narrowed
                     || knobs.models.is_empty()
                     || knobs.models.iter().any(|allowed| allowed == &row.model)
             })
-            .map(|row| (row.provider.clone(), row.model.clone()))
+            .map(|row| FreeTarget {
+                provider: row.provider.clone(),
+                model: row.model.clone(),
+                public_catalog: row.source == SOURCE_PUBLIC_CATALOG,
+            })
             .collect();
 
         if targets.is_empty() {
@@ -1129,36 +1350,58 @@ impl Planner {
                     summarize(&available)
                 )
             } else {
-                // Providers whose rows cannot be used because no account is active: an
-                // activation problem, not a discovery one, and the message must say which.
+                // Providers whose rows cannot be used because no account is active or every
+                // model was toggled off.
                 let mut idle: Vec<String> = Vec::new();
                 for row in &free_rows {
-                    if !accounts.contains(row.provider.as_str())
-                        && !idle.iter().any(|provider| provider == &row.provider)
+                    if !row_can_route(row) && !idle.iter().any(|provider| provider == &row.provider)
                     {
                         idle.push(row.provider.clone());
                     }
                 }
-                format!(
-                    "discovered free models exist ({}) but no free-mode account on those \
-                     providers is active; activate one and run discovery again",
-                    summarize(&idle)
-                )
+                if idle.is_empty() {
+                    "every discovered free model is currently switched off in Free mode; enable \
+                     at least one model in Free mode"
+                        .to_string()
+                } else {
+                    format!(
+                        "discovered free models exist ({}) but no free-mode account on those \
+                         providers is active; activate one and run discovery again",
+                        summarize(&idle)
+                    )
+                }
             };
             return Err(no_route(model, detail));
         }
 
-        // Model rotation: successive free plans start at successive discovered models, so
-        // two requests in a row never open with the same (account, proxy) pair. A pinned
-        // model yields one entry and this is a no-op, which is why the account order below
-        // still spreads: `free_order` rotates the accounts of that one model.
-        rotate(&mut targets, self.free.turn());
+        // Order targets: when live probes exist, put working models first (fastest latency
+        // first), unprobed next (rotated so consecutive calls spread), and failed models
+        // last. When no probe data exists, rotate the whole pool identically to before.
+        let turn = self.free.turn();
+        if knobs.probes.is_empty() {
+            rotate(&mut targets, turn);
+        } else {
+            let mut working: Vec<FreeTarget> = Vec::new();
+            let mut unprobed: Vec<FreeTarget> = Vec::new();
+            let mut failed: Vec<FreeTarget> = Vec::new();
+            for target in targets {
+                match knobs.probe_rank(&target.provider, &target.model).0 {
+                    0 => working.push(target),
+                    1 => unprobed.push(target),
+                    _ => failed.push(target),
+                }
+            }
+            working.sort_by_key(|target| knobs.probe_rank(&target.provider, &target.model).1);
+            rotate(&mut unprobed, turn);
+            targets = working.into_iter().chain(unprobed).chain(failed).collect();
+        }
         Ok(Some(FreePlan { targets, knobs }))
     }
 
     /// Ordered `(provider, model, explicit)` list for `model`, before connection
     /// expansion. `explicit` records that the caller named the provider, which stops
     /// an unknown id from being fanned out to every active connection.
+    #[allow(clippy::too_many_arguments)]
     async fn targets(
         &self,
         catalog: &Catalog,
@@ -1167,6 +1410,7 @@ impl Planner {
         aliases: &[rrouter_store::ModelAlias],
         combo_start: Option<usize>,
         providers: &RuntimeProviders,
+        default_group: Option<&str>,
     ) -> Result<Vec<(String, String, bool)>> {
         let mut current = model.to_string();
 
@@ -1197,7 +1441,7 @@ impl Planner {
                     .copied()
                     .unwrap_or(entry.as_str());
                 out.extend(
-                    self.expand_entry_resolved(catalog, store, resolved, providers)
+                    self.expand_entry_resolved(catalog, store, resolved, providers, None)
                         .await?,
                 );
             }
@@ -1207,20 +1451,29 @@ impl Planner {
             return Err(Error::NotFound(format!("combo {}", combo_name)));
         }
 
-        self.expand_entry_resolved(catalog, store, &current, providers)
+        self.expand_entry_resolved(catalog, store, &current, providers, default_group)
             .await
     }
 
     /// Resolve a free-form group reference (`main/provider/model`) before falling back to
-    /// the provider/catalog grammar. The group name is a namespace, not a fan-out alias:
-    /// the provider segment pins the row, so it cannot be ambiguous when several providers
-    /// serve the same id. Combining providers is a combo's job.
+    /// the provider/catalog grammar. The group slug (or legacy display name) is a
+    /// namespace, not a fan-out alias: the provider segment pins the row, so it cannot be
+    /// ambiguous when several providers serve the same id. Combining providers is a
+    /// combo's job.
+    ///
+    /// When `default_group` is set on the paying key and the entry has no explicit group
+    /// prefix:
+    /// - `provider/model` or `code/model` keeps its pinned provider (never widens).
+    /// - A bare model id scopes to members of `default_group` (ordered by layout position,
+    ///   marked `explicit = true` so it never widens to unrelated providers); if the group
+    ///   has no member for that id, falls back to normal catalog resolution.
     async fn expand_entry_resolved(
         &self,
         catalog: &Catalog,
         store: &Store,
         entry: &str,
         providers: &RuntimeProviders,
+        default_group: Option<&str>,
     ) -> Result<Vec<(String, String, bool)>> {
         if let Some((head, rest)) = entry.split_once('/') {
             if !rest.is_empty() && providers.id(head).is_none() {
@@ -1228,11 +1481,56 @@ impl Planner {
                     if let Some(provider) = providers.id(segment) {
                         if !id.is_empty() {
                             if let Some(preset) = store.default_model_preset().await? {
-                                if preset.layout.group_by_name(head).is_some() {
+                                if let Some((group, matched_by_name)) =
+                                    preset.layout.resolve_group_prefix(head)
+                                {
+                                    if matched_by_name {
+                                        log_legacy_group_prefix_once(
+                                            head,
+                                            group.effective_slug().unwrap_or(&group.name),
+                                        );
+                                    }
                                     return Ok(vec![(provider, id.to_string(), true)]);
                                 }
                             }
                         }
+                    }
+                }
+            }
+        } else if let Some(default_group_ref) = default_group {
+            // Bare model id with a key default_group: prefer/scope to that group's
+            // explicit members in layout position order. If the group has no member for
+            // this id (or was deleted), fall back to normal catalog resolution.
+            if let Some(preset) = store.default_model_preset().await? {
+                if let Some((group, matched_by_name)) =
+                    preset.layout.resolve_group_prefix(default_group_ref)
+                {
+                    if matched_by_name {
+                        log_legacy_group_prefix_once(
+                            default_group_ref,
+                            group.effective_slug().unwrap_or(&group.name),
+                        );
+                    }
+                    let mut members: Vec<(u32, &str)> = preset
+                        .layout
+                        .items
+                        .iter()
+                        .filter(|item| {
+                            item.id == entry
+                                && item.provider != "rrouter"
+                                && item.group.as_deref() == Some(group.id.as_str())
+                        })
+                        .map(|item| (item.position, item.provider.as_str()))
+                        .collect();
+                    members.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+                    let mut out: Vec<(String, String, bool)> = Vec::with_capacity(members.len());
+                    for (_, provider) in members {
+                        if !out.iter().any(|(existing, _, _)| existing == provider) {
+                            out.push((provider.to_string(), entry.to_string(), true));
+                        }
+                    }
+                    if !out.is_empty() {
+                        return Ok(out);
                     }
                 }
             }
@@ -1279,6 +1577,22 @@ impl Planner {
             .into_iter()
             .map(|provider| (provider.to_string(), entry.to_string(), false))
             .collect()
+    }
+}
+
+/// Log once per `(legacy_prefix, slug)` pair at debug level when a client uses a group's
+/// legacy display name instead of its stable slug. Never an error.
+fn log_legacy_group_prefix_once(legacy_prefix: &str, slug: &str) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<HashSet<(String, String)>>> =
+        std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(HashSet::new()));
+    let key = (legacy_prefix.to_string(), slug.to_string());
+    if seen.lock().is_ok_and(|mut set| set.insert(key)) {
+        tracing::debug!(
+            legacy_prefix = %legacy_prefix,
+            group_slug = %slug,
+            "resolved legacy group-name prefix to stable slug"
+        );
     }
 }
 
@@ -1749,6 +2063,7 @@ mod tests {
                     reasoning_effort: None,
                     reasoning_tokens: 0,
                     session_id: None,
+                    fallback_reason: None,
                 })
                 .await
                 .expect("usage");

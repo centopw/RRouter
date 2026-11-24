@@ -62,6 +62,7 @@ fn row_json(r: &UsageRecord) -> Value {
         "reasoning_effort": r.reasoning_effort,
         "reasoning_tokens": r.reasoning_tokens,
         "session_id": r.session_id,
+        "fallback_reason": r.fallback_reason,
         // Every route that writes a usage row is a `POST`; the method is a property of
         // the log, not a stored column. `protocol` is the client dialect the endpoint
         // names, `None` for a passthrough whose path is not a canonical dialect.
@@ -757,5 +758,50 @@ pub async fn summary(
             ok_json(json!({ "data": data }))
         }
         Err(e) => admin_error(&e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_usage(fallback_reason: Option<&str>) -> UsageRecord {
+        UsageRecord {
+            id: Some(1),
+            ts: 1_700_000_000,
+            request_id: Some(Uuid::nil()),
+            trace_id: None,
+            provider: "opencode".to_string(),
+            model: "big-pickle".to_string(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".to_string()),
+            key_id: None,
+            cost_micros: 0,
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 42,
+            ttft_ms: 10,
+            upstream_ms: 5,
+            status: 200,
+            streamed: false,
+            error: None,
+            requested_model: Some("claude-sonnet-4-5".to_string()),
+            finish_reason: Some("stop".to_string()),
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+            fallback_reason: fallback_reason.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn row_json_exposes_fallback_reason() {
+        let with_reason = row_json(&sample_usage(Some("quota")));
+        assert_eq!(with_reason["fallback_reason"], json!("quota"));
+
+        let without_reason = row_json(&sample_usage(None));
+        assert_eq!(without_reason["fallback_reason"], Value::Null);
     }
 }

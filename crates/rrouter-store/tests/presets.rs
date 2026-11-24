@@ -208,6 +208,7 @@ fn layout_groups_are_unique_ordered_and_bound_to_providers() {
     let group = |id: &str, name: &str, provider: Option<&str>| LayoutGroup {
         id: id.to_string(),
         name: name.to_string(),
+        slug: None,
         provider: provider.map(str::to_string),
         visible: true,
         access: None,
@@ -297,6 +298,83 @@ fn layout_groups_are_unique_ordered_and_bound_to_providers() {
     let ordered = valid.clone();
     assert_eq!(ordered.groups[0].id, "g-fast");
     assert_eq!(ordered.groups[1].id, "provider:openai");
+}
+
+#[tokio::test]
+async fn group_slug_is_derived_and_immutable_on_rename() {
+    let store = Store::open_in_memory().expect("store");
+    let layout = LayoutDocument {
+        schema_version: LAYOUT_SCHEMA_VERSION,
+        auto_include_new: true,
+        groups: vec![
+            LayoutGroup {
+                id: "g-main".into(),
+                name: "Main Pool".into(),
+                slug: None,
+                provider: None,
+                visible: true,
+                access: None,
+            },
+            LayoutGroup {
+                id: "provider:openai".into(),
+                name: "OpenAI".into(),
+                slug: None,
+                provider: Some("openai".into()),
+                visible: true,
+                access: None,
+            },
+        ],
+        items: Vec::new(),
+    };
+    let created = store
+        .create_model_preset("slug-test", None, &layout, "admin")
+        .await
+        .expect("create");
+    assert_eq!(created.layout.groups[0].slug.as_deref(), Some("main-pool"));
+    assert_eq!(created.layout.groups[1].slug, None);
+
+    // Renaming the display name while omitting `slug` preserves the stored slug.
+    let mut renamed = created.layout.clone();
+    renamed.groups[0].name = "Primary".into();
+    renamed.groups[0].slug = None;
+    let PresetUpdateOutcome::Updated(after_rename) = store
+        .update_model_preset_layout(created.id, created.revision, &renamed, "admin")
+        .await
+        .expect("rename")
+    else {
+        panic!("expected updated");
+    };
+    assert_eq!(after_rename.layout.groups[0].name, "Primary");
+    assert_eq!(
+        after_rename.layout.groups[0].slug.as_deref(),
+        Some("main-pool")
+    );
+    // Both stable slug and current display name resolve to the same group.
+    let (by_slug, legacy_slug) = after_rename
+        .layout
+        .resolve_group_prefix("main-pool")
+        .expect("by slug");
+    assert_eq!(by_slug.id, "g-main");
+    assert!(!legacy_slug);
+    let (by_name, legacy_name) = after_rename
+        .layout
+        .resolve_group_prefix("Primary")
+        .expect("by display name");
+    assert_eq!(by_name.id, "g-main");
+    assert!(legacy_name);
+
+    // Attempting to mutate the stored slug is rejected with a clear 400.
+    let mut mutated_slug = after_rename.layout.clone();
+    mutated_slug.groups[0].slug = Some("different-slug".into());
+    let err = store
+        .update_model_preset_layout(created.id, after_rename.revision, &mutated_slug, "admin")
+        .await
+        .expect_err("mutating slug must fail");
+    assert_eq!(err.status(), 400);
+    assert!(
+        err.to_string().contains("immutable"),
+        "clear immutability error: {err}"
+    );
 }
 
 #[test]
@@ -755,10 +833,11 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
              ALTER TABLE combos DROP COLUMN cursor; \
              ALTER TABLE eval_suites DROP COLUMN system_prompt; \
              ALTER TABLE eval_runs DROP COLUMN judge_model; \
-             DROP INDEX IF EXISTS idx_api_keys_system_kind; ALTER TABLE api_keys DROP COLUMN kind; ALTER TABLE api_keys DROP COLUMN sealed_secret; ALTER TABLE api_keys DROP COLUMN owner_user_id; ALTER TABLE api_keys DROP COLUMN last_used_at; \
+             DROP INDEX IF EXISTS idx_api_keys_system_kind; ALTER TABLE api_keys DROP COLUMN kind; ALTER TABLE api_keys DROP COLUMN sealed_secret; ALTER TABLE api_keys DROP COLUMN owner_user_id; ALTER TABLE api_keys DROP COLUMN last_used_at; ALTER TABLE api_keys DROP COLUMN default_group; \
              ALTER TABLE usage DROP COLUMN requested_model; ALTER TABLE usage DROP COLUMN finish_reason; \
              ALTER TABLE usage DROP COLUMN reasoning_effort; ALTER TABLE usage DROP COLUMN reasoning_tokens; \
              ALTER TABLE usage DROP COLUMN session_id; \
+             ALTER TABLE usage DROP COLUMN fallback_reason; \
              ALTER TABLE connections DROP COLUMN refusal; \
              PRAGMA user_version = 29;",
         )

@@ -1,15 +1,78 @@
 # Free mode
 
-Free mode lets one JSON document declare free-tier providers, the accounts on them and the
-egress proxy each account must leave through. RRouter then discovers which models each
-account actually serves, and exposes the reserved ref `free` — routed across every free
-account and proxy pair so per-account rate limits are hit later rather than failing a
-request.
+Free mode finds free endpoints and models automatically and uses them, so a user keeps a
+working model when their paid tokens run out — or when they just want a free one. Nothing
+has to be imported or configured: on startup RRouter fetches the public OpenCode and
+OpenRouter catalogs, keeps every zero-priced chat model that speaks a dialect it can route,
+and exposes the reserved ref `free` across that pool.
 
-The document is the only place free mode is configured. Nothing about it is compiled in:
-adding a provider, an account or a proxy is an import, not a restart.
+The default is **off** and **opt-in**: flip the pool on, flip automatic fallback on, done.
+An optional JSON document (the *Advanced* path) remains for operators who need named
+free-tier accounts, per-account rate limits and egress proxies.
 
-## The document
+## Quick setup
+
+1. `GET /api/free-mode` — the discovered pool is already populated (OpenCode zero-price chat
+   models; OpenRouter `:free` models).
+2. `PATCH /api/free-mode {"enabled": true}` — turns the pool on and probes the working
+   models so the UI shows a live result.
+3. `PATCH /api/free-mode {"fallback_on_quota": true}` (optional) — routes a paid request to
+   `free` when the paid route fails with quota exhaustion, upstream `429` or `402`.
+
+Then request `free` (the whole working pool) or `free/<model>` (one pinned model, e.g.
+`free/big-pickle`):
+
+```json
+POST /v1/chat/completions
+{ "model": "free", "messages": [{ "role": "user", "content": "hi" }] }
+```
+
+`free` never widens to a non-free account, and an anonymous keyless `Bearer public` send is
+used only for verified public-catalog free models on OpenCode — never for a paid model.
+
+## Discovery
+
+Two public catalogs are fetched (keyless, no account) on startup and every 30 minutes, and
+on demand via `?refresh=true`:
+
+- **OpenCode Zen** — `https://opencode.ai/inference/v1/models`. Free rule:
+  `cost.text.input.price == 0 && cost.text.output.price == 0`. A model is usable only when
+  it declares a `chat-completions` API; a model that speaks another dialect (for example
+  `jev-1.13-free`, `systemone`) is recorded but marked `usable: false` and excluded from
+  routing, with the reason surfaced in the UI.
+- **OpenRouter** — `https://openrouter.ai/api/v1/models`. Free rule: `id` ends in `:free`,
+  or `pricing.prompt == "0" && pricing.completion == "0"`. These require an account
+  (`auth_mode: key_required`), so they stay visible with an "add a key" link until one is
+  connected on Providers.
+
+For a model to be served *free*, it must be verified free by one of those rules. A normal
+account on the provider is eligible for a verified-free model, but never for a paid one; a
+paid model can never ride the `free` pool.
+
+## Automatic fallback
+
+Opt-in (`fallback_on_quota`, default `false`). Fires only when **all** hold:
+
+1. the free pool is on *and* fallback is on,
+2. the request did not already name a `free` ref and did not set
+   `provider.allow_fallbacks: false`,
+3. the paid route failed with a budget/quota limit (`quota`), an upstream `429` or
+   `all_candidates_cooling_down` (`rate_limit`), or an upstream `402` (`payment_required`).
+
+On fallback the response carries `x-rrouter-fallback: free`,
+`x-rrouter-fallback-reason: <quota|rate_limit|payment_required>` and
+`x-rrouter-fallback-model: <provider>/<model>`; the usage row records the same reason with
+`cost_micros = 0`. If the free pool also fails, the **original paid error** is returned —
+fallback never hides the real failure behind a secondary one.
+
+OpenCode's account/IP-wide `FreeUsageLimitError` (`429`) cools the whole provider (honoring
+the HTTP `Retry-After`, capped at one hour) instead of burning one attempt per free model,
+so a single exhausted bucket fails over to another provider rather than fanning out.
+
+## Advanced: the JSON document
+
+The document path — named free-tier providers, accounts and per-account egress proxies — is
+unchanged, and lives behind *Advanced* in the UI. Everything below describes it in full.
 
 ```json
 {
@@ -184,7 +247,109 @@ the marker never downgrades a seeded row.
 
 ## Endpoints
 
-All three sit on the admin API and are gated exactly like the rest of `/api/*`.
+All of these sit on the admin API and are gated exactly like the rest of `/api/*`. The
+zero-config surface is `GET`/`PATCH /api/free-mode`, `PATCH /api/free-mode/models` and
+`POST /api/free-mode/probe`; the document path (`import`/`discover`/`DELETE`) is unchanged.
+
+### `GET /api/free-mode[?refresh=true]`
+
+Returns the complete state in one call. Fetches the public catalogs first when they have not
+been fetched yet (or `?refresh=true`), degrading to cached rows plus `catalogs[].error` on a
+network failure.
+
+```json
+{
+  "enabled": false,
+  "fallback_on_quota": false,
+  "fallback_triggers": ["quota", "429", "402"],
+  "ref": "free",
+  "last_checked_at": 1763890000,
+  "discovered_at": 1763890000,
+  "summary": { "total": 26, "usable": 25, "enabled": 25, "working": 7, "unusable": 1 },
+  "next_fallback_model": "big-pickle",
+  "models": [
+    {
+      "provider": "opencode",
+      "provider_display": "OpenCode",
+      "model": "big-pickle",
+      "display": "Big Pickle",
+      "ref": "free/big-pickle",
+      "endpoint": "https://opencode.ai/inference/openai/v1/chat/completions",
+      "dialect": "openai_chat",
+      "free": true,
+      "enabled": true,
+      "usable": true,
+      "unusable_reason": null,
+      "auth_mode": "key_or_anonymous",
+      "has_account": false,
+      "needs_key": false,
+      "price": 0.0,
+      "source": "public-catalog",
+      "discovered_at": 1763890000,
+      "probe": { "ok": true, "status": 200, "latency_ms": 820, "message": null, "needs_key": false, "at": 1763890000 }
+    }
+  ],
+  "catalogs": [
+    { "provider": "opencode", "url": "https://opencode.ai/inference/v1/models", "discovered_at": 1763890000, "models": 11, "usable": 10, "error": null }
+  ],
+  "document": null,
+  "routing": { "enabled": false, "fallback_on_quota": false, "per_account_rpm": null, "max_attempts": 8, "prefer": "spread", "disabled_models": [] },
+  "updated_at": null,
+  "accounts": []
+}
+```
+
+- `probe` is `null` until the model is first probed; otherwise
+  `{ ok, status, latency_ms, message, needs_key, at }`.
+- `auth_mode` is `key_or_anonymous` (OpenCode — an account if connected, else anonymous
+  `Bearer public`), `key_required` (OpenRouter — needs a connected account), or `anonymous`.
+- `needs_key` is `true` when the model needs an account the operator has not connected
+  (`key_required` with no account, or the last probe hit `FreeUsageLimitError`/`401`).
+- `next_fallback_model` is the model the free pool would pick right now (working-first),
+  or `null`.
+- `enabled` defaults to `false` on a fresh instance; importing an Advanced document with
+  `routing.enabled: true` turns it on.
+
+### `PATCH /api/free-mode`
+
+Toggles the pool and/or automatic fallback. Works with **zero** document imported. All
+fields optional; unknown fields are rejected.
+
+```json
+{ "enabled": true, "fallback_on_quota": true, "probe_on_enable": true }
+```
+
+On `enabled` turning `false -> true` (with `probe_on_enable`, the default) the enabled
+usable models are probed concurrently (concurrency 5, 6s each); a `key_required` model with
+no account returns an instant synthetic `{ ok: false, status: 401, message: "Add an
+<Provider> API key on Providers to use its free models", needs_key: true }`. Responds `200`
+with the same shape as `GET /api/free-mode` (fresh probes and summary).
+
+### `PATCH /api/free-mode/models`
+
+Enable or disable one discovered model. The model id travels in the JSON body so ids with a
+`/` (e.g. `inclusionai/ling-3.2-flash:free`) never break URL routing.
+
+```json
+{ "provider": "opencode", "model": "tidepool-alpha-free", "enabled": false }
+```
+
+`400` when `provider`/`model` are missing or enabling a `usable: false` model; `404` when
+`(provider, model)` was not discovered. Responds `200` with
+`{ ok, provider, model, enabled, summary, next_fallback_model }`.
+
+### `POST /api/free-mode/probe`
+
+Probe one model now (the "Try" button) or all enabled usable models (`{}` / `{"all": true}`,
+optionally `{"refresh_catalogs": true}`). Always `200` for a probe outcome; `400`/`404` only
+for invalid input or an unknown model.
+
+```json
+{ "provider": "opencode", "model": "big-pickle" }
+```
+
+Responds `200` with `{ provider, model, endpoint, probe }` (single) or
+`{ ok, checked_at, results: [{ provider, model, endpoint, probe }] }` (all).
 
 ### `POST /api/free-mode/import`
 
@@ -212,67 +377,6 @@ provider entries, `accounts` counts connections created and updated, `disabled` 
 accounts `prune` parked.
 
 Failures are `400` with the `details` list above, or a store error as `{"error": {...}}`.
-
-### `GET /api/free-mode`
-
-```json
-{
-  "document": {
-    "version": 1,
-    "prune": false,
-    "routing": { "…": "as imported" },
-    "proxies": { "p1": "http://***@10.0.0.1:8080" },
-    "providers": [
-      {
-        "provider": "openrouter",
-        "models": ["deepseek-r1:free"],
-        "accounts": [
-          {
-            "label": "acc-1",
-            "priority": 0,
-            "weight": 100,
-            "rpm": 5,
-            "proxy": "p1",
-            "has_api_key": true,
-            "has_access_token": false,
-            "has_refresh_token": false
-          }
-        ]
-      }
-    ]
-  },
-  "routing": { "enabled": true, "per_account_rpm": 10, "max_attempts": 8, "prefer": "spread", "models": ["…"] },
-  "updated_at": 1763760000,
-  "accounts": [
-    {
-      "connection_id": "0b4c…",
-      "provider": "openrouter",
-      "label": "acc-1",
-      "proxy": "http://***@10.0.0.1:8080",
-      "free_rpm": 5,
-      "is_active": true,
-      "last_error": null
-    }
-  ],
-  "models": [
-    {
-      "provider": "openrouter",
-      "model": "deepseek-r1:free",
-      "free": true,
-      "price": 0.0,
-      "source": "provider-list",
-      "discovered_at": 1763760100
-    }
-  ],
-  "discovered_at": 1763760100
-}
-```
-
-`document` is `null` until something was imported; `accounts` and `models` are populated
-independently, so an instance after a teardown is still inspectable. `document` is the
-stored copy with every secret replaced: `has_api_key` / `has_access_token` /
-`has_refresh_token` booleans, and proxy URLs masked. Which ids are in `routing.models` is
-read from `routing`, not from a per-model flag.
 
 ### `POST /api/free-mode/discover`
 
@@ -334,14 +438,18 @@ upgrades the row to `provider-list`.
 
 ## Choosing models
 
-Four refs are reserved, and none of them ever widens to a non-free-mode account:
+Four refs are reserved, and none of them ever widens to a non-free account:
 
 | Ref | What it spends |
 | --- | --- |
-| `free` | Every free model of every active free-mode account, narrowed by `routing.models` when that list is non-empty. |
+| `free` | Every enabled, usable free model — the public-catalog pool plus free-mode accounts, narrowed by `routing.models` when that list is non-empty. |
 | `free:PROVIDER` | The same pool limited to one provider, e.g. `free:openrouter`. |
 | `free/MODEL` | One model id across every free-mode account that serves it. |
 | `free:PROVIDER/MODEL` | One model on one provider's free-mode accounts. |
+
+A normal (non-`free_mode`) account on a provider is eligible for a **verified-free** model
+but never for a paid one. A model is verified free only by a public catalog's zero price or a
+`:free`/`-free` id; an unknown price is not a free price.
 
 A concrete call:
 

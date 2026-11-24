@@ -12,14 +12,34 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 44;
+pub const SCHEMA_VERSION: i64 = 46;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
     V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40,
-    V41, V42, V43, V44,
+    V41, V42, V43, V44, V45, V46,
 ];
+
+/// V46: per-key `default_group` + stable routing `slug` backfill on preset groups.
+///
+/// `api_keys.default_group` stores a free-form group's stable slug (nullable; `NULL` keeps
+/// the pre-v46 behaviour). In the same transaction, [`migrate`] backfills `slug` on every
+/// existing free-form group inside `model_presets.layout_json` so renaming a group display
+/// name never alters existing clients' callable refs.
+const V46: &str = r#"
+ALTER TABLE api_keys ADD COLUMN default_group TEXT;
+"#;
+
+/// V45: free-mode fallback attribution.
+///
+/// `fallback_reason` records why a request that started on a paid route was served by the
+/// free pool instead (`quota`, `rate_limit`, `payment_required`), or `NULL` when no
+/// fallback to free mode occurred. Additive and nullable: pre-v45 rows keep reading as
+/// `None`.
+const V45: &str = r#"
+ALTER TABLE usage ADD COLUMN fallback_reason TEXT;
+"#;
 
 /// V44: free mode — the imported document plus the models discovery proved free.
 ///
@@ -952,10 +972,50 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
         }
         let tx = conn.transaction().map_err(db_err)?;
         tx.execute_batch(sql).map_err(db_err)?;
+        if target == 46 {
+            backfill_preset_group_slugs(&tx)?;
+        }
         // `PRAGMA user_version` does not accept a bound parameter.
         tx.execute_batch(&format!("PRAGMA user_version = {target}"))
             .map_err(db_err)?;
         tx.commit().map_err(db_err)?;
+    }
+    Ok(())
+}
+
+/// V46 data backfill: assign a stable `slug` to every free-form group in every stored
+/// preset layout that does not already have one. Provider buckets keep `slug: None`.
+fn backfill_preset_group_slugs(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT id, layout_json FROM model_presets")
+            .map_err(db_err)?;
+        let iter = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(db_err)?;
+        iter.map(|r| r.map_err(db_err))
+            .collect::<Result<Vec<_>>>()?
+    };
+    for (id, raw_layout) in rows {
+        let Ok(mut layout) = serde_json::from_str::<crate::presets::LayoutDocument>(&raw_layout)
+        else {
+            continue;
+        };
+        if !layout
+            .groups
+            .iter()
+            .any(|g| g.provider.is_none() && g.slug.is_none())
+        {
+            continue;
+        }
+        crate::presets::normalize_group_slugs(&mut layout, None)?;
+        let updated = serde_json::to_string(&layout)
+            .map_err(|e| Error::Store(format!("serialize backfilled preset {id}: {e}")))?;
+        tx.execute(
+            "UPDATE model_presets SET layout_json = ?2 WHERE id = ?1",
+            rusqlite::params![id, updated],
+        )
+        .map_err(db_err)?;
     }
     Ok(())
 }
@@ -1945,5 +2005,120 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    /// v44 -> v45: `usage.fallback_reason` is added as a nullable TEXT column, existing
+    /// usage rows keep reading with NULL, and re-running `migrate` is a no-op.
+    #[test]
+    fn upgrades_from_v44_landing_v45_usage_fallback_reason() {
+        let mut c = Connection::open_in_memory().expect("open");
+        at_version(&mut c, 44);
+        assert_eq!(user_version(&c), 44);
+        assert!(!has_column(&c, "usage", "fallback_reason"));
+
+        c.execute(
+            "INSERT INTO usage (ts, request_id, provider, model, status) \
+             VALUES (1000, 'req-pre-v45', 'openai', 'gpt-4.1', 200)",
+            [],
+        )
+        .expect("pre-v45 usage row");
+
+        migrate(&mut c).expect("upgrade to v45");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+        assert!(has_column(&c, "usage", "fallback_reason"));
+
+        let legacy: Option<String> = c
+            .query_row(
+                "SELECT fallback_reason FROM usage WHERE request_id = 'req-pre-v45'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("legacy row survives");
+        assert_eq!(legacy, None);
+
+        c.execute(
+            "INSERT INTO usage (ts, request_id, provider, model, status, fallback_reason) \
+             VALUES (1001, 'req-v45', 'opencode', 'big-pickle', 200, 'quota')",
+            [],
+        )
+        .expect("v45 usage row");
+        let reason: Option<String> = c
+            .query_row(
+                "SELECT fallback_reason FROM usage WHERE request_id = 'req-v45'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("v45 row");
+        assert_eq!(reason.as_deref(), Some("quota"));
+
+        // Re-running migrate on an already-upgraded DB must be idempotent.
+        migrate(&mut c).expect("idempotent re-migrate");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+    }
+
+    /// v45 -> v46: `api_keys.default_group` is added as a nullable TEXT column, existing
+    /// keys read NULL, existing free-form preset groups are backfilled with deterministic
+    /// unique slugs while provider buckets keep `slug: None`, and re-running `migrate` is
+    /// idempotent.
+    #[test]
+    fn upgrades_from_v45_landing_v46_default_group_and_group_slugs() {
+        let mut c = Connection::open_in_memory().expect("open");
+        at_version(&mut c, 45);
+        assert_eq!(user_version(&c), 45);
+        assert!(!has_column(&c, "api_keys", "default_group"));
+
+        c.execute(
+            "INSERT INTO api_keys (id, key_hash, name, is_active, created_at) \
+             VALUES ('k-pre-v46', 'hash1', 'legacy', 1, 1000)",
+            [],
+        )
+        .expect("pre-v46 api key");
+
+        let pre_layout = r#"{
+            "schema_version": 1,
+            "auto_include_new": true,
+            "groups": [
+                {"id": "g-main", "name": "Main Group", "visible": true},
+                {"id": "g-dup", "name": "main-group", "visible": true},
+                {"id": "provider:openai", "name": "OpenAI", "provider": "openai", "visible": true}
+            ],
+            "items": []
+        }"#;
+        c.execute(
+            "UPDATE model_presets SET layout_json = ?1 \
+             WHERE id = '00000000-0000-0000-0000-000000000001'",
+            rusqlite::params![pre_layout],
+        )
+        .expect("pre-v46 preset layout");
+
+        migrate(&mut c).expect("upgrade to v46");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
+        assert!(has_column(&c, "api_keys", "default_group"));
+
+        let legacy_group: Option<String> = c
+            .query_row(
+                "SELECT default_group FROM api_keys WHERE id = 'k-pre-v46'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("legacy key survives");
+        assert_eq!(legacy_group, None);
+
+        let updated_raw: String = c
+            .query_row(
+                "SELECT layout_json FROM model_presets \
+                 WHERE id = '00000000-0000-0000-0000-000000000001'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("backfilled layout");
+        let layout: crate::presets::LayoutDocument =
+            serde_json::from_str(&updated_raw).expect("parse layout");
+        assert_eq!(layout.groups[0].slug.as_deref(), Some("main-group"));
+        assert_eq!(layout.groups[1].slug.as_deref(), Some("main-group-2"));
+        assert_eq!(layout.groups[2].slug, None);
+
+        migrate(&mut c).expect("idempotent re-migrate");
+        assert_eq!(user_version(&c), SCHEMA_VERSION);
     }
 }

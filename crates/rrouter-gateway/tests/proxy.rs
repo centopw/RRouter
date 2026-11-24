@@ -21,7 +21,7 @@ use rrouter_auth::Credentials;
 use rrouter_gateway::{app, config::Config, AppState};
 use rrouter_router::{Breaker, Catalog, Dispatcher, Planner};
 use rrouter_store::{
-    AccountQuota, BudgetWindow, ComboStrategy, ModelRow, Store, UsageQuery, UsageRecord,
+    AccountQuota, BudgetWindow, ComboStrategy, FreeModel, ModelRow, Store, UsageQuery, UsageRecord,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -702,6 +702,42 @@ impl Harness {
                 .expect("request"),
         )
         .await
+    }
+
+    /// Register a free-mode account pointing at the mock upstream and return its id.
+    async fn connect_free(&self, provider: &str, mock: &Mock) -> uuid::Uuid {
+        let id = self.connect(provider, mock).await;
+        self.state
+            .store
+            .set_connection_free_mode(id, true, None)
+            .await
+            .expect("mark free");
+        id
+    }
+
+    /// Seed one verified-free public-catalog discovery row and turn automatic fallback on.
+    async fn enable_free_fallback(&self, provider: &str, model: &str) {
+        self.state
+            .store
+            .upsert_free_model(&FreeModel {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                free: true,
+                price: Some(0.0),
+                source: "public-catalog".to_string(),
+                connection_id: None,
+                discovered_at: rrouter_gateway::now_unix(),
+            })
+            .await
+            .expect("seed free model");
+        self.state
+            .store
+            .save_free_mode_config(
+                &serde_json::json!({}),
+                &serde_json::json!({ "enabled": true, "fallback_on_quota": true }),
+            )
+            .await
+            .expect("enable fallback");
     }
 }
 
@@ -2429,6 +2465,7 @@ async fn budget_exhausted_blocks_the_next_request() {
             reasoning_effort: None,
             reasoning_tokens: 0,
             session_id: None,
+            fallback_reason: None,
         })
         .await
         .expect("seed spend");
@@ -2443,6 +2480,159 @@ async fn budget_exhausted_blocks_the_next_request() {
     let (status, _, body) = h.chat(Some(&key), "gpt-4.1").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(mock.hits(), 1);
+}
+
+// ------------------------------------------------------------- free-mode fallback
+
+/// A paid provider's `429` falls back to the free pool and stamps the response headers
+/// and the usage row's `fallback_reason`, while the usage row still names the *paid*
+/// provider's account (the free send is a separate attempt).
+#[tokio::test]
+async fn free_fallback_serves_after_a_paid_429_and_stamps_reason() {
+    // openai (paid) answers 429; the free opencode account answers.
+    let mock = Mock::start(vec![
+        MockReply::Json(429, json!({"error": {"message": "paid throttle"}})),
+        openai_reply("free answer"),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.connect_free("opencode", &mock).await;
+    h.enable_free_fallback("opencode", "big-pickle").await;
+    let (key, _id) = h.create_key().await;
+
+    let (status, headers, body) = h.chat(Some(&key), "openai/gpt-4.1").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "free answer");
+    assert_eq!(
+        headers
+            .get("x-rrouter-fallback")
+            .and_then(|v| v.to_str().ok()),
+        Some("free")
+    );
+    assert_eq!(
+        headers
+            .get("x-rrouter-fallback-reason")
+            .and_then(|v| v.to_str().ok()),
+        Some("rate_limit")
+    );
+
+    // The usage row records the fallback reason (the paid attempt), so operators can see
+    // how often a key is being carried by the free pool.
+    let request_id = uuid::Uuid::parse_str(
+        headers
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .expect("request id"),
+    )
+    .expect("uuid");
+    let row = h.usage_for(request_id).await;
+    assert_eq!(row.fallback_reason.as_deref(), Some("rate_limit"));
+}
+
+/// When the free pool also fails, the client sees the *original* paid error, not the
+/// free attempt's error.
+#[tokio::test]
+async fn free_fallback_returns_the_original_paid_error_when_free_also_fails() {
+    // openai (paid) 429, then opencode free also 429.
+    let mock = Mock::start(vec![
+        MockReply::Json(429, json!({"error": {"message": "paid throttle"}})),
+        MockReply::Json(429, json!({"error": {"message": "free throttle"}})),
+    ])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.connect_free("opencode", &mock).await;
+    h.enable_free_fallback("opencode", "big-pickle").await;
+    let (key, _id) = h.create_key().await;
+
+    let (status, _headers, body) = h.chat(Some(&key), "openai/gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert!(
+        body.to_string().contains("paid throttle"),
+        "the original paid error is surfaced, not the free one: {body}"
+    );
+}
+
+/// `x-rrouter-allow-fallbacks: false` stops a paid `429` from reaching the free pool.
+#[tokio::test]
+async fn free_fallback_respects_allow_fallbacks_false() {
+    let mock = Mock::start(vec![MockReply::Json(
+        429,
+        json!({"error": {"message": "paid throttle"}}),
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.connect_free("opencode", &mock).await;
+    h.enable_free_fallback("opencode", "big-pickle").await;
+    let (key, _id) = h.create_key().await;
+
+    let (status, body) = h
+        .post_with(
+            "/v1/chat/completions",
+            openai_chat_body("openai/gpt-4.1"),
+            &[
+                ("authorization", &format!("Bearer {key}")),
+                ("x-rrouter-allow-fallbacks", "false"),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(mock.hits(), 1, "no free attempt was made");
+}
+
+/// A `provider.only` that names the paid provider (and excludes opencode) must not be
+/// routed around: the fallback plan has no eligible free candidate and returns the
+/// original error.
+#[tokio::test]
+async fn free_fallback_respects_provider_only() {
+    let mock = Mock::start(vec![MockReply::Json(
+        429,
+        json!({"error": {"message": "paid throttle"}}),
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.connect_free("opencode", &mock).await;
+    h.enable_free_fallback("opencode", "big-pickle").await;
+    let (key, _id) = h.create_key().await;
+
+    let mut body = openai_chat_body("openai/gpt-4.1");
+    body["provider"] = json!({ "only": ["openai"] });
+    let (status, body) = h
+        .post_with(
+            "/v1/chat/completions",
+            body,
+            &[("authorization", &format!("Bearer {key}"))],
+        )
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(mock.hits(), 1, "no free attempt was made: {body}");
+}
+
+/// A key whose allowlist does not admit `free` is never served by the free pool: budget
+/// exhaustion surfaces the original 429 instead of an anonymous free send.
+#[tokio::test]
+async fn free_fallback_skips_when_the_allowlist_excludes_free() {
+    let mock = Mock::start(vec![MockReply::Json(
+        429,
+        json!({"error": {"message": "paid throttle"}}),
+    )])
+    .await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.connect_free("opencode", &mock).await;
+    h.enable_free_fallback("opencode", "big-pickle").await;
+    let (key, id) = h.create_key().await;
+    h.patch_key(&id, json!({"allowed_models": ["gpt-4.1"]}))
+        .await;
+
+    // The paid request reaches openai (429), then fallback must NOT fire because the
+    // allowlist does not contain `free`.
+    let (status, _, body) = h.chat(Some(&key), "openai/gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(mock.hits(), 1, "the free pool was never consulted: {body}");
 }
 
 /// Two concurrent requests against one budgeted key must not both pass the preflight
@@ -2628,6 +2818,7 @@ async fn key_rows_match_the_governance_contract() {
         "kind": "user",
         "models": [],
         "last_used_at": 0,
+        "default_group": null,
     });
     assert_eq!(patched, expected);
 
@@ -4255,6 +4446,7 @@ async fn passthrough_refuses_an_exhausted_key_before_the_upstream_call() {
             reasoning_effort: None,
             reasoning_tokens: 0,
             session_id: None,
+            fallback_reason: None,
         })
         .await
         .expect("seed spend");
@@ -4705,6 +4897,7 @@ async fn seed_usage(
             reasoning_effort: None,
             reasoning_tokens: 0,
             session_id: None,
+            fallback_reason: None,
         })
         .await
         .expect("seed usage");
@@ -4836,6 +5029,7 @@ async fn usage_api_pages_backwards_without_overlap() {
                 reasoning_effort: None,
                 reasoning_tokens: 0,
                 session_id: None,
+                fallback_reason: None,
             })
             .await
             .expect("record usage");
@@ -4933,6 +5127,7 @@ async fn usage_api_filters_compose_with_the_cursor() {
                 reasoning_effort: None,
                 reasoning_tokens: 0,
                 session_id: None,
+                fallback_reason: None,
             })
             .await
             .expect("record usage");
@@ -5053,6 +5248,7 @@ fn export_row(ts: i64) -> UsageRecord {
         reasoning_effort: None,
         reasoning_tokens: 0,
         session_id: None,
+        fallback_reason: None,
     }
 }
 
@@ -5536,6 +5732,7 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
             reasoning_effort: None,
             reasoning_tokens: 0,
             session_id: None,
+            fallback_reason: None,
         })
         .await
         .expect("seed last month");
@@ -5581,6 +5778,7 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
             reasoning_effort: None,
             reasoning_tokens: 0,
             session_id: None,
+            fallback_reason: None,
         })
         .await
         .expect("seed this month");
@@ -6597,6 +6795,7 @@ fn quota_usage(connection: uuid::Uuid) -> UsageRecord {
         reasoning_effort: None,
         reasoning_tokens: 0,
         session_id: None,
+        fallback_reason: None,
     }
 }
 
@@ -7529,6 +7728,7 @@ async fn seed_spend(store: &Store, key: uuid::Uuid, tokens: u32, cost_micros: u6
             reasoning_effort: None,
             reasoning_tokens: 0,
             session_id: None,
+            fallback_reason: None,
         })
         .await
         .expect("seed usage");

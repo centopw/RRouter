@@ -620,20 +620,62 @@ impl AppState {
     }
 
     /// Apply this key's model mapping to the client's model: one hop, before alias and
-    /// combo resolution. Only a key can carry a mapping, so anonymous traffic and
-    /// unmapped models pass through unchanged, and a key with no mapping keeps exactly
-    /// the pre-phase-4 behaviour.
+    /// combo resolution, then normalize any inbound group prefix (slug or legacy display
+    /// name) to its canonical `<slug>/<code>/<id>` form for routing.
     ///
-    /// Runs on the request path, so it is one indexed row rather than the whole map.
+    /// Usage logs record `requested_model` separately from the client's literal string
+    /// before this runs, so normalization affects routing only.
     pub async fn mapped_model(&self, key: Option<Uuid>, model: &str) -> Result<String> {
-        let Some(id) = key else {
+        let mapped = match key {
+            Some(id) => self
+                .store
+                .key_model_target(id, model)
+                .await?
+                .unwrap_or_else(|| model.to_string()),
+            None => model.to_string(),
+        };
+        self.normalize_group_ref(&mapped).await
+    }
+
+    /// Normalize an inbound `<group>/<provider_or_code>/<id>` ref to the canonical
+    /// `<slug>/<code>/<id>` spelling for routing. Legacy group display names are accepted
+    /// and logged once at debug level. Non-group refs (`free*`, `combo:*`, aliases,
+    /// `provider/model`, bare ids) pass through unchanged.
+    async fn normalize_group_ref(&self, model: &str) -> Result<String> {
+        if model == "free"
+            || model.starts_with("free:")
+            || model.starts_with("free/")
+            || model.starts_with("combo:")
+        {
+            return Ok(model.to_string());
+        }
+        let Some((head, rest)) = model.split_once('/') else {
             return Ok(model.to_string());
         };
-        Ok(self
-            .store
-            .key_model_target(id, model)
-            .await?
-            .unwrap_or_else(|| model.to_string()))
+        if rest.is_empty() || self.provider_by_ref(head).is_some() {
+            return Ok(model.to_string());
+        }
+        let Some((segment, id)) = rest.split_once('/') else {
+            return Ok(model.to_string());
+        };
+        if id.is_empty() {
+            return Ok(model.to_string());
+        }
+        let Some(provider) = self.provider_by_ref(segment) else {
+            return Ok(model.to_string());
+        };
+        let Some(preset) = self.store.default_model_preset().await? else {
+            return Ok(model.to_string());
+        };
+        let Some((group, matched_by_name)) = preset.layout.resolve_group_prefix(head) else {
+            return Ok(model.to_string());
+        };
+        let slug = group.effective_slug().unwrap_or(&group.name);
+        if matched_by_name {
+            log_legacy_group_prefix_once(head, slug);
+        }
+        let code = self.provider_code(&provider);
+        Ok(format!("{slug}/{code}/{id}"))
     }
 
     /// Take the budget locks a request needs before checking its spend. Returns `None`
@@ -678,10 +720,18 @@ impl AppState {
         // A free-form group prefix is a routing alias with its own grant list. Resolve
         // one alias hop first, or `fast -> main/gpt-4.1` would bypass the group check.
         let resolved = self.resolve_alias(model).await?;
-        if let Some((head, _)) = resolved.split_once('/') {
+        let mut explicit_group_provider_ref: Option<String> = None;
+        let mut explicit_group_checked = false;
+        if let Some((head, rest)) = resolved.split_once('/') {
             if self.provider_by_ref(head).is_none() {
                 if let Some(preset) = self.store.default_model_preset().await? {
-                    if let Some(group) = preset.layout.group_by_name(head) {
+                    if let Some((group, matched_by_name)) = preset.layout.resolve_group_prefix(head)
+                    {
+                        explicit_group_checked = true;
+                        let slug = group.effective_slug().unwrap_or(&group.name);
+                        if matched_by_name {
+                            log_legacy_group_prefix_once(head, slug);
+                        }
                         if !rrouter_store::LayoutDocument::allows(
                             group,
                             caller.key_id(),
@@ -696,6 +746,52 @@ impl AppState {
                                 ),
                             });
                         }
+                        if let Some((segment, id)) = rest.split_once('/') {
+                            if !id.is_empty() {
+                                if let Some(provider) = self.provider_by_ref(segment) {
+                                    explicit_group_provider_ref = Some(format!("{provider}/{id}"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // When the key has a default_group and the request did not name an explicit group,
+        // enforce that default group's access grants for non-empty, non-free, non-combo
+        // refs so a key cannot use a default group it is not permitted to access.
+        if !explicit_group_checked {
+            if let Some(default_group_ref) = caller.default_group() {
+                let is_free = resolved == "free"
+                    || resolved.starts_with("free:")
+                    || resolved.starts_with("free/");
+                if !resolved.is_empty() && !is_free && !resolved.starts_with("combo:") {
+                    let is_combo = self.store.get_combo(&resolved).await?.is_some();
+                    if !is_combo {
+                        if let Some(preset) = self.store.default_model_preset().await? {
+                            if let Some((group, matched_by_name)) =
+                                preset.layout.resolve_group_prefix(default_group_ref)
+                            {
+                                let slug = group.effective_slug().unwrap_or(&group.name);
+                                if matched_by_name {
+                                    log_legacy_group_prefix_once(default_group_ref, slug);
+                                }
+                                if !rrouter_store::LayoutDocument::allows(
+                                    group,
+                                    caller.key_id(),
+                                    caller.team_id(),
+                                    caller.owner_user_id(),
+                                ) {
+                                    return Err(Error::Forbidden {
+                                        code: "model_not_allowed",
+                                        message: format!(
+                                            "this caller is not allowed to use model group {}",
+                                            group.name
+                                        ),
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -705,9 +801,13 @@ impl AppState {
         };
         if let Some(allowed) = &key.allowed_models {
             // The allowlist is written against resolved refs; compare after the same one
-            // alias hop the planner performs, and only for keys that have a list.
-            let resolved = self.resolve_alias(model).await?;
-            if !model_allowed(allowed, &resolved) {
+            // alias hop the planner performs, and also accept the underlying
+            // `provider/id` when the ref is group-qualified.
+            let matched = model_allowed(allowed, &resolved)
+                || explicit_group_provider_ref
+                    .as_deref()
+                    .is_some_and(|canonical| model_allowed(allowed, canonical));
+            if !matched {
                 return Err(Error::Forbidden {
                     code: "model_not_allowed",
                     message: format!("api key {} is not allowed to use model {model}", key.id),
@@ -934,6 +1034,14 @@ impl Caller {
         }
     }
 
+    /// The paying key's default free-form group slug, if configured.
+    pub fn default_group(&self) -> Option<&str> {
+        match self {
+            Self::Anonymous => None,
+            Self::Key(key) => key.default_group.as_deref(),
+        }
+    }
+
     /// This caller's guardrail policy, if it has one. Anonymous traffic never does.
     pub fn guardrails(&self) -> Option<&Guardrails> {
         match self {
@@ -954,6 +1062,23 @@ impl Caller {
             Self::Anonymous => "-".to_string(),
             Self::Key(key) => key.id.to_string(),
         }
+    }
+}
+
+/// Log once per `(legacy_prefix, slug)` pair at debug level when a client uses a group's
+/// legacy display name instead of its stable slug. Never an error.
+pub(crate) fn log_legacy_group_prefix_once(legacy_prefix: &str, slug: &str) {
+    static SEEN: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+    > = std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let key = (legacy_prefix.to_string(), slug.to_string());
+    if seen.lock().is_ok_and(|mut set| set.insert(key)) {
+        tracing::debug!(
+            legacy_prefix = %legacy_prefix,
+            group_slug = %slug,
+            "resolved legacy group-name prefix to stable slug"
+        );
     }
 }
 

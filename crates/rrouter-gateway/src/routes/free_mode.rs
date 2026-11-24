@@ -1,9 +1,9 @@
-//! `/api/free-mode` — the imported document, the discovery run and teardown.
+//! `/api/free-mode` — zero-config free model discovery, toggles, live probes, plus the
+//! Advanced JSON document import and teardown.
 //!
-//! Admin-only, like every other write on this router: a document names providers, accounts
-//! and egress proxies, so editing it is an operator capability. Every response is
-//! secrets-free — proxy URLs are masked, credentials appear as `has_*` booleans, and the
-//! stored document is redacted before it is echoed.
+//! Admin-only, like every other write on this router. Every response is secrets-free: proxy
+//! URLs are masked, credentials appear as `has_*` booleans, probe errors are scrubbed, and
+//! any stored document is redacted before it is echoed.
 
 use std::sync::Arc;
 
@@ -15,7 +15,9 @@ use rrouter_core::Error;
 use serde_json::{json, Value};
 
 use super::{admin_error, body_json, ok_json};
-use crate::free_mode::{self, ValidationError};
+use crate::free_mode::{
+    self, PatchModelRequest, PatchSettingsRequest, ProbeRequest, ValidationError,
+};
 use crate::state::AppState;
 
 /// `POST /api/free-mode/import` — validate the document, then apply it. Idempotent.
@@ -82,74 +84,150 @@ pub async fn import(
     }
 }
 
-/// `GET /api/free-mode` — the stored document, the discovered rows and the accounts.
-///
-/// `document` is `null` until something was imported; `accounts` and `models` are populated
-/// independently, because a teardown that leaves accounts behind must still be inspectable.
-pub async fn get(State(state): State<Arc<AppState>>) -> Response {
-    let config = match state.store.free_mode_config().await {
-        Ok(config) => config,
-        Err(error) => return admin_error(&error),
-    };
-    let models = match state.store.list_free_models().await {
-        Ok(models) => models,
-        Err(error) => return admin_error(&error),
-    };
-    let connections = match state.store.list_connections(None).await {
-        Ok(connections) => connections,
-        Err(error) => return admin_error(&error),
-    };
-
-    let accounts: Vec<Value> = connections
+/// `GET /api/free-mode[?refresh=true]` — zero-config free-mode state, discovered models,
+/// probe status, catalogs, plus any imported Advanced document and accounts.
+pub async fn get(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<Vec<(String, String)>>,
+) -> Response {
+    let refresh = query
         .iter()
-        .filter(|conn| conn.credentials.free_mode)
-        .map(|conn| {
-            json!({
-                "connection_id": conn.id.to_string(),
-                "provider": conn.provider.clone(),
-                "label": conn
-                    .credentials
-                    .account_label
-                    .clone()
-                    .or_else(|| conn.name.clone()),
-                "proxy": conn.credentials.proxy_masked(),
-                "free_rpm": conn.credentials.free_rpm,
-                "is_active": conn.is_active,
-                "last_error": conn.last_error.clone(),
-            })
-        })
-        .collect();
-    let rows: Vec<Value> = models
-        .iter()
-        .map(|row| {
-            json!({
-                "provider": row.provider.clone(),
-                "model": row.model.clone(),
-                "free": row.free,
-                "price": row.price,
-                "source": row.source.clone(),
-                "discovered_at": row.discovered_at,
-            })
-        })
-        .collect();
-    let discovered_at = models.iter().map(|row| row.discovered_at).max();
+        .any(|(key, value)| key == "refresh" && matches!(value.trim(), "true" | "1" | "yes"));
+    match free_mode::state_view(&state, refresh).await {
+        Ok(view) => ok_json(view),
+        Err(error) => admin_error(&error),
+    }
+}
 
-    ok_json(json!({
-        "document": config
-            .as_ref()
-            .map(|config| free_mode::public_document(&config.document)),
-        "routing": config.as_ref().map(|config| config.routing.clone()),
-        "updated_at": config.as_ref().map(|config| config.updated_at),
-        "accounts": accounts,
-        "models": rows,
-        "discovered_at": discovered_at,
-    }))
+/// `PATCH /api/free-mode` — toggle the free pool and/or automatic quota fallback.
+pub async fn patch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    body: Body,
+) -> Response {
+    let value = match body_json(body).await {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let req: PatchSettingsRequest = match serde_json::from_value(value) {
+        Ok(req) => req,
+        Err(error) => return admin_error(&Error::BadRequest(format!("invalid body: {error}"))),
+    };
+    match free_mode::patch_settings(&state, req.clone()).await {
+        Ok(view) => {
+            audit(
+                &state,
+                &headers,
+                peer,
+                "free_mode_updated",
+                &format!(
+                    "enabled={}, fallback_on_quota={}",
+                    view.enabled, view.fallback_on_quota
+                ),
+            )
+            .await;
+            ok_json(view)
+        }
+        Err(error) => admin_error(&error),
+    }
+}
+
+/// `PATCH /api/free-mode/models` — enable or disable one discovered free model.
+pub async fn patch_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    body: Body,
+) -> Response {
+    let value = match body_json(body).await {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let req: PatchModelRequest = match serde_json::from_value(value) {
+        Ok(req) => req,
+        Err(error) => return admin_error(&Error::BadRequest(format!("invalid body: {error}"))),
+    };
+    match free_mode::patch_model(&state, req).await {
+        Ok(resp) => {
+            audit(
+                &state,
+                &headers,
+                peer,
+                "free_mode_model_updated",
+                &format!("{}/{} enabled={}", resp.provider, resp.model, resp.enabled),
+            )
+            .await;
+            ok_json(resp)
+        }
+        Err(error) => admin_error(&error),
+    }
+}
+
+/// `POST /api/free-mode/probe` — test one free model now, or every enabled usable model
+/// when `model` is omitted (or `all: true`).
+pub async fn probe(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    peer: crate::auth::Peer,
+    body: Body,
+) -> Response {
+    let value = match body_json(body).await {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let req: ProbeRequest = match serde_json::from_value(value) {
+        Ok(req) => req,
+        Err(error) => return admin_error(&Error::BadRequest(format!("invalid body: {error}"))),
+    };
+    if !req.all {
+        if let (Some(provider), Some(model)) = (req.provider.as_deref(), req.model.as_deref()) {
+            return match free_mode::probe_one(&state, provider, model).await {
+                Ok(resp) => {
+                    audit(
+                        &state,
+                        &headers,
+                        peer,
+                        "free_mode_probed",
+                        &format!(
+                            "{}/{} ok={} status={}",
+                            resp.provider, resp.model, resp.probe.ok, resp.probe.status
+                        ),
+                    )
+                    .await;
+                    ok_json(resp)
+                }
+                Err(error) => admin_error(&error),
+            };
+        }
+        if req.provider.is_some() || req.model.is_some() {
+            return admin_error(&Error::BadRequest(
+                "both provider and model are required to probe one model".into(),
+            ));
+        }
+    }
+    match free_mode::probe_all(&state, req.refresh_catalogs).await {
+        Ok(resp) => {
+            let working = resp.results.iter().filter(|r| r.probe.ok).count();
+            audit(
+                &state,
+                &headers,
+                peer,
+                "free_mode_probed",
+                &format!("batch: {working}/{} ok", resp.results.len()),
+            )
+            .await;
+            ok_json(resp)
+        }
+        Err(error) => admin_error(&error),
+    }
 }
 
 /// `POST /api/free-mode/discover` with an optional `{"providers": ["openrouter"]}`.
 ///
-/// Each account is asked through its own credentials, so one broken account costs its own
-/// row in the report and nothing else.
+/// Refreshes both imported free-mode accounts and public catalogs. Each account is asked
+/// through its own credentials, so one broken account costs its own row in the report and
+/// nothing else.
 pub async fn discover(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -193,9 +271,10 @@ pub async fn discover(
                 peer,
                 "free_mode_discovered",
                 &format!(
-                    "{} account(s), {} provider(s)",
+                    "{} account(s), {} provider(s), {} catalog(s)",
                     report.accounts.len(),
-                    report.providers.len()
+                    report.providers.len(),
+                    report.catalogs.len()
                 ),
             )
             .await;

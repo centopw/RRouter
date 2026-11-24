@@ -248,14 +248,14 @@ const UNDO_AFTER_V24: &str = "\
     DROP INDEX IF EXISTS idx_usage_trace; ALTER TABLE usage DROP COLUMN trace_id; \
     ALTER TABLE usage DROP COLUMN requested_model; ALTER TABLE usage DROP COLUMN finish_reason; \
     ALTER TABLE usage DROP COLUMN reasoning_effort; ALTER TABLE usage DROP COLUMN reasoning_tokens; \
-    ALTER TABLE usage DROP COLUMN session_id; \
+    ALTER TABLE usage DROP COLUMN session_id; ALTER TABLE usage DROP COLUMN fallback_reason; \
     DROP INDEX IF EXISTS idx_connections_team; \
     ALTER TABLE connections DROP COLUMN refusal; \
     ALTER TABLE connections DROP COLUMN owner_user_id; \
     ALTER TABLE connections DROP COLUMN team_id; \
     ALTER TABLE user_sessions DROP COLUMN user_agent; \
     ALTER TABLE user_sessions DROP COLUMN ip; \
-    ALTER TABLE api_keys DROP COLUMN last_used_at; \
+    ALTER TABLE api_keys DROP COLUMN last_used_at; ALTER TABLE api_keys DROP COLUMN default_group; \
     ALTER TABLE combos DROP COLUMN strategy; \
     ALTER TABLE combos DROP COLUMN router_model; \
     ALTER TABLE combos DROP COLUMN cursor; ";
@@ -868,6 +868,7 @@ fn spent_tokens_sums_only_that_key() {
             reasoning_tokens: 0,
             session_id: None,
             requested_model: None,
+            fallback_reason: None,
         };
         // a: 100 + 20 + 5 + 5 = 130 across two rows; b: 7; anonymous: excluded.
         s.record_usage(&rec(Some(a.id), 100, 60, 10, 5, 5))
@@ -938,6 +939,7 @@ fn cost_micros_round_trips_and_sums_per_key() {
             reasoning_tokens: 0,
             session_id: None,
             requested_model: None,
+            fallback_reason: None,
         };
         s.record_usage(&rec(Some(a.id), 1_250)).await.expect("a1");
         s.record_usage(&rec(Some(a.id), 3_000)).await.expect("a2");
@@ -1966,6 +1968,7 @@ fn usage_records_summary_and_recent_order() {
             reasoning_tokens: 0,
             session_id: None,
             requested_model: None,
+            fallback_reason: None,
         }
     };
     rt().block_on(async {
@@ -2089,6 +2092,7 @@ fn usage_record_keeps_request_context() {
             reasoning_effort: Some("minimal".into()),
             reasoning_tokens: 2,
             session_id: Some("ses_abc123".into()),
+            fallback_reason: Some("quota".into()),
         })
         .await
         .expect("record");
@@ -2104,6 +2108,16 @@ fn usage_record_keeps_request_context() {
         assert_eq!(row.reasoning_effort.as_deref(), Some("minimal"));
         assert_eq!(row.reasoning_tokens, 2);
         assert_eq!(row.session_id.as_deref(), Some("ses_abc123"));
+        assert_eq!(row.fallback_reason.as_deref(), Some("quota"));
+
+        let recent = s.recent_usage(&query(10)).await.expect("recent");
+        assert_eq!(recent[0].fallback_reason.as_deref(), Some("quota"));
+
+        let scoped = s
+            .recent_usage_in_teams(&query(10), None)
+            .await
+            .expect("recent in teams");
+        assert_eq!(scoped[0].fallback_reason.as_deref(), Some("quota"));
     });
 }
 
@@ -2213,6 +2227,7 @@ fn attempts_round_trip_under_the_request_id() {
             reasoning_tokens: 0,
             session_id: None,
             requested_model: None,
+            fallback_reason: None,
         })
         .await
         .expect("usage");
@@ -2592,6 +2607,7 @@ fn prune_usage_deletes_history_older_than_the_cutoff() {
         reasoning_tokens: 0,
         session_id: None,
         requested_model: None,
+        fallback_reason: None,
     };
     // Attempts carry their own request id, so each timestamp is separately reachable.
     let attempt_request = |ts: i64| Uuid::from_u128(0xa000 + ts as u128);
@@ -2860,6 +2876,7 @@ fn spend_since_counts_only_rows_inside_the_window() {
             reasoning_tokens: 0,
             session_id: None,
             requested_model: None,
+            fallback_reason: None,
         };
         let since = 1_000;
         s.record_usage(&rec(a.id, 999, 40, 400))
@@ -3314,6 +3331,7 @@ fn page_row(ts: i64, marker: &str) -> UsageRecord {
         reasoning_tokens: 0,
         session_id: None,
         requested_model: None,
+        fallback_reason: None,
     }
 }
 
@@ -4058,6 +4076,7 @@ fn account_quota_exhausts_only_on_usage_inside_its_window() {
             reasoning_tokens: 0,
             session_id: None,
             requested_model: None,
+            fallback_reason: None,
         };
 
         // Yesterday's rows are outside today's window but inside this week's.
@@ -4179,6 +4198,7 @@ fn account_quota_enforces_token_and_cost_limits() {
             reasoning_tokens: 0,
             session_id: None,
             requested_model: None,
+            fallback_reason: None,
         };
         store
             .record_usage(&rec(cost.id, 600, 1, 1))
@@ -4690,6 +4710,7 @@ fn usage_trace_id_roundtrips_and_absent_stays_null() {
             reasoning_tokens: 0,
             session_id: None,
             requested_model: None,
+            fallback_reason: None,
         }))
         .expect("record");
     }
@@ -4959,6 +4980,7 @@ fn usage_summary_by_connection_splits_and_sums() {
         reasoning_tokens: 0,
         session_id: None,
         requested_model: None,
+        fallback_reason: None,
     };
     rt().block_on(async {
         s.record_usage(&rec(100, Some(first), 10, 20, 200))

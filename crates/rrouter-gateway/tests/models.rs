@@ -297,6 +297,10 @@ impl Harness {
         self.send("POST", uri, body).await
     }
 
+    async fn patch(&self, uri: &str, body: Value) -> (StatusCode, Value) {
+        self.send("PATCH", uri, body).await
+    }
+
     async fn delete(&self, uri: &str) -> (StatusCode, Value) {
         self.call(
             Request::builder()
@@ -584,6 +588,7 @@ async fn free_form_group_name_is_a_routable_alias() {
         groups: vec![LayoutGroup {
             id: "g-main".into(),
             name: "main".into(),
+            slug: None,
             provider: None,
             visible: true,
             access: None,
@@ -666,6 +671,7 @@ async fn group_access_scopes_discovery_lookup_and_routing() {
         groups: vec![LayoutGroup {
             id: "g-main".into(),
             name: "main".into(),
+            slug: None,
             provider: None,
             visible: true,
             access: None,
@@ -781,6 +787,7 @@ async fn v1_models_groups_follow_the_default_preset() {
             LayoutGroup {
                 id: "g-fast".into(),
                 name: "Fast".into(),
+                slug: None,
                 provider: None,
                 visible: true,
                 access: None,
@@ -788,6 +795,7 @@ async fn v1_models_groups_follow_the_default_preset() {
             LayoutGroup {
                 id: "provider:openai".into(),
                 name: "OpenAI custom".into(),
+                slug: None,
                 provider: Some("openai".into()),
                 visible: true,
                 access: None,
@@ -795,6 +803,7 @@ async fn v1_models_groups_follow_the_default_preset() {
             LayoutGroup {
                 id: "provider:anthropic".into(),
                 name: "Anthropic custom".into(),
+                slug: None,
                 provider: Some("anthropic".into()),
                 visible: true,
                 access: None,
@@ -832,6 +841,7 @@ async fn v1_models_groups_follow_the_default_preset() {
     let groups = body["groups"].as_array().expect("groups");
     assert_eq!(groups[0]["id"], "g-fast");
     assert_eq!(groups[0]["name"], "Fast");
+    assert_eq!(groups[0]["slug"], "fast");
     assert_eq!(groups[0]["provider"], Value::Null);
     assert_eq!(groups[1]["id"], "provider:openai");
     assert_eq!(groups[1]["name"], "OpenAI custom");
@@ -840,7 +850,7 @@ async fn v1_models_groups_follow_the_default_preset() {
     let data = body["data"].as_array().expect("data");
     let gpt = data
         .iter()
-        .find(|model| model["id"] == "Fast/oai/gpt-4.1" && model["owned_by"] == "openai")
+        .find(|model| model["id"] == "fast/oai/gpt-4.1" && model["owned_by"] == "openai")
         .expect("gpt-4.1 after grouping");
     assert_eq!(gpt["group"], "g-fast");
     let claude = data
@@ -850,7 +860,7 @@ async fn v1_models_groups_follow_the_default_preset() {
     assert_eq!(claude["group"], "provider:anthropic");
     assert_eq!(
         data.first().map(|model| model["id"].clone()),
-        Some(Value::String("Fast/oai/gpt-4.1".into())),
+        Some(Value::String("fast/oai/gpt-4.1".into())),
         "the custom group is first: {body}"
     );
     // Grouping does not hide models: every entry still reports a group.
@@ -872,6 +882,7 @@ async fn v1_models_groups_follow_the_default_preset() {
     stale.groups.push(LayoutGroup {
         id: "provider:gone".into(),
         name: "Gone".into(),
+        slug: None,
         provider: Some("gone".into()),
         visible: true,
         access: None,
@@ -923,6 +934,7 @@ async fn v1_models_groups_follow_the_default_preset() {
         groups: vec![LayoutGroup {
             id: "g-hidden".into(),
             name: "Hidden".into(),
+            slug: None,
             provider: None,
             visible: false,
             access: None,
@@ -1023,6 +1035,7 @@ async fn v1_models_groups_follow_the_default_preset() {
     aliases_hidden.groups.push(LayoutGroup {
         id: "g-hidden-names".into(),
         name: "Hidden names".into(),
+        slug: None,
         provider: None,
         visible: false,
         access: None,
@@ -2602,4 +2615,302 @@ async fn colliding_alias_and_combo_list_once_and_the_combo_still_routes() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["choices"][0]["message"]["content"], "pong", "{body}");
+}
+
+/// S2: `/api/models` emits canonical `reference` + `also_matches` (keeping `ref` as
+/// `provider/id`), `/v1/models` advertises the stable `slug`, and renaming a group's
+/// display name never breaks slug or legacy-name routing while usage logs keep the
+/// client's literal `requested_model`.
+#[tokio::test]
+async fn stable_group_slug_reference_also_matches_and_normalization() {
+    let h = harness();
+    let mock = start_mock().await;
+    h.connect("openai", &mock).await;
+    let preset = h
+        .state
+        .store
+        .default_model_preset()
+        .await
+        .expect("preset lookup")
+        .expect("seeded default");
+
+    let layout = LayoutDocument {
+        schema_version: rrouter_store::LAYOUT_SCHEMA_VERSION,
+        auto_include_new: true,
+        groups: vec![LayoutGroup {
+            id: "g-main".into(),
+            name: "main".into(),
+            slug: None,
+            provider: None,
+            visible: true,
+            access: None,
+        }],
+        items: vec![LayoutItem {
+            provider: "openai".into(),
+            id: "gpt-4.1".into(),
+            group: Some("g-main".into()),
+            position: 0,
+            visible: true,
+            last_visible_position: None,
+            hidden_at: None,
+        }],
+    };
+    let rrouter_store::PresetUpdateOutcome::Updated(saved) = h
+        .state
+        .store
+        .update_model_preset_layout(preset.id, preset.revision, &layout, "test")
+        .await
+        .expect("save")
+    else {
+        panic!("expected updated");
+    };
+    assert_eq!(saved.layout.groups[0].slug.as_deref(), Some("main"));
+
+    // Rename display name from "main" to "Primary": slug remains "main".
+    let mut renamed = saved.layout.clone();
+    renamed.groups[0].name = "Primary".into();
+    h.state
+        .store
+        .update_model_preset_layout(preset.id, saved.revision, &renamed, "test")
+        .await
+        .expect("rename");
+
+    // GET /api/models emits `reference` and `also_matches` for both grouped and ungrouped rows.
+    let (status, body) = h.get("/api/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rows = body["data"].as_array().expect("data");
+    let grouped = rows
+        .iter()
+        .find(|row| row["provider"] == "openai" && row["id"] == "gpt-4.1")
+        .expect("grouped gpt-4.1");
+    assert_eq!(grouped["ref"], "openai/gpt-4.1");
+    assert_eq!(grouped["reference"], "main/oai/gpt-4.1");
+    let also: Vec<&str> = grouped["also_matches"]
+        .as_array()
+        .expect("also_matches")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(also.contains(&"main/openai/gpt-4.1"), "{also:?}");
+    assert!(also.contains(&"Primary/oai/gpt-4.1"), "{also:?}");
+    assert!(also.contains(&"oai/gpt-4.1"), "{also:?}");
+    assert!(also.contains(&"openai/gpt-4.1"), "{also:?}");
+    assert!(also.contains(&"gpt-4.1"), "{also:?}");
+    assert!(!also.contains(&"main/oai/gpt-4.1"), "{also:?}");
+
+    let ungrouped = rows
+        .iter()
+        .find(|row| row["provider"] == "openai" && row["id"] == "gpt-4.1-mini")
+        .expect("ungrouped gpt-4.1-mini");
+    assert_eq!(ungrouped["ref"], "openai/gpt-4.1-mini");
+    assert_eq!(ungrouped["reference"], "openai/gpt-4.1-mini");
+    let ungrouped_also: Vec<&str> = ungrouped["also_matches"]
+        .as_array()
+        .expect("also_matches")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        ungrouped_also.contains(&"oai/gpt-4.1-mini"),
+        "{ungrouped_also:?}"
+    );
+    assert!(
+        ungrouped_also.contains(&"gpt-4.1-mini"),
+        "{ungrouped_also:?}"
+    );
+
+    // GET /v1/models advertises stable slug, not renamed display name.
+    let (status, body) = h.get("/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let group_entry = body["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .find(|g| g["id"] == "g-main")
+        .expect("g-main");
+    assert_eq!(group_entry["name"], "Primary");
+    assert_eq!(group_entry["slug"], "main");
+    assert!(
+        body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .any(|m| m["id"] == "main/oai/gpt-4.1"),
+        "v1/models uses stable slug: {body}"
+    );
+
+    // GET /v1/models/{id} accepts both slug and display name and returns canonical id.
+    for path in [
+        "/v1/models/main/oai/gpt-4.1",
+        "/v1/models/Primary/oai/gpt-4.1",
+    ] {
+        let (status, body) = h.get(path).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(body["id"], "main/oai/gpt-4.1");
+    }
+
+    // Inbound legacy display-name prefix routes and normalizes for routing while
+    // `requested_model` in usage logs keeps the client's literal string.
+    let (status, body) = h
+        .post(
+            "/v1/chat/completions",
+            json!({
+                "model": "Primary/openai/gpt-4.1",
+                "messages": [{"role": "user", "content": "ping"}],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut events = Vec::new();
+    for _ in 0..50 {
+        events = h
+            .state
+            .store
+            .recent_usage(&rrouter_store::UsageQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .expect("usage");
+        if !events.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let latest = events.first().expect("usage row");
+    assert_eq!(
+        latest.requested_model.as_deref(),
+        Some("Primary/openai/gpt-4.1"),
+        "usage requested_model must keep the client's literal string"
+    );
+    assert_eq!(
+        latest.model, "main/oai/gpt-4.1",
+        "routing model is normalized to canonical slug/code/id"
+    );
+}
+
+/// S3: per-key `default_group` CRUD validation, access enforcement in `admit`, and
+/// bare-model scoping in `plan`.
+#[tokio::test]
+async fn key_default_group_crud_and_admit_enforcement() {
+    let h = harness();
+    let mock = start_mock().await;
+    h.connect("openai", &mock).await;
+    let preset = h
+        .state
+        .store
+        .default_model_preset()
+        .await
+        .expect("preset")
+        .expect("default");
+
+    let (allowed_secret, allowed_key) = h
+        .state
+        .store
+        .create_api_key(Some("allowed"))
+        .await
+        .expect("allowed key");
+    let (denied_secret, denied_key) = h
+        .state
+        .store
+        .create_api_key(Some("denied"))
+        .await
+        .expect("denied key");
+
+    let layout = LayoutDocument {
+        schema_version: rrouter_store::LAYOUT_SCHEMA_VERSION,
+        auto_include_new: true,
+        groups: vec![LayoutGroup {
+            id: "g-main".into(),
+            name: "Main Pool".into(),
+            slug: None,
+            provider: None,
+            visible: true,
+            access: Some(rrouter_store::GroupAccess {
+                keys: vec![allowed_key.id],
+                ..Default::default()
+            }),
+        }],
+        items: vec![LayoutItem {
+            provider: "openai".into(),
+            id: "gpt-4.1".into(),
+            group: Some("g-main".into()),
+            position: 0,
+            visible: true,
+            last_visible_position: None,
+            hidden_at: None,
+        }],
+    };
+    h.state
+        .store
+        .update_model_preset_layout(preset.id, preset.revision, &layout, "test")
+        .await
+        .expect("save layout");
+
+    // POST /api/keys with valid default_group (accepts display name, stores canonical slug).
+    let (status, created) = h
+        .post(
+            "/api/keys",
+            json!({ "name": "with-group", "default_group": "Main Pool" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["default_group"], "main-pool");
+    let created_id = created["id"].as_str().expect("id");
+
+    // POST /api/keys with unknown default_group -> 400.
+    let (status, bad) = h
+        .post(
+            "/api/keys",
+            json!({ "name": "bad-group", "default_group": "nonexistent" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+
+    // PATCH /api/keys/{id} clears default_group with null.
+    let (status, patched) = h
+        .patch(
+            &format!("/api/keys/{created_id}"),
+            json!({ "default_group": null }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert!(patched["default_group"].is_null(), "{patched}");
+
+    // Assign default_group to both keys via PATCH.
+    for id in [allowed_key.id, denied_key.id] {
+        let (status, body) = h
+            .patch(
+                &format!("/api/keys/{id}"),
+                json!({ "default_group": "main-pool" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["default_group"], "main-pool");
+    }
+
+    // Allowed key succeeds with bare model name; denied key gets 403 model_not_allowed.
+    let (status, ok_body) = h
+        .post_as(
+            "/v1/chat/completions",
+            &allowed_secret,
+            json!({
+                "model": "gpt-4.1",
+                "messages": [{"role": "user", "content": "ping"}],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{ok_body}");
+
+    let (status, denied_body) = h
+        .post_as(
+            "/v1/chat/completions",
+            &denied_secret,
+            json!({
+                "model": "gpt-4.1",
+                "messages": [{"role": "user", "content": "ping"}],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied_body}");
 }

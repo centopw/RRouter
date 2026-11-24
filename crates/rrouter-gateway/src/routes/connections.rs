@@ -660,6 +660,12 @@ async fn probe(
             axum::http::HeaderValue::from_static(rrouter_translate::google_cca::CLIENT_HEADER),
         );
     }
+    if matches!(spec.id, "opencode" | "opencode-go") {
+        let session = crate::proxy::opencode_session(None, conn.id.as_u128() as u64);
+        if let Ok(value) = axum::http::HeaderValue::from_str(&session) {
+            headers.insert("x-opencode-session", value);
+        }
+    }
     let resp = http
         .post(url)
         .headers(headers)
@@ -850,8 +856,13 @@ async fn probe_model(state: &AppState, spec: &rrouter_auth::ProviderSpec) -> Str
     // it. Keep those ids only when nothing proven exists, so a probe cannot fail on a
     // model the provider never listed.
     let mut proven: std::collections::BTreeSet<String> = candidates.clone();
+    let mut unusable: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for row in &rows {
         if row.provider != spec.id {
+            continue;
+        }
+        if !crate::models_registry::is_probe_usable_row(row, spec.default_dialect) {
+            unusable.insert(row.model.clone());
             continue;
         }
         candidates.insert(row.model.clone());
@@ -859,10 +870,12 @@ async fn probe_model(state: &AppState, spec: &rrouter_auth::ProviderSpec) -> Str
             proven.insert(row.model.clone());
         }
     }
+    proven.retain(|id| !unusable.contains(id) && !rrouter_router::catalog::is_retired(spec.id, id));
+    candidates
+        .retain(|id| !unusable.contains(id) && !rrouter_router::catalog::is_retired(spec.id, id));
     if !proven.is_empty() {
         candidates = proven;
     }
-    candidates.retain(|id| !rrouter_router::catalog::is_retired(spec.id, id));
     if candidates.is_empty() {
         return spec.id.to_string();
     }
@@ -1332,6 +1345,237 @@ mod tests {
                 catalog.is_known(&model),
                 "{id} probe model {model:?} must be routable"
             );
+        }
+    }
+
+    fn test_state(store: Arc<rrouter_store::Store>) -> Arc<AppState> {
+        let config = crate::config::Config::resolve(&|_| None, None)
+            .expect("default config")
+            .config;
+        let data_dir = std::env::temp_dir().join(format!("rrouter-conn-test-{}", Uuid::new_v4()));
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("http");
+        Arc::new(AppState {
+            store,
+            catalog: Arc::new(rrouter_router::Catalog::builtin()),
+            refresher: Arc::new(rrouter_auth::Refresher::new(http.clone())),
+            planner: rrouter_router::Planner::new(),
+            dispatcher: Arc::new(rrouter_router::Dispatcher::new(
+                rrouter_router::Breaker::new(),
+            )),
+            http,
+            proxy_clients: Default::default(),
+            config: crate::config::ConfigSnapshot::from(config),
+            started: std::time::Instant::now(),
+            oauth: rrouter_auth::OAuthFlows::new(),
+            counters: Default::default(),
+            envelope_drops: Default::default(),
+            providers: Default::default(),
+            concurrency: std::sync::RwLock::new(None),
+            auth: crate::auth::Auth::load(&data_dir, false),
+        })
+    }
+
+    /// `probe_model` must never select a non-chat (`systemone`) model or any model the
+    /// live catalog marked unusable, even when its published price is 0.
+    #[tokio::test]
+    async fn probe_model_skips_non_chat_systemone_and_unusable_models() {
+        let store = Arc::new(rrouter_store::Store::open_in_memory().expect("store"));
+        let state = test_state(Arc::clone(&store));
+        let spec = rrouter_auth::get("opencode").expect("opencode spec");
+
+        let parsed = crate::models_registry::parse_models(&json!({
+            "data": [
+                {
+                    "id": "jev-1.13-free",
+                    "name": "Jev 1.13 Free",
+                    "type": "decision",
+                    "recommended_api": "systemone",
+                    "api": {
+                        "systemone": { "base_url": "https://opencode.ai/inference/systemone/v1" }
+                    },
+                    "cost": { "text": { "input": { "price": 0 }, "output": { "price": 0 } } }
+                },
+                {
+                    "id": "responses-only-free",
+                    "recommended_api": "responses",
+                    "api": {
+                        "responses": { "base_url": "https://opencode.ai/inference/openai/v1" }
+                    },
+                    "cost": { "text": { "input": { "price": 0 }, "output": { "price": 0 } } }
+                },
+                {
+                    "id": "claude-haiku-4-5",
+                    "recommended_api": "chat-completions",
+                    "api": {
+                        "chat-completions": { "base_url": "https://opencode.ai/inference/openai/v1" }
+                    },
+                    "cost": { "text": { "input": { "price": 1.0 }, "output": { "price": 5.0 } } }
+                }
+            ]
+        }));
+        for item in &parsed {
+            store
+                .upsert_model(&rrouter_store::ModelRow {
+                    provider: "opencode".into(),
+                    model: item.id.clone(),
+                    display: item.display.clone(),
+                    context: item.context,
+                    max_output: item.max_output,
+                    caps: item.caps.clone(),
+                    cost: item.cost.clone(),
+                    source: crate::models_registry::SOURCE_UPSTREAM.into(),
+                    updated_at: 0,
+                })
+                .await
+                .expect("upsert");
+        }
+        // Explicitly flagged unusable in caps must also be skipped even at $0.
+        store
+            .upsert_model(&rrouter_store::ModelRow {
+                provider: "opencode".into(),
+                model: "aaa-unusable-free".into(),
+                display: None,
+                context: None,
+                max_output: None,
+                caps: json!({"usable": false}),
+                cost: Some(json!({"input": 0.0, "output": 0.0})),
+                source: crate::models_registry::SOURCE_UPSTREAM.into(),
+                updated_at: 0,
+            })
+            .await
+            .expect("upsert unusable");
+
+        let chosen = probe_model(&state, spec).await;
+        assert_eq!(
+            chosen, "claude-haiku-4-5",
+            "must skip jev-1.13-free (systemone), responses-only, and usable:false"
+        );
+
+        // Once a zero-cost chat-completions model is present, it wins over paid chat models.
+        let pickle = &crate::models_registry::parse_models(&json!({
+            "data": [{
+                "id": "big-pickle",
+                "recommended_api": "chat-completions",
+                "api": {
+                    "chat-completions": { "base_url": "https://opencode.ai/inference/openai/v1" }
+                },
+                "cost": { "text": { "input": { "price": 0 }, "output": { "price": 0 } } }
+            }]
+        }))[0];
+        store
+            .upsert_model(&rrouter_store::ModelRow {
+                provider: "opencode".into(),
+                model: pickle.id.clone(),
+                display: pickle.display.clone(),
+                context: pickle.context,
+                max_output: pickle.max_output,
+                caps: pickle.caps.clone(),
+                cost: pickle.cost.clone(),
+                source: crate::models_registry::SOURCE_UPSTREAM.into(),
+                updated_at: 0,
+            })
+            .await
+            .expect("upsert big-pickle");
+
+        assert_eq!(probe_model(&state, spec).await, "big-pickle");
+    }
+
+    /// `probe()` must send `x-opencode-session` (matching `proxy::opencode_session`) for
+    /// both `opencode` and `opencode-go`, and never probe with a `systemone` model.
+    #[tokio::test]
+    async fn probe_sends_x_opencode_session_for_opencode_and_opencode_go() {
+        for provider in ["opencode", "opencode-go"] {
+            let server = wiremock::MockServer::start().await;
+            let store = Arc::new(rrouter_store::Store::open_in_memory().expect("store"));
+            let state = test_state(Arc::clone(&store));
+            let spec = rrouter_auth::get(provider).expect("spec");
+
+            let conn = store
+                .create_connection(
+                    provider,
+                    "api_key",
+                    Credentials {
+                        api_key: Some("test-oc-key".into()),
+                        base_url_override: Some(server.uri()),
+                        ..Credentials::default()
+                    },
+                    None,
+                )
+                .await
+                .expect("connection");
+
+            // Seed both a non-chat systemone model and a valid chat model.
+            for item in crate::models_registry::parse_models(&json!({
+                "data": [
+                    {
+                        "id": "jev-1.13-free",
+                        "type": "decision",
+                        "recommended_api": "systemone",
+                        "api": { "systemone": { "base_url": "https://opencode.ai/inference/systemone/v1" } },
+                        "cost": { "text": { "input": { "price": 0 }, "output": { "price": 0 } } }
+                    },
+                    {
+                        "id": "beam-free",
+                        "recommended_api": "chat-completions",
+                        "api": { "chat-completions": { "base_url": "https://opencode.ai/inference/openai/v1" } },
+                        "cost": { "text": { "input": { "price": 0 }, "output": { "price": 0 } } }
+                    }
+                ]
+            })) {
+                store
+                    .upsert_model(&rrouter_store::ModelRow {
+                        provider: provider.into(),
+                        model: item.id,
+                        display: item.display,
+                        context: item.context,
+                        max_output: item.max_output,
+                        caps: item.caps,
+                        cost: item.cost,
+                        source: crate::models_registry::SOURCE_UPSTREAM.into(),
+                        updated_at: 0,
+                    })
+                    .await
+                    .expect("upsert");
+            }
+
+            let expected_session = crate::proxy::opencode_session(None, conn.id.as_u128() as u64);
+            assert!(expected_session.starts_with("ses_"));
+            assert_eq!(expected_session.len(), 36);
+
+            let expected_path = match provider {
+                "opencode" => "/inference/openai/v1/chat/completions",
+                "opencode-go" => "/inference/go/openai/v1/chat/completions",
+                _ => unreachable!(),
+            };
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path(expected_path))
+                .and(wiremock::matchers::header(
+                    "x-opencode-session",
+                    expected_session.as_str(),
+                ))
+                .and(wiremock::matchers::body_partial_json(json!({
+                    "model": "beam-free"
+                })))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "beam-free",
+                    "choices": [{
+                        "index": 0,
+                        "message": { "role": "assistant", "content": "pong" },
+                        "finish_reason": "stop"
+                    }]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let status = probe(&state, spec, conn).await.expect("probe ok");
+            assert_eq!(status, 200);
         }
     }
 }

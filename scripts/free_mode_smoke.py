@@ -5,6 +5,8 @@ Self-contained: starts a mock OpenAI-compatible upstream and (by default) the re
 binary against a temporary data directory, so no provider credentials and no network are
 needed. The contract it asserts:
 
+  GET  /api/free-mode                      -> zero-config state (enabled/fallback/summary/catalogs)
+  PATCH /api/free-mode                     -> toggles the pool on/off
   POST /api/free-mode/import   {document}  -> the document is applied (accounts created)
   POST /api/free-mode/discover             -> free models recorded with their source
   GET  /api/free-mode                      -> document, routing knobs, accounts, models
@@ -324,6 +326,20 @@ def main() -> int:
             run.blocked = "free-mode import/discovery endpoints are absent"
             return 3
         run.check("free-mode state is readable", status == 200, f"{status} {state}")
+
+        # ----- zero-config surface: toggles, summary and catalog fields --------
+        # A fresh instance (no document imported) defaults off, and the frozen
+        # contract's top-level fields are present even when no catalog ran.
+        for field in ("enabled", "fallback_on_quota", "summary", "catalogs", "next_fallback_model", "ref"):
+            run.check(f"zero-config field {field!r} is present", field in state, str(sorted(state))[:200])
+        run.check("pool defaults to off", state.get("enabled") is False, str(state.get("enabled")))
+
+        status, toggled = api(base, "PATCH", "/free-mode", {"enabled": True}, token=token)
+        run.check("PATCH toggles the pool on", status == 200, f"{status} {toggled}")
+        run.check("PATCH echoes enabled", toggled.get("enabled") is True, str(toggled.get("enabled")))
+
+        status, toggled = api(base, "PATCH", "/free-mode", {"enabled": False}, token=token)
+        run.check("PATCH toggles the pool back off", status == 200 and toggled.get("enabled") is False, f"{status} {toggled}")
 
         # ----- import: the document creates free-mode accounts -----------------
         status, imported = api(

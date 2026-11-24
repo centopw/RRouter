@@ -429,10 +429,15 @@ impl<'a> RegistryIndex<'a> {
                     let indices = self.row(provider, rest).into_iter().collect();
                     return Some((indices, ResolutionPath::Explicit));
                 }
-                // 3. `group/code/id`: the head must be a layout group and the middle
-                // segment must name a provider.
+                // 3. `group/code/id`: the head must be a free-form layout group (stable
+                // slug or legacy display name) and the middle segment must name a provider.
                 if let Some((segment, id)) = rest.split_once('/') {
-                    if !id.is_empty() && self.groups.iter().any(|group| group.name == head) {
+                    if !id.is_empty()
+                        && self.groups.iter().any(|group| {
+                            group.provider.is_none()
+                                && (group.slug.as_deref() == Some(head) || group.name == head)
+                        })
+                    {
                         if let Some(provider) = self.provider_for(segment) {
                             let indices = self.row(provider, id).into_iter().collect();
                             return Some((indices, ResolutionPath::Explicit));
@@ -877,6 +882,7 @@ mod tests {
         let groups = vec![LayoutGroup {
             id: "g-main".to_string(),
             name: "main".to_string(),
+            slug: None,
             provider: None,
             visible: true,
             access: None,

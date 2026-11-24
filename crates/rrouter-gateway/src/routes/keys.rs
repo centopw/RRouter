@@ -59,6 +59,7 @@ fn row(
         "owner_user_id": key.owner_user_id.map(|user| user.to_string()),
         "kind": key.kind.as_str(),
         "last_used_at": key.last_used_at,
+        "default_group": key.default_group,
         "models": models_value(models),
     })
 }
@@ -199,9 +200,22 @@ pub async fn create(
             .await
             .map(|user| user.id),
     };
+    let default_group = match default_group_field_opt(&value) {
+        Ok(Some(raw)) => match resolve_default_group(&state, &raw).await {
+            Ok(slug) => Some(slug),
+            Err(e) => return admin_error(&e),
+        },
+        Ok(None) => None,
+        Err(e) => return admin_error(&e),
+    };
     match state
         .store
-        .create_api_key_for(name.as_deref(), team_id, owner_user_id)
+        .create_api_key_with_group(
+            name.as_deref(),
+            team_id,
+            owner_user_id,
+            default_group.as_deref(),
+        )
         .await
     {
         Ok((plaintext, key)) => {
@@ -228,6 +242,7 @@ pub async fn create(
                 "key": plaintext,
                 "id": key.id.to_string(),
                 "name": key.name,
+                "default_group": key.default_group,
                 "created_at": key.created_at,
                 "notice": "store this key now; it cannot be shown again",
             }))
@@ -255,10 +270,21 @@ pub async fn update(
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    let patch = match patch_from(&value) {
+    let mut patch = match patch_from(&value) {
         Ok(patch) => patch,
         Err(e) => return admin_error(&e),
     };
+    if let Some(Some(raw)) = patch.default_group.as_ref().map(|g| g.as_deref()) {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            patch.default_group = Some(None);
+        } else {
+            match resolve_default_group(&state, &trimmed).await {
+                Ok(slug) => patch.default_group = Some(Some(slug)),
+                Err(e) => return admin_error(&e),
+            }
+        }
+    }
     // Tenancy is applied separately: it is not traffic policy, and a body that only moves
     // a key between teams must not rewrite its limits. `null` releases the key back to
     // instance-wide, which is what every pre-v23 key was.
@@ -412,6 +438,7 @@ fn describe_patch(patch: &ApiKeyPatch, scope: KeyScope, window: BudgetWindow) ->
         (patch.allowed_models.is_some(), "allowed_models"),
         (patch.expires_at.is_some(), "expires_at"),
         (patch.guardrails.is_some(), "guardrails"),
+        (patch.default_group.is_some(), "default_group"),
     ] {
         if present {
             fields.push(name);
@@ -626,12 +653,58 @@ fn patch_from(value: &Value) -> Result<ApiKeyPatch, Error> {
                     ),
                 });
             }
+            "default_group" => {
+                patch.default_group = Some(match raw {
+                    Value::Null => None,
+                    Value::String(group) => Some(group.trim().to_string()),
+                    _ => {
+                        return Err(Error::BadRequest(
+                            "default_group must be a string or null".into(),
+                        ))
+                    }
+                });
+            }
             // The dashboard sends the full row back on save; unknown fields are ignored
             // so a newer UI cannot break an older backend.
             _ => {}
         }
     }
     Ok(patch)
+}
+
+/// Read an optional `default_group` on create: absent, `null`, or blank -> `None`.
+fn default_group_field_opt(value: &Value) -> Result<Option<String>, Error> {
+    let Some(raw) = value.get("default_group") else {
+        return Ok(None);
+    };
+    match raw {
+        Value::Null => Ok(None),
+        Value::String(group) => {
+            let trimmed = group.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        _ => Err(Error::BadRequest(
+            "default_group must be a string or null".into(),
+        )),
+    }
+}
+
+/// Validate a key's `default_group` against the default preset's free-form groups (by
+/// stable slug or legacy display name) and return the canonical stable slug to store.
+async fn resolve_default_group(state: &AppState, raw: &str) -> Result<String, Error> {
+    let trimmed = raw.trim();
+    if let Some(preset) = state.store.default_model_preset().await? {
+        if let Some((group, _)) = preset.layout.resolve_group_prefix(trimmed) {
+            return Ok(group.effective_slug().unwrap_or(&group.name).to_string());
+        }
+    }
+    Err(Error::BadRequest(format!(
+        "unknown default_group {trimmed:?}: must match a free-form group in the default preset"
+    )))
 }
 
 /// A key name: `null` clears it, a string is trimmed and capped. The store applies the
