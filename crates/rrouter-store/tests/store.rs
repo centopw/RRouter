@@ -5091,11 +5091,15 @@ fn unrouted_reasons_buckets_pre_dispatch_failures_by_reason() {
         s.record_usage(&rec(200, "", Some("unknown_model")))
             .await
             .expect("unknown_model 2");
-        s.record_usage(&rec(300, "", Some("auth"))).await.expect("auth");
+        s.record_usage(&rec(300, "", Some("auth")))
+            .await
+            .expect("auth");
         // Legacy pre-v47 row: unrouted, but no reason recorded.
         s.record_usage(&rec(400, "", None)).await.expect("legacy");
         // A served request must not appear in the breakdown.
-        s.record_usage(&rec(500, "openai", None)).await.expect("served");
+        s.record_usage(&rec(500, "openai", None))
+            .await
+            .expect("served");
 
         let rows = s
             .unrouted_reasons_in_teams(None, None)
@@ -5122,7 +5126,11 @@ fn unrouted_reasons_buckets_pre_dispatch_failures_by_reason() {
             .unrouted_reasons_in_teams(Some(250), None)
             .await
             .expect("since");
-        assert_eq!(recent.iter().map(|r| r.requests).sum::<u64>(), 2, "only ts>=250 rows");
+        assert_eq!(
+            recent.iter().map(|r| r.requests).sum::<u64>(),
+            2,
+            "only ts>=250 rows"
+        );
     });
 }
 

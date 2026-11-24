@@ -686,10 +686,7 @@ async fn a_whole_key_free_tier_widens_only_vendored_models() {
     // The mock's own list already carries `mock-alpha:free` (a real marker) but none of its
     // ids are vendored Groq models, so only the marker model is free.
     let (status, body) = h
-        .post(
-            "/api/free-mode/discover",
-            json!({ "providers": ["groq"] }),
-        )
+        .post("/api/free-mode/discover", json!({ "providers": ["groq"] }))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     // `mock-alpha:free` (marker) only; `mock-gamma`/`mock-delta`/`mock-beta` are NOT in the
@@ -703,8 +700,14 @@ async fn a_whole_key_free_tier_widens_only_vendored_models() {
             .unwrap_or_else(|| panic!("{model} missing: {rows:?}"))
     };
     assert!(row("mock-alpha:free").free);
-    assert!(!row("mock-gamma").free, "an unvendored model is not widened");
-    assert!(!row("mock-delta").free, "an unvendored model is not widened");
+    assert!(
+        !row("mock-gamma").free,
+        "an unvendored model is not widened"
+    );
+    assert!(
+        !row("mock-delta").free,
+        "an unvendored model is not widened"
+    );
 }
 
 /// A paid (non-free-mode) account on a whole-key provider is never consulted by free-mode
@@ -729,14 +732,14 @@ async fn a_paid_account_on_a_whole_key_provider_is_never_widened() {
         .expect("groq paid connection");
 
     let (status, body) = h
-        .post(
-            "/api/free-mode/discover",
-            json!({ "providers": ["groq"] }),
-        )
+        .post("/api/free-mode/discover", json!({ "providers": ["groq"] }))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     // No free-mode account existed, so no account rows and no provider summary.
-    assert!(body["providers"].as_array().is_none_or(|p| p.is_empty()), "{body}");
+    assert!(
+        body["providers"].as_array().is_none_or(|p| p.is_empty()),
+        "{body}"
+    );
     let rows = h.state.store.list_free_models().await.expect("rows");
     assert!(
         rows.is_empty(),

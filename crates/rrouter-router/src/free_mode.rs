@@ -378,7 +378,10 @@ pub fn utc_day_start(now_unix: u64) -> u64 {
 /// daily window). Used to park a daily-exhausted model/account until the window rolls over,
 /// instead of the 1 h cap a transient 429 earns.
 pub fn seconds_until_utc_midnight(now_unix: u64) -> u64 {
-    utc_day_start(now_unix).saturating_add(86_400).saturating_sub(now_unix).max(1)
+    utc_day_start(now_unix)
+        .saturating_add(86_400)
+        .saturating_sub(now_unix)
+        .max(1)
 }
 
 fn now_unix_secs() -> u64 {
@@ -635,7 +638,9 @@ impl FreeRotation {
     /// it without touching paid accounts.
     pub fn is_tracking_model(&self, connection: Uuid, model: &str) -> bool {
         let state = self.lock();
-        state.model_days.contains_key(&(connection, model.to_string()))
+        state
+            .model_days
+            .contains_key(&(connection, model.to_string()))
     }
 
     /// Record completed tokens for `(connection, model)` toward TPM and TPD only if this
@@ -910,11 +915,7 @@ impl FreeRotation {
 
     /// Rebuild today's UTC-day request and token counts from durable `usage` aggregates
     /// (`ts >= today 00:00 UTC`). Idempotent: only the first caller after boot applies.
-    pub fn seed_from_usage_at(
-        &self,
-        rows: &[(Uuid, String, String, u32, u64)],
-        now_unix: u64,
-    ) {
+    pub fn seed_from_usage_at(&self, rows: &[(Uuid, String, String, u32, u64)], now_unix: u64) {
         let mut state = self.lock();
         if state.seeded_from_usage {
             return;
@@ -1050,7 +1051,12 @@ mod tests {
 
         // Two sends hit the 2 RPM cap (still under 3 RPD).
         rot.note_model_send_at(conn, "gemini-2.5-flash", t0, now_unix);
-        rot.note_model_send_at(conn, "gemini-2.5-flash", t0 + Duration::from_secs(5), now_unix + 5);
+        rot.note_model_send_at(
+            conn,
+            "gemini-2.5-flash",
+            t0 + Duration::from_secs(5),
+            now_unix + 5,
+        );
         assert!(matches!(
             rot.check_model_caps_at(
                 conn,
@@ -1059,17 +1065,34 @@ mod tests {
                 t0 + Duration::from_secs(10),
                 now_unix + 10,
             ),
-            Some(ModelCapHit::Rpm { used: 2, limit: 2, .. })
+            Some(ModelCapHit::Rpm {
+                used: 2,
+                limit: 2,
+                ..
+            })
         ));
 
         // After 61 s the RPM window clears, but recording 1,200 tokens trips TPM (1,000).
         let t1 = t0 + Duration::from_secs(61);
         let u1 = now_unix + 61;
-        assert_eq!(rot.check_model_caps_at(conn, "gemini-2.5-flash", limits, t1, u1), None);
+        assert_eq!(
+            rot.check_model_caps_at(conn, "gemini-2.5-flash", limits, t1, u1),
+            None
+        );
         rot.note_model_tokens_if_tracked_at(conn, "gemini-2.5-flash", 1_200, t1, u1);
         assert!(matches!(
-            rot.check_model_caps_at(conn, "gemini-2.5-flash", limits, t1 + Duration::from_secs(1), u1 + 1),
-            Some(ModelCapHit::Tpm { used: 1_200, limit: 1_000, .. })
+            rot.check_model_caps_at(
+                conn,
+                "gemini-2.5-flash",
+                limits,
+                t1 + Duration::from_secs(1),
+                u1 + 1
+            ),
+            Some(ModelCapHit::Tpm {
+                used: 1_200,
+                limit: 1_000,
+                ..
+            })
         ));
 
         // After another 61 s TPM clears; a 3rd send reaches 3/3 RPD and parks until UTC midnight
@@ -1097,7 +1120,10 @@ mod tests {
         // After UTC midnight, both the park and the day counters clear.
         let t_next = t2 + Duration::from_secs(expected_wait + 1);
         let u_next = u2 + expected_wait + 1;
-        assert_eq!(rot.check_model_caps_at(conn, "gemini-2.5-flash", limits, t_next, u_next), None);
+        assert_eq!(
+            rot.check_model_caps_at(conn, "gemini-2.5-flash", limits, t_next, u_next),
+            None
+        );
         assert_eq!(rot.model_day_count_at(conn, "gemini-2.5-flash", u_next), 0);
         assert_eq!(rot.model_day_tokens_at(conn, "gemini-2.5-flash", u_next), 0);
     }
@@ -1113,12 +1139,27 @@ mod tests {
         let now_unix = day_start + 7_200;
         let t0 = Instant::now();
 
-        rot.note_model_tokens_if_tracked_at(paid_conn, "llama-3.3-70b-versatile", 500_000, t0, now_unix);
+        rot.note_model_tokens_if_tracked_at(
+            paid_conn,
+            "llama-3.3-70b-versatile",
+            500_000,
+            t0,
+            now_unix,
+        );
         assert!(!rot.is_tracking_model(paid_conn, "llama-3.3-70b-versatile"));
-        assert_eq!(rot.model_day_tokens_at(paid_conn, "llama-3.3-70b-versatile", now_unix), 0);
+        assert_eq!(
+            rot.model_day_tokens_at(paid_conn, "llama-3.3-70b-versatile", now_unix),
+            0
+        );
 
         rot.note_model_send_at(free_conn, "llama-3.3-70b-versatile", t0, now_unix);
-        rot.note_model_tokens_if_tracked_at(free_conn, "llama-3.3-70b-versatile", 100_000, t0, now_unix);
+        rot.note_model_tokens_if_tracked_at(
+            free_conn,
+            "llama-3.3-70b-versatile",
+            100_000,
+            t0,
+            now_unix,
+        );
         let limits = ModelLimits {
             tpd: Some(100_000),
             ..Default::default()
@@ -1138,11 +1179,22 @@ mod tests {
     #[test]
     fn learned_limits_only_tighten_and_usage_seed_is_idempotent() {
         let rot = FreeRotation::new();
-        assert!(rot.learn_model_limit("gemini", "models/gemini-2.5-flash", LimitKind::RequestsPerDay, 15));
-        assert!(!rot.learn_model_limit("gemini", "gemini-2.5-flash", LimitKind::RequestsPerDay, 50));
+        assert!(rot.learn_model_limit(
+            "gemini",
+            "models/gemini-2.5-flash",
+            LimitKind::RequestsPerDay,
+            15
+        ));
+        assert!(!rot.learn_model_limit(
+            "gemini",
+            "gemini-2.5-flash",
+            LimitKind::RequestsPerDay,
+            50
+        ));
         assert!(rot.learn_model_limit("gemini", "gemini-2.5-flash", LimitKind::RequestsPerDay, 10));
         assert_eq!(
-            rot.learned_model_limits("gemini", "models/gemini-2.5-flash").rpd,
+            rot.learned_model_limits("gemini", "models/gemini-2.5-flash")
+                .rpd,
             Some(10)
         );
         let merged = ModelLimits::merge_tighter(
@@ -1171,7 +1223,13 @@ mod tests {
         // Calling a second time is a no-op (no double-count).
         rot.seed_from_usage_at(&rows, now_unix);
         assert_eq!(rot.provider_day_count_at(conn, "gemini", now_unix), 20);
-        assert_eq!(rot.model_day_count_at(conn, "gemini-2.5-flash", now_unix), 20);
-        assert_eq!(rot.model_day_tokens_at(conn, "gemini-2.5-flash", now_unix), 42_000);
+        assert_eq!(
+            rot.model_day_count_at(conn, "gemini-2.5-flash", now_unix),
+            20
+        );
+        assert_eq!(
+            rot.model_day_tokens_at(conn, "gemini-2.5-flash", now_unix),
+            42_000
+        );
     }
 }

@@ -769,11 +769,7 @@ pub async fn summary(
 /// The additive `unrouted` payload: total pre-dispatch failures plus a per-reason list.
 /// A breakdown read failure degrades to an empty answer rather than failing the summary.
 async fn unrouted_json(state: &Arc<AppState>, since: Option<i64>, teams: Option<&[Uuid]>) -> Value {
-    match state
-        .store
-        .unrouted_reasons_in_teams(since, teams)
-        .await
-    {
+    match state.store.unrouted_reasons_in_teams(since, teams).await {
         Ok(reasons) => {
             let reasons_json: Vec<serde_json::Value> = reasons
                 .iter()

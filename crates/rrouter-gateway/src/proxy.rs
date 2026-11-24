@@ -3738,8 +3738,7 @@ impl Attempt<'_> {
         let rotation = self.state.planner.free_rotation();
         let norm_model =
             rrouter_router::free_mode::normalize_model_key(&candidate.provider, &candidate.model);
-        let is_public_free =
-            is_public_free_candidate(self.state.store.as_ref(), candidate).await;
+        let is_public_free = is_public_free_candidate(self.state.store.as_ref(), candidate).await;
 
         if is_public_free {
             crate::free_mode::ensure_rotation_seeded(self.state.store.as_ref(), rotation).await;
@@ -5014,7 +5013,9 @@ impl RequestTrace {
         // A request that failed before any provider was dispatched leaves `provider`
         // empty; record the stable reason so the dashboard can bucket these instead of
         // showing one undifferentiated "unrouted" pile.
-        let unrouted_reason = provider.is_empty().then(|| classify_unrouted(err).to_string());
+        let unrouted_reason = provider
+            .is_empty()
+            .then(|| classify_unrouted(err).to_string());
         let rec = UsageRecord {
             id: None,
             ts: crate::now_unix(),

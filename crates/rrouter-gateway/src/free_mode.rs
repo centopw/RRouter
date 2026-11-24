@@ -1576,7 +1576,10 @@ pub async fn ensure_rotation_seeded(store: &Store, rotation: &rrouter_router::Fr
     }
     let now = crate::now_unix().max(0) as u64;
     let day_start = rrouter_router::free_mode::utc_day_start(now) as i64;
-    let rows = match store.usage_summary_by_connection(Some(day_start), None).await {
+    let rows = match store
+        .usage_summary_by_connection(Some(day_start), None)
+        .await
+    {
         Ok(rows) => rows,
         Err(err) => {
             tracing::warn!(error = %err, "failed to seed free-mode daily counters from usage");
@@ -1590,10 +1593,7 @@ pub async fn ensure_rotation_seeded(store: &Store, rotation: &rrouter_router::Fr
             let conn = row
                 .connection_id
                 .unwrap_or(rrouter_router::free_mode::ANONYMOUS_CONNECTION);
-            let requests = row
-                .requests
-                .saturating_sub(row.errors)
-                .min(u32::MAX as u64) as u32;
+            let requests = row.requests.saturating_sub(row.errors).min(u32::MAX as u64) as u32;
             let tokens = row
                 .input_tokens
                 .saturating_add(row.output_tokens)
@@ -3483,8 +3483,8 @@ pub fn learn_limit_from_error(body: &str) -> Option<(LimitKind, u64)> {
         // 3. Groq 413/429 format: "on tokens per minute (TPM): Limit 12000, Used ...".
         let window_after: String = after.chars().take(48).collect();
         if let Some(lim_pos) = window_after.find("limit") {
-            let after_limit = window_after[lim_pos + "limit".len()..]
-                .trim_start_matches([' ', '\t', ':', '=']);
+            let after_limit =
+                window_after[lim_pos + "limit".len()..].trim_start_matches([' ', '\t', ':', '=']);
             if let Some(n) = leading_number(after_limit).filter(|&n| n > 0) {
                 return Some((kind, n));
             }
@@ -3554,9 +3554,11 @@ pub fn free_tier_cooldown_secs(retry_after: Option<u64>, body: &str, now_unix: i
     }
     let value: Value = serde_json::from_str(body).ok()?;
     let reset_val = value.pointer("/error/metadata/headers/X-RateLimit-Reset")?;
-    let reset_ms = reset_val
-        .as_i64()
-        .or_else(|| reset_val.as_str().and_then(|s| s.trim().parse::<i64>().ok()))?;
+    let reset_ms = reset_val.as_i64().or_else(|| {
+        reset_val
+            .as_str()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+    })?;
     let reset = reset_ms / 1000;
     if reset <= now_unix {
         return None;
@@ -3641,7 +3643,10 @@ mod tests {
     #[test]
     fn vendored_free_tiers_parse_and_expose_rules_and_limits() {
         let tiers = vendored_free_tiers();
-        assert_eq!(tiers.upstream.repo, "https://github.com/tashfeenahmed/freellmapi");
+        assert_eq!(
+            tiers.upstream.repo,
+            "https://github.com/tashfeenahmed/freellmapi"
+        );
         assert_eq!(
             tiers.upstream.sha,
             "6daa81b8def6a7e1d99fd67a611779913c287076"
@@ -3652,9 +3657,15 @@ mod tests {
         // Whole-key free tiers carry the all-models-on-free-key rule; OpenRouter keeps
         // its `:free` suffix rule.
         assert_eq!(vendored_free_rule("groq"), Some("all-models-on-free-key"));
-        assert_eq!(vendored_free_rule("cerebras"), Some("all-models-on-free-key"));
+        assert_eq!(
+            vendored_free_rule("cerebras"),
+            Some("all-models-on-free-key")
+        );
         assert_eq!(vendored_free_rule("gemini"), Some("all-models-on-free-key"));
-        assert_eq!(vendored_free_rule("mistral"), Some("all-models-on-free-key"));
+        assert_eq!(
+            vendored_free_rule("mistral"),
+            Some("all-models-on-free-key")
+        );
         assert_eq!(vendored_free_rule("openrouter"), Some("id-suffix:free"));
         assert_eq!(vendored_free_rule("opencode"), None);
 
@@ -3692,7 +3703,8 @@ mod tests {
         assert!(vendored_model_limits("cerebras", "qwen-3-coder-480b").is_none());
 
         // Mistral's context window was corrected 131K → 262K (V12).
-        let mistral = vendored_model_limits("mistral", "mistral-large-latest").expect("mistral row");
+        let mistral =
+            vendored_model_limits("mistral", "mistral-large-latest").expect("mistral row");
         assert_eq!(mistral.context, Some(262144));
 
         assert!(vendored_model_limits("groq", "does-not-exist").is_none());
@@ -3710,7 +3722,10 @@ mod tests {
         assert!(!whole_key_free_model("groq", "gpt-5-expensive"));
 
         // Providers without the whole-key rule never widen, even for a vendored id.
-        assert!(!whole_key_free_model("openrouter", "llama-3.3-70b-versatile"));
+        assert!(!whole_key_free_model(
+            "openrouter",
+            "llama-3.3-70b-versatile"
+        ));
         assert!(!whole_key_free_model("opencode", "llama-3.3-70b-versatile"));
         assert!(!whole_key_free_model("unknown", "llama-3.3-70b-versatile"));
     }
@@ -3964,11 +3979,17 @@ mod tests {
 
         // Without a raw inner message, the outer message is the fallback.
         let plain = r#"{"error":{"code":429,"message":"Provider returned error"}}"#;
-        assert_eq!(extract_provider_error_message(plain, None), "Provider returned error");
+        assert_eq!(
+            extract_provider_error_message(plain, None),
+            "Provider returned error"
+        );
 
         // A non-OpenRouter error still reads `/error/message`.
         let anthropic = r#"{"type":"error","error":{"message":"rate_limit_error"}}"#;
-        assert_eq!(extract_provider_error_message(anthropic, None), "rate_limit_error");
+        assert_eq!(
+            extract_provider_error_message(anthropic, None),
+            "rate_limit_error"
+        );
     }
 
     /// `Retry-After` is read as integer seconds, fractional seconds, and ignored when it is
@@ -4069,9 +4090,17 @@ mod tests {
         let gemini = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"exhausted","a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"45s"}]}}"#;
         assert_eq!(retry_hint(&empty, gemini), Some(45), "Gemini RetryInfo 45s");
         let gemini_frac = r#"{"error":{"details":[{"retryDelay":"1.5s"}]}}"#;
-        assert_eq!(retry_hint(&empty, gemini_frac), Some(2), "Gemini RetryInfo 1.5s");
+        assert_eq!(
+            retry_hint(&empty, gemini_frac),
+            Some(2),
+            "Gemini RetryInfo 1.5s"
+        );
         let gemini_ms = r#"{"error":{"details":[{"retryDelay":"500ms"}]}}"#;
-        assert_eq!(retry_hint(&empty, gemini_ms), Some(1), "Gemini RetryInfo 500ms");
+        assert_eq!(
+            retry_hint(&empty, gemini_ms),
+            Some(1),
+            "Gemini RetryInfo 500ms"
+        );
 
         // Real Groq / OpenAI prose formats: ms, decimals, compound durations, spaced units.
         assert_eq!(
