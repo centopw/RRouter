@@ -45,6 +45,23 @@ export function usd(micros: number | null | undefined, opts?: { dash?: boolean }
   return `$${dollars.toFixed(4)}`;
 }
 
+/**
+ * Display money from micros for caps, KPIs, and totals: two decimals from a cent ($0.01) up
+ * (`$0.50`, `$24.10`, `$42.17`), keeping `usd()` precision below a cent so fractional-cent
+ * totals stay visible. Keep `usd()` for per-request costs where four decimals carry meaning.
+ */
+export function usdDisplay(micros: number | null | undefined, opts?: { dash?: boolean }): string {
+  if (micros === null || micros === undefined || !Number.isFinite(micros)) {
+    return opts?.dash ? "—" : "$0.00";
+  }
+  if (micros === 0 && opts?.dash) return "—";
+  const dollars = micros / MICROS;
+  if (Math.abs(dollars) >= 0.01) {
+    return dollars < 0 ? `-$${Math.abs(dollars).toFixed(2)}` : `$${dollars.toFixed(2)}`;
+  }
+  return usd(micros, opts);
+}
+
 /** Micros as an editable dollar string: `2500000` -> "2.5", `1` -> "0.000001". */
 export function usdInput(micros: number): string {
   if (!(micros > 0)) return "";
@@ -89,13 +106,22 @@ export function ago(ts: number): string {
   return `${Math.floor(secs / 86400)}d ago`;
 }
 
-export function uptime(secs: number): string {
-  const d = Math.floor(secs / 86400);
-  const h = Math.floor((secs % 86400) / 3600);
-  const m = Math.floor((secs % 3600) / 60);
+/**
+ * Floor-based human duration (`"11d 23h"`, `"2h 59m"`, `"45m"`), never rounding a remainder
+ * up into `"2h 60m"` or `"11d 24h"`.
+ */
+export function duration(secs: number): string {
+  const s = Number.isFinite(secs) && secs > 0 ? Math.floor(secs) : 0;
+  const d = Math.floor(s / 86_400);
+  const h = Math.floor((s % 86_400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
   if (d > 0) return `${d}d ${h}h`;
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
+}
+
+export function uptime(secs: number): string {
+  return duration(secs);
 }
 
 /** Split a model reference into provider and id; both halves may be absent. */

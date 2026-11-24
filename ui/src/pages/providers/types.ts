@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { HealthStatus } from "../../components/molecules/HealthBadge";
 import {
   api,
   type AccountQuotaRow,
@@ -9,11 +10,20 @@ import {
   type ModelProvider,
   type QuotaPingMode,
   type QuotaPingRow,
+  type UsageSummaryByConnection,
 } from "../../lib/api";
+import { duration } from "../../lib/format";
 import { qk } from "../../lib/queries";
 import { refusalView, type RefusalView } from "../../lib/refusal";
 
 export type ProviderNotice = { tone: "pos" | "neg"; text: string };
+
+export type AccountFilter = "all" | "attention" | "disabled";
+
+export type AccountTraffic24h = {
+  requests: number;
+  errors: number;
+};
 
 export type ConnectionTestResult = {
   id: string;
@@ -25,7 +35,7 @@ export type ConnectionTestResult = {
 
 /**
  * Single source of truth for whether one account can take traffic right now, and why not.
- * Both the provider header's "N of M ready" count, each account row, the hover/focus
+ * Both the provider header readiness readout, KPI summary, each account row, the hover/focus
  * preview, and the connection drawer read from this function so they can never disagree.
  */
 export type AccountStatus =
@@ -34,14 +44,24 @@ export type AccountStatus =
       ready: false;
       label: string;
       tone: "neg" | "warn" | "info";
+      health: HealthStatus;
       reason: string;
       refusal: RefusalView;
     }
   | {
-      kind: "disabled" | "backoff" | "no_endpoint" | "over_quota" | "plan_at_limit" | "ready";
+      kind:
+        | "disabled"
+        | "backoff"
+        | "no_endpoint"
+        | "over_quota"
+        | "plan_at_limit"
+        | "warning"
+        | "last_error"
+        | "ready";
       ready: boolean;
       label: string;
-      tone: "muted" | "warn" | "neg";
+      tone: "pos" | "muted" | "warn" | "neg";
+      health: HealthStatus;
       reason: string | null;
     };
 
@@ -62,14 +82,50 @@ export type ProviderGroup = {
   tiers: Array<{ priority: number; count: number }>;
   /** Accounts whose `accountStatus().ready` is true right now. */
   ready: number;
+  /** Accounts with `is_active === true`. */
   enabled: number;
+  /** Accounts disabled on purpose by an operator (`!is_active` with no provider refusal). */
+  disabled: number;
+  /** Non-disabled accounts expected to be ready (`enabled + refused`). */
+  expected: number;
   backoff: number;
   overQuota: number;
   /** Accounts a provider retired (`refusal` set): out of rotation, and not by an operator. */
   refused: number;
   /** Worst subscription window in the group; `null` when no account reported one. */
   subscription: { percent: number; resets_at: number | null; reporting: number } | null;
-  state: "healthy" | "degraded" | "down";
+  /** `"disabled"` when every account in the group was turned off on purpose (never red/amber). */
+  state: "healthy" | "degraded" | "down" | "disabled";
+};
+
+export type TightestLimitSummary = {
+  connectionId: string;
+  accountName: string;
+  providerLabel: string;
+  windowLabel: string;
+  percent: number;
+  resetsAt: number | null;
+};
+
+export type ProvidersSummary = {
+  total: number;
+  ready: number;
+  enabled: number;
+  disabled: number;
+  refused: number;
+  /** Accounts not disabled on purpose (`total - disabled`). */
+  expected: number;
+  /** Accounts needing operator attention (never includes intentionally disabled accounts). */
+  attention: number;
+  /** Severe non-ready accounts (backoff, refused, exhausted, no endpoint). */
+  severe: number;
+  attentionDetail: string;
+  tightest: TightestLimitSummary | null;
+  traffic24h: {
+    requests: number;
+    errors: number;
+    errorRate: number;
+  };
 };
 
 export const PLACEHOLDER_LABELS = /^(resource|your-resource|placeholder)$/i;
@@ -397,31 +453,11 @@ export function subscriptionUsagePercent(row?: AccountSubscription): number | nu
   return Math.round(Math.max(...row.windows.map((window) => window.used_percent)));
 }
 
-/** Fill for a magnitude bar: neutral until 70%, then the state colour only. */
-export function barFill(percent: number): string {
-  return percent >= 90
-    ? "bg-[var(--color-neg-fill)]"
-    : percent >= 70
-      ? "bg-[var(--color-warn-fill)]"
-      : "bg-muted";
-}
-
-/** Text for the same bar: the number is a signal at 70%+, plain otherwise. */
-export function barText(percent: number): string {
-  return percent >= 90
-    ? "text-[var(--color-neg)]"
-    : percent >= 70
-      ? "text-[var(--color-warn)]"
-      : "text-muted";
-}
-
 /** "1h 35m" until the window rolls over; empty when the provider gave no timestamp. */
-export function until(ts: number | null): string {
+export function until(ts: number | null, nowSec = Math.floor(Date.now() / 1000)): string {
   if (!ts) return "";
-  const secs = Math.max(0, ts - Math.floor(Date.now() / 1000));
-  if (secs < 3600) return `${Math.max(1, Math.round(secs / 60))}m`;
-  if (secs < 86_400) return `${Math.floor(secs / 3600)}h ${Math.round((secs % 3600) / 60)}m`;
-  return `${Math.floor(secs / 86_400)}d ${Math.round((secs % 86_400) / 3600)}h`;
+  const secs = Math.max(0, ts - nowSec);
+  return duration(Math.max(60, secs));
 }
 
 export function parseAnchor(value: string): number | null {
@@ -462,8 +498,53 @@ export function pingBadgeText(ping: QuotaPingRow): string {
   return `${ping.mode} ${ping.slots_per_day}/day`;
 }
 
+function capitalizeFirst(text: string): string {
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+}
+
+function shortWindowLabel(label: string, windowSeconds: number | null): string {
+  if (windowSeconds === 5 * 3600 || /^5[\s-]?hour$/i.test(label.trim())) {
+    return "5h";
+  }
+  return label;
+}
+
+function tightestLimitForAccount(
+  quota?: AccountQuotaRow,
+  subscription?: AccountSubscription,
+): { label: string; percent: number; resetsAt: number | null } | null {
+  let best: { label: string; percent: number; resetsAt: number | null } | null = null;
+  const consider = (label: string, percent: number, resetsAt: number | null) => {
+    if (!Number.isFinite(percent)) return;
+    if (best === null || percent > best.percent) {
+      best = { label, percent, resetsAt };
+    }
+  };
+  if (quota) {
+    const win = capitalizeFirst(WINDOW_LABEL[quota.window] ?? quota.window);
+    if (quota.max_requests > 0) {
+      consider(`${win} req`, (quota.requests / quota.max_requests) * 100, quota.resets_at);
+    }
+    if (quota.max_tokens > 0) {
+      consider(`${win} tok`, (quota.tokens / quota.max_tokens) * 100, quota.resets_at);
+    }
+    if (quota.max_cost_micros > 0) {
+      consider(`${win} spend`, (quota.cost_micros / quota.max_cost_micros) * 100, quota.resets_at);
+    }
+  }
+  for (const window of subscription?.windows ?? []) {
+    consider(
+      shortWindowLabel(window.label, window.window_seconds),
+      window.used_percent,
+      window.resets_at,
+    );
+  }
+  return best;
+}
+
 /**
- * Standing readiness of one connection: what stops it routing, else that it is ready.
+ * Standing readiness of one connection: what stops it routing, else whether it is nearing
+ * a limit (`Warning`, still ready) or `Healthy`.
  *
  * A provider refusal comes first and reads as its own badge, because it is not the same
  * fact as an operator disable. Live breaker state has no API yet (S1); persisted probe
@@ -481,8 +562,9 @@ export function accountStatus(
     return {
       kind: "refusal",
       ready: false,
-      label: refusal.label,
+      label: capitalizeFirst(refusal.label),
       tone: refusal.tone,
+      health: refusal.tone === "neg" ? "failing" : refusal.tone === "warn" ? "warning" : "info",
       reason: refusal.description,
       refusal,
     };
@@ -491,8 +573,9 @@ export function accountStatus(
     return {
       kind: "disabled",
       ready: false,
-      label: "disabled",
+      label: "Disabled",
       tone: "muted",
+      health: "disabled",
       reason: "Disabled by an operator; excluded from routing.",
     };
   }
@@ -500,8 +583,9 @@ export function accountStatus(
     return {
       kind: "backoff",
       ready: false,
-      label: `backoff ${connection.backoff_level}`,
-      tone: "warn",
+      label: "Backoff",
+      tone: "neg",
+      health: "failing",
       reason: connection.last_error ?? "In probe backoff after a recent upstream error.",
     };
   }
@@ -509,8 +593,9 @@ export function accountStatus(
     return {
       kind: "no_endpoint",
       ready: false,
-      label: "no endpoint",
+      label: "No endpoint",
       tone: "warn",
+      health: "warning",
       reason: "Resource base URL is not configured yet.",
     };
   }
@@ -519,8 +604,9 @@ export function accountStatus(
     return {
       kind: "over_quota",
       ready: false,
-      label: "over quota",
+      label: "Exhausted",
       tone: "neg",
+      health: "exhausted",
       reason: `Operator ${WINDOW_LABEL[quota.window] ?? quota.window} cap reached${reset ? ` · resets in ${reset}` : ""}.`,
     };
   }
@@ -532,20 +618,209 @@ export function accountStatus(
       : null;
   if (worstWindow && worstWindow.used_percent >= 90) {
     const reset = until(worstWindow.resets_at);
+    const exhausted = worstWindow.used_percent >= 100;
     return {
       kind: "plan_at_limit",
       ready: false,
-      label: "plan at limit",
-      tone: "warn",
+      label: exhausted ? "Exhausted" : "Warning",
+      tone: exhausted ? "neg" : "warn",
+      health: exhausted ? "exhausted" : "warning",
       reason: `${worstWindow.label} at ${Math.round(worstWindow.used_percent)}%${reset ? ` · resets in ${reset}` : ""}.`,
+    };
+  }
+  const tightest = tightestLimitForAccount(quota, subscription);
+  if (tightest && tightest.percent >= 70) {
+    const reset = until(tightest.resetsAt);
+    return {
+      kind: "warning",
+      ready: true,
+      label: "Warning",
+      tone: "warn",
+      health: "warning",
+      reason: `${tightest.label} at ${Math.round(tightest.percent)}%${reset ? ` · resets in ${reset}` : ""}.`,
+    };
+  }
+  const staleError = connection.last_error?.trim() || null;
+  if (staleError) {
+    return {
+      kind: "last_error",
+      ready: true,
+      label: "Last error",
+      tone: "warn",
+      health: "warning",
+      reason: staleError,
     };
   }
   return {
     kind: "ready",
     ready: true,
-    label: "ready",
-    tone: "muted",
+    label: "Healthy",
+    tone: "pos",
+    health: "healthy",
     reason: null,
+  };
+}
+
+/**
+ * Whether an account needs operator attention. Intentionally disabled accounts never do,
+ * and every account that needs attention carries a non-Healthy status pill.
+ */
+export function accountNeedsAttention(_connection: Connection, status: AccountStatus): boolean {
+  if (status.kind === "disabled") return false;
+  return !status.ready || status.health !== "healthy";
+}
+
+/** Fold 24h usage summary rows by `connection_id` for the Providers 24h column. */
+export function buildTrafficByConnection(
+  rows?: ReadonlyArray<UsageSummaryByConnection>,
+): Map<string, AccountTraffic24h> {
+  const map = new Map<string, AccountTraffic24h>();
+  for (const row of rows ?? []) {
+    if (!row.connection_id) continue;
+    const prev = map.get(row.connection_id);
+    if (prev) {
+      prev.requests += row.requests;
+      prev.errors += row.errors;
+    } else {
+      map.set(row.connection_id, { requests: row.requests, errors: row.errors });
+    }
+  }
+  return map;
+}
+
+/** Filter grouped providers by the segmented filter while preserving each group's full readiness stats. */
+export function filterProviderGroups(
+  groups: ProviderGroup[],
+  filter: AccountFilter,
+  quotas?: AccountQuotaRow[],
+  subscriptions?: AccountSubscription[],
+  providers?: ModelProvider[],
+): ProviderGroup[] {
+  if (filter === "all") return groups;
+  const quotaBy = new Map((quotas ?? []).map((row) => [row.connection_id, row]));
+  const subscriptionBy = new Map((subscriptions ?? []).map((row) => [row.connection_id, row]));
+  const result: ProviderGroup[] = [];
+  for (const group of groups) {
+    const matching = group.connections.filter((connection) => {
+      const status = accountStatus(
+        connection,
+        quotaBy.get(connection.id),
+        subscriptionBy.get(connection.id),
+        providers,
+      );
+      return filter === "disabled"
+        ? status.kind === "disabled"
+        : accountNeedsAttention(connection, status);
+    });
+    if (matching.length > 0) {
+      result.push({ ...group, connections: matching });
+    }
+  }
+  return result;
+}
+
+/** Pure KPI strip rollup across all visible accounts, limits, and 24h traffic. */
+export function summarizeProviders(
+  accounts: Connection[],
+  providers?: ModelProvider[],
+  quotas?: AccountQuotaRow[],
+  subscriptions?: AccountSubscription[],
+  trafficRows?: ReadonlyArray<UsageSummaryByConnection>,
+): ProvidersSummary {
+  const quotaBy = new Map((quotas ?? []).map((row) => [row.connection_id, row]));
+  const subscriptionBy = new Map((subscriptions ?? []).map((row) => [row.connection_id, row]));
+  const providerDisplay = new Map((providers ?? []).map((p) => [p.id, p.display]));
+
+  let ready = 0;
+  let enabled = 0;
+  let disabled = 0;
+  let refused = 0;
+  let attention = 0;
+  let severe = 0;
+  let backoffCount = 0;
+  let exhaustedCount = 0;
+  let noEndpointCount = 0;
+  let warningCount = 0;
+  let staleErrorCount = 0;
+  let tightest: TightestLimitSummary | null = null;
+
+  for (const account of accounts) {
+    const quota = quotaBy.get(account.id);
+    const subscription = subscriptionBy.get(account.id);
+    const status = accountStatus(account, quota, subscription, providers);
+
+    if (status.ready) ready += 1;
+    if (account.is_active) enabled += 1;
+    if (status.kind === "disabled") disabled += 1;
+    if (status.kind === "refusal") refused += 1;
+
+    if (accountNeedsAttention(account, status)) {
+      attention += 1;
+      if (status.kind === "backoff") {
+        backoffCount += 1;
+        severe += 1;
+      } else if (status.kind === "refusal") {
+        severe += 1;
+      } else if (status.kind === "over_quota" || status.kind === "plan_at_limit") {
+        exhaustedCount += 1;
+        severe += 1;
+      } else if (status.kind === "no_endpoint") {
+        noEndpointCount += 1;
+        severe += 1;
+      } else if (status.kind === "warning") {
+        warningCount += 1;
+      } else if (status.kind === "last_error") {
+        staleErrorCount += 1;
+      }
+    }
+
+    if (account.is_active) {
+      const limit = tightestLimitForAccount(quota, subscription);
+      if (limit && (tightest === null || limit.percent > tightest.percent)) {
+        const display = providerDisplay.get(account.provider) ?? providerLabel(account.provider);
+        tightest = {
+          connectionId: account.id,
+          accountName: connectionLabel(account, display),
+          providerLabel: display,
+          windowLabel: limit.label,
+          percent: limit.percent,
+          resetsAt: limit.resetsAt,
+        };
+      }
+    }
+  }
+
+  const reasons: string[] = [];
+  if (backoffCount > 0) reasons.push(`${backoffCount} backoff`);
+  if (refused > 0) reasons.push(`${refused} refused`);
+  if (exhaustedCount > 0) reasons.push(`${exhaustedCount} at limit`);
+  if (noEndpointCount > 0) reasons.push(`${noEndpointCount} no endpoint`);
+  if (warningCount > 0) reasons.push(`${warningCount} limit${warningCount === 1 ? "" : "s"}`);
+  if (staleErrorCount > 0) reasons.push(`${staleErrorCount} error${staleErrorCount === 1 ? "" : "s"}`);
+
+  let requests = 0;
+  let errors = 0;
+  for (const row of trafficRows ?? []) {
+    requests += row.requests;
+    errors += row.errors;
+  }
+
+  return {
+    total: accounts.length,
+    ready,
+    enabled,
+    disabled,
+    refused,
+    expected: accounts.length - disabled,
+    attention,
+    severe,
+    attentionDetail: reasons.length > 0 ? reasons.join(" · ") : "All enabled healthy",
+    tightest,
+    traffic24h: {
+      requests,
+      errors,
+      errorRate: requests > 0 ? (errors / requests) * 100 : 0,
+    },
   };
 }
 
@@ -594,7 +869,7 @@ export function buildProviderGroups(
 
     let ready = 0;
     let enabled = 0;
-    let flagged = 0;
+    let disabled = 0;
     let overQuota = 0;
     let backoff = 0;
     let refused = 0;
@@ -607,10 +882,8 @@ export function buildProviderGroups(
       const subscription = subscriptionBy.get(account.id);
       const status = accountStatus(account, quota, subscription, providers);
       if (status.ready) ready += 1;
-      if (account.is_active) {
-        enabled += 1;
-        if (!status.ready) flagged += 1;
-      }
+      if (account.is_active) enabled += 1;
+      if (status.kind === "disabled") disabled += 1;
       if (quota?.exhausted) overQuota += 1;
       if (account.backoff_level > 0) backoff += 1;
       if (status.kind === "refusal") refused += 1;
@@ -624,6 +897,16 @@ export function buildProviderGroups(
       }
     }
 
+    const expected = connections.length - disabled;
+    const state: ProviderGroup["state"] =
+      expected === 0
+        ? "disabled"
+        : ready === 0
+          ? "down"
+          : ready < expected
+            ? "degraded"
+            : "healthy";
+
     return {
       key,
       provider,
@@ -633,6 +916,8 @@ export function buildProviderGroups(
       tiers,
       ready,
       enabled,
+      disabled,
+      expected,
       backoff,
       overQuota,
       refused,
@@ -644,7 +929,7 @@ export function buildProviderGroups(
               resets_at: worstResets,
               reporting,
             },
-      state: ready === 0 ? "down" : flagged > 0 ? "degraded" : "healthy",
+      state,
     };
   });
 }

@@ -1,3 +1,6 @@
+import type { Model } from "../../lib/api.ts";
+import { rowIsAvailable, rowIsFree, type UnifiedRow } from "./unified-rows.ts";
+
 /**
  * The URL vocabulary of the unified Models table, and nothing else.
  *
@@ -87,4 +90,145 @@ export function sizeOf(params: URLSearchParams): number {
 export function pageOf(params: URLSearchParams, key: string, total: number, size: number): number {
   const last = Math.max(1, Math.ceil(total / size));
   return Math.min(Math.max(1, Number(params.get(key) ?? "1") || 1), last);
+}
+
+/**
+ * Label for a preset in the selector. Drops the redundant " · default" suffix when
+ * the preset is already named "Default" (case-insensitive).
+ */
+export function presetOptionLabel(name: string, isDefault: boolean): string {
+  if (!isDefault) return name;
+  return name.trim().toLowerCase() === "default" ? name : `${name} · default`;
+}
+
+/** True when the status selection is the default admin board (`Routed` only). */
+export function isDefaultStatusSet(statuses: ReadonlySet<StatusKey>): boolean {
+  return statuses.size === 1 && statuses.has("routed");
+}
+
+/**
+ * Count non-default filters controlled inside the filter bar / phone filter sheet.
+ * Search (`q`) sits inline beside the phone Filters button, so it is excluded here.
+ */
+export function countActiveFilters({
+  provider,
+  kind,
+  statuses,
+  statusAware,
+  free,
+  custom,
+}: {
+  provider: string;
+  kind: string;
+  statuses: ReadonlySet<StatusKey>;
+  statusAware: boolean;
+  free: boolean;
+  custom: boolean;
+}): number {
+  let count = 0;
+  if (provider !== ALL) count += 1;
+  if (kind !== "all") count += 1;
+  if (statusAware && !isDefaultStatusSet(statuses)) count += 1;
+  if (free) count += 1;
+  if (custom) count += 1;
+  return count;
+}
+
+export type ModelKpiSummary = {
+  total: number;
+  /** Non-disabled rows (denominator for reader availability so disabled-on-purpose never degrades readiness). */
+  enabledTotal: number;
+  routed: number;
+  routedAvailable: number;
+  routedUnavailable: number;
+  available: number;
+  free: number;
+  routedFree: number;
+  hidden: number;
+  unrouted: number;
+  disabled: number;
+  /** Rows outside the routed board (`hidden + unrouted + disabled`). */
+  notRouted: number;
+  /** Non-disabled rows that cannot currently serve (the sole count under "Needs attention"). */
+  unavailable: number;
+  /** Preset status buckets containing at least one non-disabled unavailable row. */
+  unavailableStatuses: StatusKey[];
+  /** Non-empty preset status buckets among `hidden`, `unrouted`, `disabled`. */
+  notRoutedStatuses: StatusKey[];
+};
+
+const NOT_ROUTED_ORDER: readonly StatusKey[] = ["hidden", "unrouted", "disabled"];
+
+/**
+ * Real-data counts for the top KPI strip across the unified row set.
+ * Disabled rows are counted strictly under `disabled` / `notRouted` and never under
+ * `unavailable` ("Needs attention"), so operator-disabled models never read as degraded.
+ */
+export function summarizeModelKpis(
+  rows: readonly UnifiedRow[],
+  modelByRef: ReadonlyMap<string, Model>,
+): ModelKpiSummary {
+  let routed = 0;
+  let routedAvailable = 0;
+  let available = 0;
+  let free = 0;
+  let routedFree = 0;
+  let hidden = 0;
+  let unrouted = 0;
+  let disabled = 0;
+  let unavailable = 0;
+  const unavailableStatusSet = new Set<StatusKey>();
+
+  for (const row of rows) {
+    const isAvail = rowIsAvailable(row, modelByRef);
+    const isFreeRow = rowIsFree(row, modelByRef);
+
+    if (row.status === "routed") {
+      routed += 1;
+      if (isAvail) routedAvailable += 1;
+      if (isFreeRow) routedFree += 1;
+    } else if (row.status === "hidden") {
+      hidden += 1;
+    } else if (row.status === "unrouted") {
+      unrouted += 1;
+    } else if (row.status === "disabled") {
+      disabled += 1;
+    }
+
+    if (isAvail) {
+      available += 1;
+    } else if (row.status !== "disabled") {
+      unavailable += 1;
+      if (row.status !== "catalog") {
+        unavailableStatusSet.add(row.status);
+      }
+    }
+
+    if (isFreeRow) free += 1;
+  }
+
+  const notRoutedCounts: Record<StatusKey, number> = {
+    routed,
+    hidden,
+    unrouted,
+    disabled,
+  };
+
+  return {
+    total: rows.length,
+    enabledTotal: rows.length - disabled,
+    routed,
+    routedAvailable,
+    routedUnavailable: routed - routedAvailable,
+    available,
+    free,
+    routedFree,
+    hidden,
+    unrouted,
+    disabled,
+    notRouted: hidden + unrouted + disabled,
+    unavailable,
+    unavailableStatuses: STATUSES.filter((status) => unavailableStatusSet.has(status)),
+    notRoutedStatuses: NOT_ROUTED_ORDER.filter((status) => notRoutedCounts[status] > 0),
+  };
 }

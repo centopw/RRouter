@@ -1,52 +1,60 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link } from "react-router-dom";
 import * as Popover from "@radix-ui/react-popover";
-import { DotsThree } from "@phosphor-icons/react";
+import { DotsThree, PlugsConnected } from "@phosphor-icons/react";
+import { HealthBadge } from "../../components/molecules/HealthBadge";
 import { ProviderIcon } from "../../components/provider-icon";
 import { PaginationBar } from "../../components/table";
-import { Badge, Button, Card, Dot, Heading, cx } from "../../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  Dot,
+  Meter,
+  Segmented,
+  barText,
+  cx,
+} from "../../components/ui";
 import {
   type AccountQuotaRow,
   type AccountSubscription,
   type Connection,
   type ModelProvider,
 } from "../../lib/api";
-import { ms } from "../../lib/format";
+import { compact, ms } from "../../lib/format";
 import { refusalView } from "../../lib/refusal";
-import { QuotaMeter, resetsIn, worstQuotaBar } from "../usage/quota";
+import { resetsIn, worstQuotaBar } from "../usage/quota";
 import { AccountNameLink } from "./account-preview";
 import {
   accountStatus,
-  barText,
   connectionLabel,
   derivedIdentifiers,
   hostOf,
   isCustomConnection,
   protocolLabel,
+  type AccountFilter,
   type AccountStatus,
+  type AccountTraffic24h,
   type ConnectionTestResult,
   type ProviderGroup,
 } from "./types";
 
 /**
  * Aligned column grid from `md` (768px) upward:
- *   md:  identity | limit | status | actions
- *   lg+: identity | priority | limit | status | actions
+ *   md:  account | owner | limit | status | actions
+ *   lg+: account | owner | priority | limit | 24h | status | actions
  *
- * Below `md` (phone widths), each row stacks cleanly into two readable lines so account
- * names never collapse to a few letters and the actions menu stays reachable at every width.
+ * Keeps Account proportional (~280–320 px at 1440) instead of a 530 px void, and gives
+ * Owner, 24 h traffic, and the limit bar their own dedicated columns.
  */
 const DESKTOP_GRID =
-  "md:grid md:items-center md:gap-x-3 md:grid-cols-[minmax(0,1fr)_13rem_8.5rem_3.25rem] " +
-  "lg:grid-cols-[minmax(0,1fr)_3.25rem_16rem_9.5rem_3.25rem] " +
-  "xl:grid-cols-[minmax(0,1fr)_3.25rem_18rem_9.5rem_3.25rem]";
+  "md:grid md:items-center md:gap-x-3 md:grid-cols-[minmax(0,1.15fr)_5.5rem_minmax(11rem,1fr)_7.75rem_2.25rem] " +
+  "lg:grid-cols-[minmax(10rem,1.2fr)_5.5rem_2.75rem_minmax(12rem,1.15fr)_4.5rem_8rem_2.25rem] " +
+  "xl:grid-cols-[minmax(12rem,1.3fr)_6.5rem_3rem_minmax(14rem,1.25fr)_5.25rem_8.5rem_2.5rem]";
 
-const DOT_TONE = { muted: "muted", warn: "warn", neg: "neg" } as const;
-const STATE_TEXT = {
-  muted: "text-muted",
-  warn: "text-[var(--color-warn)]",
-  neg: "text-[var(--color-neg)]",
-} as const;
+const OWNER_TOOLTIP =
+  "Team keys route only to their own team's accounts; shared accounts serve instance-wide keys.";
 
 /**
  * Kept exported for backwards compatibility with any caller importing `AccountCell`.
@@ -87,7 +95,7 @@ export function AccountCell({
 
 /**
  * Single limit readout for one account: the worst bar across operator caps and provider
- * plan windows (`worstQuotaBar`), rendered with the shared `QuotaMeter` and `barText`
+ * plan windows (`worstQuotaBar`), rendered with the shared `Meter` and `barText`
  * ladder. Never mixes two different windows into one cell, and never prints "no cap set"
  * unless both limit sources have actually answered.
  */
@@ -107,10 +115,7 @@ function LimitCell({
 
   if (bar) {
     const reset = resetsIn(bar.resets_at);
-    // Long spend ratios ("$14.2000 / $50.0000") need the label's horizontal room; keep
-    // "resets in" inline when the right-hand detail is compact, and always show it in the
-    // preview and drawer.
-    const showResetInline = Boolean(reset) && bar.detail.length <= 10;
+    const showResetInline = Boolean(reset) && bar.detail.length <= 12;
     return (
       <Link
         to={href}
@@ -125,7 +130,7 @@ function LimitCell({
           </span>
           <span className={cx("shrink-0 tnum", barText(bar.percent))}>{bar.detail}</span>
         </span>
-        <QuotaMeter
+        <Meter
           percent={bar.percent}
           label={reset ? `${bar.label}, ${reset}` : bar.label}
         />
@@ -163,14 +168,16 @@ function LimitCell({
 }
 
 /**
- * Standing status, or the live test result from this session when the operator just tested
- * this account. Standing state stays visible in the preview and drawer.
+ * Standing status pill (`HealthBadge`), or the live test result from this session when
+ * the operator just tested this account. Standing state stays visible in the preview and drawer.
  */
 function StatusCell({
+  connection,
   status,
   testing,
   lastTest,
 }: {
+  connection: Connection;
   status: AccountStatus;
   testing: boolean;
   lastTest: ConnectionTestResult | null;
@@ -179,7 +186,7 @@ function StatusCell({
     return (
       <span role="status" className="flex min-w-0 items-center gap-1.5 text-caption text-muted">
         <Dot tone="muted" />
-        <span className="truncate">testing…</span>
+        <span className="truncate">Testing…</span>
       </span>
     );
   }
@@ -202,18 +209,18 @@ function StatusCell({
     );
   }
 
-  if (status.kind === "refusal") {
-    return (
-      <span className="flex min-w-0 items-center">
-        <Badge tone={status.refusal.tone}>{status.refusal.label}</Badge>
-      </span>
-    );
-  }
-
   return (
-    <span className="flex min-w-0 items-center gap-1.5 text-caption">
-      <Dot tone={DOT_TONE[status.tone]} />
-      <span className={cx("truncate", STATE_TEXT[status.tone])}>{status.label}</span>
+    <span className="flex min-w-0 items-center">
+      <HealthBadge
+        status={status.health}
+        label={status.label}
+        tone={status.kind === "refusal" ? status.refusal.tone : undefined}
+        title={
+          status.kind === "backoff"
+            ? `Backoff level ${connection.backoff_level}`
+            : (status.reason ?? undefined)
+        }
+      />
     </span>
   );
 }
@@ -337,6 +344,7 @@ function AccountRow({
   quota,
   subscription,
   quotaLoaded,
+  traffic,
   isAdmin,
   selected,
   testing,
@@ -354,6 +362,7 @@ function AccountRow({
   quota?: AccountQuotaRow;
   subscription?: AccountSubscription;
   quotaLoaded: boolean;
+  traffic?: AccountTraffic24h;
   isAdmin: boolean;
   selected: boolean;
   testing: boolean;
@@ -370,12 +379,16 @@ function AccountRow({
   const providerId = group.provider ?? connection.provider;
   const status = accountStatus(connection, quota, subscription, providers);
   const ownerLabel = teamName(connection.team_id) ?? "Shared";
+  const lastError = connection.last_error?.trim() || null;
+  const requests24h = traffic?.requests ?? 0;
+  const errors24h = traffic?.errors ?? 0;
 
   return (
     <li
       className={cx(
-        "flex flex-col gap-2 px-4 py-2.5 transition-colors hover:bg-[var(--color-row-hover)] md:min-h-[52px] md:gap-0 md:py-2",
+        "flex flex-col gap-2 px-4 py-2.5 transition-colors hover:bg-[var(--color-row-hover)] md:min-h-[52px] md:gap-y-0 md:py-2",
         DESKTOP_GRID,
+        status.kind === "disabled" && "opacity-75",
         selected && "bg-[var(--color-selected)] hover:bg-[var(--color-selected)]",
       )}
     >
@@ -395,7 +408,11 @@ function AccountRow({
             lastTest={lastTest}
             ownerLabel={ownerLabel}
           />
+          {connection.free_mode ? <Badge tone="neutral">free</Badge> : null}
           {custom ? <Badge tone="neutral">custom</Badge> : null}
+          {connection.team_id ? (
+            <span className="shrink-0 truncate text-caption text-muted md:hidden">{ownerLabel}</span>
+          ) : null}
         </span>
         {isAdmin ? (
           <span className="md:hidden">
@@ -412,12 +429,23 @@ function AccountRow({
         ) : null}
       </div>
 
-      {/* Desktop lg+ col 2: priority */}
+      {/* Desktop md+ col 2: owner */}
+      <span
+        title={ownerLabel}
+        className={cx(
+          "hidden min-w-0 truncate text-caption md:block",
+          connection.team_id ? "font-medium text-fg" : "text-muted",
+        )}
+      >
+        {ownerLabel}
+      </span>
+
+      {/* Desktop lg+ col 3: priority */}
       <span className="hidden truncate text-right text-caption text-muted tnum lg:block">
         p{connection.priority}
       </span>
 
-      {/* Mobile bottom row / Desktop cols 3 & 4: limit + status */}
+      {/* Mobile bottom row / Desktop cols 4, 5, 6: limit + 24h traffic + status */}
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 pl-6 md:contents md:pl-0">
         <div className="min-w-0 flex-1">
           <LimitCell
@@ -427,12 +455,41 @@ function AccountRow({
             providerId={providerId}
           />
         </div>
+        <span
+          title={
+            requests24h > 0
+              ? `${requests24h.toLocaleString()} requests${errors24h > 0 ? ` · ${errors24h.toLocaleString()} errors` : ""} in last 24h`
+              : "No requests in last 24h"
+          }
+          className={cx(
+            "hidden min-w-0 flex-col items-end text-right text-caption leading-tight tnum lg:flex",
+            requests24h > 0 ? "text-fg" : "text-faint",
+          )}
+        >
+          {requests24h > 0 ? (
+            <>
+              <span className="truncate">{compact(requests24h)}</span>
+              {errors24h > 0 ? (
+                <span className="truncate text-[10px] text-[var(--color-neg)]">
+                  {compact(errors24h)} err
+                </span>
+              ) : null}
+            </>
+          ) : (
+            "—"
+          )}
+        </span>
         <div className="shrink-0 md:min-w-0">
-          <StatusCell status={status} testing={testing} lastTest={lastTest} />
+          <StatusCell
+            connection={connection}
+            status={status}
+            testing={testing}
+            lastTest={lastTest}
+          />
         </div>
       </div>
 
-      {/* Desktop col 5: actions menu */}
+      {/* Desktop col 7: actions menu */}
       <span className="hidden items-center justify-end md:flex">
         {isAdmin ? (
           <ConnectionMenu
@@ -446,29 +503,56 @@ function AccountRow({
           />
         ) : null}
       </span>
+
+      {/* Inline error sub-row whenever last_error is set, including stale errors when backoff is 0 */}
+      {lastError ? (
+        <div className="min-w-0 pl-6 md:col-span-full md:pl-10 md:pt-1">
+          <Link
+            to={inspectHref}
+            title={lastError}
+            className="flex min-w-0 items-baseline gap-1.5 rounded-[var(--radius-input)] text-caption text-[var(--color-neg-ink)] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+          >
+            <span aria-hidden className="shrink-0 text-[var(--color-neg)]">
+              ↳
+            </span>
+            <span className="min-w-0 truncate font-mono">
+              {status.kind === "last_error" ? "" : connection.backoff_level === 0 ? "Last error: " : ""}
+              {lastError}
+            </span>
+          </Link>
+        </div>
+      ) : null}
     </li>
   );
 }
 
 /**
  * Provider header: name links to `/models?provider=<id>`, one visible readiness readout
- * ("2 of 3 ready", toned by `group.state`) at every width, and a direct link to Usage.
- * Accounts stay expanded underneath — no collapse caret.
+ * scoped strictly to non-disabled accounts ("N/M enabled ready · K off"), and a direct
+ * link to Usage. Accounts stay expanded underneath — no collapse caret.
  */
 function ProviderHeader({ group }: { group: ProviderGroup }) {
   const providerId = group.provider ?? group.connections[0]?.provider ?? "";
-  const stateTone =
-    group.state === "healthy" ? "muted" : group.state === "degraded" ? "warn" : "neg";
-  const readiness = `${group.ready} of ${group.connections.length} ready`;
+
+  const readiness =
+    group.expected === 0 && group.disabled > 0
+      ? `${group.disabled} disabled`
+      : group.disabled > 0
+        ? `${group.ready}/${group.expected} enabled ready · ${group.disabled} off`
+        : `${group.ready}/${group.expected} ready`;
+
+  const textCls =
+    group.state === "healthy"
+      ? "text-muted"
+      : group.state === "degraded"
+        ? "text-[var(--color-warn)]"
+        : group.state === "down"
+          ? "text-[var(--color-neg)]"
+          : "text-faint";
 
   return (
-    <div
-      className={cx(
-        "flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 bg-surface-2/70 px-4 py-2.5 md:min-h-[44px] md:py-2",
-        DESKTOP_GRID,
-      )}
-    >
-      <span className="flex min-w-0 items-center gap-2 md:col-start-1">
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 bg-surface-2/70 px-4 py-2.5 md:min-h-[42px] md:py-2">
+      <span className="flex min-w-0 items-center gap-2">
         <ProviderIcon provider={group.provider ?? "custom"} size={18} />
         <Link
           to={`/models?provider=${encodeURIComponent(providerId)}`}
@@ -479,16 +563,31 @@ function ProviderHeader({ group }: { group: ProviderGroup }) {
         {group.code ? <Badge tone="neutral">{group.code}</Badge> : null}
       </span>
 
-      <span className="flex items-center gap-3 md:contents">
-        <span className="flex min-w-0 items-center gap-1.5 text-caption tnum md:col-start-3 lg:col-start-4">
-          <Dot tone={DOT_TONE[stateTone]} />
-          <span className={cx("truncate", STATE_TEXT[stateTone])}>{readiness}</span>
+      <span className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="flex min-w-0 items-center gap-1.5 text-caption tnum">
+          {group.state === "disabled" ? (
+            <span
+              aria-hidden
+              className="inline-block h-1.5 w-1.5 shrink-0 rounded-full border border-faint"
+            />
+          ) : (
+            <Dot
+              tone={
+                group.state === "healthy"
+                  ? "pos"
+                  : group.state === "degraded"
+                    ? "warn"
+                    : "neg"
+              }
+            />
+          )}
+          <span className={cx("truncate", textCls)}>{readiness}</span>
         </span>
         <Link
           to={`/usage?provider=${encodeURIComponent(providerId)}`}
-          className="justify-self-end whitespace-nowrap rounded-[var(--radius-input)] text-caption text-muted underline-offset-2 hover:text-fg hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)] md:col-start-4 lg:col-start-5"
+          className="whitespace-nowrap rounded-[var(--radius-input)] text-caption text-accent-text underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
         >
-          usage
+          Usage →
         </Link>
       </span>
     </div>
@@ -500,7 +599,7 @@ function ProviderHeader({ group }: { group: ProviderGroup }) {
  */
 function InventorySkeleton() {
   return (
-    <div aria-busy="true" className="border-t border-line">
+    <div aria-busy="true">
       <span className="sr-only">Loading accounts…</span>
       {Array.from({ length: 4 }, (_, index) => (
         <div
@@ -515,9 +614,11 @@ function InventorySkeleton() {
             <span className="h-4 w-4 shrink-0 animate-pulse rounded bg-surface-3" />
             <span className="h-3 w-28 max-w-full animate-pulse rounded bg-surface-3" />
           </span>
-          <span className="hidden h-3 w-8 animate-pulse rounded bg-surface-3 lg:ml-auto lg:block" />
+          <span className="hidden h-3 w-14 animate-pulse rounded bg-surface-3 md:block" />
+          <span className="hidden h-3 w-7 animate-pulse rounded bg-surface-3 lg:ml-auto lg:block" />
           <span className="h-3 w-24 max-w-full animate-pulse rounded bg-surface-3" />
-          <span className="h-3 w-16 max-w-full animate-pulse rounded bg-surface-3" />
+          <span className="hidden h-3 w-10 animate-pulse rounded bg-surface-3 lg:ml-auto lg:block" />
+          <span className="h-5 w-16 max-w-full animate-pulse rounded-full bg-surface-3" />
           <span className="ml-auto hidden h-3 w-6 animate-pulse rounded bg-surface-3 md:block" />
         </div>
       ))}
@@ -535,9 +636,16 @@ const DEFAULT_PAGE_SIZE = 10;
  */
 export function ProviderInventory({
   groups,
+  totalAccounts,
+  totalProviders,
+  attentionCount,
+  disabledCount,
+  filter,
+  onFilterChange,
   quotas,
   subscriptions,
   quotaLoaded,
+  trafficById,
   providers,
   isAdmin,
   testingId,
@@ -553,9 +661,16 @@ export function ProviderInventory({
   onOpenCodes,
 }: {
   groups: ProviderGroup[];
+  totalAccounts: number;
+  totalProviders: number;
+  attentionCount: number;
+  disabledCount: number;
+  filter: AccountFilter;
+  onFilterChange: (next: AccountFilter) => void;
   quotas?: AccountQuotaRow[];
   subscriptions?: AccountSubscription[];
   quotaLoaded: boolean;
+  trafficById: ReadonlyMap<string, AccountTraffic24h>;
   providers?: ModelProvider[];
   isAdmin: boolean;
   testingId: string | null;
@@ -580,8 +695,6 @@ export function ProviderInventory({
     () => new Map((subscriptions ?? []).map((row) => [row.connection_id, row])),
     [subscriptions],
   );
-  const accountCount = groups.reduce((total, group) => total + group.connections.length, 0);
-  const readyCount = groups.reduce((total, group) => total + group.ready, 0);
   const lastPage = Math.max(1, Math.ceil(groups.length / size));
   const current = Math.min(page, lastPage);
   const visible = groups.slice((current - 1) * size, current * size);
@@ -593,50 +706,82 @@ export function ProviderInventory({
   }, [groups.length]);
   useEffect(() => {
     setPage(1);
-  }, [size]);
-
-  const summaryTone =
-    accountCount === 0
-      ? "text-faint"
-      : readyCount === 0
-        ? "text-[var(--color-neg)]"
-        : readyCount < accountCount
-          ? "text-[var(--color-warn)]"
-          : "text-faint";
+  }, [size, filter]);
 
   return (
     <Card className="overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-3 sm:px-5">
-        <Heading level={2}>Connections</Heading>
-        <span className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          {isAdmin ? (
-            <Button variant="quiet" size="sm" onClick={onOpenCodes}>
-              Provider codes
-            </Button>
-          ) : null}
-          {!loading ? (
-            <span className={cx("text-caption tnum", summaryTone)}>
-              {readyCount} of {accountCount} ready · {groups.length} provider
-              {groups.length === 1 ? "" : "s"}
-            </span>
-          ) : null}
-        </span>
-      </div>
+      <CardHeader
+        icon={<PlugsConnected size={16} />}
+        title="Accounts"
+        meta={
+          !loading
+            ? `${totalAccounts} · ${totalProviders} provider${totalProviders === 1 ? "" : "s"}`
+            : undefined
+        }
+        padding="compact"
+        className="border-b border-line"
+        action={
+          <div className="flex flex-wrap items-center gap-2">
+            <Segmented
+              ariaLabel="Filter accounts by status"
+              value={filter}
+              onChange={onFilterChange}
+              options={[
+                { id: "all", label: "All" },
+                {
+                  id: "attention",
+                  label:
+                    attentionCount > 0 ? `Needs attention (${attentionCount})` : "Needs attention",
+                },
+                {
+                  id: "disabled",
+                  label: disabledCount > 0 ? `Disabled (${disabledCount})` : "Disabled",
+                },
+              ]}
+            />
+            {isAdmin ? (
+              <Button variant="quiet" size="sm" onClick={onOpenCodes}>
+                Provider codes
+              </Button>
+            ) : null}
+          </div>
+        }
+      />
+
       <div id="providers-connected">
         {loading ? (
           <InventorySkeleton />
+        ) : groups.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
+            <p className="text-small text-muted">
+              {filter === "attention"
+                ? "No accounts need attention right now."
+                : "No accounts are disabled."}
+            </p>
+            <Button variant="quiet" size="sm" onClick={() => onFilterChange("all")}>
+              Show all accounts
+            </Button>
+          </div>
         ) : (
           <>
             <div
-              aria-hidden="true"
               className={cx(
-                "hidden border-t border-line bg-surface px-4 py-2 text-caption font-medium text-faint md:grid",
+                "hidden bg-surface px-4 py-2 text-caption font-medium text-faint md:grid",
                 DESKTOP_GRID,
               )}
             >
               <span>Account</span>
-              <span className="hidden text-right lg:block">Priority</span>
+              <span>
+                <span
+                  title={OWNER_TOOLTIP}
+                  className="cursor-help underline decoration-dotted decoration-faint/60 underline-offset-2"
+                >
+                  Owner
+                </span>
+              </span>
+              <span className="hidden text-right lg:block">Prio</span>
               <span>Limit</span>
+              <span className="hidden text-right lg:block">24h</span>
               <span>Status</span>
               <span className="sr-only">Actions</span>
             </div>
@@ -657,6 +802,7 @@ export function ProviderInventory({
                         quota={quotaBy.get(connection.id)}
                         subscription={subscriptionBy.get(connection.id)}
                         quotaLoaded={quotaLoaded}
+                        traffic={trafficById.get(connection.id)}
                         isAdmin={isAdmin}
                         selected={selectedId === connection.id}
                         testing={testingId === connection.id}

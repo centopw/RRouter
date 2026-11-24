@@ -7,10 +7,9 @@
 import { Fragment, memo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { CaretRight } from "@phosphor-icons/react";
-import { Badge, Button, cx } from "../../components/ui";
-import { ago, compact, pct, splitRef, usd } from "../../lib/format";
+import { Badge, Button, barText, cx } from "../../components/ui";
+import { ago, compact, pct, splitRef, usdDisplay } from "../../lib/format";
 import type { AccountQuotaRow, AccountSubscription } from "../../lib/api";
-import { barText } from "../providers/types";
 import { errorRateOf, type AccountNode, type ProviderNode, type Totals } from "./aggregate";
 import { resolveProviderDisplay } from "./board-model";
 import { UsageProviderIcon } from "./provider-badge";
@@ -150,7 +149,7 @@ export const UsageTable = memo(function UsageTable({
             </th>
             <Num className="font-semibold">{compact(totals.requests)}</Num>
             <Num className="font-semibold">{compact(totals.tokens)}</Num>
-            <Num className="font-semibold">{usd(totals.costMicros)}</Num>
+            <Num className="font-semibold">{usdDisplay(totals.costMicros)}</Num>
             <ErrorRate totals={totals} className="font-semibold" />
             {showQuota ? <td /> : null}
           </tr>
@@ -201,7 +200,7 @@ export const UsageTable = memo(function UsageTable({
                 </th>
                 <Num>{compact(node.totals.requests)}</Num>
                 <Num>{compact(node.totals.tokens)}</Num>
-                <Num>{usd(node.totals.costMicros)}</Num>
+                <Num>{usdDisplay(node.totals.costMicros)}</Num>
                 <ErrorRate totals={node.totals} />
                 {showQuota ? (
                   <td className="px-3 py-2.5 pl-6 text-caption tnum">
@@ -397,7 +396,7 @@ function ModelRows({
             </th>
             <Num className="text-muted">{compact(model.totals.requests)}</Num>
             <Num className="text-muted">{compact(model.totals.tokens)}</Num>
-            <Num className="text-muted">{usd(model.totals.costMicros)}</Num>
+            <Num className="text-muted">{usdDisplay(model.totals.costMicros)}</Num>
             <ErrorRate totals={model.totals} />
             {columns > 5 ? <td /> : null}
           </tr>
@@ -437,7 +436,7 @@ function AccountNums({ account }: { account: AccountNode }) {
     <>
       <Num>{compact(account.totals.requests)}</Num>
       <Num>{compact(account.totals.tokens)}</Num>
-      <Num>{usd(account.totals.costMicros)}</Num>
+      <Num>{usdDisplay(account.totals.costMicros)}</Num>
       <ErrorRate totals={account.totals} />
     </>
   );

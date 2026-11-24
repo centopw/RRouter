@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ProviderIcon } from "../../components/provider-icon";
+import { HealthBadge } from "../../components/molecules/HealthBadge";
 import {
   AlertBanner,
-  Badge,
   Button,
   Dot,
   ErrorNote,
@@ -24,7 +23,7 @@ import {
 import { ms } from "../../lib/format";
 import { reenableConsequence } from "../../lib/refusal";
 import { paceSentence } from "../usage/headline";
-import { accountRisk, isAlarming } from "../usage/pace";
+import { accountRisk } from "../usage/pace";
 import { QuotaCell as UsageQuotaCell } from "../usage/quota";
 import {
   accountStatus,
@@ -39,13 +38,6 @@ import {
   useInvalidateProviders,
   type ConnectionTestResult,
 } from "./types";
-
-const STATUS_TEXT = {
-  muted: "text-muted",
-  warn: "text-[var(--color-warn)]",
-  neg: "text-[var(--color-neg)]",
-  info: "text-[var(--color-info)]",
-} as const;
 
 /**
  * One-level inspection and configuration drawer for a connection: standing status,
@@ -172,8 +164,10 @@ export function ConnectionDrawer({
 
   const now = Date.now();
   const risk = subscription ? accountRisk(subscription, now) : null;
-  const alarmingWindows =
-    risk?.windows.filter((entry) => isAlarming(entry.pace.state)) ?? [];
+  // Exclude already-exhausted windows: the 100% red bar above already states it, so repeating
+  // "5 hour: Limit reached" right underneath is duplicate noise.
+  const paceWarnings =
+    risk?.windows.filter((entry) => entry.pace.state === "on_pace_to_hit") ?? [];
   const egressOpenByDefault = Boolean(
     connection.proxy || connection.free_rpm || connection.free_mode,
   );
@@ -242,9 +236,6 @@ export function ConnectionDrawer({
             >
               Remove
             </Button>
-            <Button onClick={onClose} disabled={busy}>
-              Close
-            </Button>
             <Button
               variant="primary"
               loading={busy}
@@ -254,34 +245,33 @@ export function ConnectionDrawer({
               {busy ? "Saving…" : "Save changes"}
             </Button>
           </>
-        ) : (
-          <Button variant="primary" onClick={onClose}>
-            Close
-          </Button>
-        )
+        ) : undefined
       }
     >
       <div className="flex flex-col gap-5">
         <section className="flex flex-wrap items-center gap-2 border-b border-line pb-4">
-          <ProviderIcon provider={connection.provider} size={20} />
+          <span className="text-caption text-muted">{credentialShapeOf(connection)}</span>
+          <span className="text-caption text-faint" aria-hidden>
+            ·
+          </span>
           <Link
             to={`/models?provider=${encodeURIComponent(connection.provider)}`}
             onClick={onClose}
-            className="text-body font-medium text-fg underline-offset-2 hover:text-[var(--color-accent-text)] hover:underline"
+            className="text-caption font-medium text-[var(--color-accent-text)] underline-offset-2 hover:underline"
           >
-            {display}
+            Models →
           </Link>
-          {spec?.code ? <Badge tone="neutral">{spec.code}</Badge> : null}
-          <span className="text-caption text-faint">{credentialShapeOf(connection)}</span>
-          <span className="ml-auto flex items-center gap-1.5 text-caption">
-            {refusal ? (
-              <Badge tone={refusal.tone}>{refusal.label}</Badge>
-            ) : (
-              <>
-                <Dot tone={status.tone} />
-                <span className={STATUS_TEXT[status.tone]}>{status.label}</span>
-              </>
-            )}
+          <span className="ml-auto flex items-center">
+            <HealthBadge
+              status={status.health}
+              label={status.label}
+              tone={refusal ? refusal.tone : undefined}
+              title={
+                status.kind === "backoff"
+                  ? `Backoff level ${connection.backoff_level}`
+                  : undefined
+              }
+            />
           </span>
         </section>
 
@@ -357,9 +347,9 @@ export function ConnectionDrawer({
             subscription={subscription}
             loaded={quotaLoaded}
           />
-          {alarmingWindows.length > 0 ? (
+          {paceWarnings.length > 0 ? (
             <ul className="flex flex-col gap-1 text-caption text-[var(--color-warn)] tnum">
-              {alarmingWindows.map((entry) => {
+              {paceWarnings.map((entry) => {
                 const line = paceSentence(entry.pace, now);
                 if (!line) return null;
                 return (

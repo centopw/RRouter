@@ -2,14 +2,14 @@
  * Quota bars for the Usage page. Two sources feed one row: operator limits on the
  * connection (`used / limit`) and windows the provider itself reports (percent only).
  * Every bar names its window in full and says when it resets in plain text; nothing
- * lives in a hover title. Colour comes from the one shared ladder (providers/types.ts
- * `barFill` / `barText`): neutral until 70%, warn to 90%, then negative.
+ * lives in a hover title. Colour comes from the shared `Meter` ladder (`barFill` /
+ * `barText`): neutral until 70%, warn to 90%, then negative.
  */
 
 import type { AccountQuotaRow, AccountSubscription, SubscriptionWindow } from "../../lib/api";
-import { cx } from "../../components/ui";
-import { compact, usd } from "../../lib/format";
-import { barFill, barText, until, WINDOW_LABEL } from "../providers/types";
+import { Meter, barText, cx } from "../../components/ui";
+import { compact, usdDisplay } from "../../lib/format";
+import { until, WINDOW_LABEL } from "../providers/types";
 
 export type QuotaBar = {
   id: string;
@@ -77,7 +77,7 @@ export function quotaBars(
         id: "cost",
         label: `${window} spend`,
         percent: (quota.cost_micros / quota.max_cost_micros) * 100,
-        detail: `${usd(quota.cost_micros)} / ${usd(quota.max_cost_micros)}`,
+        detail: `${usdDisplay(quota.cost_micros)} / ${usdDisplay(quota.max_cost_micros)}`,
         resets_at,
       });
     }
@@ -112,38 +112,6 @@ export function worstQuotaPercent(
   return worstQuotaBar(quota, subscription)?.percent ?? null;
 }
 
-/**
- * A magnitude bar: 6px tall, `barFill` on `bg-rule` (neutral fill ~6:1 in both themes),
- * and the number beside it carries the same tone. Width is the caller's.
- */
-export function QuotaMeter({
-  percent,
-  label,
-  className,
-}: {
-  percent: number;
-  /** Accessible name, e.g. "Weekly, resets in 6d 18h". */
-  label: string;
-  className?: string;
-}) {
-  const width = Math.min(100, Math.max(0, percent));
-  return (
-    <span
-      role="progressbar"
-      aria-label={label}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={Math.round(percent)}
-      className={cx("block h-1.5 w-full overflow-hidden rounded-full bg-rule", className)}
-    >
-      <span
-        className={cx("block h-full rounded-full", barFill(percent))}
-        style={{ width: `${width}%` }}
-      />
-    </span>
-  );
-}
-
 function Bar({ bar }: { bar: QuotaBar }) {
   const reset = resetsIn(bar.resets_at);
   return (
@@ -155,7 +123,7 @@ function Bar({ bar }: { bar: QuotaBar }) {
         </span>
         <span className={cx("shrink-0 tnum", barText(bar.percent))}>{bar.detail}</span>
       </div>
-      <QuotaMeter percent={bar.percent} label={reset ? `${bar.label}, ${reset}` : bar.label} />
+      <Meter percent={bar.percent} label={reset ? `${bar.label}, ${reset}` : bar.label} />
     </div>
   );
 }

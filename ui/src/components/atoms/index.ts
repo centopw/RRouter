@@ -1,7 +1,7 @@
-/** Unified component barrel (all 26 atoms and 13 molecules). */
+/** Unified component barrel (all 27 atoms and 13 molecules). */
 export { cx } from "../../lib/cx";
 
-// Atoms (26 modules)
+// Atoms (27 modules)
 export { Badge, type BadgeSize, type BadgeTone } from "./Badge";
 export { Button } from "./Button";
 export { Checkbox } from "./Checkbox";
@@ -16,6 +16,7 @@ export { Heading } from "./Heading";
 export { IconButton } from "./IconButton";
 export { Inline } from "./Inline";
 export { control, Input, type ControlSize } from "./Input";
+export { Meter, barFill, barText } from "./Meter";
 export { SectionLabel } from "./SectionLabel";
 export { Segmented } from "./Segmented";
 export { Select } from "./Select";
@@ -33,7 +34,7 @@ export type { TextVariant, Tone } from "./typography";
 export { AlertBanner, type AlertTone } from "../molecules/AlertBanner";
 export { Card } from "../molecules/Card";
 export { CardFooter } from "../molecules/CardFooter";
-export { CardHeader } from "../molecules/CardHeader";
+export { CardHeader, type CardHeaderPadding } from "../molecules/CardHeader";
 export { ConfirmDialog } from "../molecules/ConfirmDialog";
 export { Disclosure } from "../molecules/Disclosure";
 export { EmptyState } from "../molecules/EmptyState";

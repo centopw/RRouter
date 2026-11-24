@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Badge,
@@ -14,6 +14,7 @@ import { useIsAdmin, useKeys, useTeams, useUsers } from "../../lib/queries";
 import { setGroupAccess } from "../../lib/api";
 import type { DraftEntry, DraftGroup } from "../../lib/layout-draft";
 import { PROVIDER_PILL } from "./rows";
+import { groupDisplayName } from "./unified-rows";
 
 /** Cap initial DOM rows in the group candidate checklist so 1,000+ models open instantly. */
 const INITIAL_CANDIDATE_CAP = 100;
@@ -22,17 +23,28 @@ const INITIAL_CANDIDATE_CAP = 100;
 export function GroupHeading({
   group,
   count,
+  action,
 }: {
   group: DraftGroup & { implicit?: boolean };
   count: number;
+  action?: ReactNode;
 }) {
+  const title = groupDisplayName(group);
   return (
-    <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-line bg-surface-2 px-4 py-2.5">
-      <div className="flex min-w-0 items-baseline gap-2">
-        <h3 className="truncate text-small font-semibold text-fg">{group.name}</h3>
-        <CopyIconButton value={group.name} label={`Copy group name ${group.name}`} />
-        <span className="shrink-0 text-caption text-faint">
-          {group.provider ? `provider · ${group.provider}` : "custom group"}
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-surface-2 px-3.5 py-2">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <h3 className="truncate text-small font-semibold text-fg">{title}</h3>
+        {!group.provider ? (
+          <CopyIconButton value={group.name} label={`Copy group name ${group.name}`} />
+        ) : null}
+        {!group.provider ? (
+          <span className="shrink-0 text-caption text-faint">· custom group</span>
+        ) : null}
+        <span
+          className="shrink-0 text-caption text-faint tnum"
+          aria-label={`${count.toLocaleString()} ${count === 1 ? "entry" : "entries"}`}
+        >
+          · {count.toLocaleString()}
         </span>
         {group.visible === false ? (
           <Badge tone="warn" title="This group and its models are not listed by /v1/models">
@@ -40,9 +52,7 @@ export function GroupHeading({
           </Badge>
         ) : null}
       </div>
-      <span className="text-caption text-faint tnum">
-        {count.toLocaleString()} {count === 1 ? "entry" : "entries"}
-      </span>
+      {action ? <div className="shrink-0">{action}</div> : null}
     </div>
   );
 }
@@ -164,20 +174,22 @@ export function GroupManager({
         </p>
       ) : null}
       <ul className="flex flex-col gap-2">
-        {groups.map((group, index) => (
+        {groups.map((group, index) => {
+          const displayName = groupDisplayName(group);
+          return (
           <li
             key={group.id}
             className="flex flex-wrap items-center gap-2 rounded-[var(--radius-card)] border border-line bg-surface-2 p-2"
           >
             <span className="min-w-0 flex-1">
-              <GroupNameField name={group.name} onCommit={(next) => onRename(group.id, next)} />
+              <GroupNameField name={displayName} onCommit={(next) => onRename(group.id, next)} />
             </span>
             <Badge tone={group.provider ? "neutral" : "accent"}>
               {group.provider ? "provider" : "custom"}
             </Badge>
             <Button
               variant="quiet"
-              ariaLabel={`Access for ${group.name}`}
+              ariaLabel={`Access for ${displayName}`}
               disabled={!isDefault}
               title={
                 isDefault
@@ -192,7 +204,7 @@ export function GroupManager({
               <Toggle
                 size="sm"
                 checked={group.visible}
-                label={`Show ${group.name} in /v1/models`}
+                label={`Show ${displayName} in /v1/models`}
                 onChange={(next) => onSetVisible(group.id, next)}
               />
               /v1/models
@@ -200,7 +212,7 @@ export function GroupManager({
             {group.provider ? null : (
               <Button
                 variant="quiet"
-                aria-label={`${openModels === group.id ? "Close" : "Edit"} models in ${group.name}`}
+                aria-label={`${openModels === group.id ? "Close" : "Edit"} models in ${displayName}`}
                 onClick={() => {
                   setOpenModels(openModels === group.id ? null : group.id);
                   setShowAllCandidates(false);
@@ -211,7 +223,7 @@ export function GroupManager({
             )}
             <Button
               variant="quiet"
-              aria-label={`Move ${group.name} up`}
+              aria-label={`Move ${displayName} up`}
               disabled={index === 0}
               onClick={() => onReorder(group.id, groups[index - 1]?.id ?? group.id)}
             >
@@ -219,7 +231,7 @@ export function GroupManager({
             </Button>
             <Button
               variant="quiet"
-              aria-label={`Move ${group.name} down`}
+              aria-label={`Move ${displayName} down`}
               disabled={index === groups.length - 1}
               onClick={() => onReorder(group.id, groups[index + 1]?.id ?? group.id)}
             >
@@ -228,7 +240,7 @@ export function GroupManager({
             {group.provider ? null : (
               <Button
                 variant="quiet"
-                aria-label={`Delete group ${group.name}`}
+                aria-label={`Delete group ${displayName}`}
                 onClick={() => onDelete(group.id)}
               >
                 delete
@@ -239,7 +251,7 @@ export function GroupManager({
                 <Input
                   value={filter}
                   placeholder="filter models, aliases and combos"
-                  ariaLabel={`Filter entries for ${group.name}`}
+                  ariaLabel={`Filter entries for ${displayName}`}
                   onChange={(next) => {
                     setFilter(next);
                     setShowAllCandidates(false);
@@ -258,8 +270,8 @@ export function GroupManager({
                           checked={checked}
                           ariaLabel={
                             checked
-                              ? `Remove ${candidate.ref} from ${group.name}`
-                              : `Add ${candidate.ref} to ${group.name}, showing it in this preset`
+                              ? `Remove ${candidate.ref} from ${displayName}`
+                              : `Add ${candidate.ref} to ${displayName}, showing it in this preset`
                           }
                           onChange={(next) =>
                             onAssign(candidate.ref, next ? group.id : null)
@@ -293,7 +305,8 @@ export function GroupManager({
               </div>
             ) : null}
           </li>
-        ))}
+          );
+        })}
       </ul>
       <form
         className="mt-4 flex items-end gap-2 border-t border-line pt-4"

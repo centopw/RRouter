@@ -10,9 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { CaretDown, CaretUp } from "@phosphor-icons/react";
-import { Link } from "react-router-dom";
-import { Badge, Button, CopyIconButton, Select, cx } from "../../components/ui";
-import { Toggle } from "../../components/atoms";
+import { Badge, CopyIconButton, cx } from "../../components/ui";
 import { CAPABILITY_LABELS, CapabilityChips } from "../../components/capability-chips";
 import type { Column } from "../../components/table";
 import { DragHandle, DragPreview, SortableLayout, useRowDrag } from "../../components/sortable-list";
@@ -24,10 +22,16 @@ import type { ModelTestOutcome } from "./actions";
 import { GroupHeading } from "./groups";
 import { cacheText, isFree, priceText } from "./price";
 import {
+  BoardSectionContext,
   FreeBadge,
   ModelCardBody,
+  NameRowMenu,
   PROVIDER_PILL,
+  PlayLinkButton,
   RowPreview,
+  RowStatusPill,
+  useBoardSection,
+  type PhoneMoveControls,
 } from "./rows";
 import {
   STRATEGY_LABEL,
@@ -35,10 +39,12 @@ import {
   comboBlocked,
   comboCapabilitySplit,
   comboPriceText,
+  groupDisplayName,
   membersOf,
   nameDetail,
   qualifiedTokenRange,
   rowIsFree,
+  rowStatusMeta,
   type AliasRow,
   type ComboMember,
   type ComboRow,
@@ -99,6 +105,27 @@ function membersId(ref: string): string {
   return `combo-members-${ref.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
+/** Status cell shared by the board and flat table; reads availability from row context. */
+export function UnifiedStatusCell({ row }: { row: UnifiedRow }) {
+  const { modelByRef, isAdmin } = useContext(UnifiedRowDataContext);
+  const meta = rowStatusMeta(row, modelByRef);
+  const linkToProviders =
+    isAdmin && row.kind === "model" && row.model !== null && meta.kind === "unavailable";
+  return (
+    <div className="inline-flex items-center justify-end">
+      <RowStatusPill
+        meta={meta}
+        href={linkToProviders ? "/providers" : undefined}
+        ariaLabel={
+          linkToProviders
+            ? "Model unavailable: no healthy connection. Open Providers to check accounts."
+            : undefined
+        }
+      />
+    </div>
+  );
+}
+
 /** The registry mutations a model row reaches; the page owns the hooks behind them. */
 export type ModelActions = {
   isAdmin: boolean;
@@ -134,7 +161,7 @@ export type LayoutControls = {
  */
 const DEFER_SECTION_STYLE: CSSProperties = {
   contentVisibility: "auto",
-  containIntrinsicSize: "auto none auto 280px",
+  containIntrinsicSize: "auto none auto 220px",
 };
 
 /** One routed group: heading, drag-orderable table on desktop, cards on a phone. */
@@ -153,6 +180,7 @@ export const BoardSection = memo(function BoardSection({
   onMove,
   showHeader = true,
   deferLayout = false,
+  headingAction,
 }: {
   group: DraftGroup & { implicit?: boolean };
   count: number;
@@ -170,50 +198,59 @@ export const BoardSection = memo(function BoardSection({
   showHeader?: boolean;
   /** Defer off-screen paint for below-the-fold sections when drag is inactive. */
   deferLayout?: boolean;
+  /** Optional right-side slot on the section heading (e.g. Groups button on first section). */
+  headingAction?: ReactNode;
 }) {
+  const displayName = groupDisplayName(group);
+  const sectionCtx = useMemo(
+    () => ({ inBoardSection: true, inProviderSection: Boolean(group.provider) }),
+    [group.provider],
+  );
   return (
-    <section
-      aria-label={group.name}
-      style={deferLayout && !drag ? DEFER_SECTION_STYLE : undefined}
-    >
-      <GroupHeading group={group} count={count} />
-      {phone ? (
-        <ul aria-label={`${group.name} rows`} className="flex flex-col">
-          {rows.map((row, index) => (
-            <li
-              key={row.ref}
-              className="border-b border-[var(--color-rule)] px-4 py-3 last:border-b-0"
-            >
-              <UnifiedCard
-                row={row}
-                actions={actions}
-                controls={controls}
-                onHide={onHide}
-                move={
-                  controls?.editable
-                    ? {
-                        up: index > 0,
-                        down: index < rows.length - 1,
-                        onMove: (delta) => onMove(row.ref, delta),
-                      }
-                    : undefined
-                }
-              />
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <BoardTable
-          label={group.name}
-          rows={rows}
-          columns={columns}
-          drag={drag}
-          reducedMotion={reducedMotion}
-          onReorder={onReorder}
-          showHeader={showHeader}
-        />
-      )}
-    </section>
+    <BoardSectionContext.Provider value={sectionCtx}>
+      <section
+        aria-label={displayName}
+        style={deferLayout && !drag ? DEFER_SECTION_STYLE : undefined}
+      >
+        <GroupHeading group={group} count={count} action={headingAction} />
+        {phone ? (
+          <ul aria-label={`${displayName} rows`} className="flex flex-col">
+            {rows.map((row, index) => (
+              <li
+                key={row.ref}
+                className="border-b border-[var(--color-rule)] px-3.5 py-2.5 last:border-b-0"
+              >
+                <UnifiedCard
+                  row={row}
+                  actions={actions}
+                  controls={controls}
+                  onHide={onHide}
+                  move={
+                    controls?.editable
+                      ? {
+                          up: index > 0,
+                          down: index < rows.length - 1,
+                          onMove: (delta) => onMove(row.ref, delta),
+                        }
+                      : undefined
+                  }
+                />
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <BoardTable
+            label={displayName}
+            rows={rows}
+            columns={columns}
+            drag={drag}
+            reducedMotion={reducedMotion}
+            onReorder={onReorder}
+            showHeader={showHeader}
+          />
+        )}
+      </section>
+    </BoardSectionContext.Provider>
   );
 });
 
@@ -248,10 +285,9 @@ export const FlatTable = memo(function FlatTable({
                 scope="col"
                 style={column.width ? { width: column.width } : undefined}
                 className={cx(
-                  "sticky top-0 z-20 border-b border-line bg-surface px-4 py-2.5 text-small font-semibold text-ink-soft",
+                  "sticky top-0 z-20 border-b border-line bg-surface px-3.5 py-2 text-caption font-medium text-faint",
                   column.align === "right" ? "text-right" : "text-left",
-                  column.key === "actions" &&
-                    "sticky right-0 z-30 border-l border-line bg-surface shadow-[var(--shadow-sticky-col)]",
+                  column.key === "actions" && "sticky right-0 z-30 bg-surface",
                   column.className,
                 )}
               >
@@ -308,7 +344,7 @@ function BoardTable({
         {/* Widths live in a colgroup so a group whose header is visually skipped still
             lines up with the first group's columns. */}
         <colgroup>
-          {drag ? <col style={{ width: "2.5rem" }} /> : null}
+          {drag ? <col style={{ width: "2.25rem" }} /> : null}
           {columns.map((column) => (
             <col key={column.key} style={column.width ? { width: column.width } : undefined} />
           ))}
@@ -316,7 +352,7 @@ function BoardTable({
         <thead className={showHeader ? "sticky top-0 z-20" : "sr-only"}>
           <tr>
             {drag ? (
-              <th scope="col" className="w-10 border-b border-line bg-surface px-1 py-2.5">
+              <th scope="col" className="w-9 border-b border-line bg-surface px-1 py-2">
                 <span className="sr-only">reorder</span>
               </th>
             ) : null}
@@ -326,10 +362,9 @@ function BoardTable({
                 scope="col"
                 style={column.width ? { width: column.width } : undefined}
                 className={cx(
-                  "sticky top-0 z-20 border-b border-line bg-surface px-4 py-2.5 text-small font-semibold text-ink-soft",
+                  "sticky top-0 z-20 border-b border-line bg-surface px-3.5 py-2 text-caption font-medium text-faint",
                   column.align === "right" ? "text-right" : "text-left",
-                  column.key === "actions" &&
-                    "sticky right-0 z-30 border-l border-line bg-surface shadow-[var(--shadow-sticky-col)]",
+                  column.key === "actions" && "sticky right-0 z-30 bg-surface",
                   column.className,
                 )}
               >
@@ -380,10 +415,10 @@ function RowCells({ row, columns }: { row: UnifiedRow; columns: Array<Column<Uni
       {columns.map((column) => {
         const content = column.render(row);
         const shared = cx(
-          "border-b border-[var(--color-rule)] px-4 py-2.5 align-middle text-fg",
+          "border-b border-[var(--color-rule)] px-3.5 py-1.5 align-middle text-fg",
           column.align === "right" && "text-right tnum",
           column.key === "actions" &&
-            "sticky right-0 z-10 border-l border-line bg-surface shadow-[var(--shadow-sticky-col)] group-hover:bg-[var(--color-row-hover)]",
+            "sticky right-0 z-10 bg-surface pl-2 pr-3 group-hover:bg-[var(--color-row-hover)]",
           column.className,
         );
         if (column.key === "model") {
@@ -415,7 +450,7 @@ function ComboDetailTableRow({ row, span }: { row: ComboRow; span: number }) {
     <tr>
       <td
         colSpan={span}
-        className="border-b border-[var(--color-rule)] bg-surface-2 px-4 py-3"
+        className="border-b border-[var(--color-rule)] bg-surface-2 px-3.5 py-2.5"
       >
         <ComboMemberList row={row} />
       </td>
@@ -443,7 +478,7 @@ const SortableRow = memo(function SortableRow({
         data-dragging={drag.isDragging || undefined}
         className={cx("group", drag.isDragging && "relative z-10 opacity-70")}
       >
-        <td className="border-b border-[var(--color-rule)] px-1 py-2 align-middle">
+        <td className="border-b border-[var(--color-rule)] px-1 py-1.5 align-middle group-hover:bg-[var(--color-row-hover)]">
           <DragHandle label={`Reorder ${row.ref}`} drag={drag} />
         </td>
         <RowCells row={row} columns={columns} />
@@ -626,7 +661,10 @@ export const UnifiedCards = memo(function UnifiedCards({
   return (
     <ul aria-label="Models" className="flex flex-col">
       {rows.map((row) => (
-        <li key={row.ref} className="border-b border-[var(--color-rule)] px-4 py-3 last:border-b-0">
+        <li
+          key={row.ref}
+          className="border-b border-[var(--color-rule)] px-3.5 py-2.5 last:border-b-0"
+        >
           <UnifiedCard row={row} actions={actions} controls={controls} onHide={onHide} />
         </li>
       ))}
@@ -645,76 +683,109 @@ const UnifiedCard = memo(function UnifiedCard({
   actions: ModelActions;
   controls: LayoutControls | undefined;
   onHide: (ref: string) => void;
-  move?: { up: boolean; down: boolean; onMove: (delta: number) => void };
+  move?: PhoneMoveControls;
 }) {
-  const controlsRow = controls ? (
-    <CardControls row={row} controls={controls} move={move} />
-  ) : null;
+  const { modelByRef } = useContext(UnifiedRowDataContext);
+  const { inBoardSection, inProviderSection } = useBoardSection();
+  const statusMeta = rowStatusMeta(row, modelByRef);
+
+  const editable = Boolean(controls?.editable);
+  const currentGroup = controls?.groupOf(row.ref);
+  const customGroupLabel = !inBoardSection
+    ? controls?.groups.find((group) => !group.provider && group.id === currentGroup)?.name
+    : undefined;
+  const hideAction = editable
+    ? () => (row.entry ? onHide(row.ref) : controls!.onVisible(row.ref, false))
+    : undefined;
+  const showAction = editable ? () => controls!.onVisible(row.ref, true) : undefined;
+  const onMoveGroup = editable
+    ? (next: string | null) => controls!.onAssignGroup(row.ref, next)
+    : undefined;
 
   if (row.kind === "model" && row.model) {
     return (
-      <>
-        <ModelCardBody
-          model={row.model}
-          isAdmin={actions.isAdmin}
-          testTarget={actions.testTarget}
-          testOutcome={actions.testResults?.get(row.model.ref)}
-          toggleTarget={actions.toggleTarget}
-          removeTarget={actions.removeTarget}
-          onTest={actions.onTest}
-          onToggle={actions.onToggle}
-          onEdit={actions.onEdit}
-          onDelete={actions.onDelete}
-          onHide={
-            row.entry && controls?.editable ? (ref) => onHide(ref) : undefined
-          }
-          onMoveTop={actions.onMoveTop ? () => actions.onMoveTop!(row.ref) : undefined}
-          onMoveBottom={actions.onMoveBottom ? () => actions.onMoveBottom!(row.ref) : undefined}
-          canMoveTop={actions.canMoveTop ? actions.canMoveTop(row.ref) : undefined}
-          canMoveBottom={actions.canMoveBottom ? actions.canMoveBottom(row.ref) : undefined}
-          groups={controls?.editable ? controls.groups : undefined}
-          currentGroup={controls?.groupOf(row.ref)}
-        />
-        {controlsRow}
-      </>
+      <ModelCardBody
+        model={row.model}
+        isAdmin={actions.isAdmin}
+        testTarget={actions.testTarget}
+        testOutcome={actions.testResults?.get(row.model.ref)}
+        toggleTarget={actions.toggleTarget}
+        removeTarget={actions.removeTarget}
+        onTest={actions.onTest}
+        onToggle={actions.onToggle}
+        onEdit={actions.onEdit}
+        onDelete={actions.onDelete}
+        onHide={hideAction ? () => hideAction() : undefined}
+        onShow={showAction ? () => showAction() : undefined}
+        rowStatus={row.status}
+        statusMeta={statusMeta}
+        showProvider={!inProviderSection}
+        customGroupLabel={customGroupLabel}
+        move={move}
+        onMoveTop={actions.onMoveTop ? () => actions.onMoveTop!(row.ref) : undefined}
+        onMoveBottom={actions.onMoveBottom ? () => actions.onMoveBottom!(row.ref) : undefined}
+        canMoveTop={actions.canMoveTop ? actions.canMoveTop(row.ref) : undefined}
+        canMoveBottom={actions.canMoveBottom ? actions.canMoveBottom(row.ref) : undefined}
+        groups={editable ? controls?.groups : undefined}
+        currentGroup={currentGroup}
+        onMoveGroup={onMoveGroup}
+      />
     );
   }
 
+  const cut = row.ref.indexOf("/");
+  const staleProvider = cut < 0 ? row.ref : row.ref.slice(0, cut);
+
   return (
-    <>
-      {row.kind === "model" ? <StaleIdentity row={row} /> : <NameIdentity row={row} />}
-      {row.kind === "combo" ? <CardComboMembers row={row} /> : null}
-      <div className="mt-2 flex flex-wrap items-center gap-2 text-caption text-faint">
-        {controls?.editable ? (
-          <Button
-            variant="quiet"
-            onClick={() =>
-              row.entry ? onHide(row.ref) : controls.onVisible(row.ref, false)
-            }
-            ariaLabel={`Hide ${row.ref} from the active list`}
-          >
-            hide
-          </Button>
+    <div className="flex min-w-0 flex-col gap-1">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1 pt-0.5">
+          {row.kind === "model" ? (
+            <StaleIdentity row={row} customGroupLabel={customGroupLabel} />
+          ) : (
+            <NameIdentity row={row} customGroupLabel={customGroupLabel} />
+          )}
+        </div>
+        {actions.isAdmin ? (
+          <div className="flex shrink-0 items-center gap-0.5">
+            {row.kind !== "model" ? (
+              <PlayLinkButton
+                to={`/playground/chat?model=${encodeURIComponent(row.name)}`}
+                label={`Test ${row.name} in Playground`}
+                title={`Test ${row.name} in Playground`}
+              />
+            ) : null}
+            {row.kind !== "model" || editable ? (
+              <NameRowMenu
+                subject={row.ref}
+                provider={row.kind === "model" ? staleProvider : "rrouter"}
+                kind={row.kind === "model" ? "stale" : row.kind}
+                name={row.kind === "model" ? undefined : row.name}
+                rowStatus={row.status}
+                onHide={hideAction}
+                onShow={showAction}
+                move={move}
+                onMoveTop={actions.onMoveTop ? () => actions.onMoveTop!(row.ref) : undefined}
+                onMoveBottom={
+                  actions.onMoveBottom ? () => actions.onMoveBottom!(row.ref) : undefined
+                }
+                canMoveTop={actions.canMoveTop ? actions.canMoveTop(row.ref) : undefined}
+                canMoveBottom={
+                  actions.canMoveBottom ? actions.canMoveBottom(row.ref) : undefined
+                }
+                groups={editable ? controls?.groups : undefined}
+                currentGroup={currentGroup}
+                onMoveGroup={onMoveGroup}
+              />
+            ) : null}
+          </div>
         ) : null}
-        {row.kind === "model" ? null : (
-          <>
-            <Link
-              to={`/playground/chat?model=${encodeURIComponent(row.name)}`}
-              className="inline-flex h-8 items-center rounded-full px-2 text-small text-accent-text underline underline-offset-2"
-            >
-              Test in Playground →
-            </Link>
-            <Link
-              to={`${row.kind === "alias" ? "/routing/aliases" : "/routing/combos"}?edit=${encodeURIComponent(row.name)}`}
-              className="inline-flex h-8 items-center rounded-full px-2 text-small text-accent-text underline underline-offset-2"
-            >
-              edit {row.kind}
-            </Link>
-          </>
-        )}
       </div>
-      {controlsRow}
-    </>
+      <div className="flex items-center justify-end">
+        <RowStatusPill meta={statusMeta} />
+      </div>
+      {row.kind === "combo" ? <CardComboMembers row={row} /> : null}
+    </div>
   );
 });
 
@@ -723,106 +794,29 @@ function CardComboMembers({ row }: { row: ComboRow }) {
   const open = useContext(UnifiedRowExpandedContext).has(row.ref);
   if (!open) return null;
   return (
-    <div className="mt-2 rounded-[var(--radius-input)] border border-line bg-surface-2 px-3 py-2">
+    <div className="mt-1 rounded-[var(--radius-input)] border border-line bg-surface-2 px-3 py-2">
       <ComboMemberList row={row} />
     </div>
   );
 }
 
-function CardControls({
+export function StaleIdentity({
   row,
-  controls,
-  move,
+  customGroupLabel,
 }: {
   row: UnifiedRow;
-  controls: LayoutControls;
-  move?: { up: boolean; down: boolean; onMove: (delta: number) => void };
+  customGroupLabel?: string;
 }) {
-  const customGroups = controls.groups.filter((group) => !group.provider);
-  const explicit = customGroups.find((group) => group.id === controls.groupOf(row.ref));
-  return (
-    <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-line pt-2">
-      {controls.editable ? (
-        <div className="w-40">
-          <Select
-            ariaLabel={`Group for ${row.ref}`}
-            value={explicit?.id ?? ""}
-            onChange={(next) => controls.onAssignGroup(row.ref, next === "" ? null : next)}
-          >
-            <option value="">Ungrouped</option>
-            {customGroups.map((group) => (
-              <option key={group.id} value={group.id}>
-                {group.name}
-              </option>
-            ))}
-          </Select>
-        </div>
-      ) : (
-        <span className="text-caption text-muted">group · {explicit?.name ?? "ungrouped"}</span>
-      )}
-      {controls.editable ? (
-        <span className="flex items-center gap-1.5 text-caption text-muted">
-          <Toggle
-            size="sm"
-            checked={
-              row.status !== "disabled" &&
-              (row.entry?.visible ?? row.status === "routed")
-            }
-            disabled={row.status === "disabled"}
-            label={`List ${row.ref} on /v1/models`}
-            onChange={(next) => controls.onVisible(row.ref, next)}
-          />
-          /v1
-        </span>
-      ) : (
-        <Badge
-          tone={
-            row.status !== "disabled" && (row.entry?.visible ?? row.status === "routed")
-              ? "neutral"
-              : "warn"
-          }
-        >
-          {row.status !== "disabled" && (row.entry?.visible ?? row.status === "routed")
-            ? "listed"
-            : "hidden"}
-        </Badge>
-      )}
-      {move ? (
-        <span className="ml-auto flex items-center gap-1">
-          <Button
-            variant="quiet"
-            size="lg"
-            ariaLabel={`Move ${row.ref} up`}
-            onClick={() => move.onMove(-1)}
-            disabled={!move.up}
-          >
-            ↑
-          </Button>
-          <Button
-            variant="quiet"
-            size="lg"
-            ariaLabel={`Move ${row.ref} down`}
-            onClick={() => move.onMove(1)}
-            disabled={!move.down}
-          >
-            ↓
-          </Button>
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-export function StaleIdentity({ row }: { row: UnifiedRow }) {
+  const { inBoardSection } = useBoardSection();
   return (
     <div className="flex min-w-0 flex-col">
       <span className="truncate font-mono text-small text-faint">{row.ref}</span>
-      <span className="mt-0.5 flex flex-wrap gap-1">
-        <Badge tone="warn" title="no connection lists this model right now">
-          unavailable
-        </Badge>
-        {row.status === "hidden" ? <Badge tone="neutral">hidden</Badge> : null}
-      </span>
+      <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-caption text-faint">
+        <span>not in registry</span>
+        {!inBoardSection && customGroupLabel ? (
+          <Badge tone="neutral">{customGroupLabel}</Badge>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -843,7 +837,7 @@ function NamePreviewBody({
         <div className="break-all font-mono text-small font-medium text-fg">
           {row.name} → {row.alias.target}
         </div>
-        <div className={available ? "text-[var(--color-pos-ink)] font-medium" : "text-[var(--color-warn-ink)] font-medium"}>
+        <div className={available ? "font-medium text-[var(--color-pos-ink)]" : "font-medium text-[var(--color-warn-ink)]"}>
           {available
             ? "Target available right now"
             : target && !target.enabled
@@ -878,14 +872,14 @@ function NamePreviewBody({
         <span className="break-all font-mono text-small font-medium text-fg">{row.name}</span>
         <span className="text-muted">({STRATEGY_LABEL[row.combo.strategy ?? "fallback"]})</span>
       </div>
-      <div className={blocked ? "text-[var(--color-warn-ink)] font-medium" : "text-[var(--color-pos-ink)] font-medium"}>
+      <div className={blocked ? "font-medium text-[var(--color-warn-ink)]" : "font-medium text-[var(--color-pos-ink)]"}>
         {blocked ?? "Ready to route"}
       </div>
       <div className="flex flex-col gap-0.5 text-muted tnum">
         <span>{ctx ?? "Context —"}</span>
         <span>{maxOut ?? "Max output —"}</span>
       </div>
-      <div className="text-fg tnum">{price ?? "Metadata —"}</div>
+      <div className="text-fg tnum">{price ?? "Price —"}</div>
       {caps.known ? (
         <div className="flex flex-col gap-0.5 text-muted">
           {caps.guaranteed.length > 0 ? (
@@ -903,15 +897,25 @@ function NamePreviewBody({
       {row.combo.models.length > 0 ? (
         <div className="border-t border-line pt-1.5 text-muted">
           <div className="mb-0.5 text-faint">Candidates ({row.combo.models.length}):</div>
-          <div className="font-mono text-fg">{row.combo.models.slice(0, 5).join(" → ")}{row.combo.models.length > 5 ? ` (+${row.combo.models.length - 5} more)` : ""}</div>
+          <div className="font-mono text-fg">
+            {row.combo.models.slice(0, 5).join(" → ")}
+            {row.combo.models.length > 5 ? ` (+${row.combo.models.length - 5} more)` : ""}
+          </div>
         </div>
       ) : null}
     </div>
   );
 }
 
-export function NameIdentity({ row }: { row: AliasRow | ComboRow }) {
+export function NameIdentity({
+  row,
+  customGroupLabel,
+}: {
+  row: AliasRow | ComboRow;
+  customGroupLabel?: string;
+}) {
   const { modelByRef, isAdmin, toggle } = useContext(UnifiedRowDataContext);
+  const { inBoardSection } = useBoardSection();
   const expanded = useContext(UnifiedRowExpandedContext);
   const open = row.kind === "combo" && expanded.has(row.ref);
   const members = row.kind === "combo" ? row.combo.models.length : 0;
@@ -928,37 +932,29 @@ export function NameIdentity({ row }: { row: AliasRow | ComboRow }) {
 
   return (
     <div className="flex min-w-0 flex-col">
-      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-        <span className={PROVIDER_PILL}>rrouter</span>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        {!inBoardSection ? <span className={PROVIDER_PILL}>rrouter</span> : null}
         <RowPreview
           label={`Details for ${row.kind} ${row.name}`}
           trigger={
-            <span className="min-w-0 break-all font-mono text-small text-fg">{row.name}</span>
+            <span className="min-w-0 break-all font-mono text-small font-medium text-fg">
+              {row.name}
+            </span>
           }
           content={<NamePreviewBody row={row} modelByRef={modelByRef} />}
         />
         <CopyIconButton value={row.name} label={`Copy ${row.kind} ${row.name}`} />
-        <Badge tone="neutral">{row.kind}</Badge>
-        {row.kind === "combo" ? (
-          <Badge tone="neutral">{STRATEGY_LABEL[row.combo.strategy ?? "fallback"]}</Badge>
-        ) : null}
+        <Badge tone="neutral">
+          {row.kind === "combo"
+            ? `combo · ${STRATEGY_LABEL[row.combo.strategy ?? "fallback"]}`
+            : row.kind}
+        </Badge>
         {free ? <FreeBadge linked={isAdmin} /> : null}
-        {row.kind === "alias" && !targetAvailable ? (
-          <Badge tone="warn" title="The target model is disabled or not connected">
-            target unavailable
-          </Badge>
-        ) : null}
-        {blocked ? (
-          <Badge tone="warn" title={blocked}>
-            {blocked}
-          </Badge>
-        ) : null}
         {deprecatedCount > 0 ? (
           <Badge tone="warn" title="One or more candidate models are retired by their provider">
             {aggregate?.all_deprecated ? "all deprecated" : `${deprecatedCount} deprecated`}
           </Badge>
         ) : null}
-        {row.status === "hidden" ? <Badge tone="warn">hidden</Badge> : null}
       </div>
       <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-caption text-faint tnum">
         <span className="min-w-0 break-all">{nameDetail(row)}</span>
@@ -967,6 +963,13 @@ export function NameIdentity({ row }: { row: AliasRow | ComboRow }) {
             <span className="whitespace-nowrap">ctx {compact(target.context)}</span>
             {free ? null : <span className="whitespace-nowrap">{priceText(target.cost)}</span>}
           </>
+        ) : null}
+        {row.kind === "alias" && !targetAvailable ? (
+          <span className="text-[var(--color-warn-ink)]">target unavailable</span>
+        ) : null}
+        {blocked ? <span className="text-[var(--color-warn-ink)]">{blocked}</span> : null}
+        {!inBoardSection && customGroupLabel ? (
+          <Badge tone="neutral">{customGroupLabel}</Badge>
         ) : null}
         {capSplit?.known && (capSplit.guaranteed.length > 0 || capSplit.someOnly.length > 0) ? (
           <span className="flex flex-wrap items-center gap-1">
@@ -982,20 +985,20 @@ export function NameIdentity({ row }: { row: AliasRow | ComboRow }) {
             ))}
           </span>
         ) : null}
+        {row.kind === "combo" ? (
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={open ? membersId(row.ref) : undefined}
+            aria-label={`${open ? "Hide" : "Show"} ${members} members for ${row.name}`}
+            onClick={() => toggle(row.ref)}
+            className="inline-flex items-center gap-1 rounded-full border border-line bg-surface-2 px-2 py-px text-caption text-muted transition-colors hover:border-line-strong hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+          >
+            {open ? <CaretUp size={11} aria-hidden /> : <CaretDown size={11} aria-hidden />}
+            {open ? "Hide members" : `Show ${members} member${members === 1 ? "" : "s"}`}
+          </button>
+        ) : null}
       </div>
-      {row.kind === "combo" ? (
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls={open ? membersId(row.ref) : undefined}
-          aria-label={`${open ? "Hide" : "Show"} ${members} members for ${row.name}`}
-          onClick={() => toggle(row.ref)}
-          className="mt-1 inline-flex w-fit items-center gap-1 rounded-full border border-line bg-surface-2 px-2 py-0.5 text-caption text-muted transition-colors hover:border-line-strong hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
-        >
-          {open ? <CaretUp size={11} aria-hidden /> : <CaretDown size={11} aria-hidden />}
-          {open ? "Hide members" : `Show ${members} member${members === 1 ? "" : "s"}`}
-        </button>
-      ) : null}
     </div>
   );
 }

@@ -16,11 +16,11 @@ import { memo, useId, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChartLineUp, WarningCircle } from "@phosphor-icons/react";
 import { HoverPreview } from "../../components/hover-preview";
-import { Badge, Button, Card, Dot, FilterChip, cx, type BadgeTone, type DotTone } from "../../components/ui";
-import { ago, compact, pct, splitRef, usd } from "../../lib/format";
+import { Badge, Button, Card, Dot, FilterChip, Meter, barText, cx, type BadgeTone, type DotTone } from "../../components/ui";
+import { ago, compact, pct, splitRef, usdDisplay } from "../../lib/format";
 import { useAccountUsageHistory } from "../../lib/queries";
 import { refusalView } from "../../lib/refusal";
-import { barFill, barText, until } from "../providers/types";
+import { until } from "../providers/types";
 import {
   defaultChartWindowId,
   failureSummary,
@@ -159,7 +159,7 @@ export function SummaryStrip({
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-small tnum">
         <span className="text-muted">
           {rangeLabel} spend{" "}
-          <span className="font-semibold text-fg">{usd(summary.totalSpendMicros)}</span>
+          <span className="font-semibold text-fg">{usdDisplay(summary.totalSpendMicros)}</span>
         </span>
         <span className="text-faint">
           {compact(summary.totalRequests)} req
@@ -234,7 +234,7 @@ export function AccountPreviewLink({
                     {id || model.model}
                   </span>
                   <span className="shrink-0 text-faint">
-                    {compact(model.totals.requests)} req · {usd(model.totals.costMicros)}
+                    {compact(model.totals.requests)} req · {usdDisplay(model.totals.costMicros)}
                   </span>
                 </li>
               );
@@ -283,44 +283,6 @@ function StatusLabel({ status }: { status: BoardStatusKind }) {
   );
 }
 
-/**
- * 6px meter on the shared colour ladder, with an optional tick where the window is
- * projected to land at reset.
- */
-export function LimitMeter({
-  percent,
-  tick,
-  label,
-}: {
-  percent: number;
-  tick: number | null;
-  label: string;
-}) {
-  const width = Math.min(100, Math.max(0, percent));
-  return (
-    <span
-      role="progressbar"
-      aria-label={label}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={Math.round(percent)}
-      className="relative block h-1.5 w-full overflow-hidden rounded-full bg-rule"
-    >
-      <span
-        className={cx("block h-full rounded-full", barFill(percent))}
-        style={{ width: `${width}%` }}
-      />
-      {tick !== null ? (
-        <span
-          aria-hidden
-          className="absolute inset-y-0 w-0.5 rounded-full bg-faint"
-          style={{ left: `min(calc(${tick}% - 1px), calc(100% - 2px))` }}
-        />
-      ) : null}
-    </span>
-  );
-}
-
 function shortWindowLabel(risk: WindowRisk): string {
   return windowLabel(risk.window).replace(/\s+window$/i, "");
 }
@@ -342,7 +304,7 @@ function PlanWindowRow({ risk, now }: { risk: WindowRisk; now: number }) {
     <li className="flex flex-col gap-0.5">
       <div className={WINDOW_ROW}>
         <span className="truncate text-small text-ink-soft">{label}</span>
-        <LimitMeter
+        <Meter
           percent={window.used_percent}
           tick={projectionTick(risk)}
           label={[`${windowLabel(window)}: ${used}% used`, reset, status.text]
@@ -377,7 +339,7 @@ function OperatorCapRow({ bar }: { bar: OperatorBar }) {
     <li className="flex flex-col gap-0.5">
       <div className={WINDOW_ROW}>
         <span className="truncate text-small text-ink-soft">{bar.label}</span>
-        <LimitMeter
+        <Meter
           percent={bar.percent}
           tick={null}
           label={[`Operator cap, ${bar.label}: ${bar.detail}`, reset].filter(Boolean).join(", ")}
@@ -681,7 +643,7 @@ const AccountLimitCard = memo(function AccountLimitCard({
         <StatCell value={compact(item.totals.requests)} unit="req" />
         <StatCell value={compact(item.totals.tokens)} unit="tok" />
         <StatCell
-          value={usd(item.totals.costMicros)}
+          value={usdDisplay(item.totals.costMicros)}
           className={item.totals.costMicros > 0 ? "text-ink-soft" : undefined}
         />
         <StatCell value={pct(item.errorRate)} unit="err" className={errorTone} />

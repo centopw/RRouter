@@ -20,12 +20,22 @@ type Brand = {
   domain?: string;
 };
 
+/**
+ * Terminal prompt mark (`>_`, 24×24) for Codex so it reads distinctly from OpenAI's
+ * blossom in grouped provider lists and tables.
+ */
+const CODEX_PATH =
+  "M2.5 7A1.414 1.414 0 0 1 4.5 5L10.5 11A1.414 1.414 0 0 1 10.5 13L4.5 19A1.414 1.414 0 0 1 2.5 17L7.5 12Z" +
+  "M13.91 16.59H20.5A1.414 1.414 0 0 1 20.5 19.41H13.91A1.414 1.414 0 0 1 13.91 16.59Z";
+
 /** Brand marks where simple-icons has one, and each provider's theme-aware token + site. */
 export const PROVIDER_BRANDS: Record<string, Brand> = {
   anthropic: { path: siAnthropic.path, color: "#D97757", cssColor: "var(--provider-anthropic)", domain: "anthropic.com" },
   claude: { path: siAnthropic.path, color: "#D97757", cssColor: "var(--provider-claude)", domain: "claude.ai" },
   openai: { path: siOpenai.path, color: "#10A37F", cssColor: "var(--provider-openai)", domain: "openai.com" },
-  codex: { path: siOpenai.path, color: "#10A37F", cssColor: "var(--provider-codex)", domain: "openai.com" },
+  // Distinct teal/cyan tone (`--sem-series-5`: #0e7490 light / #22d3ee dark) paired with
+  // the prompt glyph so Codex never blends with OpenAI's emerald blossom.
+  codex: { path: CODEX_PATH, color: "#0E7490", cssColor: "var(--sem-series-5)", domain: "openai.com" },
   opencode: { color: "#171C26", cssColor: "var(--provider-opencode)", domain: "opencode.ai" },
   "opencode-go": { color: "#E87040", cssColor: "var(--provider-opencode-go)", domain: "opencode.ai" },
   github: { path: siGithub.path, color: "#181717", cssColor: "var(--provider-github)", domain: "github.com" },

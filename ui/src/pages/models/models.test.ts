@@ -8,6 +8,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Capabilities, Combo, Model } from "../../lib/api.ts";
+import {
+  ALL,
+  countActiveFilters,
+  isDefaultStatusSet,
+  presetOptionLabel,
+  summarizeModelKpis,
+  type StatusKey,
+} from "./params.ts";
 import { cacheText, dollars, isFree, priceText, rangeText } from "./price.ts";
 import {
   comboBlocked,
@@ -282,4 +290,151 @@ test("emptyStateKind never falsely blames the preset when filters or errors caus
     emptyStateKind({ ...base, counts: { ...base.counts, hidden: 2 } }),
     "all_hidden",
   );
+});
+
+test("presetOptionLabel drops redundant ' · default' when the preset is already named Default", () => {
+  assert.equal(presetOptionLabel("Default", true), "Default");
+  assert.equal(presetOptionLabel("default", true), "default");
+  assert.equal(presetOptionLabel(" Default ", true), " Default ");
+  assert.equal(presetOptionLabel("Production", true), "Production · default");
+  assert.equal(presetOptionLabel("Free only", false), "Free only");
+  assert.equal(presetOptionLabel("Default", false), "Default");
+});
+
+test("countActiveFilters counts non-default sheet filters without counting inline search", () => {
+  const defaultStatuses = new Set<StatusKey>(["routed"]);
+  assert.equal(isDefaultStatusSet(defaultStatuses), true);
+  assert.equal(
+    countActiveFilters({
+      provider: ALL,
+      kind: "all",
+      statuses: defaultStatuses,
+      statusAware: true,
+      free: false,
+      custom: false,
+    }),
+    0,
+  );
+  assert.equal(
+    countActiveFilters({
+      provider: "claude",
+      kind: "combos",
+      statuses: new Set<StatusKey>(["routed", "hidden"]),
+      statusAware: true,
+      free: true,
+      custom: true,
+    }),
+    5,
+  );
+  // Readers (statusAware: false) never count status as an active filter.
+  assert.equal(
+    countActiveFilters({
+      provider: ALL,
+      kind: "all",
+      statuses: new Set<StatusKey>(["hidden"]),
+      statusAware: false,
+      free: true,
+      custom: false,
+    }),
+    1,
+  );
+});
+
+test("summarizeModelKpis computes real routed, hidden, unrouted, disabled, unavailable, and free counts", () => {
+  const routedOk = makeModel({
+    ref: "claude/claude-sonnet-4-5",
+    provider: "claude",
+    id: "claude-sonnet-4-5",
+    available: true,
+  });
+  const routedDown = makeModel({
+    ref: "claude/claude-opus-4-5",
+    provider: "claude",
+    id: "claude-opus-4-5",
+    available: false,
+  });
+  const hiddenDown = makeModel({
+    ref: "claude/claude-3-7-sonnet",
+    provider: "claude",
+    id: "claude-3-7-sonnet",
+    available: false,
+  });
+  const hiddenOk = makeModel({
+    ref: "openrouter/qwen",
+    provider: "openrouter",
+    id: "qwen",
+    available: true,
+  });
+  const disabled = makeModel({
+    ref: "openai/o4-mini",
+    provider: "openai",
+    id: "o4-mini",
+    enabled: false,
+    available: true,
+  });
+  const unroutedFree = makeModel({
+    ref: "openrouter/gemma:free",
+    provider: "openrouter",
+    id: "gemma:free",
+    cost: { input: 0, output: 0 },
+    available: true,
+  });
+
+  const models = [routedOk, routedDown, hiddenDown, hiddenOk, disabled, unroutedFree];
+  const entries = new Map([
+    [routedOk.ref, { ref: routedOk.ref, visible: true }],
+    [routedDown.ref, { ref: routedDown.ref, visible: true }],
+    [hiddenDown.ref, { ref: hiddenDown.ref, visible: false }],
+    [hiddenOk.ref, { ref: hiddenOk.ref, visible: false }],
+    [disabled.ref, { ref: disabled.ref, visible: true }],
+  ]);
+  const modelByRef = new Map(models.map((m) => [m.ref, m] as const));
+
+  const rows = rowsFor({
+    models,
+    aliases: [{ alias: "fast", target: unroutedFree.ref }],
+    combos: [],
+    entries,
+    presetAware: true,
+    autoInclude: false,
+  });
+
+  const kpis = summarizeModelKpis(rows, modelByRef);
+  assert.deepEqual(kpis, {
+    total: 7,
+    enabledTotal: 6,
+    routed: 2,
+    routedAvailable: 1,
+    routedUnavailable: 1,
+    available: 4,
+    free: 2,
+    routedFree: 0,
+    hidden: 2,
+    unrouted: 2,
+    disabled: 1,
+    notRouted: 5,
+    unavailable: 2,
+    unavailableStatuses: ["routed", "hidden"],
+    notRoutedStatuses: ["hidden", "unrouted", "disabled"],
+  });
+
+  // Disabled-only rows never count under unavailable / Needs attention (audit finding 3).
+  const disabledOnlyRows = rowsFor({
+    models: [routedOk, disabled],
+    aliases: [],
+    combos: [],
+    entries: new Map([
+      [routedOk.ref, { ref: routedOk.ref, visible: true }],
+      [disabled.ref, { ref: disabled.ref, visible: true }],
+    ]),
+    presetAware: true,
+    autoInclude: false,
+  });
+  const disabledOnlyKpis = summarizeModelKpis(disabledOnlyRows, modelByRef);
+  assert.equal(disabledOnlyKpis.enabledTotal, 1);
+  assert.equal(disabledOnlyKpis.disabled, 1);
+  assert.equal(disabledOnlyKpis.notRouted, 1);
+  assert.deepEqual(disabledOnlyKpis.notRoutedStatuses, ["disabled"]);
+  assert.equal(disabledOnlyKpis.unavailable, 0);
+  assert.deepEqual(disabledOnlyKpis.unavailableStatuses, []);
 });

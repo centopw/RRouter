@@ -102,7 +102,7 @@ export type ComboPricing = {
 
 /**
  * The fold `/api/combos` sends (`combo_meta.rs`, additive wire). Older gateways omit it,
- * in which case the row says `metadata —` rather than borrowing member 1's numbers.
+ * in which case the row shows the candidate count alone rather than borrowing member 1's numbers.
  */
 export type ComboAggregate = {
   context: NumberRange | null;
@@ -239,20 +239,117 @@ export function comboCapabilitySplit(aggregate: ComboAggregate | null): {
 /**
  * The second line of a name row. An alias names its target. A combo states the candidate
  * range the gateway folded (guaranteed floor to best case), never one member's numbers;
- * without the fold it says `metadata —`.
+ * without the fold it shows the candidate count alone.
  */
 export function nameDetail(row: AliasRow | ComboRow): string {
   if (row.kind === "alias") return `alias → ${row.alias.target}`;
   const n = row.combo.models.length;
   const count = `${n.toLocaleString()} candidate${n === 1 ? "" : "s"}`;
   const aggregate = aggregateOf(row.combo);
-  if (!aggregate) return `${count} · metadata —`;
+  if (!aggregate) return count;
   const parts = [count];
   const ctx = qualifiedTokenRange(aggregate.context, "ctx");
   parts.push(ctx ?? "ctx —");
   const price = comboPriceText(aggregate);
   if (price && price !== "Free") parts.push(price);
   return parts.join(" · ");
+}
+
+/**
+ * Normalize the synthetic `rrouter` provider bucket to "RRouter names" unless the operator
+ * explicitly renamed the group to something else.
+ */
+export function groupDisplayName(group: { name: string; provider?: string }): string {
+  if (group.provider === "rrouter" && group.name.toLowerCase() === "rrouter") {
+    return "RRouter names";
+  }
+  return group.name;
+}
+
+export type RowStatusKind =
+  | "routed"
+  | "available"
+  | "unavailable"
+  | "hidden"
+  | "unrouted"
+  | "disabled";
+
+export type RowStatusMeta = {
+  kind: RowStatusKind;
+  label: string;
+  tone: "pos" | "warn" | "info" | "neutral";
+  dot: "pos" | "warn" | "info" | "muted";
+  title: string;
+};
+
+/**
+ * Single status vocabulary for every Models row, aligned with Usage's HealthBadge tones:
+ * Routed / Available (pos) · Unavailable / Hidden (warn) · Not in preset (info) · Disabled (neutral).
+ */
+export function rowStatusMeta(
+  row: UnifiedRow,
+  modelByRef: ReadonlyMap<string, Model>,
+): RowStatusMeta {
+  if (row.status === "disabled") {
+    return {
+      kind: "disabled",
+      label: "Disabled",
+      tone: "neutral",
+      dot: "muted",
+      title: "Disabled globally — the gateway refuses this id on every endpoint",
+    };
+  }
+  if (row.status === "hidden") {
+    return {
+      kind: "hidden",
+      label: "Hidden",
+      tone: "warn",
+      dot: "warn",
+      title: "Hidden from /v1/models in this preset",
+    };
+  }
+  if (row.status === "unrouted") {
+    return {
+      kind: "unrouted",
+      label: "Not in preset",
+      tone: "info",
+      dot: "info",
+      title: "In the registry, not included in this preset",
+    };
+  }
+  if (!rowIsAvailable(row, modelByRef)) {
+    const reason =
+      row.kind === "model"
+        ? row.model === null
+          ? "No connection lists this model right now"
+          : "No healthy connection for this provider right now"
+        : row.kind === "alias"
+          ? "Target model is disabled or not connected"
+          : (comboBlocked(aggregateOf(row.combo)) ?? "No candidate is connected");
+    return {
+      kind: "unavailable",
+      label: "Unavailable",
+      tone: "warn",
+      dot: "warn",
+      title: reason,
+    };
+  }
+  if (row.status === "routed") {
+    return {
+      kind: "routed",
+      label: "Routed",
+      tone: "pos",
+      dot: "pos",
+      title: "Listed on /v1/models and ready to serve",
+    };
+  }
+  return {
+    kind: "available",
+    label: "Available",
+    tone: "pos",
+    dot: "pos",
+    title: "Ready to serve",
+  };
 }
 
 /**

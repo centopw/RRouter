@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
-import { CaretDown, Copy, DotsThree, PencilSimple, Plus, Star, Trash } from "@phosphor-icons/react";
+import { CaretDown, Check, Copy, DotsThree, PencilSimple, Plus, Star, Trash } from "@phosphor-icons/react";
 import { Link } from "react-router-dom";
 import { IconButton } from "../../components/atoms";
 import { ModelChain, ModelSelect } from "../../components/model-select";
@@ -29,6 +29,7 @@ import {
 } from "../../lib/queries";
 import type { ComboStrategy, Model, ModelPreset, PresetSummary } from "../../lib/api";
 import type { DraftState, LayoutDraft } from "../../lib/layout-draft";
+import { presetOptionLabel } from "./params";
 
 const STATE_TEXT: Record<DraftState, string> = {
   clean: "saved",
@@ -497,8 +498,9 @@ function SwitchLayoutConfirmModal({
 }
 
 /**
- * The preset control bar in `/models`. Switching and saving happen inline; full preset
- * lifecycle management opens `PresetManagerDrawer` without navigating away.
+ * The preset line directly under the `/models` page title. Switching and saving happen inline;
+ * `Save` appears only when the draft has unsaved changes. Full preset lifecycle management opens
+ * `PresetManagerDrawer` without navigating away.
  */
 export function PresetControls({
   presets,
@@ -509,6 +511,7 @@ export function PresetControls({
   onSelect,
   onSaveAsNew,
   onManagePresets,
+  onManageGroups,
 }: {
   presets: PresetSummary[];
   presetId: string;
@@ -519,13 +522,21 @@ export function PresetControls({
   onSelect: (id: string) => void;
   onSaveAsNew: () => void;
   onManagePresets?: () => void;
+  onManageGroups?: () => void;
 }) {
   const [switching, setSwitching] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const dirty = draft.state !== "clean";
   const saving = draft.state === "saving";
   const conflict = draft.conflict !== null;
+  const showSave = (draft.state === "dirty" || draft.state === "saving") && !conflict;
+  const currentPreset = presets.find((preset) => preset.id === presetId);
+  const currentLabel = currentPreset
+    ? presetOptionLabel(currentPreset.name, currentPreset.id === defaultId)
+    : "Preset";
 
   const pick = (id: string) => {
+    setPickerOpen(false);
     if (id === presetId) return;
     if (dirty) setSwitching(id);
     else onSelect(id);
@@ -547,96 +558,160 @@ export function PresetControls({
   };
 
   return (
-    <>
-      <label className="flex min-w-0 items-center gap-2">
+    <div className="-mt-3 mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span className="text-small text-muted">Preset</span>
-        <span className="w-[180px] max-w-full">
-          <Select ariaLabel="preset being edited" value={presetId} onChange={pick} disabled={busy}>
-            {presets.map((preset) => (
-              <option key={preset.id} value={preset.id}>
-                {preset.name}
-                {preset.id === defaultId ? " · default" : ""}
-              </option>
-            ))}
-          </Select>
+
+        <Popover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
+          <Popover.Trigger asChild>
+            <button
+              type="button"
+              disabled={busy}
+              aria-label="Preset being edited"
+              aria-haspopup="dialog"
+              aria-expanded={pickerOpen}
+              className="inline-flex h-8 max-w-[220px] items-center gap-1.5 rounded-full border border-line bg-surface px-3 text-small font-medium text-fg transition-colors hover:border-[var(--color-line-strong)] hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <span className="truncate">{currentLabel}</span>
+              <CaretDown size={11} className="shrink-0 text-muted" aria-hidden />
+            </button>
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content
+              role="group"
+              aria-label="Choose preset"
+              side="bottom"
+              align="start"
+              sideOffset={4}
+              className="popover-panel z-[var(--z-popover-portal)] flex w-60 flex-col gap-0.5 rounded-[var(--radius-card)] border border-line bg-surface p-1 shadow-[var(--shadow-popover)]"
+            >
+              {presets.map((preset) => {
+                const selected = preset.id === presetId;
+                const label = presetOptionLabel(preset.name, preset.id === defaultId);
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => pick(preset.id)}
+                    className={cx(
+                      "flex h-8 w-full items-center justify-between gap-2 rounded-[var(--radius-input)] px-2.5 text-left text-small transition-colors hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--color-focus-ring)]",
+                      selected ? "bg-[var(--color-selected)] font-medium text-fg" : "text-fg",
+                    )}
+                  >
+                    <span className="truncate">{label}</span>
+                    {selected ? (
+                      <Check size={14} weight="bold" className="shrink-0 text-accent-text" aria-hidden />
+                    ) : null}
+                  </button>
+                );
+              })}
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
+
+        <span
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-1.5 text-caption text-muted"
+        >
+          {conflict ? (
+            <Dot tone="neg" />
+          ) : dirty ? (
+            <Dot tone="warn" />
+          ) : (
+            <Check size={13} weight="bold" className="text-[var(--color-pos)]" aria-hidden />
+          )}
+          {STATE_TEXT[draft.state]}
+          {!dirty && draft.savedAt ? ` · ${when(Math.floor(draft.savedAt / 1000))}` : ""}
         </span>
-      </label>
 
-      <span
-        role="status"
-        aria-live="polite"
-        className="flex items-center gap-1.5 text-caption text-muted"
-      >
-        {dirty ? <Dot tone="warn" /> : <Dot tone="pos" />}
-        {STATE_TEXT[draft.state]}
-        {!dirty && draft.savedAt ? ` · ${when(Math.floor(draft.savedAt / 1000))}` : ""}
-      </span>
-
-      <Button
-        variant="primary"
-        onClick={() => void draft.saveNow()}
-        disabled={!dirty || saving || busy || conflict}
-        title={
-          conflict
-            ? "Resolve the conflict below before saving again"
-            : dirty
-              ? "Write this order and visibility to the preset"
-              : "No unsaved changes"
-        }
-      >
-        Save
-      </Button>
-
-      <Popover.Root>
-        <Popover.Trigger asChild>
-          <button
-            type="button"
-            aria-label="Preset actions"
-            aria-haspopup="menu"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+        {showSave ? (
+          <Button
+            variant="primary"
+            size="md"
+            loading={saving}
+            onClick={() => void draft.saveNow()}
+            disabled={saving || busy}
+            title="Write this order and visibility to the preset"
           >
-            <DotsThree size={18} weight="bold" aria-hidden />
-          </button>
-        </Popover.Trigger>
-        <Popover.Portal>
-          <Popover.Content
-            role="menu"
-            aria-label="Preset actions"
-            side="bottom"
-            align="end"
-            sideOffset={4}
-            className="popover-panel z-[var(--z-popover-portal)] flex w-56 flex-col rounded-[var(--radius-card)] border border-line bg-surface p-1 shadow-[var(--shadow-popover)]"
+            Save
+          </Button>
+        ) : null}
+      </div>
+
+      <div className="flex shrink-0 items-center gap-1">
+        {onManagePresets ? (
+          <Button variant="ghost" size="sm" onClick={onManagePresets} className="text-muted hover:text-fg">
+            Manage presets
+          </Button>
+        ) : (
+          <Link
+            to="/routing/presets"
+            className="inline-flex h-7 shrink-0 items-center justify-center whitespace-nowrap rounded-full px-2.5 text-small text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
           >
-            <Popover.Close asChild>
-              <button type="button" role="menuitem" onClick={onSaveAsNew} className={menuItem}>
-                Save as new…
-              </button>
-            </Popover.Close>
-            <Popover.Close asChild>
-              {onManagePresets ? (
-                <button type="button" role="menuitem" onClick={onManagePresets} className={menuItem}>
-                  Manage presets…
+            Manage presets
+          </Link>
+        )}
+
+        <Popover.Root>
+          <Popover.Trigger asChild>
+            <button
+              type="button"
+              aria-label="Preset actions"
+              aria-haspopup="menu"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+            >
+              <DotsThree size={18} weight="bold" aria-hidden />
+            </button>
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content
+              role="menu"
+              aria-label="Preset actions"
+              side="bottom"
+              align="end"
+              sideOffset={4}
+              className="popover-panel z-[var(--z-popover-portal)] flex w-56 flex-col rounded-[var(--radius-card)] border border-line bg-surface p-1 shadow-[var(--shadow-popover)]"
+            >
+              <Popover.Close asChild>
+                <button type="button" role="menuitem" onClick={onSaveAsNew} className={menuItem}>
+                  Save as new…
                 </button>
-              ) : (
-                <Link to="/routing/presets" role="menuitem" className={menuItem}>
-                  Manage presets…
-                </Link>
-              )}
-            </Popover.Close>
-            <Popover.Close asChild>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={draft.discard}
-                disabled={!dirty}
-                className={menuItem}
-              >
-                Discard changes
-              </button>
-            </Popover.Close>
-          </Popover.Content>
-        </Popover.Portal>
-      </Popover.Root>
+              </Popover.Close>
+              {onManageGroups ? (
+                <Popover.Close asChild>
+                  <button type="button" role="menuitem" onClick={onManageGroups} className={menuItem}>
+                    Manage groups…
+                  </button>
+                </Popover.Close>
+              ) : null}
+              <Popover.Close asChild>
+                {onManagePresets ? (
+                  <button type="button" role="menuitem" onClick={onManagePresets} className={menuItem}>
+                    Manage presets…
+                  </button>
+                ) : (
+                  <Link to="/routing/presets" role="menuitem" className={menuItem}>
+                    Manage presets…
+                  </Link>
+                )}
+              </Popover.Close>
+              <Popover.Close asChild>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={draft.discard}
+                  disabled={!dirty}
+                  className={menuItem}
+                >
+                  Discard changes
+                </button>
+              </Popover.Close>
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
+      </div>
 
       <SwitchLayoutConfirmModal
         open={switching !== null}
@@ -644,7 +719,7 @@ export function PresetControls({
         onDiscard={discardAndSwitch}
         onSaveAndSwitch={() => void saveAndSwitch()}
       />
-    </>
+    </div>
   );
 }
 
@@ -953,6 +1028,7 @@ export function AddMenu({
           aria-haspopup="menu"
           className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-full border border-transparent bg-accent px-3.5 text-body font-semibold text-[var(--color-accent-ink)] transition-colors hover:bg-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
         >
+          <Plus size={14} weight="bold" aria-hidden />
           Add
           <CaretDown size={11} aria-hidden />
         </button>

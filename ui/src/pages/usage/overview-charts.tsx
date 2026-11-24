@@ -11,10 +11,10 @@
 import { useCallback, useId, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChartLineUp } from "@phosphor-icons/react";
-import { Card } from "../../components/ui";
+import { Card, CardHeader } from "../../components/ui";
 import { bucketLabel, niceMax, xLabelIndices, type RangeSpec } from "../../lib/activity";
 import { compact } from "../../lib/format";
-import { scale } from "./chart-geometry";
+import { fitLabels, scale } from "./chart-geometry";
 import type { UsageBreakdown, UsageTrend } from "./overview-model";
 
 function useContainerWidth(): [(el: HTMLDivElement | null) => (() => void) | undefined, number] {
@@ -128,10 +128,11 @@ export function UsageBreakdownCard({
 
   return (
     <Card className="flex min-w-0 flex-col gap-3 p-4">
-      <div className="flex items-baseline justify-between gap-2">
-        <h2 className="text-body font-semibold text-fg">Usage Breakdown</h2>
-        <span className="text-caption text-faint">Last {rangeLabel}</span>
-      </div>
+      <CardHeader
+        title="Usage Breakdown"
+        padding="none"
+        action={<span className="text-caption text-faint">Last {rangeLabel}</span>}
+      />
 
       {breakdown.slices.length === 0 ? (
         <p className="py-6 text-center text-small text-faint">
@@ -200,6 +201,8 @@ export function UsageBreakdownCard({
 
 const TREND_HEIGHT = 200;
 const TREND_PAD = { top: 18, right: 16, bottom: 24, left: 46 };
+/** Minimum px between Usage Trend x-axis labels so dates/times never collide on narrow viewports. */
+const TREND_X_LABEL_MIN_GAP = 72;
 
 /** Multi-line Usage Trend card: Total + top 3 providers across the active range. */
 export function UsageTrendCard({
@@ -232,7 +235,26 @@ export function UsageTrendCard({
       ? `${totalLine} L${totalPoints[totalPoints.length - 1]!.x.toFixed(1)},${bottom} L${totalPoints[0]!.x.toFixed(1)},${bottom} Z`
       : "";
 
-  const labelIdx = xLabelIndices(trend.starts.length, range.labelEvery);
+  const lastIdx = trend.starts.length - 1;
+  const xLabels =
+    width > 0
+      ? fitLabels(
+          xLabelIndices(trend.starts.length, range.labelEvery).flatMap((idx) => {
+            const start = trend.starts[idx];
+            if (start === undefined) return [];
+            const isEdge = idx === 0 || idx === lastIdx;
+            return [
+              {
+                key: String(idx),
+                x: x(idx),
+                text: bucketLabel(start, range.seconds, nowSec),
+                priority: isEdge ? 0 : 1,
+              },
+            ];
+          }),
+          TREND_X_LABEL_MIN_GAP,
+        )
+      : [];
   const latestTotal = trend.total[trend.total.length - 1] ?? 0;
   const lastPt = totalPoints[totalPoints.length - 1];
 
@@ -243,40 +265,40 @@ export function UsageTrendCard({
 
   return (
     <Card className="flex min-w-0 flex-col gap-3 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <ChartLineUp size={16} aria-hidden className="text-accent-text" />
-          <h2 className="text-body font-semibold text-fg">Usage Trend</h2>
-          <span className="text-caption text-faint">({metricLabel})</span>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-caption">
-          <span className="inline-flex items-center gap-1.5 text-muted">
-            <span
-              aria-hidden
-              className="h-2 w-2 rounded-full"
-              style={{ backgroundColor: "var(--color-series-1)" }}
-            />
-            Total
-          </span>
-          {trend.providers.map((series) => (
-            <span key={series.id} className="inline-flex items-center gap-1.5 text-muted">
+      <CardHeader
+        icon={<ChartLineUp size={16} />}
+        title="Usage Trend"
+        meta={`(${metricLabel})`}
+        padding="none"
+        action={
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-caption">
+            <span className="inline-flex items-center gap-1.5 text-muted">
               <span
                 aria-hidden
                 className="h-2 w-2 rounded-full"
-                style={{ backgroundColor: series.color }}
+                style={{ backgroundColor: "var(--color-series-1)" }}
               />
-              {series.label}
+              Total
             </span>
-          ))}
-          <Link
-            to="/activity"
-            className="text-accent-text underline-offset-2 hover:underline focus-visible:underline"
-          >
-            View details →
-          </Link>
-        </div>
-      </div>
+            {trend.providers.map((series) => (
+              <span key={series.id} className="inline-flex items-center gap-1.5 text-muted">
+                <span
+                  aria-hidden
+                  className="h-2 w-2 rounded-full"
+                  style={{ backgroundColor: series.color }}
+                />
+                {series.label}
+              </span>
+            ))}
+            <Link
+              to="/activity"
+              className="text-accent-text underline-offset-2 hover:underline focus-visible:underline"
+            >
+              View details →
+            </Link>
+          </div>
+        }
+      />
 
       {loading && trend.maxValue === 0 ? (
         <div
@@ -396,21 +418,18 @@ export function UsageTrendCard({
                 </g>
               ) : null}
 
-              {labelIdx.map((idx) => {
-                const start = trend.starts[idx];
-                if (start === undefined) return null;
-                const px = x(idx);
-                const anchor =
-                  idx === 0 ? "start" : idx === trend.starts.length - 1 ? "end" : "middle";
+              {xLabels.map((label) => {
+                const idx = Number(label.key);
+                const anchor = idx === 0 ? "start" : idx === lastIdx ? "end" : "middle";
                 return (
                   <text
-                    key={idx}
-                    x={px}
+                    key={label.key}
+                    x={label.x}
                     y={TREND_HEIGHT - 6}
                     textAnchor={anchor}
                     className="fill-[var(--color-faint)] text-caption tnum"
                   >
-                    {bucketLabel(start, range.seconds, nowSec)}
+                    {label.text}
                   </text>
                 );
               })}

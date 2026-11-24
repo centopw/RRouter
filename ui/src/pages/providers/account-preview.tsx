@@ -1,9 +1,10 @@
 import { HoverPreview } from "../../components/hover-preview";
-import { Badge, Dot, cx } from "../../components/ui";
+import { HealthBadge } from "../../components/molecules/HealthBadge";
+import { Dot, cx } from "../../components/ui";
 import type { AccountQuotaRow, AccountSubscription, Connection } from "../../lib/api";
 import { ms } from "../../lib/format";
 import { paceSentence } from "../usage/headline";
-import { accountRisk, isAlarming } from "../usage/pace";
+import { accountRisk } from "../usage/pace";
 import { QuotaCell as UsageQuotaCell, quotaBars } from "../usage/quota";
 import {
   derivedIdentifiers,
@@ -11,13 +12,6 @@ import {
   type AccountStatus,
   type ConnectionTestResult,
 } from "./types";
-
-const STATUS_TEXT = {
-  muted: "text-muted",
-  warn: "text-[var(--color-warn)]",
-  neg: "text-[var(--color-neg)]",
-  info: "text-[var(--color-info)]",
-} as const;
 
 /**
  * Account name as a deep-link (`?inspect=<id>`) with a non-modal, non-focus-stealing
@@ -68,7 +62,9 @@ export function AccountNameLink({
   const now = Date.now();
   const risk = subscription ? accountRisk(subscription, now) : null;
   const alarmingPace =
-    risk && isAlarming(risk.worst.pace.state) ? paceSentence(risk.worst.pace, now) : null;
+    risk && risk.worst.pace.state === "on_pace_to_hit"
+      ? paceSentence(risk.worst.pace, now)
+      : null;
 
   const showLastErrorSeparately =
     Boolean(connection.last_error) && connection.last_error !== status.reason;
@@ -79,15 +75,12 @@ export function AccountNameLink({
         <span className="min-w-0 truncate font-medium text-fg">
           {primary ?? "Unnamed account"}
         </span>
-        <span className="flex shrink-0 items-center gap-1.5 text-caption">
-          {status.kind === "refusal" ? (
-            <Badge tone={status.refusal.tone}>{status.refusal.label}</Badge>
-          ) : (
-            <>
-              <Dot tone={status.tone} />
-              <span className={STATUS_TEXT[status.tone]}>{status.label}</span>
-            </>
-          )}
+        <span className="flex shrink-0 items-center">
+          <HealthBadge
+            status={status.health}
+            label={status.label}
+            tone={status.kind === "refusal" ? status.refusal.tone : undefined}
+          />
         </span>
       </div>
 

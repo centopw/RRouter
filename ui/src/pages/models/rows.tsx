@@ -1,4 +1,6 @@
 import {
+  createContext,
+  useContext,
   useEffect,
   useId,
   useRef,
@@ -10,7 +12,8 @@ import * as Popover from "@radix-ui/react-popover";
 import { CheckCircle, CircleNotch, DotsThree, Play, WarningCircle } from "@phosphor-icons/react";
 import { Link } from "react-router-dom";
 import { Badge, Button, Card, CopyIconButton, cx } from "../../components/ui";
-import { Heading, Toggle } from "../../components/atoms";
+import { Heading } from "../../components/atoms";
+import { HealthBadge, type HealthStatus } from "../../components/molecules/HealthBadge";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS, CapabilityChips } from "../../components/capability-chips";
 import { compact, ms } from "../../lib/format";
 import { alsoMatches, canonicalRef } from "../../lib/model-ref";
@@ -18,6 +21,7 @@ import type { Model } from "../../lib/api";
 import type { DraftGroup } from "../../lib/layout-draft";
 import type { ModelTestOutcome } from "./actions";
 import { cacheText, isFree, priceText } from "./price";
+import { groupDisplayName, type RowStatus, type RowStatusMeta } from "./unified-rows";
 
 /** Shared styling for a provider ownership badge (plain mono pill, no tracked-caps). */
 export const PROVIDER_PILL =
@@ -27,6 +31,71 @@ export const PROVIDER_LINK = cx(
   PROVIDER_PILL,
   "transition-colors hover:border-line-strong hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text",
 );
+
+/**
+ * Ambient board section context so rows inside a provider section omit the repeated
+ * provider chip, while flat views and custom groups keep ownership visible.
+ */
+export type BoardSectionContextValue = {
+  inBoardSection: boolean;
+  inProviderSection: boolean;
+};
+
+export const BoardSectionContext = createContext<BoardSectionContextValue>({
+  inBoardSection: false,
+  inProviderSection: false,
+});
+
+export function useBoardSection(): BoardSectionContextValue {
+  return useContext(BoardSectionContext);
+}
+
+const HEALTH_STATUS_FOR_ROW: Record<
+  RowStatusMeta["kind"],
+  { status: HealthStatus; label?: string; tone?: "pos" | "warn" | "info" | "neutral" }
+> = {
+  routed: { status: "routed" },
+  available: { status: "healthy", label: "Available" },
+  unavailable: { status: "unavailable" },
+  hidden: { status: "hidden", tone: "warn" },
+  unrouted: { status: "not_in_preset", tone: "info" },
+  disabled: { status: "disabled" },
+};
+
+/**
+ * Shared HealthBadge status pill for Models rows: Routed / Available (pos),
+ * Unavailable / Hidden (warn), Not in preset (info), and Disabled (neutral hollow dot).
+ */
+export function RowStatusPill({
+  meta,
+  href,
+  ariaLabel,
+}: {
+  meta: RowStatusMeta;
+  href?: string;
+  ariaLabel?: string;
+}) {
+  const mapped = HEALTH_STATUS_FOR_ROW[meta.kind];
+  const pill = (
+    <HealthBadge
+      status={mapped.status}
+      label={mapped.label ?? meta.label}
+      tone={mapped.tone}
+      title={meta.title}
+      className="shrink-0 whitespace-nowrap"
+    />
+  );
+  if (!href) return pill;
+  return (
+    <Link
+      to={href}
+      aria-label={ariaLabel ?? `${meta.label}: ${meta.title}`}
+      className="inline-flex shrink-0 rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+    >
+      {pill}
+    </Link>
+  );
+}
 
 /**
  * Non-modal, non-focus-stealing task-scoped preview. Opens after ~350 ms mouse hover or
@@ -191,6 +260,9 @@ export function ModelPreviewBody({
   );
 }
 
+const ACTION_ICON_CLASS =
+  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:opacity-70";
+
 /** A test is one icon: a word per row made the name repeat and the column jump. */
 export function TestButton({
   model,
@@ -211,7 +283,7 @@ export function TestButton({
         pending ? `Testing ${model.ref}` : `Send a test completion to ${model.ref}`
       }
       title={`Send a 16-token completion to ${model.ref}`}
-      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text disabled:opacity-70"
+      className={ACTION_ICON_CLASS}
     >
       {pending ? (
         <CircleNotch size={15} className="animate-spin" aria-hidden />
@@ -219,6 +291,23 @@ export function TestButton({
         <Play size={14} aria-hidden />
       )}
     </button>
+  );
+}
+
+/** Matching one-icon test link for alias and combo rows so every row shares one action style. */
+export function PlayLinkButton({
+  to,
+  label,
+  title,
+}: {
+  to: string;
+  label: string;
+  title?: string;
+}) {
+  return (
+    <Link to={to} aria-label={label} title={title ?? label} className={ACTION_ICON_CLASS}>
+      <Play size={14} aria-hidden />
+    </Link>
   );
 }
 
@@ -258,55 +347,37 @@ export function TestOutcomeInline({ outcome }: { outcome?: ModelTestOutcome }) {
   );
 }
 
+export type PhoneMoveControls = {
+  up: boolean;
+  down: boolean;
+  onMove: (delta: number) => void;
+};
+
+const MENU_ITEM =
+  "flex h-8 w-full items-center rounded-[var(--radius-input)] px-2 text-left text-small text-fg hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent-text disabled:cursor-not-allowed disabled:text-faint";
+
 /**
- * Edit and delete live behind one trigger, so the row keeps a stable width.
- *
- * Menu semantics (one tab stop, arrows/Home/End inside) are hand-rolled: Radix Popover
- * already owns focus restore and Escape, and a `@radix-ui/react-dropdown-menu` dependency
- * for one page was not worth the bundle.
+ * Shared overflow menu shell (one tab stop, arrows/Home/End inside). Radix Popover owns
+ * focus restore and Escape.
  */
-export function RowMenu({
-  model,
-  pendingDelete,
-  onEdit,
-  onDelete,
-  onHide,
-  onMoveTop,
-  onMoveBottom,
-  canMoveTop,
-  canMoveBottom,
-  groups,
-  currentGroup,
-  onMoveGroup,
-  groupMenuClassName,
+function ActionMenuShell({
+  subject,
+  children,
 }: {
-  model: Model;
-  pendingDelete: boolean;
-  onEdit: () => void;
-  onDelete: () => void;
-  /** Only while a preset is active: hides the row here, not from routing. */
-  onHide?: () => void;
-  onMoveTop?: () => void;
-  onMoveBottom?: () => void;
-  canMoveTop?: boolean;
-  canMoveBottom?: boolean;
-  /** Groups on this preset; omitted when an inline Group select is already shown. */
-  groups?: Array<DraftGroup & { implicit?: boolean }>;
-  currentGroup?: string;
-  onMoveGroup?: (group: string | null) => void;
-  /** Optional responsive visibility class (e.g. `md:hidden` when desktop has a Group column). */
-  groupMenuClassName?: string;
+  subject: string;
+  children: ReactNode;
 }) {
   const surface = useRef<HTMLDivElement>(null);
   const items = () =>
-    [...(surface.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
+    [...(surface.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])];
   const focusItem = (index: number) => {
     const list = items();
     if (list.length === 0) return;
     list[(index + list.length) % list.length]?.focus();
   };
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const index = items().indexOf(document.activeElement as HTMLElement);
+    const list = items();
+    const index = list.indexOf(document.activeElement as HTMLElement);
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
@@ -328,19 +399,14 @@ export function RowMenu({
         break;
     }
   };
-  const item =
-    "flex h-8 items-center rounded-[var(--radius-input)] px-2 text-left text-small text-fg hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent-text";
-  const movableGroups = groups?.filter(
-    (group) => !group.provider || group.provider === model.provider,
-  );
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
         <button
           type="button"
-          aria-label={`More actions for ${model.ref}`}
+          aria-label={`More actions for ${subject}`}
           aria-haspopup="menu"
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-3 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-text"
+          className={ACTION_ICON_CLASS}
         >
           <DotsThree size={18} weight="bold" aria-hidden />
         </button>
@@ -352,7 +418,7 @@ export function RowMenu({
           side="bottom"
           align="end"
           sideOffset={4}
-          aria-label={`Actions for ${model.ref}`}
+          aria-label={`Actions for ${subject}`}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             window.requestAnimationFrame(() => focusItem(0));
@@ -360,109 +426,402 @@ export function RowMenu({
           onKeyDown={onKeyDown}
           className="popover-panel z-[var(--z-popover-portal)] flex w-56 flex-col rounded-[var(--radius-card)] border border-line bg-surface p-1 shadow-[var(--shadow-popover)] focus:outline-none"
         >
-          <Popover.Close asChild>
-            <Link
-              to={`/playground/chat?model=${encodeURIComponent(model.ref)}`}
-              role="menuitem"
-              tabIndex={-1}
-              className={item}
-            >
-              Test in Playground
-            </Link>
-          </Popover.Close>
-          <Popover.Close asChild>
-            <button type="button" role="menuitem" tabIndex={-1} onClick={onEdit} className={item}>
-              Edit limits and price
-            </button>
-          </Popover.Close>
-          {onMoveTop || onMoveBottom ? (
-            <div className="mt-1 border-t border-line pt-1">
-              {onMoveTop ? (
-                <Popover.Close asChild>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    tabIndex={-1}
-                    disabled={canMoveTop === false}
-                    onClick={onMoveTop}
-                    className={cx(item, "w-full disabled:cursor-not-allowed disabled:text-faint")}
-                  >
-                    Move to top
-                  </button>
-                </Popover.Close>
-              ) : null}
-              {onMoveBottom ? (
-                <Popover.Close asChild>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    tabIndex={-1}
-                    disabled={canMoveBottom === false}
-                    onClick={onMoveBottom}
-                    className={cx(item, "w-full disabled:cursor-not-allowed disabled:text-faint")}
-                  >
-                    Move to bottom
-                  </button>
-                </Popover.Close>
-              ) : null}
-            </div>
-          ) : null}
-          {groups && onMoveGroup ? (
-            <div className={cx("mt-1 border-t border-line pt-1", groupMenuClassName)}>
-              <p className="px-2 py-1 text-caption text-faint">Move to group</p>
-              <div className="max-h-48 overflow-y-auto">
-                {movableGroups?.map((group) => {
-                  const checked = currentGroup === group.id;
-                  return (
-                    <Popover.Close asChild key={group.id}>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        tabIndex={-1}
-                        aria-current={checked ? "true" : undefined}
-                        onClick={() => onMoveGroup(group.provider ? null : group.id)}
-                        className={cx(item, checked && "bg-surface-2 text-accent-text")}
-                      >
-                        <span className="min-w-0 flex-1 truncate">{group.name}</span>
-                        {group.provider ? (
-                          <span className="ml-2 shrink-0 text-caption text-faint">provider</span>
-                        ) : null}
-                        {checked ? <span className="ml-2 shrink-0 text-caption">current</span> : null}
-                      </button>
-                    </Popover.Close>
-                  );
-                })}
-              </div>
-            </div>
-          ) : null}
-          {onHide ? (
-            <Popover.Close asChild>
-              <button type="button" role="menuitem" tabIndex={-1} onClick={onHide} className={item}>
-                Remove from this preset
-              </button>
-            </Popover.Close>
-          ) : null}
-          {model.source === "custom" ? (
-            <Popover.Close asChild>
-              <button
-                type="button"
-                role="menuitem"
-                tabIndex={-1}
-                onClick={onDelete}
-                disabled={pendingDelete}
-                className={cx(item, "text-[var(--color-neg-ink)] hover:bg-[var(--color-neg-tint)]")}
-              >
-                Delete custom model
-              </button>
-            </Popover.Close>
-          ) : null}
+          {children}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
   );
 }
 
-/** One model as a phone card. Shared by the board and every filtered row set. */
+function MenuGroupPicker({
+  groups,
+  provider,
+  currentGroup,
+  onMoveGroup,
+  className,
+}: {
+  groups?: Array<DraftGroup & { implicit?: boolean }>;
+  provider: string;
+  currentGroup?: string;
+  onMoveGroup?: (group: string | null) => void;
+  className?: string;
+}) {
+  if (!groups || !onMoveGroup) return null;
+  const movableGroups = groups.filter(
+    (group) => !group.provider || group.provider === provider,
+  );
+  if (movableGroups.length <= 1) return null;
+  return (
+    <div className={cx("mt-1 border-t border-line pt-1", className)}>
+      <p className="px-2 py-1 text-caption text-faint">Move to group</p>
+      <div className="max-h-48 overflow-y-auto">
+        {movableGroups.map((group) => {
+          const checked = currentGroup === group.id;
+          const label = groupDisplayName(group);
+          return (
+            <Popover.Close asChild key={group.id}>
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                aria-current={checked ? "true" : undefined}
+                onClick={() => onMoveGroup(group.provider ? null : group.id)}
+                className={cx(MENU_ITEM, checked && "bg-surface-2 text-accent-text")}
+              >
+                <span className="min-w-0 flex-1 truncate">{label}</span>
+                {group.provider ? (
+                  <span className="ml-2 shrink-0 text-caption text-faint">default</span>
+                ) : null}
+                {checked ? <span className="ml-2 shrink-0 text-caption">current</span> : null}
+              </button>
+            </Popover.Close>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function MenuReorderItems({
+  move,
+  onMoveTop,
+  onMoveBottom,
+  canMoveTop,
+  canMoveBottom,
+}: {
+  move?: PhoneMoveControls;
+  onMoveTop?: () => void;
+  onMoveBottom?: () => void;
+  canMoveTop?: boolean;
+  canMoveBottom?: boolean;
+}) {
+  if (!move && !onMoveTop && !onMoveBottom) return null;
+  return (
+    <div className="mt-1 border-t border-line pt-1">
+      {move ? (
+        <>
+          <Popover.Close asChild>
+            <button
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              disabled={!move.up}
+              onClick={() => move.onMove(-1)}
+              className={MENU_ITEM}
+            >
+              Move up
+            </button>
+          </Popover.Close>
+          <Popover.Close asChild>
+            <button
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              disabled={!move.down}
+              onClick={() => move.onMove(1)}
+              className={MENU_ITEM}
+            >
+              Move down
+            </button>
+          </Popover.Close>
+        </>
+      ) : null}
+      {onMoveTop ? (
+        <Popover.Close asChild>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            disabled={canMoveTop === false}
+            onClick={onMoveTop}
+            className={MENU_ITEM}
+          >
+            Move to top
+          </button>
+        </Popover.Close>
+      ) : null}
+      {onMoveBottom ? (
+        <Popover.Close asChild>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            disabled={canMoveBottom === false}
+            onClick={onMoveBottom}
+            className={MENU_ITEM}
+          >
+            Move to bottom
+          </button>
+        </Popover.Close>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Overflow menu for a live registry model row. Owns preset visibility (`/v1`), global
+ * enable/disable, group assignment, reordering, edit, and custom-model delete so the row
+ * itself stays uncluttered.
+ */
+export function RowMenu({
+  model,
+  pendingDelete,
+  pendingToggle,
+  rowStatus,
+  onEdit,
+  onDelete,
+  onToggle,
+  onHide,
+  onShow,
+  move,
+  onMoveTop,
+  onMoveBottom,
+  canMoveTop,
+  canMoveBottom,
+  groups,
+  currentGroup,
+  onMoveGroup,
+  groupMenuClassName,
+}: {
+  model: Model;
+  pendingDelete: boolean;
+  pendingToggle?: boolean;
+  rowStatus?: RowStatus;
+  onEdit: () => void;
+  onDelete: () => void;
+  onToggle?: () => void;
+  /** Hide the row from `/v1/models` in this preset. */
+  onHide?: () => void;
+  /** Restore a hidden row or add a not-in-preset row to `/v1/models`. */
+  onShow?: () => void;
+  move?: PhoneMoveControls;
+  onMoveTop?: () => void;
+  onMoveBottom?: () => void;
+  canMoveTop?: boolean;
+  canMoveBottom?: boolean;
+  groups?: Array<DraftGroup & { implicit?: boolean }>;
+  currentGroup?: string;
+  onMoveGroup?: (group: string | null) => void;
+  groupMenuClassName?: string;
+}) {
+  const showHideAction = Boolean(onHide && (rowStatus === undefined || rowStatus === "routed"));
+  const showRestoreAction = Boolean(
+    onShow && (rowStatus === "hidden" || rowStatus === "unrouted"),
+  );
+  const hasStateSection = showHideAction || showRestoreAction || Boolean(onToggle);
+
+  return (
+    <ActionMenuShell subject={model.ref}>
+      <Popover.Close asChild>
+        <Link
+          to={`/playground/chat?model=${encodeURIComponent(model.ref)}`}
+          role="menuitem"
+          tabIndex={-1}
+          className={MENU_ITEM}
+        >
+          Test in Playground
+        </Link>
+      </Popover.Close>
+      <Popover.Close asChild>
+        <button type="button" role="menuitem" tabIndex={-1} onClick={onEdit} className={MENU_ITEM}>
+          Edit limits and price
+        </button>
+      </Popover.Close>
+      {hasStateSection ? (
+        <div className="mt-1 border-t border-line pt-1">
+          {showHideAction ? (
+            <Popover.Close asChild>
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                onClick={onHide}
+                className={MENU_ITEM}
+              >
+                Hide from /v1
+              </button>
+            </Popover.Close>
+          ) : null}
+          {showRestoreAction ? (
+            <Popover.Close asChild>
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                onClick={onShow}
+                className={MENU_ITEM}
+              >
+                {rowStatus === "unrouted" ? "Add to preset (/v1)" : "Show on /v1"}
+              </button>
+            </Popover.Close>
+          ) : null}
+          {onToggle ? (
+            <Popover.Close asChild>
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                disabled={pendingToggle}
+                onClick={onToggle}
+                className={MENU_ITEM}
+              >
+                {model.enabled ? "Disable model" : "Enable model"}
+              </button>
+            </Popover.Close>
+          ) : null}
+        </div>
+      ) : null}
+      <MenuReorderItems
+        move={move}
+        onMoveTop={onMoveTop}
+        onMoveBottom={onMoveBottom}
+        canMoveTop={canMoveTop}
+        canMoveBottom={canMoveBottom}
+      />
+      <MenuGroupPicker
+        groups={groups}
+        provider={model.provider}
+        currentGroup={currentGroup}
+        onMoveGroup={onMoveGroup}
+        className={groupMenuClassName}
+      />
+      {model.source === "custom" ? (
+        <div className="mt-1 border-t border-line pt-1">
+          <Popover.Close asChild>
+            <button
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              onClick={onDelete}
+              disabled={pendingDelete}
+              className={cx(MENU_ITEM, "text-[var(--color-neg-ink)] hover:bg-[var(--color-neg-tint)]")}
+            >
+              Delete custom model
+            </button>
+          </Popover.Close>
+        </div>
+      ) : null}
+    </ActionMenuShell>
+  );
+}
+
+/**
+ * Matching overflow menu for alias, combo, and stale preset rows so every row kind on the
+ * Models table uses one consistent `▷` + `⋯` action cell.
+ */
+export function NameRowMenu({
+  subject,
+  provider,
+  kind,
+  name,
+  rowStatus,
+  onHide,
+  onShow,
+  move,
+  onMoveTop,
+  onMoveBottom,
+  canMoveTop,
+  canMoveBottom,
+  groups,
+  currentGroup,
+  onMoveGroup,
+}: {
+  subject: string;
+  provider: string;
+  kind: "alias" | "combo" | "stale";
+  name?: string;
+  rowStatus: RowStatus;
+  onHide?: () => void;
+  onShow?: () => void;
+  move?: PhoneMoveControls;
+  onMoveTop?: () => void;
+  onMoveBottom?: () => void;
+  canMoveTop?: boolean;
+  canMoveBottom?: boolean;
+  groups?: Array<DraftGroup & { implicit?: boolean }>;
+  currentGroup?: string;
+  onMoveGroup?: (group: string | null) => void;
+}) {
+  const showHideAction = Boolean(onHide && rowStatus === "routed");
+  const showRestoreAction = Boolean(
+    onShow && (rowStatus === "hidden" || rowStatus === "unrouted"),
+  );
+  const hasLinks = kind !== "stale" && Boolean(name);
+
+  return (
+    <ActionMenuShell subject={subject}>
+      {hasLinks && name ? (
+        <>
+          <Popover.Close asChild>
+            <Link
+              to={`/playground/chat?model=${encodeURIComponent(name)}`}
+              role="menuitem"
+              tabIndex={-1}
+              className={MENU_ITEM}
+            >
+              Test in Playground
+            </Link>
+          </Popover.Close>
+          <Popover.Close asChild>
+            <Link
+              to={`${kind === "alias" ? "/routing/aliases" : "/routing/combos"}?edit=${encodeURIComponent(name)}`}
+              role="menuitem"
+              tabIndex={-1}
+              className={MENU_ITEM}
+            >
+              Edit {kind}
+            </Link>
+          </Popover.Close>
+        </>
+      ) : null}
+      {showHideAction || showRestoreAction ? (
+        <div className={cx(hasLinks && "mt-1 border-t border-line pt-1")}>
+          {showHideAction ? (
+            <Popover.Close asChild>
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                onClick={onHide}
+                className={MENU_ITEM}
+              >
+                Hide from /v1
+              </button>
+            </Popover.Close>
+          ) : null}
+          {showRestoreAction ? (
+            <Popover.Close asChild>
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                onClick={onShow}
+                className={MENU_ITEM}
+              >
+                {rowStatus === "unrouted" ? "Add to preset (/v1)" : "Show on /v1"}
+              </button>
+            </Popover.Close>
+          ) : null}
+        </div>
+      ) : null}
+      <MenuReorderItems
+        move={move}
+        onMoveTop={onMoveTop}
+        onMoveBottom={onMoveBottom}
+        canMoveTop={canMoveTop}
+        canMoveBottom={canMoveBottom}
+      />
+      <MenuGroupPicker
+        groups={groups}
+        provider={provider}
+        currentGroup={currentGroup}
+        onMoveGroup={onMoveGroup}
+      />
+    </ActionMenuShell>
+  );
+}
+
+/** One model as a compact phone card. Shared by the board and every filtered row set. */
 export function ModelCardBody({
   model: m,
   isAdmin,
@@ -475,12 +834,19 @@ export function ModelCardBody({
   onEdit,
   onDelete,
   onHide,
+  onShow,
+  rowStatus,
+  statusMeta,
+  showProvider = true,
+  customGroupLabel,
+  move,
   onMoveTop,
   onMoveBottom,
   canMoveTop,
   canMoveBottom,
   groups,
   currentGroup,
+  onMoveGroup,
 }: {
   model: Model;
   isAdmin: boolean;
@@ -493,32 +859,44 @@ export function ModelCardBody({
   onEdit: (model: Model) => void;
   onDelete: (model: Model) => void;
   onHide?: (ref: string) => void;
+  onShow?: (ref: string) => void;
+  rowStatus?: RowStatus;
+  statusMeta?: RowStatusMeta;
+  showProvider?: boolean;
+  customGroupLabel?: string;
+  move?: PhoneMoveControls;
   onMoveTop?: () => void;
   onMoveBottom?: () => void;
   canMoveTop?: boolean;
   canMoveBottom?: boolean;
   groups?: Array<DraftGroup & { implicit?: boolean }>;
   currentGroup?: string;
+  onMoveGroup?: (group: string | null) => void;
 }) {
   const reference = canonicalRef(m, groups, currentGroup);
   const otherSpellings = alsoMatches(m, groups, currentGroup);
+  const showInlineUnavailable =
+    m.enabled && !m.available && statusMeta?.kind !== "unavailable";
+
   return (
-    <div className="flex items-start justify-between gap-3">
-      <div className="min-w-0">
-        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          <Link
-            to="/providers"
-            aria-label={`View ${m.provider} on Providers`}
-            className={PROVIDER_LINK}
-          >
-            {m.provider}
-          </Link>
+    <div className={cx("flex min-w-0 flex-col gap-1", !m.enabled && "opacity-60")}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-0.5 pt-0.5">
+          {showProvider ? (
+            <Link
+              to="/providers"
+              aria-label={`View ${m.provider} on Providers`}
+              className={PROVIDER_LINK}
+            >
+              {m.provider}
+            </Link>
+          ) : null}
           <RowPreview
             label={`Details for ${reference}`}
             trigger={
               <h3
                 className={cx(
-                  "min-w-0 break-all font-mono text-small",
+                  "min-w-0 break-all font-mono text-small font-medium",
                   m.enabled ? "text-fg" : "text-faint",
                 )}
               >
@@ -538,6 +916,46 @@ export function ModelCardBody({
             value={reference}
             label={`Copy model name ${reference}`}
           />
+        </div>
+        {isAdmin ? (
+          <div className="flex shrink-0 items-center gap-0.5">
+            <TestButton
+              model={m}
+              pending={testTarget === m.ref}
+              onTest={() => onTest(m)}
+            />
+            <RowMenu
+              model={m}
+              pendingDelete={removeTarget === m.ref}
+              pendingToggle={toggleTarget === m.id}
+              rowStatus={rowStatus}
+              onEdit={() => onEdit(m)}
+              onDelete={() => onDelete(m)}
+              onToggle={() => onToggle(m)}
+              onHide={onHide ? () => onHide(m.ref) : undefined}
+              onShow={onShow ? () => onShow(m.ref) : undefined}
+              move={move}
+              onMoveTop={onMoveTop}
+              onMoveBottom={onMoveBottom}
+              canMoveTop={canMoveTop}
+              canMoveBottom={canMoveBottom}
+              groups={groups}
+              currentGroup={currentGroup}
+              onMoveGroup={onMoveGroup}
+            />
+          </div>
+        ) : null}
+      </div>
+      {m.display && m.display !== m.id ? (
+        <p className="truncate text-caption text-faint">{m.display}</p>
+      ) : null}
+      {reference !== m.ref ? (
+        <p className="break-all font-mono text-caption text-faint">{reference}</p>
+      ) : null}
+      <ModelMetaLine model={m} compactLayout />
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-1">
+          {isFree(m.cost) ? <FreeBadge linked={isAdmin} /> : null}
           {m.source === "custom" ? (
             <Badge tone="accent" title="added by an operator, not synced from the provider">
               custom
@@ -548,58 +966,21 @@ export function ModelCardBody({
               deprecated
             </Badge>
           ) : null}
-          {!m.enabled ? (
-            <Badge tone="neutral" title="the gateway refuses this id on every endpoint">
-              disabled
-            </Badge>
-          ) : !m.available ? (
-            <AvailabilityBadge linked={isAdmin} />
-          ) : null}
-          {isFree(m.cost) ? <FreeBadge linked={isAdmin} /> : null}
-        </div>
-        {m.display && m.display !== m.id ? (
-          <p className="mt-0.5 truncate text-caption text-faint">{m.display}</p>
-        ) : null}
-        {reference !== m.ref ? (
-          <p className="mt-0.5 break-all font-mono text-caption text-faint">{reference}</p>
-        ) : null}
-        <ModelMetaLine model={m} />
-        <div className="mt-1.5 flex flex-wrap items-center gap-2">
+          {showInlineUnavailable ? <AvailabilityBadge linked={isAdmin} /> : null}
+          {customGroupLabel ? <Badge tone="neutral">{customGroupLabel}</Badge> : null}
           <CapabilityChips capabilities={m.capabilities} max={2} subject={m.ref} />
           <TestOutcomeInline outcome={testOutcome} />
         </div>
-      </div>
-      <div className="flex shrink-0 flex-col items-end gap-2">
-        {isAdmin ? (
-          <Toggle
-            size="sm"
-            checked={m.enabled}
-            label={`${m.ref} ${m.enabled ? "enabled" : "disabled"}`}
-            disabled={toggleTarget === m.id}
-            onChange={() => onToggle(m)}
+        {statusMeta ? (
+          <RowStatusPill
+            meta={statusMeta}
+            href={isAdmin && statusMeta.kind === "unavailable" ? "/providers" : undefined}
+            ariaLabel={
+              isAdmin && statusMeta.kind === "unavailable"
+                ? "Model unavailable: no healthy connection. Open Providers to check accounts."
+                : undefined
+            }
           />
-        ) : (
-          <Badge tone={m.enabled ? "pos" : "neutral"}>{m.enabled ? "on" : "off"}</Badge>
-        )}
-        {isAdmin ? (
-          <div className="flex items-center gap-1">
-            <TestButton
-              model={m}
-              pending={testTarget === m.ref}
-              onTest={() => onTest(m)}
-            />
-            <RowMenu
-              model={m}
-              pendingDelete={removeTarget === m.ref}
-              onEdit={() => onEdit(m)}
-              onDelete={() => onDelete(m)}
-              onHide={onHide ? () => onHide(m.ref) : undefined}
-              onMoveTop={onMoveTop}
-              onMoveBottom={onMoveBottom}
-              canMoveTop={canMoveTop}
-              canMoveBottom={canMoveBottom}
-            />
-          </div>
         ) : null}
       </div>
     </div>
@@ -729,12 +1110,26 @@ export function FreeBadge({ linked }: { linked: boolean }) {
  * The unit is printed, not hidden in a tooltip; a free model's price is its badge, so the
  * line omits it rather than repeating `Free`.
  */
-export function ModelMetaLine({ model, children }: { model: Model; children?: ReactNode }) {
-  const cache = cacheText(model.cost);
+export function ModelMetaLine({
+  model,
+  children,
+  compactLayout = false,
+}: {
+  model: Model;
+  children?: ReactNode;
+  compactLayout?: boolean;
+}) {
+  const cache = compactLayout ? null : cacheText(model.cost);
   return (
-    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption text-faint">
-      <span className="whitespace-nowrap tnum">ctx {compact(model.context)}</span>
-      <span className="whitespace-nowrap tnum">max {compact(model.max_output)}</span>
+    <div
+      className={cx(
+        "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-caption text-faint",
+        compactLayout ? "" : "mt-0.5",
+      )}
+    >
+      <span className="whitespace-nowrap tnum">
+        ctx {compact(model.context)} · max {compact(model.max_output)}
+      </span>
       {isFree(model.cost) ? null : (
         <span className="whitespace-nowrap tnum">{priceText(model.cost)}</span>
       )}

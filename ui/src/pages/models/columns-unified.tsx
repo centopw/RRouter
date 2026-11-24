@@ -1,18 +1,18 @@
 import { useMemo, type ReactNode } from "react";
-import { Link } from "react-router-dom";
-import { Badge, Button, Select } from "../../components/ui";
-import { Toggle } from "../../components/atoms";
 import type { Column } from "../../components/table";
-import { useModelColumns, type ModelColumnsOptions } from "./columns";
-import { NameIdentity, StaleIdentity } from "./table-unified";
+import { ModelIdentityCell, type ModelColumnsOptions } from "./columns";
+import { NameRowMenu, PlayLinkButton, RowMenu, TestButton } from "./rows";
+import { NameIdentity, StaleIdentity, UnifiedStatusCell } from "./table-unified";
 import type { UnifiedRow } from "./unified-rows";
 
 /**
- * One column definition for the union table. Cells reuse {@link useModelColumns}, so a
- * price, a capability badge or a row menu cannot drift between the board and a filter
- * view; the identity cell keys on the row kind, and the group and `/v1` cells are the two
- * layout controls this page owns. A name row keeps the same ref and preset entry as a
- * model, so grouping, visibility and hiding need no branch per kind.
+ * One column definition for the union table:
+ * - `model`: identity, pricing, context/max, and capabilities
+ * - `status`: single HealthBadge-style status pill (Routed / Unavailable / Hidden / Not in preset / Disabled)
+ * - `actions`: one uniform `▷` + `⋯` action cell for every row kind (admin only)
+ *
+ * Per-row group assignment, `/v1` hide/show, and global enable/disable live inside `⋯`
+ * so the default board never repeats 20 identical "Ungrouped" selects or twin toggles.
  */
 export function useUnifiedColumns({
   model,
@@ -37,14 +37,15 @@ export function useUnifiedColumns({
   onVisible: (ref: string, visible: boolean) => void;
   onHide: (ref: string) => void;
 }): Array<Column<UnifiedRow>> {
-  const base = useModelColumns(model);
-
   return useMemo<Array<Column<UnifiedRow>>>(() => {
     const columns: Array<Column<UnifiedRow>> = [];
-    const byKey = new Map(base.map((column) => [column.key, column] as const));
-    const identity = byKey.get("model");
-    const actions = byKey.get("actions");
-    const customGroups = (groups ?? []).filter((group) => !group.provider);
+    const customGroupById = new Map(
+      (groups ?? [])
+        .filter((group) => !group.provider)
+        .map((group) => [group.id, group.name] as const),
+    );
+    const movableGroups =
+      isAdmin && editable && presetScoped ? model.groups : undefined;
 
     const dim = (row: UnifiedRow, node: ReactNode) =>
       row.kind === "model" && row.model && !row.model.enabled ? (
@@ -55,157 +56,145 @@ export function useUnifiedColumns({
 
     columns.push({
       key: "model",
-      title: "provider / name",
+      title: "Model",
       wrap: true,
       render: (row) => {
-        if (row.kind !== "model") return <NameIdentity row={row} />;
-        if (row.model === null) return <StaleIdentity row={row} />;
-        return identity ? dim(row, identity.render(row.model)) : null;
+        const customGroupLabel = customGroupById.get(groupOf(row.ref));
+        if (row.kind !== "model") {
+          return <NameIdentity row={row} customGroupLabel={customGroupLabel} />;
+        }
+        if (row.model === null) {
+          return <StaleIdentity row={row} customGroupLabel={customGroupLabel} />;
+        }
+        return dim(
+          row,
+          <ModelIdentityCell
+            model={row.model}
+            isAdmin={model.isAdmin}
+            groups={model.groups}
+            groupId={model.groupOf?.(row.model.ref)}
+            outcome={model.testResults?.get(row.model.ref)}
+            rowStatus={row.status}
+            customGroupLabel={customGroupLabel}
+          />,
+        );
       },
     });
 
-    if (isAdmin && presetScoped) {
-      columns.push({
-        key: "group",
-        title: "group",
-        width: "9.5rem",
-        className: "hidden md:table-cell",
-        render: (row) => {
-          const explicit = customGroups.find((group) => group.id === groupOf(row.ref));
-          if (!editable) {
-            return (
-              <span className="text-caption text-muted">
-                {row.entry ? (explicit?.name ?? "ungrouped") : "—"}
-              </span>
-            );
-          }
-          return (
-            <Select
-              ariaLabel={`Group for ${row.ref}`}
-              value={explicit?.id ?? ""}
-              onChange={(next) => onAssignGroup(row.ref, next === "" ? null : next)}
-            >
-              <option value="">Ungrouped</option>
-              {customGroups.map((group) => (
-                <option key={group.id} value={group.id}>
-                  {group.name}
-                </option>
-              ))}
-            </Select>
-          );
-        },
-      });
-      columns.push({
-        key: "v1",
-        title: "/v1",
-        width: "3.5rem",
-        render: (row) => {
-          // A row the preset has never stored is still advertised while auto-include is
-          // on; the toggle must reflect what /v1/models actually serves, not just the
-          // presence of an explicit entry.
-          // Disabled models never reach /v1/models, whatever the preset says.
-          const listed =
-            row.status !== "disabled" && (row.entry?.visible ?? row.status === "routed");
-          if (!editable) {
-            return (
-              <Badge tone={listed ? "neutral" : "warn"}>{listed ? "listed" : "hidden"}</Badge>
-            );
-          }
-          return (
-            <Toggle
-              size="sm"
-              checked={listed}
-              disabled={row.status === "disabled"}
-              label={
-                row.status === "disabled"
-                  ? `${row.ref} is disabled and cannot be listed`
-                  : `List ${row.ref} on /v1/models`
-              }
-              onChange={(next) => onVisible(row.ref, next)}
-            />
-          );
-        },
-      });
-    }
+    columns.push({
+      key: "status",
+      title: "Status",
+      align: "right",
+      width: "8.5rem",
+      render: (row) => <UnifiedStatusCell row={row} />,
+    });
 
-    const enabled = byKey.get("enabled");
-    if (enabled) {
-      columns.push({
-        // A model column is reusable as-is except for the two row-typed callbacks, which
-        // this literal re-supplies against the unified row.
-        ...(enabled as Omit<Column<UnifiedRow>, "render" | "cellTitle">),
-        render: (row) =>
-          row.kind === "model" && row.model ? (
-            dim(row, enabled.render(row.model))
-          ) : (
-            <span className="text-faint" aria-label="not applicable">—</span>
-          ),
-        cellTitle: (row) =>
-          row.kind === "model" && row.model ? enabled.cellTitle?.(row.model) : undefined,
-      });
-    }
-
-    if (isAdmin && actions) {
+    if (isAdmin) {
       columns.push({
         key: "actions",
         title: "Actions",
         srOnlyTitle: true,
         align: "right",
-        width: "10rem",
+        width: "5.25rem",
         render: (row) => {
+          const canHide = editable && presetScoped;
+          const hideAction = canHide
+            ? () => (row.entry ? onHide(row.ref) : onVisible(row.ref, false))
+            : undefined;
+          const showAction = canHide ? () => onVisible(row.ref, true) : undefined;
+          const onMoveGroup =
+            movableGroups
+              ? (next: string | null) => onAssignGroup(row.ref, next)
+              : undefined;
+
           if (row.kind !== "model") {
             return (
-              <div className="flex items-center justify-end gap-2">
-                <Link
+              <div className="flex items-center justify-end gap-0.5">
+                <PlayLinkButton
                   to={`/playground/chat?model=${encodeURIComponent(row.name)}`}
-                  className="text-caption text-accent-text underline underline-offset-2"
+                  label={`Test ${row.name} in Playground`}
                   title={`Test ${row.name} in Playground`}
-                >
-                  Test
-                </Link>
-                {editable ? (
-                  <Button
-                    variant="quiet"
-                    ariaLabel={`Hide ${row.ref} from the active list`}
-                    onClick={() =>
-                      row.entry ? onHide(row.ref) : onVisible(row.ref, false)
-                    }
-                  >
-                    hide
-                  </Button>
-                ) : null}
-                <Link
-                  to={`${row.kind === "alias" ? "/routing/aliases" : "/routing/combos"}?edit=${encodeURIComponent(row.name)}`}
-                  className="text-caption text-accent-text underline underline-offset-2"
-                >
-                  edit
-                </Link>
+                />
+                <NameRowMenu
+                  subject={row.ref}
+                  provider="rrouter"
+                  kind={row.kind}
+                  name={row.name}
+                  rowStatus={row.status}
+                  onHide={hideAction}
+                  onShow={showAction}
+                  onMoveTop={model.onMoveTop ? () => model.onMoveTop!(row.ref) : undefined}
+                  onMoveBottom={
+                    model.onMoveBottom ? () => model.onMoveBottom!(row.ref) : undefined
+                  }
+                  canMoveTop={model.canMoveTop ? model.canMoveTop(row.ref) : undefined}
+                  canMoveBottom={
+                    model.canMoveBottom ? model.canMoveBottom(row.ref) : undefined
+                  }
+                  groups={movableGroups}
+                  currentGroup={groupOf(row.ref)}
+                  onMoveGroup={onMoveGroup}
+                />
               </div>
             );
           }
+
           if (!row.model) {
-            return editable && row.entry ? (
-              <div className="flex justify-end">
-                <Button
-                  variant="quiet"
-                  ariaLabel={`Hide ${row.ref} from the active list`}
-                  onClick={() => onHide(row.ref)}
-                >
-                  hide
-                </Button>
+            if (!canHide) return null;
+            const cut = row.ref.indexOf("/");
+            const staleProvider = cut < 0 ? row.ref : row.ref.slice(0, cut);
+            return (
+              <div className="flex items-center justify-end gap-0.5">
+                <NameRowMenu
+                  subject={row.ref}
+                  provider={staleProvider}
+                  kind="stale"
+                  rowStatus={row.status}
+                  onHide={row.entry ? () => onHide(row.ref) : undefined}
+                  onShow={showAction}
+                  groups={movableGroups}
+                  currentGroup={groupOf(row.ref)}
+                  onMoveGroup={onMoveGroup}
+                />
               </div>
-            ) : null;
+            );
           }
-          return dim(row, actions.render(row.model));
+
+          const m = row.model;
+          return (
+            <div className="flex items-center justify-end gap-0.5">
+              <TestButton
+                model={m}
+                pending={model.testTarget === m.ref}
+                onTest={() => model.onTest(m)}
+              />
+              <RowMenu
+                model={m}
+                pendingDelete={model.removeTarget === m.ref}
+                pendingToggle={model.toggleTarget === m.id}
+                rowStatus={row.status}
+                onEdit={() => model.onEdit(m)}
+                onDelete={() => model.onDelete(m)}
+                onToggle={() => model.onToggle(m)}
+                onHide={hideAction}
+                onShow={showAction}
+                onMoveTop={model.onMoveTop ? () => model.onMoveTop!(m.ref) : undefined}
+                onMoveBottom={model.onMoveBottom ? () => model.onMoveBottom!(m.ref) : undefined}
+                canMoveTop={model.canMoveTop ? model.canMoveTop(m.ref) : undefined}
+                canMoveBottom={model.canMoveBottom ? model.canMoveBottom(m.ref) : undefined}
+                groups={movableGroups}
+                currentGroup={groupOf(m.ref)}
+                onMoveGroup={onMoveGroup}
+              />
+            </div>
+          );
         },
       });
     }
 
     return columns;
-    // The base columns are rebuilt only when their own inputs change; this list adds the
-    // layout controls, which depend on the draft and the group vocabulary.
   }, [
-    base,
+    model,
     isAdmin,
     editable,
     presetScoped,

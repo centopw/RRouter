@@ -14,10 +14,10 @@
  */
 
 import type { AccountQuotaRow, AccountQuotaWindow, Connection } from "../../lib/api";
-import { cx } from "../../components/ui";
-import { compact, pct, usd } from "../../lib/format";
-import { barText, QUOTA_WINDOWS } from "../providers/types";
-import { QuotaMeter, resetsIn } from "../usage/quota";
+import { Meter, barText, cx } from "../../components/ui";
+import { compact, pct, usdDisplay } from "../../lib/format";
+import { QUOTA_WINDOWS } from "../providers/types";
+import { resetsIn } from "../usage/quota";
 
 type Unit = "cost" | "tokens" | "requests";
 
@@ -37,7 +37,7 @@ const DIMENSIONS: Dimension[] = [
     noun: "spend",
     limit: (row) => row.max_cost_micros,
     used: (row) => row.cost_micros,
-    format: (micros) => usd(micros),
+    format: (micros) => usdDisplay(micros),
   },
   {
     unit: "tokens",
@@ -122,7 +122,7 @@ function TotalLine({ total }: { total: QuotaTotal }) {
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-small">
       <span className="w-[112px] shrink-0 font-medium text-fg">{name}</span>
       <span className={cx("tnum", barText(total.percent))}>{total.detail}</span>
-      <QuotaMeter
+      <Meter
         percent={total.percent}
         label={reset ? `${name} quota used, ${reset}` : `${name} quota used`}
         className="max-w-[220px]"

@@ -13,6 +13,7 @@ import type {
   UsageEvent,
   UsageSummaryByConnection,
 } from "../../lib/api";
+import { usdDisplay } from "../../lib/format.ts";
 import {
   addTotals,
   buildAccountNodes,
@@ -182,14 +183,6 @@ function compactCount(n: number): string {
   return String(n);
 }
 
-function formatUsd(micros: number): string {
-  const dollars = micros / 1_000_000;
-  if (Math.abs(dollars) < 0.01) {
-    return `$${dollars.toFixed(6).replace(/(\.\d{2}\d*?)0+$/, "$1")}`;
-  }
-  return `$${dollars.toFixed(4)}`;
-}
-
 function capWindowLabel(window: AccountQuotaRow["window"]): string {
   return window.charAt(0).toUpperCase() + window.slice(1);
 }
@@ -226,7 +219,7 @@ function buildOperatorBars(quota?: AccountQuotaRow): OperatorBar[] {
       id: "op-cost",
       label: `${prefix} spend`,
       percent,
-      detail: `${formatUsd(quota.cost_micros)} / ${formatUsd(quota.max_cost_micros)}`,
+      detail: `${usdDisplay(quota.cost_micros)} / ${usdDisplay(quota.max_cost_micros)}`,
       resets_at: quota.resets_at,
       exhausted: quota.exhausted || percent >= 100,
     });

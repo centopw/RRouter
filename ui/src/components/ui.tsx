@@ -1,7 +1,7 @@
-/** Unified UI primitive barrel (all 26 atoms and 13 molecules). */
+/** Unified UI primitive barrel (all 27 atoms and 13 molecules). */
 export { cx } from "../lib/cx";
 
-// Atoms (26 modules)
+// Atoms (27 modules)
 export { Badge, type BadgeSize, type BadgeTone } from "./atoms/Badge";
 export { Button } from "./atoms/Button";
 export { Checkbox } from "./atoms/Checkbox";
@@ -16,6 +16,7 @@ export { Heading } from "./atoms/Heading";
 export { IconButton } from "./atoms/IconButton";
 export { Inline } from "./atoms/Inline";
 export { control, Input, type ControlSize } from "./atoms/Input";
+export { Meter, barFill, barText } from "./atoms/Meter";
 export { SectionLabel } from "./atoms/SectionLabel";
 export { Segmented } from "./atoms/Segmented";
 export { Select } from "./atoms/Select";
@@ -33,7 +34,7 @@ export type { TextVariant, Tone } from "./atoms/typography";
 export { AlertBanner, type AlertTone } from "./molecules/AlertBanner";
 export { Card } from "./molecules/Card";
 export { CardFooter } from "./molecules/CardFooter";
-export { CardHeader } from "./molecules/CardHeader";
+export { CardHeader, type CardHeaderPadding } from "./molecules/CardHeader";
 export { ConfirmDialog } from "./molecules/ConfirmDialog";
 export { Disclosure } from "./molecules/Disclosure";
 export { EmptyState } from "./molecules/EmptyState";

@@ -89,8 +89,8 @@ export function EmptyTeamProviders({
         No provider accounts assigned to {teamLabel}
       </Heading>
       <p className="mx-auto mt-1.5 max-w-[460px] text-body text-muted">
-        A team key fails with “no eligible upstream” until an administrator assigns a provider
-        account to this team.
+        Team keys route only to their own team's accounts; shared accounts serve instance-wide keys.
+        Requests from this team fail until an administrator assigns an account here.
       </p>
       <div className="mt-5 flex flex-wrap justify-center gap-2">
         <Button variant="quiet" onClick={onShowAll}>

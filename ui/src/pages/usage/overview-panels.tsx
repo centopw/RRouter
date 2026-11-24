@@ -7,7 +7,7 @@
  * - `RecentActivityCard`: latest served requests across providers.
  */
 
-import { Fragment, type ReactNode } from "react";
+import { Fragment } from "react";
 import { Link } from "react-router-dom";
 import {
   Bell,
@@ -20,12 +20,13 @@ import {
   Stack,
   WarningCircle,
 } from "@phosphor-icons/react";
-import { Badge, Card, Dot, cx, type BadgeTone, type DotTone } from "../../components/ui";
+import { HealthBadge } from "../../components/molecules/HealthBadge";
+import { KpiTile, type KpiTone } from "../../components/molecules/KpiTile";
+import { Card, CardHeader, Meter, barText, cx } from "../../components/ui";
 import type { UsageEvent } from "../../lib/api";
-import { ago, compact, pct, splitRef, usd } from "../../lib/format";
-import { barFill, barText } from "../providers/types";
-import { resolveProviderDisplay, type BoardAccount, type BoardStatusKind } from "./board-model";
-import { AccountForecastPanel, AccountPreviewLink, LimitMeter } from "./limits";
+import { ago, compact, pct, splitRef, usdDisplay } from "../../lib/format";
+import { resolveProviderDisplay, type BoardAccount } from "./board-model";
+import { AccountForecastPanel, AccountPreviewLink } from "./limits";
 import {
   WINDOW_COLUMNS,
   bucketAccountWindows,
@@ -36,25 +37,6 @@ import {
 import { MiniSparkline } from "./overview-charts";
 import { UsageProviderIcon } from "./provider-badge";
 import { capitalized } from "./quota";
-
-function KpiIcon({ tone, children }: { tone: "info" | "accent" | "pos" | "warn" | "neg"; children: ReactNode }) {
-  const cls =
-    tone === "pos"
-      ? "bg-[var(--color-pos-tint)] text-[var(--color-pos)]"
-      : tone === "warn"
-        ? "bg-[var(--color-warn-tint)] text-[var(--color-warn)]"
-        : tone === "neg"
-          ? "bg-[var(--color-neg-tint)] text-[var(--color-neg)]"
-          : "bg-[var(--color-info-tint)] text-[var(--color-info)]";
-  return (
-    <span
-      aria-hidden
-      className={cx("inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]", cls)}
-    >
-      {children}
-    </span>
-  );
-}
 
 /** 4 KPI tiles across the top of Usage Overview. Every number comes directly from real API data. */
 export function OverviewKpiRow({
@@ -70,7 +52,7 @@ export function OverviewKpiRow({
 }) {
   const { peakUsage, providers, estimatedDaysLeft, spend } = kpis;
 
-  const daysTone: "pos" | "warn" | "neg" | "info" =
+  const daysTone: KpiTone =
     estimatedDaysLeft.kind === "exhausted"
       ? "neg"
       : estimatedDaysLeft.kind === "countdown"
@@ -79,129 +61,84 @@ export function OverviewKpiRow({
           ? "pos"
           : "info";
 
+  const peakTone: KpiTone =
+    peakUsage === null
+      ? "info"
+      : peakUsage.percent >= 90
+        ? "neg"
+        : peakUsage.percent >= 70
+          ? "warn"
+          : "info";
+
   return (
     <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      {/* Tile 1: Peak Quota Usage (or range tokens for non-admin / no tracked limits) */}
-      <Card as="article" className="flex items-start gap-3 p-4">
-        <KpiIcon
-          tone={
-            peakUsage === null
-              ? "info"
-              : peakUsage.percent >= 90
-                ? "neg"
-                : peakUsage.percent >= 70
-                  ? "warn"
-                  : "info"
-          }
-        >
-          <Lightning size={18} weight="fill" />
-        </KpiIcon>
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="text-caption font-medium text-muted">
-            {isAdmin && peakUsage !== null ? "Peak Quota Usage" : `Total Usage (${rangeLabel})`}
-          </span>
-          {isAdmin && peakUsage !== null ? (
-            <>
-              <span className="text-2xl font-semibold leading-tight text-fg tnum">
-                {Math.round(peakUsage.percent)}%
-              </span>
-              <span className="mt-0.5 block h-1.5 w-full overflow-hidden rounded-full bg-rule">
-                <span
-                  className={cx("block h-full rounded-full", barFill(peakUsage.percent))}
-                  style={{ width: `${Math.min(100, Math.max(0, peakUsage.percent))}%` }}
-                />
-              </span>
-              <span className="truncate text-caption text-faint">
-                {peakUsage.providerLabel} · {peakUsage.windowLabel}
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="text-2xl font-semibold leading-tight text-fg tnum">
-                {compact(spend.tokens)}
-              </span>
-              <span className="truncate text-caption text-faint tnum">
-                tokens · {compact(spend.requests)} req
-              </span>
-            </>
-          )}
-        </div>
-      </Card>
+      <KpiTile
+        icon={<Lightning size={18} weight="fill" />}
+        tone={peakTone}
+        label={isAdmin && peakUsage !== null ? "Peak Quota Usage" : `Total Usage (${rangeLabel})`}
+        value={
+          isAdmin && peakUsage !== null ? `${Math.round(peakUsage.percent)}%` : compact(spend.tokens)
+        }
+        meter={
+          isAdmin && peakUsage !== null ? (
+            <Meter
+              percent={peakUsage.percent}
+              label={`Peak quota usage: ${Math.round(peakUsage.percent)}%, ${peakUsage.providerLabel} ${peakUsage.windowLabel}`}
+            />
+          ) : undefined
+        }
+        detail={
+          isAdmin && peakUsage !== null
+            ? `${peakUsage.providerLabel} · ${peakUsage.windowLabel}`
+            : `tokens · ${compact(spend.requests)} req`
+        }
+      />
 
-      {/* Tile 2: Active Providers */}
-      <Card as="article" className="flex items-start gap-3 p-4">
-        <KpiIcon tone="accent">
-          <Stack size={18} weight="fill" />
-        </KpiIcon>
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="text-caption font-medium text-muted">Active Providers</span>
-          <span className="text-2xl font-semibold leading-tight text-fg tnum">
-            {providers.active}
-            <span className="text-lead font-normal text-faint"> / {providers.total}</span>
-          </span>
-          <span className="truncate text-caption text-faint">
-            {isAdmin
-              ? `${providers.tracked} tracked quota${providers.inactive > 0 ? ` · ${providers.inactive} inactive` : ""}`
-              : providers.inactive > 0
-                ? `${providers.inactive} inactive`
-                : "All connected active"}
-          </span>
-        </div>
-      </Card>
+      <KpiTile
+        icon={<Stack size={18} weight="fill" />}
+        tone="accent"
+        label="Active Providers"
+        value={providers.active}
+        suffix={`/ ${providers.total}`}
+        detail={
+          isAdmin
+            ? `${providers.tracked} tracked quota${providers.inactive > 0 ? ` · ${providers.inactive} inactive` : ""}`
+            : providers.inactive > 0
+              ? `${providers.inactive} inactive`
+              : "All connected active"
+        }
+      />
 
-      {/* Tile 3: Estimated Days/Time Left */}
-      <Card as="article" className="flex items-start gap-3 p-4">
-        <KpiIcon tone={daysTone}>
-          <ShieldCheck size={18} weight="fill" />
-        </KpiIcon>
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="text-caption font-medium text-muted">{estimatedDaysLeft.title}</span>
-          <span className="text-2xl font-semibold leading-tight text-fg tnum">
-            {estimatedDaysLeft.label}
-          </span>
-          <span className="truncate text-caption text-faint">{estimatedDaysLeft.detail}</span>
-        </div>
-      </Card>
+      <KpiTile
+        icon={<ShieldCheck size={18} weight="fill" />}
+        tone={daysTone}
+        label={estimatedDaysLeft.title}
+        value={estimatedDaysLeft.label}
+        detail={estimatedDaysLeft.detail}
+      />
 
-      {/* Tile 4: Total Spend */}
-      <Card as="article" className="flex items-start justify-between gap-2 p-4">
-        <div className="flex min-w-0 flex-1 items-start gap-3">
-          <KpiIcon tone="info">
-            <CurrencyDollar size={18} weight="bold" />
-          </KpiIcon>
-          <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <span className="text-caption font-medium text-muted">Total Spend ({rangeLabel})</span>
-            <span className="truncate text-2xl font-semibold leading-tight text-fg tnum">
-              {usd(spend.costMicros)}
-            </span>
-            <div className="flex items-end justify-between gap-2">
-              <span className="truncate text-caption text-faint tnum">
-                {compact(spend.requests)} req
-                {spend.errors > 0 ? ` · ${pct(spend.errorRate)} err` : ` · ${compact(spend.tokens)} tok`}
-              </span>
-              <div className="hidden shrink-0 sm:block">
-                <MiniSparkline values={spendSeries} color="var(--color-series-2)" width={64} height={20} />
-              </div>
-            </div>
+      <KpiTile
+        icon={<CurrencyDollar size={18} weight="bold" />}
+        tone="info"
+        label={`Total Spend (${rangeLabel})`}
+        value={usdDisplay(spend.costMicros)}
+        detail={
+          <>
+            {compact(spend.requests)} req
+            {spend.errors > 0
+              ? ` · ${pct(spend.errorRate)} err`
+              : ` · ${compact(spend.tokens)} tok`}
+          </>
+        }
+        aside={
+          <div className="hidden sm:block">
+            <MiniSparkline values={spendSeries} color="var(--color-series-2)" width={64} height={20} />
           </div>
-        </div>
-      </Card>
+        }
+      />
     </div>
   );
 }
-
-const ROW_STATUS: Record<BoardStatusKind, { label: string; tone: BadgeTone; dot: DotTone }> = {
-  exhausted: { label: "Exhausted", tone: "neg", dot: "neg" },
-  at_risk: { label: "Warning", tone: "warn", dot: "warn" },
-  failing: { label: "Failing", tone: "neg", dot: "neg" },
-  degraded: { label: "Warning", tone: "warn", dot: "warn" },
-  healthy: { label: "Healthy", tone: "pos", dot: "pos" },
-  no_limit: { label: "Healthy", tone: "neutral", dot: "muted" },
-  unavailable: { label: "Unavailable", tone: "warn", dot: "warn" },
-  loading: { label: "Checking…", tone: "neutral", dot: "muted" },
-  admin_only: { label: "Active", tone: "neutral", dot: "muted" },
-  inactive: { label: "Inactive", tone: "neutral", dot: "muted" },
-};
 
 function WindowCell({ cell }: { cell: WindowCellData | null }) {
   if (!cell) {
@@ -223,7 +160,7 @@ function WindowCell({ cell }: { cell: WindowCellData | null }) {
           <span className={cx("font-medium", barText(cell.percent))}>{cell.primary}</span>
           {cell.meta ? <span className="truncate text-faint">{cell.meta}</span> : null}
         </div>
-        <LimitMeter percent={cell.percent} tick={cell.tick} label={cell.ariaLabel} />
+        <Meter percent={cell.percent} tick={cell.tick} label={cell.ariaLabel} />
         {cell.notable ? (
           <span
             className={cx(
@@ -267,33 +204,31 @@ export function TrackedProvidersTable({
 }) {
   return (
     <Card className="flex min-w-0 flex-col overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
-        <div className="flex items-center gap-2">
-          <Stack size={16} aria-hidden className="text-accent-text" />
-          <h2 className="text-body font-semibold text-fg">Providers</h2>
-          {isAdmin && quotaLoaded ? (
-            <span className="text-caption text-faint tnum">
-              {accounts.length} tracked
+      <CardHeader
+        icon={<Stack size={16} />}
+        title="Providers"
+        meta={isAdmin && quotaLoaded ? `${accounts.length} tracked` : undefined}
+        padding="compact"
+        className="border-b border-line"
+        action={
+          <div className="flex items-center gap-3 text-caption">
+            <span className="hidden items-center gap-1.5 text-muted sm:inline-flex">
+              <span aria-hidden className="h-2 w-2 rounded-full bg-[var(--color-ink-soft)]" />
+              Usage
             </span>
-          ) : null}
-        </div>
-        <div className="flex items-center gap-3 text-caption">
-          <span className="hidden items-center gap-1.5 text-muted sm:inline-flex">
-            <span aria-hidden className="h-2 w-2 rounded-full bg-[var(--color-ink-soft)]" />
-            Usage
-          </span>
-          <span className="hidden items-center gap-1.5 text-faint sm:inline-flex">
-            <span aria-hidden className="h-2 w-2 rounded-full bg-rule" />
-            Limit
-          </span>
-          <Link
-            to="/providers"
-            className="text-accent-text underline-offset-2 hover:underline focus-visible:underline"
-          >
-            View all →
-          </Link>
-        </div>
-      </div>
+            <span className="hidden items-center gap-1.5 text-faint sm:inline-flex">
+              <span aria-hidden className="h-2 w-2 rounded-full bg-rule" />
+              Limit
+            </span>
+            <Link
+              to="/providers"
+              className="text-accent-text underline-offset-2 hover:underline focus-visible:underline"
+            >
+              View all →
+            </Link>
+          </div>
+        }
+      />
 
       {!isAdmin ? (
         <div className="px-4 py-10 text-center text-small text-faint">
@@ -342,7 +277,6 @@ export function TrackedProvidersTable({
             <tbody className="divide-y divide-rule">
               {accounts.map((item) => {
                 const buckets = bucketAccountWindows(item, now);
-                const statusMeta = ROW_STATUS[item.status];
                 const chartOpen = expandedCharts.has(item.key);
                 const canOpenChart = item.connectionId !== null && item.windows.length > 0;
                 const titleText = item.plan
@@ -386,12 +320,7 @@ export function TrackedProvidersTable({
 
                       <td className="px-3 py-3 text-right align-middle">
                         <div className="inline-flex items-center justify-end gap-1.5">
-                          <Badge tone={statusMeta.tone}>
-                            <span className="inline-flex items-center gap-1.5">
-                              <Dot tone={statusMeta.dot} />
-                              {statusMeta.label}
-                            </span>
-                          </Badge>
+                          <HealthBadge status={item.status} />
                           {canOpenChart ? (
                             <button
                               type="button"
@@ -453,18 +382,19 @@ export function QuotaAlertsCard({
 }) {
   return (
     <Card className="flex flex-col gap-3 p-4">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <Bell size={16} aria-hidden className="text-accent-text" />
-          <h2 className="text-body font-semibold text-fg">Quota Alerts</h2>
-        </div>
-        <Link
-          to="/providers"
-          className="text-caption text-accent-text underline-offset-2 hover:underline focus-visible:underline"
-        >
-          View all →
-        </Link>
-      </div>
+      <CardHeader
+        icon={<Bell size={16} />}
+        title="Quota Alerts"
+        padding="none"
+        action={
+          <Link
+            to="/providers"
+            className="text-caption text-accent-text underline-offset-2 hover:underline focus-visible:underline"
+          >
+            View all →
+          </Link>
+        }
+      />
 
       {!isAdmin ? (
         <p className="py-3 text-caption text-faint">Quota alerts are visible to admins only.</p>
@@ -547,18 +477,19 @@ export function RecentActivityCard({
 
   return (
     <Card className="flex flex-col gap-3 p-4">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <Pulse size={16} aria-hidden className="text-accent-text" />
-          <h2 className="text-body font-semibold text-fg">Recent Activity</h2>
-        </div>
-        <Link
-          to="/activity"
-          className="text-caption text-accent-text underline-offset-2 hover:underline focus-visible:underline"
-        >
-          View all →
-        </Link>
-      </div>
+      <CardHeader
+        icon={<Pulse size={16} />}
+        title="Recent Activity"
+        padding="none"
+        action={
+          <Link
+            to="/activity"
+            className="text-caption text-accent-text underline-offset-2 hover:underline focus-visible:underline"
+          >
+            View all →
+          </Link>
+        }
+      />
 
       {loading && items.length === 0 ? (
         <p className="py-4 text-center text-small text-faint">Loading recent activity…</p>

@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { CheckCircle, Lightning, Pulse, WarningCircle } from "@phosphor-icons/react";
+import { KpiTile, type KpiTone } from "../components/molecules/KpiTile";
 import { OAuthDialog } from "../components/oauth-dialog";
 import {
+  AlertBanner,
   Button,
   ConfirmDialog,
   ErrorNote,
+  Meter,
   PageHeader,
   Select,
-  cx,
 } from "../components/ui";
 import { type Connection, type OAuthProvider } from "../lib/api";
 import { apiCode } from "../lib/auth";
+import { compact, pct } from "../lib/format";
 import { refusalView, reenableConsequence } from "../lib/refusal";
 import {
   useAccountQuotas,
@@ -20,7 +24,10 @@ import {
   useModelProviders,
   useOAuthProviders,
   useTeams,
+  useUsageSeries,
+  useUsageSummaryByConnection,
 } from "../lib/queries";
+import { MiniSparkline } from "./usage/overview-charts";
 import { ProviderInventory } from "./providers/account-row";
 import {
   AddProviderFlow,
@@ -31,9 +38,140 @@ import {
 import { ConnectionDrawer } from "./providers/connection-drawer";
 import {
   buildProviderGroups,
+  buildTrafficByConnection,
+  filterProviderGroups,
+  summarizeProviders,
+  until,
   useConnectionMutations,
+  type AccountFilter,
   type ProviderNotice,
+  type ProvidersSummary,
 } from "./providers/types";
+
+function ProvidersKpiRow({
+  summary,
+  trafficSeries,
+  isAdmin,
+  quotaLoaded,
+  filter,
+  onToggleAttention,
+}: {
+  summary: ProvidersSummary;
+  trafficSeries: ReadonlyArray<number>;
+  isAdmin: boolean;
+  quotaLoaded: boolean;
+  filter: AccountFilter;
+  onToggleAttention: () => void;
+}) {
+  const readyTone: KpiTone =
+    summary.expected === 0
+      ? "neutral"
+      : summary.ready === 0
+        ? "neg"
+        : summary.ready < summary.expected
+          ? "warn"
+          : "pos";
+
+  const readyDetail =
+    summary.expected === 0 && summary.disabled > 0
+      ? `${summary.disabled} disabled`
+      : summary.disabled > 0
+        ? `${summary.disabled} disabled`
+        : summary.ready === summary.expected && summary.expected > 0
+          ? "All enabled ready"
+          : `${summary.expected - summary.ready} not ready`;
+
+  const attentionTone: KpiTone =
+    summary.attention === 0 ? "pos" : summary.severe > 0 ? "neg" : "warn";
+
+  const tightest = summary.tightest;
+  const tightestTone: KpiTone =
+    !isAdmin || !tightest
+      ? "info"
+      : tightest.percent >= 90
+        ? "neg"
+        : tightest.percent >= 70
+          ? "warn"
+          : "info";
+  const tightestReset = tightest ? until(tightest.resetsAt) : "";
+
+  const trafficTone: KpiTone =
+    summary.traffic24h.requests > 0 && summary.traffic24h.errorRate >= 10 ? "warn" : "info";
+
+  return (
+    <div className="mb-4 grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
+      <KpiTile
+        icon={<CheckCircle size={18} weight="fill" />}
+        tone={readyTone}
+        label="Ready"
+        value={summary.ready}
+        suffix={`/ ${summary.expected}`}
+        detail={readyDetail}
+      />
+
+      <KpiTile
+        icon={<WarningCircle size={18} weight="fill" />}
+        tone={attentionTone}
+        label="Needs attention"
+        value={summary.attention}
+        detail={summary.attentionDetail}
+        onClick={onToggleAttention}
+        active={filter === "attention"}
+      />
+
+      <KpiTile
+        icon={<Lightning size={18} weight="fill" />}
+        tone={tightestTone}
+        label="Tightest limit"
+        value={isAdmin && tightest ? `${Math.round(tightest.percent)}%` : "—"}
+        meter={
+          isAdmin && tightest ? (
+            <Meter
+              percent={tightest.percent}
+              label={`Tightest limit: ${Math.round(tightest.percent)}%, ${tightest.accountName} ${tightest.windowLabel}`}
+            />
+          ) : undefined
+        }
+        detail={
+          !isAdmin
+            ? "Admin only"
+            : tightest
+              ? `${tightest.accountName} · ${tightest.windowLabel}${tightestReset ? ` · ${tightestReset}` : ""}`
+              : quotaLoaded
+                ? "No caps set"
+                : "Checking limits…"
+        }
+      />
+
+      <KpiTile
+        icon={<Pulse size={18} weight="fill" />}
+        tone={trafficTone}
+        label="Traffic 24h"
+        value={compact(summary.traffic24h.requests)}
+        suffix="req"
+        detail={
+          summary.traffic24h.requests > 0
+            ? summary.traffic24h.errors > 0
+              ? `${pct(summary.traffic24h.errorRate)} err`
+              : "0% err"
+            : "No traffic in 24h"
+        }
+        aside={
+          trafficSeries.length >= 2 ? (
+            <div className="hidden sm:block">
+              <MiniSparkline
+                values={trafficSeries}
+                color="var(--color-series-2)"
+                width={64}
+                height={20}
+              />
+            </div>
+          ) : undefined
+        }
+      />
+    </div>
+  );
+}
 
 export default function Providers() {
   const isAdmin = useIsAdmin();
@@ -52,9 +190,12 @@ export default function Providers() {
   const teams = useTeams();
   const quotas = useAccountQuotas(isAdmin);
   const subscriptions = useAccountSubscriptions(isAdmin);
+  const usage24h = useUsageSummaryByConnection(24, true, teamFilter);
+  const series24h = useUsageSeries(24, undefined, teamFilter);
   // Both limit sources answered: only then may an account without bars read "no cap set".
   const quotaLoaded = isAdmin && quotas.isSuccess && subscriptions.isSuccess;
 
+  const [filter, setFilter] = useState<AccountFilter>("all");
   const [adding, setAdding] = useState(false);
   const [initialCustomProtocol, setInitialCustomProtocol] = useState<
     "openai" | "anthropic" | null
@@ -100,6 +241,33 @@ export default function Providers() {
   const groups = useMemo(
     () => buildProviderGroups(accounts, providers.data, quotas.data, subscriptions.data),
     [accounts, providers.data, quotas.data, subscriptions.data],
+  );
+
+  const filteredGroups = useMemo(
+    () => filterProviderGroups(groups, filter, quotas.data, subscriptions.data, providers.data),
+    [groups, filter, quotas.data, subscriptions.data, providers.data],
+  );
+
+  const trafficById = useMemo(
+    () => buildTrafficByConnection(usage24h.data),
+    [usage24h.data],
+  );
+
+  const trafficSeries = useMemo(
+    () => (series24h.data ?? []).map((bucket) => bucket.requests),
+    [series24h.data],
+  );
+
+  const summary = useMemo(
+    () =>
+      summarizeProviders(
+        accounts,
+        providers.data,
+        quotas.data,
+        subscriptions.data,
+        usage24h.data,
+      ),
+    [accounts, providers.data, quotas.data, subscriptions.data, usage24h.data],
   );
 
   const quotaById = useMemo(
@@ -233,7 +401,7 @@ export default function Providers() {
     <>
       <PageHeader
         title="Providers"
-        subtitle="Upstream accounts this gateway can route through."
+        subtitle="Upstream accounts this gateway routes through."
         actions={
           <>
             {teamList.length > 0 ? (
@@ -262,16 +430,10 @@ export default function Providers() {
       />
 
       {!isAdmin ? (
-        <p className="mb-3 text-small text-muted">
-          Read-only: these are the accounts your team can route through. An administrator manages
-          credentials and limits.
-        </p>
-      ) : null}
-      {teamList.length > 0 ? (
-        <p className="mb-4 text-small text-muted">
-          Team keys route only to their own team's accounts; shared accounts serve instance-wide
-          keys.
-        </p>
+        <AlertBanner tone="info" title="Read-only view" className="mb-4">
+          These are the accounts your team can route through. An administrator manages credentials
+          and limits.
+        </AlertBanner>
       ) : null}
 
       <ProviderCodesModal
@@ -337,44 +499,32 @@ export default function Providers() {
       />
 
       {notice ? (
-        <div
-          className={cx(
-            "mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-body tnum",
-            notice.tone === "pos"
-              ? "border-[var(--color-pos-line)] bg-[var(--color-pos-tint)] text-[var(--color-pos-ink)]"
-              : "border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] text-[var(--color-neg-ink)]",
-          )}
+        <AlertBanner
+          tone={notice.tone}
+          title={notice.tone === "pos" ? "Account updated" : "Action failed"}
+          onDismiss={() => setNotice(null)}
+          className="mb-4"
         >
-          <span className="min-w-0 flex-1 break-words">{notice.text}</span>
-          <button
-            type="button"
-            onClick={() => setNotice(null)}
-            className="text-caption underline underline-offset-2"
-          >
-            dismiss
-          </button>
-        </div>
+          <span className="break-words tnum">{notice.text}</span>
+        </AlertBanner>
       ) : null}
 
       {connections.isError ? (
         <div className="mb-4">
           {apiCode(connections.error) === "team_forbidden" ? (
-            <div
-              role="alert"
-              className="flex items-start gap-2 rounded-lg border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-body text-[var(--color-warn-ink)]"
+            <AlertBanner
+              tone="warn"
+              title="Team accounts unavailable"
+              className="mb-0"
+              actions={
+                <Button variant="quiet" size="sm" onClick={() => setTeamFilter("")}>
+                  Clear filter
+                </Button>
+              }
             >
-              <span className="min-w-0 flex-1">
-                That team's provider accounts are not visible to this account — assignments are only
-                readable by members of the owning team.
-              </span>
-              <button
-                type="button"
-                onClick={() => setTeamFilter("")}
-                className="shrink-0 text-caption underline underline-offset-2"
-              >
-                clear filter
-              </button>
-            </div>
+              That team's provider accounts are not visible to this account — assignments are only
+              readable by members of the owning team.
+            </AlertBanner>
           ) : (
             <ErrorNote error={connections.error} onRetry={() => void connections.refetch()} />
           )}
@@ -392,28 +542,49 @@ export default function Providers() {
           <EmptyProviders onAdd={isAdmin ? openAdd : null} />
         )
       ) : (
-        <ProviderInventory
-          groups={groups}
-          quotas={quotas.data}
-          subscriptions={subscriptions.data}
-          quotaLoaded={quotaLoaded}
-          providers={providers.data}
-          selectedId={inspected?.id}
-          loading={connections.isLoading}
-          isAdmin={isAdmin}
-          testingId={testingId}
-          testsById={testsById}
-          inspectHrefFor={inspectHrefFor}
-          displayOf={displayOf}
-          teamName={teamName}
-          onTest={(id) => test.mutate(id)}
-          onToggle={requestToggle}
-          onRemove={(c) => {
-            remove.reset();
-            setRemoving(c);
-          }}
-          onOpenCodes={() => setCodesOpen(true)}
-        />
+        <>
+          {!connections.isLoading && accounts.length > 0 ? (
+            <ProvidersKpiRow
+              summary={summary}
+              trafficSeries={trafficSeries}
+              isAdmin={isAdmin}
+              quotaLoaded={quotaLoaded}
+              filter={filter}
+              onToggleAttention={() =>
+                setFilter((prev) => (prev === "attention" ? "all" : "attention"))
+              }
+            />
+          ) : null}
+          <ProviderInventory
+            groups={filteredGroups}
+            totalAccounts={accounts.length}
+            totalProviders={groups.length}
+            attentionCount={summary.attention}
+            disabledCount={summary.disabled}
+            filter={filter}
+            onFilterChange={setFilter}
+            quotas={quotas.data}
+            subscriptions={subscriptions.data}
+            quotaLoaded={quotaLoaded}
+            trafficById={trafficById}
+            providers={providers.data}
+            selectedId={inspected?.id}
+            loading={connections.isLoading}
+            isAdmin={isAdmin}
+            testingId={testingId}
+            testsById={testsById}
+            inspectHrefFor={inspectHrefFor}
+            displayOf={displayOf}
+            teamName={teamName}
+            onTest={(id) => test.mutate(id)}
+            onToggle={requestToggle}
+            onRemove={(c) => {
+              remove.reset();
+              setRemoving(c);
+            }}
+            onOpenCodes={() => setCodesOpen(true)}
+          />
+        </>
       )}
 
       <AddProviderFlow

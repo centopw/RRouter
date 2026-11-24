@@ -23,6 +23,7 @@ import {
   type Connection,
   type UsageSummaryByConnection,
 } from "../src/lib/api.ts";
+import { duration, uptime, usd, usdDisplay } from "../src/lib/format.ts";
 import { emptyTotals } from "../src/pages/usage/aggregate.ts";
 import {
   boardGroupOf,
@@ -434,6 +435,7 @@ test("operator quota cap marks account exhausted and includes cap bars", () => {
   assert.equal(items[0]!.status, "exhausted");
   assert.equal(items[0]!.operatorBars.length, 1);
   assert.equal(items[0]!.operatorBars[0]!.label, "Daily spend");
+  assert.equal(items[0]!.operatorBars[0]!.detail, "$5.00 / $5.00");
   assert.equal(items[0]!.hasLimits, true);
 });
 
@@ -833,4 +835,45 @@ test("classifyWindowColumn, buildUsageBreakdown, and buildUsageTrend handle all 
   assert.deepEqual(trend.total, [0, 150, 400]);
   assert.deepEqual(trend.spendMicros, [0, 200_000, 500_000]);
   assert.deepEqual(trend.providers.map((p) => p.label), ["Claude", "OpenCode Go"]);
+});
+
+test("duration and uptime floor remainders and never print 60m or 24h", () => {
+  assert.equal(duration(0), "0m");
+  assert.equal(duration(-42), "0m");
+  assert.equal(duration(Number.NaN), "0m");
+  assert.equal(duration(59), "0m");
+  assert.equal(duration(60), "1m");
+  assert.equal(duration(3595), "59m");
+  assert.equal(duration(3600), "1h 0m");
+  assert.equal(duration(3 * HOUR - 5), "2h 59m");
+  assert.equal(duration(9 * HOUR - 5), "8h 59m");
+  assert.equal(duration(DAY - 1), "23h 59m");
+  assert.equal(duration(DAY), "1d 0h");
+  assert.equal(duration(2 * DAY - 5), "1d 23h");
+  assert.equal(duration(12 * DAY - 5), "11d 23h");
+  assert.equal(uptime(12 * DAY - 5), "11d 23h");
+  assert.equal(uptime(3 * HOUR - 5), "2h 59m");
+});
+
+test("usdDisplay shows two decimals from $0.01 up while preserving sub-cent precision and usd()", () => {
+  assert.equal(usdDisplay(24_100_000), "$24.10");
+  assert.equal(usdDisplay(25_000_000), "$25.00");
+  assert.equal(usdDisplay(42_169_400), "$42.17");
+  assert.equal(usdDisplay(1_000_000), "$1.00");
+  assert.equal(usdDisplay(999_000), "$1.00");
+  assert.equal(usdDisplay(500_000), "$0.50");
+  assert.equal(usdDisplay(430_000), "$0.43");
+  assert.equal(usdDisplay(12_300), "$0.01");
+  assert.equal(usdDisplay(10_000), "$0.01");
+  assert.equal(usdDisplay(9_900), "$0.0099");
+  assert.equal(usdDisplay(500), "$0.0005");
+  assert.equal(usdDisplay(0), "$0.00");
+  assert.equal(usdDisplay(0, { dash: true }), "—");
+  assert.equal(usdDisplay(null), "$0.00");
+  assert.equal(usdDisplay(null, { dash: true }), "—");
+  assert.equal(usdDisplay(undefined, { dash: true }), "—");
+  // Per-request usd() stays four decimals from $0.01 up.
+  assert.equal(usd(24_100_000), "$24.1000");
+  assert.equal(usd(42_169_400), "$42.1694");
+  assert.equal(usd(430_000), "$0.4300");
 });

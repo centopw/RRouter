@@ -107,7 +107,7 @@ const NAV_GROUPS: NavGroup[] = [
       {
         to: "/routing/presets",
         memberTo: "/routing/topology",
-        label: "Routing",
+        label: "Presets, aliases & combos",
         icon: glyph(ArrowsSplit),
         matchPrefixes: ["/routing"],
       },
@@ -200,6 +200,14 @@ function readStarDismissed(): boolean {
   }
 }
 
+function writeStarDismissed() {
+  try {
+    window.localStorage.setItem(STAR_DISMISSED, "1");
+  } catch {
+    // Storage unavailable; the in-memory choice still hides it for this session.
+  }
+}
+
 function findActiveSearchInput(root: HTMLElement | null): HTMLInputElement | null {
   if (!root) return null;
   const selector = [
@@ -249,15 +257,14 @@ export function Shell() {
   const version = health.data?.version;
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [starDismissed, setStarDismissed] = useState(readStarDismissed);
+  // First real route where the one-time star banner appeared, so moving to another page
+  // clears it within the same session as well as across reloads.
+  const starInitialPath = useRef<string | null>(null);
   const mainRef = useRef<HTMLElement | null>(null);
 
   const dismissStar = () => {
     setStarDismissed(true);
-    try {
-      window.localStorage.setItem(STAR_DISMISSED, "1");
-    } catch {
-      // Storage unavailable; the in-memory choice still hides it for this session.
-    }
+    writeStarDismissed();
   };
 
   // The rail fades its ends only when the list actually scrolls, so a short nav has no
@@ -298,6 +305,20 @@ export function Shell() {
     window.addEventListener(ADMIN_REQUIRED_EVENT, require);
     return () => window.removeEventListener(ADMIN_REQUIRED_EVENT, require);
   }, []);
+
+  useEffect(() => {
+    if (starDismissed || adminRequired) return;
+    // Persist dismissal on first display so the banner shows once and never returns.
+    writeStarDismissed();
+    if (location.pathname === "/") return;
+    if (starInitialPath.current === null) {
+      starInitialPath.current = location.pathname;
+      return;
+    }
+    if (starInitialPath.current !== location.pathname) {
+      setStarDismissed(true);
+    }
+  }, [starDismissed, adminRequired, location.pathname]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -675,11 +696,11 @@ function UpdateMarker({ collapsed }: { collapsed?: boolean }) {
 }
 
 /**
- * One quiet line asking for a star, above the page on every route.
+ * One quiet line asking for a star, shown once on the first visit and dismissed for good.
  *
  * The only accent here is the link itself: a banner that decorates the dashboard to ask
- * for attention it does not carry fights the pages it sits on. Dismissal is remembered
- * per browser, so the ask happens once.
+ * for attention it does not carry fights the pages it sits on. It auto-dismisses after the
+ * first page view (leaving the quiet sidebar link as the persistent half).
  */
 function StarBanner({ onDismiss }: { onDismiss: () => void }) {
   return (
@@ -695,6 +716,7 @@ function StarBanner({ onDismiss }: { onDismiss: () => void }) {
         href={REPO_URL}
         target="_blank"
         rel="noreferrer"
+        onClick={onDismiss}
         className="shrink-0 whitespace-nowrap text-caption font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline"
       >
         Star on GitHub

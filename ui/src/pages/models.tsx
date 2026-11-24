@@ -2,6 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
+  CheckCircle,
+  EyeSlash,
+  GearSix,
+  Sparkle,
+  WarningCircle,
+} from "@phosphor-icons/react";
+import { KpiTile, type KpiTone } from "../components/molecules/KpiTile";
+import {
   AlertBanner,
   Button,
   Card,
@@ -45,6 +53,8 @@ import {
   sizeOf,
   statusParam,
   statusesOf,
+  summarizeModelKpis,
+  type ModelKpiSummary,
   type StatusKey,
 } from "./models/params";
 import {
@@ -71,7 +81,6 @@ import {
   matchesSearch,
   rowIsFree,
   rowsFor,
-  summarizeRows,
   type UnifiedRow,
 } from "./models/unified-rows";
 
@@ -96,6 +105,203 @@ function providerOfRow(row: UnifiedRow): string {
   if (row.model) return row.model.provider;
   const cut = row.ref.indexOf("/");
   return cut < 0 ? row.ref : row.ref.slice(0, cut);
+}
+
+function sameStatusSet(a: ReadonlySet<StatusKey>, b: readonly StatusKey[]): boolean {
+  return a.size === b.length && b.every((status) => a.has(status));
+}
+
+function NotRoutedDetail({
+  hidden,
+  unrouted,
+  disabled,
+}: {
+  hidden: number;
+  unrouted: number;
+  disabled: number;
+}) {
+  const desktopParts: string[] = [];
+  if (hidden > 0 || (unrouted === 0 && disabled === 0)) {
+    desktopParts.push(`${hidden.toLocaleString()} hidden`);
+  }
+  if (unrouted > 0 || (hidden === 0 && disabled === 0)) {
+    desktopParts.push(`${unrouted.toLocaleString()} not in preset`);
+  }
+  if (disabled > 0) {
+    desktopParts.push(
+      hidden > 0 && unrouted > 0
+        ? `${disabled.toLocaleString()} off`
+        : `${disabled.toLocaleString()} disabled`,
+    );
+  }
+
+  const fullTitle = [
+    hidden > 0 ? `${hidden.toLocaleString()} hidden` : null,
+    unrouted > 0 ? `${unrouted.toLocaleString()} not in preset` : null,
+    disabled > 0 ? `${disabled.toLocaleString()} disabled` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const compactParts: string[] = [];
+  if (hidden > 0 || (unrouted === 0 && disabled === 0)) {
+    compactParts.push(`${hidden.toLocaleString()}h`);
+  }
+  if (unrouted > 0 || (hidden === 0 && disabled === 0)) {
+    compactParts.push(`${unrouted.toLocaleString()} out`);
+  }
+  if (disabled > 0) {
+    compactParts.push(`${disabled.toLocaleString()} off`);
+  }
+
+  return (
+    <span title={fullTitle || undefined}>
+      <span className="hidden sm:inline">{desktopParts.join(" · ")}</span>
+      <span className="sm:hidden">{compactParts.join(" · ")}</span>
+    </span>
+  );
+}
+
+function ModelsKpiRow({
+  kpis,
+  statusAware,
+  requestedStatus,
+  freeOnly,
+  onSelectStatuses,
+  onToggleFree,
+}: {
+  kpis: ModelKpiSummary;
+  statusAware: boolean;
+  requestedStatus: ReadonlySet<StatusKey>;
+  freeOnly: boolean;
+  onSelectStatuses: (next: readonly StatusKey[]) => void;
+  onToggleFree: () => void;
+}) {
+  // Needs attention counts ONLY unavailable rows — operator-disabled models are intentional
+  // and must never degrade readiness or turn this tile amber (audit finding 3).
+  const attentionCount = kpis.unavailable;
+  const attentionTone: KpiTone = attentionCount === 0 ? "pos" : "warn";
+
+  if (!statusAware) {
+    const availTone: KpiTone =
+      kpis.enabledTotal === 0 ? "neutral" : kpis.unavailable > 0 ? "warn" : "pos";
+    return (
+      <div className="mb-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-3">
+        <KpiTile
+          icon={<CheckCircle size={18} weight="fill" />}
+          tone={availTone}
+          label="Available"
+          value={kpis.available.toLocaleString()}
+          suffix={`of ${kpis.enabledTotal.toLocaleString()}`}
+          detail={
+            kpis.disabled > 0
+              ? `${kpis.disabled.toLocaleString()} disabled`
+              : kpis.unavailable > 0
+                ? `${kpis.unavailable.toLocaleString()} unavailable`
+                : "All enabled ready"
+          }
+        />
+        <KpiTile
+          icon={<Sparkle size={18} weight="fill" />}
+          tone={kpis.free > 0 ? "info" : "neutral"}
+          label="Free"
+          value={kpis.free.toLocaleString()}
+          detail={kpis.free > 0 ? "$0 /1M catalog price" : "No $0 models"}
+          onClick={onToggleFree}
+          active={freeOnly}
+        />
+        <KpiTile
+          icon={<WarningCircle size={18} weight="fill" />}
+          tone={attentionTone}
+          label="Needs attention"
+          value={attentionCount.toLocaleString()}
+          detail={attentionCount > 0 ? `${attentionCount.toLocaleString()} unavailable` : "All healthy"}
+          className="col-span-2 sm:col-span-1"
+        />
+      </div>
+    );
+  }
+
+  const routedTone: KpiTone =
+    kpis.routed === 0 ? "neutral" : kpis.routedUnavailable > 0 ? "warn" : "pos";
+  const routedDetail =
+    kpis.routed === 0
+      ? "None in preset"
+      : kpis.routedUnavailable > 0
+        ? `${kpis.routedAvailable.toLocaleString()} available · ${kpis.routedUnavailable.toLocaleString()} unavailable`
+        : `${kpis.routedAvailable.toLocaleString()} available`;
+
+  const attentionTargets = kpis.unavailableStatuses;
+  const attentionActive =
+    attentionTargets.length > 0 && sameStatusSet(requestedStatus, attentionTargets);
+  const attentionDetail =
+    attentionCount === 0
+      ? "All healthy"
+      : kpis.routedUnavailable > 0
+        ? `${kpis.routedUnavailable.toLocaleString()} routed · unavailable`
+        : `${attentionCount.toLocaleString()} unavailable`;
+
+  const notRoutedTargets: StatusKey[] =
+    kpis.notRoutedStatuses.length > 0 ? kpis.notRoutedStatuses : ["hidden", "unrouted", "disabled"];
+  const notRoutedActive = sameStatusSet(requestedStatus, notRoutedTargets);
+
+  return (
+    <div className="mb-4 grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
+      <KpiTile
+        icon={<CheckCircle size={18} weight="fill" />}
+        tone={routedTone}
+        label="Routed"
+        value={kpis.routed.toLocaleString()}
+        suffix={`of ${kpis.total.toLocaleString()}`}
+        detail={routedDetail}
+        onClick={() => onSelectStatuses(["routed"])}
+      />
+
+      <KpiTile
+        icon={<Sparkle size={18} weight="fill" />}
+        tone={kpis.free > 0 ? "info" : "neutral"}
+        label="Free"
+        value={kpis.free.toLocaleString()}
+        detail={
+          kpis.free > 0
+            ? `${kpis.routedFree.toLocaleString()} routed · $0 /1M`
+            : "No $0 models"
+        }
+        onClick={onToggleFree}
+        active={freeOnly}
+      />
+
+      <KpiTile
+        icon={<WarningCircle size={18} weight="fill" />}
+        tone={attentionTone}
+        label="Needs attention"
+        value={attentionCount.toLocaleString()}
+        detail={attentionDetail}
+        onClick={
+          attentionTargets.length > 0
+            ? () => onSelectStatuses(attentionActive ? ["routed"] : attentionTargets)
+            : undefined
+        }
+        active={attentionActive}
+      />
+
+      <KpiTile
+        icon={<EyeSlash size={18} weight="fill" />}
+        tone="neutral"
+        label="Not routed"
+        value={kpis.notRouted.toLocaleString()}
+        detail={
+          <NotRoutedDetail
+            hidden={kpis.hidden}
+            unrouted={kpis.unrouted}
+            disabled={kpis.disabled}
+          />
+        }
+        onClick={() => onSelectStatuses(notRoutedActive ? ["routed"] : notRoutedTargets)}
+        active={notRoutedActive}
+      />
+    </div>
+  );
 }
 
 export default function Models() {
@@ -292,8 +498,8 @@ export default function Models() {
     ],
   );
 
-  const summary = useMemo(
-    () => summarizeRows(allRows, modelByRef),
+  const kpis = useMemo(
+    () => summarizeModelKpis(allRows, modelByRef),
     [allRows, modelByRef],
   );
 
@@ -793,14 +999,7 @@ export default function Models() {
     ? `${statusCaption} rows in ${presetName}`
     : "Every model this gateway can serve";
 
-  const subtitle = useMemo(() => {
-    if (summary.total === 0) return "Models, aliases and combos this gateway can serve.";
-    const freePart = summary.free > 0 ? ` · ${summary.free.toLocaleString()} free` : "";
-    if (hasPreset) {
-      return `${summary.routed.toLocaleString()} routed (${summary.routedAvailable.toLocaleString()} available)${freePart} · ${summary.total.toLocaleString()} total`;
-    }
-    return `${summary.available.toLocaleString()} of ${summary.total.toLocaleString()} available${freePart}`;
-  }, [hasPreset, summary]);
+  const showPresetLine = Boolean(isAdmin && presets.data && presetId && !layout.isError);
 
   const clearFilters = useCallback(() => {
     resetFilters(["q", "provider", "status", "kind", "custom", "free", "page"]);
@@ -809,6 +1008,12 @@ export default function Models() {
   const showStatus = useCallback(
     (status: StatusKey) =>
       setFilters({ status: statusParam(new Set<StatusKey>([status])), page: "1" }),
+    [setFilters],
+  );
+
+  const selectStatuses = useCallback(
+    (next: readonly StatusKey[]) =>
+      setFilters({ status: statusParam(new Set<StatusKey>(next)), page: "1" }),
     [setFilters],
   );
 
@@ -923,37 +1128,37 @@ export default function Models() {
     <>
       <PageHeader
         title="Models"
-        subtitle={subtitle}
+        subtitle={showPresetLine ? undefined : "Models, aliases and combos this gateway can serve."}
         actions={
           isAdmin ? (
-            <>
-              {presets.data && presetId && !layout.isError ? (
-                <PresetControls
-                  presets={presets.data.data}
-                  presetId={presetId}
-                  defaultId={presets.data.default_id ?? ""}
-                  draft={layoutDraft}
-                  busy={activatePreset.isPending || createPreset.isPending}
-                  onSelect={selectPreset}
-                  onSaveAsNew={() => setCopyOpen(true)}
-                  onManagePresets={presetDrawerEnabled ? () => setManageOpen(true) : undefined}
-                />
-              ) : null}
-              <AddMenu
-                onAddCustom={() => setCustomOpen(true)}
-                onAddAlias={() => {
-                  createAlias.reset();
-                  setAliasOpen(true);
-                }}
-                onAddCombo={() => {
-                  createCombo.reset();
-                  setComboOpen(true);
-                }}
-              />
-            </>
+            <AddMenu
+              onAddCustom={() => setCustomOpen(true)}
+              onAddAlias={() => {
+                createAlias.reset();
+                setAliasOpen(true);
+              }}
+              onAddCombo={() => {
+                createCombo.reset();
+                setComboOpen(true);
+              }}
+            />
           ) : undefined
         }
       />
+
+      {showPresetLine && presets.data && presetId ? (
+        <PresetControls
+          presets={presets.data.data}
+          presetId={presetId}
+          defaultId={presets.data.default_id ?? ""}
+          draft={layoutDraft}
+          busy={activatePreset.isPending || createPreset.isPending}
+          onSelect={selectPreset}
+          onSaveAsNew={() => setCopyOpen(true)}
+          onManagePresets={presetDrawerEnabled ? () => setManageOpen(true) : undefined}
+          onManageGroups={hasPreset ? openGroups : undefined}
+        />
+      ) : null}
 
       {presets.isError ? (
         <AlertBanner
@@ -1002,36 +1207,34 @@ export default function Models() {
         </AlertBanner>
       ) : null}
       {layoutDraft.conflict ? (
-        <div
-          role="alert"
-          className="mb-4 rounded-[var(--radius-card)] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-5 py-3 text-small text-fg"
+        <AlertBanner
+          tone="warn"
+          title="Another tab saved a newer revision"
+          className="mb-4"
+          actions={
+            <>
+              <Button variant="secondary" size="sm" onClick={layoutDraft.loadLatest}>
+                Load latest
+              </Button>
+              <Button variant="primary" size="sm" onClick={() => setCopyOpen(true)}>
+                Save as new
+              </Button>
+            </>
+          }
         >
-          <span className="font-medium">Another tab saved a newer revision.</span>{" "}
-          <span className="text-muted">
-            Your draft is kept here. Load the stored layout, or save your draft as a new preset.
-          </span>
-          <span className="mt-2 flex flex-wrap gap-1.5">
-            <Button variant="ghost" onClick={layoutDraft.loadLatest}>
-              Load latest
-            </Button>
-            <Button variant="primary" onClick={() => setCopyOpen(true)}>
-              Save as new
-            </Button>
-          </span>
-        </div>
+          Your draft is kept here. Load the stored layout, or save your draft as a new preset.
+        </AlertBanner>
       ) : null}
       {undo ? (
-        <div
-          role="status"
-          className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-[8px] border border-line bg-surface px-4 py-2 text-small text-fg"
-        >
-          <span>
-            <span className="font-mono">{undo.ref}</span> removed from this preset and
-            /v1/models. It still routes when named explicitly.
-          </span>
-          <span className="flex gap-1.5">
+        <AlertBanner
+          tone="info"
+          title="Removed from this preset"
+          onDismiss={() => setUndo(null)}
+          className="mb-4"
+          actions={
             <Button
-              variant="ghost"
+              variant="secondary"
+              size="sm"
               onClick={() => {
                 layoutDraft.restore(undo.ref);
                 setUndo(null);
@@ -1039,11 +1242,11 @@ export default function Models() {
             >
               Undo
             </Button>
-            <Button variant="quiet" onClick={() => setUndo(null)}>
-              dismiss
-            </Button>
-          </span>
-        </div>
+          }
+        >
+          <span className="font-mono text-fg">{undo.ref}</span> was removed from this preset and{" "}
+          <span className="font-mono">/v1/models</span>. It still routes when named explicitly.
+        </AlertBanner>
       ) : null}
 
       {!models.isLoading && !models.isError && allRows.length === 0 ? (
@@ -1055,6 +1258,16 @@ export default function Models() {
         />
       ) : (
         <UnifiedRowProvider modelByRef={modelByRef} isAdmin={isAdmin}>
+          {!loading && !models.isError && allRows.length > 0 ? (
+            <ModelsKpiRow
+              kpis={kpis}
+              statusAware={statusAware}
+              requestedStatus={requestedStatus}
+              freeOnly={freeOnly}
+              onSelectStatuses={selectStatuses}
+              onToggleFree={() => setFilters({ free: freeOnly ? null : "1", page: "1" })}
+            />
+          ) : null}
           <Card>
             <ModelFilters
               query={draft}
@@ -1074,19 +1287,13 @@ export default function Models() {
               showFreeModeLink={isAdmin}
               custom={customOnly}
               onCustom={() => setFilters({ custom: customOnly ? null : "1", page: "1" })}
-              extra={
-                isAdmin && hasPreset ? (
-                  <Button variant="quiet" onClick={openGroups}>
-                    groups
-                  </Button>
-                ) : undefined
-              }
               outside={outside}
               onShowOutside={() =>
                 setFilters({ status: STATUSES.join(","), page: "1" })
               }
               canClear={canClear}
               onClear={clearFilters}
+              phone={phone}
             />
 
             {loading ? (
@@ -1117,6 +1324,14 @@ export default function Models() {
                     showHeader={index === 0}
                     deferLayout={index > 0}
                     onMove={onMoveDelta}
+                    headingAction={
+                      index === 0 && isAdmin && hasPreset ? (
+                        <Button variant="quiet" size="sm" onClick={openGroups}>
+                          Groups
+                          <GearSix size={13} aria-hidden />
+                        </Button>
+                      ) : undefined
+                    }
                   />
                 ))
               )
