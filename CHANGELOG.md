@@ -2,6 +2,16 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.36.0 — 2026-11-24
+
+### Features
+
+- feat(ui): redesign providers and models pages on shared Meter, KpiTile and HealthBadge ([`e14c4f4`](https://github.com/centopw/RRouter/commit/e14c4f4021cdd0f51954db088156ab56bd21841f))
+
+### Other Changes
+
+- chore(ui): rebuild the served bundle ([`bcfbdfc`](https://github.com/centopw/RRouter/commit/bcfbdfc80c46c758b1549e8e9d3211f0a255709c))
+
 ## 0.35.1 — 2026-11-24
 
 ### Other Changes
