@@ -2,6 +2,12 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.35.1 — 2026-11-24
+
+### Other Changes
+
+- style: cargo fmt ([`4f813a2`](https://github.com/centopw/RRouter/commit/4f813a2c64549a9cb7a4dce511c30ad8a4c01168))
+
 ## 0.35.0 — 2026-11-24
 
 ### Features
