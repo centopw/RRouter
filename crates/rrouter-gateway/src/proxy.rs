@@ -952,7 +952,7 @@ async fn send_special(
         .map_err(transport_error)?;
     let status = resp.status();
     if !status.is_success() {
-        let retry_after = crate::free_mode::parse_retry_after_secs(resp.headers());
+        let retry_after = crate::free_mode::retry_after_header_secs(resp.headers());
         let bytes = resp.bytes().await.map_err(transport_error)?;
         return Err(upstream_error(
             &candidate,
@@ -1386,7 +1386,7 @@ async fn send_speech(
         .map_err(transport_error)?;
     let status = resp.status();
     if !status.is_success() {
-        let retry_after = crate::free_mode::parse_retry_after_secs(resp.headers());
+        let retry_after = crate::free_mode::retry_after_header_secs(resp.headers());
         let bytes = resp.bytes().await.map_err(transport_error)?;
         return Err(upstream_error(
             &candidate,
@@ -1449,7 +1449,7 @@ async fn send_voices(
 async fn read_json(candidate: &Candidate, resp: reqwest::Response) -> Result<(StatusCode, Value)> {
     let status = resp.status();
     if !status.is_success() {
-        let retry_after = crate::free_mode::parse_retry_after_secs(resp.headers());
+        let retry_after = crate::free_mode::retry_after_header_secs(resp.headers());
         let bytes = resp.bytes().await.map_err(transport_error)?;
         return Err(upstream_error(
             candidate,
@@ -3145,6 +3145,15 @@ fn upstream_error(
         text.into_owned()
     };
     let mut payload: Option<Value> = serde_json::from_slice(bytes).ok();
+    // A 429/503/413 body that states its own retry delay (Gemini `RetryInfo.retryDelay`,
+    // anchored prose "try again in Ns") is authoritative for the breaker cooldown when the
+    // header said nothing — the parity gap-4 hint, clamped to 24 h. Restricted to throttle /
+    // overload statuses so 4xx/5xx error text is never misread as a cooldown.
+    let retry_after = retry_after.or_else(|| {
+        matches!(status, 429 | 503 | 413)
+            .then(|| crate::free_mode::retry_hint_from_body(&body))
+            .flatten()
+    });
     if let Some(secs) = retry_after {
         match payload.as_mut() {
             Some(Value::Object(obj)) => {
@@ -3218,6 +3227,32 @@ fn stream_only(state: &AppState, candidate: &Candidate) -> bool {
     state
         .provider_spec(&candidate.provider)
         .is_some_and(|spec| spec.stream_only)
+}
+
+/// `true` when `candidate` targets a public-catalog free model (anonymous OpenCode, keyed
+/// OpenCode public-catalog free row, or an OpenRouter `:free` model).
+///
+/// Gated cheaply first so paid candidates (including paid OpenRouter models like
+/// `anthropic/claude-sonnet-4` and every non-public provider) pay zero store reads.
+async fn is_public_free_candidate(store: &rrouter_store::Store, candidate: &Candidate) -> bool {
+    if rrouter_router::free_mode::is_anonymous_connection(candidate.connection) {
+        return true;
+    }
+    match crate::free_mode::vendored_free_rule(&candidate.provider) {
+        Some("id-suffix:free") => {
+            candidate.model.to_ascii_lowercase().ends_with(":free")
+                || candidate.model.eq_ignore_ascii_case("openrouter/free")
+        }
+        _ if candidate.provider == "opencode" => {
+            crate::free_mode::is_public_catalog_free_model(
+                store,
+                &candidate.provider,
+                &candidate.model,
+            )
+            .await
+        }
+        _ => false,
+    }
 }
 
 /// One cache lookup: the hashed key plus the exact model id and wire dialect it was
@@ -3415,6 +3450,7 @@ fn record_cache_hit(
             reasoning_tokens: 0,
             session_id: meta.session_id,
             fallback_reason: meta.fallback_reason,
+            unrouted_reason: None,
         },
         budget_hold,
     );
@@ -3699,25 +3735,21 @@ impl Attempt<'_> {
     }
 
     async fn prepare(&self, candidate: &Candidate, trace: &AttemptTrace) -> Result<Prepared> {
-        // Short-circuit free-tier candidates whose `(connection, provider)` already hit a
-        // provider-wide `FreeUsageLimitError` so one exhausted IP/key does not waste 8
-        // upstream calls across 8 free models on the same provider.
-        if let Some(wait) = self
-            .state
-            .planner
-            .free_rotation()
-            .provider_limit_wait(candidate.connection, &candidate.provider)
-        {
-            let is_free_model =
-                rrouter_router::free_mode::is_anonymous_connection(candidate.connection)
-                    || crate::free_mode::anonymous_endpoint_for(
-                        self.state.store.as_ref(),
-                        &candidate.provider,
-                        &candidate.model,
-                    )
-                    .await
-                    .is_some();
-            if is_free_model {
+        let rotation = self.state.planner.free_rotation();
+        let norm_model =
+            rrouter_router::free_mode::normalize_model_key(&candidate.provider, &candidate.model);
+        let is_public_free =
+            is_public_free_candidate(self.state.store.as_ref(), candidate).await;
+
+        if is_public_free {
+            crate::free_mode::ensure_rotation_seeded(self.state.store.as_ref(), rotation).await;
+
+            // Short-circuit free-tier candidates whose `(connection, provider)` already hit
+            // a provider-wide `FreeUsageLimitError` or OpenRouter platform cap so one
+            // exhausted IP/key does not waste upstream calls across multiple free models.
+            if let Some(wait) =
+                rotation.provider_limit_wait(candidate.connection, &candidate.provider)
+            {
                 let secs = wait.as_secs().max(1);
                 return Err(Error::Upstream {
                     provider: candidate.provider.clone(),
@@ -3727,6 +3759,43 @@ impl Attempt<'_> {
                         candidate.provider
                     ),
                     payload: Some(serde_json::json!({ "retry_after": secs })),
+                });
+            }
+
+            // Proactive provider-wide daily cap (OpenRouter 1000/day): skip a drained
+            // account *before* spending an attempt, rather than after a 429.
+            if let Some(cap) =
+                crate::free_mode::vendored_provider_daily_cap(&candidate.provider, false)
+            {
+                let count = rotation.provider_day_count(candidate.connection, &candidate.provider);
+                if count >= cap {
+                    let secs = rrouter_router::free_mode::seconds_until_utc_midnight(
+                        crate::now_unix().max(0) as u64,
+                    );
+                    return Err(Error::Upstream {
+                        provider: candidate.provider.clone(),
+                        status: 429,
+                        body: format!(
+                            "{} free-tier daily request cap ({cap}) reached; retry after UTC midnight",
+                            candidate.provider
+                        ),
+                        payload: Some(serde_json::json!({ "retry_after": secs })),
+                    });
+                }
+            }
+
+            // Proactive per-model daily park and RPD/TPD/RPM/TPM caps (gap 2).
+            let limits = crate::free_mode::effective_model_limits(
+                rotation,
+                &candidate.provider,
+                &candidate.model,
+            );
+            if let Some(hit) = rotation.check_model_caps(candidate.connection, norm_model, limits) {
+                return Err(Error::Upstream {
+                    provider: candidate.provider.clone(),
+                    status: 429,
+                    body: hit.describe(&candidate.provider, &candidate.model),
+                    payload: Some(serde_json::json!({ "retry_after": hit.retry_after_secs() })),
                 });
             }
         }
@@ -3779,6 +3848,7 @@ impl Attempt<'_> {
                     (candidate.connection, candidate.model.clone()),
                     Dialect::OpenAiChat,
                 );
+            rotation.note_model_send(candidate.connection, norm_model);
             return Ok(Prepared {
                 urls: vec![url],
                 dialect: Dialect::OpenAiChat,
@@ -3803,7 +3873,53 @@ impl Attempt<'_> {
                 |creds| self.state.http_for(creds),
             )
             .await?;
-        self.prepare_with(candidate, spec, &creds, trace).await
+
+        // Whole-key free-mode accounts (Groq, Cerebras, Gemini, Mistral) carry free_mode=true
+        // on the credential; a paid key on those providers (free_mode=false) is never gated
+        // by free-tier per-model RPD/TPM/TPD limits.
+        let is_free_send = is_public_free || creds.free_mode;
+        if is_free_send && !is_public_free {
+            crate::free_mode::ensure_rotation_seeded(self.state.store.as_ref(), rotation).await;
+            if let Some(wait) =
+                rotation.provider_limit_wait(candidate.connection, &candidate.provider)
+            {
+                let secs = wait.as_secs().max(1);
+                return Err(Error::Upstream {
+                    provider: candidate.provider.clone(),
+                    status: 429,
+                    body: format!(
+                        "Free usage limit cooldown active for {} ({secs}s remaining)",
+                        candidate.provider
+                    ),
+                    payload: Some(serde_json::json!({ "retry_after": secs })),
+                });
+            }
+            let limits = crate::free_mode::effective_model_limits(
+                rotation,
+                &candidate.provider,
+                &candidate.model,
+            );
+            if let Some(hit) = rotation.check_model_caps(candidate.connection, norm_model, limits) {
+                return Err(Error::Upstream {
+                    provider: candidate.provider.clone(),
+                    status: 429,
+                    body: hit.describe(&candidate.provider, &candidate.model),
+                    payload: Some(serde_json::json!({ "retry_after": hit.retry_after_secs() })),
+                });
+            }
+        }
+
+        let prepared = self.prepare_with(candidate, spec, &creds, trace).await?;
+        if is_free_send {
+            if is_public_free
+                && crate::free_mode::vendored_provider_daily_cap(&candidate.provider, false)
+                    .is_some()
+            {
+                rotation.note_provider_day(candidate.connection, &candidate.provider);
+            }
+            rotation.note_model_send(candidate.connection, norm_model);
+        }
+        Ok(prepared)
     }
 
     /// The rest of [`Self::prepare`], for a caller that already holds this attempt's
@@ -4016,19 +4132,52 @@ impl Attempt<'_> {
                     // that tells a real throttle from the subscription gate's fake 429,
                     // and `Retry-After` drives the breaker cooldown on OpenCode 429s.
                     let rate_limited = carries_rate_limit_headers(resp.headers());
-                    let retry_after = crate::free_mode::parse_retry_after_secs(resp.headers());
+                    let retry_after = crate::free_mode::retry_after_header_secs(resp.headers());
                     let bytes = resp
                         .bytes()
                         .await
                         .map_err(|e| Box::new(Failure::transport(transport_error(e))))?;
-                    if status.as_u16() == 429 {
+                    if matches!(status.as_u16(), 429 | 413) {
                         let text = String::from_utf8_lossy(&bytes);
-                        if crate::free_mode::is_free_usage_limit_error(429, &text) {
-                            let wait =
-                                Duration::from_secs(retry_after.unwrap_or(300).clamp(30, 3600));
-                            self.state.planner.free_rotation().record_provider_limit(
+                        let rotation = self.state.planner.free_rotation();
+                        let norm_model = rrouter_router::free_mode::normalize_model_key(
+                            &candidate.provider,
+                            &candidate.model,
+                        );
+                        if let Some((kind, limit)) = crate::free_mode::learn_limit_from_error(&text)
+                        {
+                            rotation.learn_model_limit(
+                                &candidate.provider,
+                                &candidate.model,
+                                kind,
+                                limit,
+                            );
+                        }
+                        if status.as_u16() == 429
+                            && crate::free_mode::is_free_usage_limit_error(429, &text)
+                        {
+                            let wait = crate::free_mode::free_cooldown_duration(
+                                429,
+                                retry_after,
+                                &text,
+                                crate::now_unix(),
+                            );
+                            rotation.record_provider_limit(
                                 candidate.connection,
                                 &candidate.provider,
+                                wait,
+                            );
+                        } else if crate::free_mode::is_daily_exhaustion(status.as_u16(), &text)
+                            && rotation.is_tracking_model(candidate.connection, norm_model)
+                        {
+                            let wait = crate::free_mode::daily_park_duration(
+                                retry_after,
+                                &text,
+                                crate::now_unix(),
+                            );
+                            rotation.record_model_daily_park(
+                                candidate.connection,
+                                norm_model,
                                 wait,
                             );
                         }
@@ -4862,6 +5011,10 @@ impl RequestTrace {
             "request failed"
         );
         let meta = self.meta();
+        // A request that failed before any provider was dispatched leaves `provider`
+        // empty; record the stable reason so the dashboard can bucket these instead of
+        // showing one undifferentiated "unrouted" pile.
+        let unrouted_reason = provider.is_empty().then(|| classify_unrouted(err).to_string());
         let rec = UsageRecord {
             id: None,
             ts: crate::now_unix(),
@@ -4889,6 +5042,7 @@ impl RequestTrace {
             reasoning_tokens: 0,
             session_id: meta.session_id,
             fallback_reason: meta.fallback_reason,
+            unrouted_reason,
         };
         let store = Arc::clone(&state.store);
         let access_log = state.config.load().access_log;
@@ -4922,6 +5076,68 @@ fn attempt_status(e: &Error) -> u16 {
         // translation failure does.
         Error::AccountRefused { .. } => e.upstream_status(),
         _ => 0,
+    }
+}
+
+/// Stable machine-readable reason a request failed before any provider was dispatched.
+///
+/// The codes are a contract for the dashboard's per-reason breakdown, not a translation
+/// of [`Error::code`] (which only a few variants carry). `NoRoute` has no code, so its
+/// `detail` sentence is classified here: the wording is produced by the planner and is
+/// stable enough to key on, and any unrecognized phrasing falls back to `unknown_model`
+/// rather than inventing a bucket that hides the real cause.
+fn classify_unrouted(err: &Error) -> &'static str {
+    match err {
+        // A missing or invalid credential — the key is bad, not merely out of scope.
+        Error::Unauthorized(_) => "auth",
+        Error::Forbidden { code, .. } => match *code {
+            "api_key_inactive" | "api_key_expired" => "auth",
+            // `key_scope` (admin key on /v1, playground key outside the playground) is a
+            // valid key used in the wrong place — a governance refusal, not a bad key.
+            _ => "governance",
+        },
+        Error::Limited { code, .. } => match *code {
+            // Every candidate is cooling down in the breaker (or a free-mode cooldown):
+            // nothing was healthy, which is the no_healthy_candidate situation.
+            "all_candidates_cooling_down" => "no_healthy_candidate",
+            // Per-key/team/account spend ceilings, distinct from a throttle.
+            "budget_exhausted" | "team_budget_exhausted" | "quota_exhausted" => "budget",
+            "rate_limited" => "rate_limited",
+            _ => "governance",
+        },
+        Error::NoRoute { detail, .. } => {
+            // Order matters: "request policy excluded every provider" is the planner's
+            // wrapper for two different endings. With a non-empty exclusion summary it is
+            // a real policy refusal; with "(no candidate was declared)" the model simply
+            // resolved to zero targets, which is the unknown-model case.
+            if detail.contains("no candidate was declared")
+                || detail.contains("no connection declares this model")
+            {
+                "unknown_model"
+            } else if detail.contains("owns no provider accounts")
+                || detail.contains("no eligible connection for")
+            {
+                "group_empty"
+            } else if detail.contains("none has an active connection")
+                || detail.contains("no candidates")
+            {
+                "no_healthy_candidate"
+            } else if detail.contains("excluded by request policy")
+                || detail.contains("request policy excluded")
+            {
+                "governance"
+            } else {
+                "unknown_model"
+            }
+        }
+        Error::BadRequest(_) => "bad_request",
+        Error::NotFound(_) => "unknown_model",
+        Error::Upstream { .. } | Error::AccountRefused { .. } => "upstream",
+        Error::Translation(_) => "translation",
+        Error::Timeout(_) => "timeout",
+        Error::Store(_) => "store",
+        Error::Transport(_) => "transport",
+        Error::Json(_) | Error::Io(_) => "other",
     }
 }
 
@@ -5624,6 +5840,15 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
         + u64::from(usage.cache_read_tokens)
         + u64::from(usage.cache_write_tokens);
     state.record_tokens(r.key, spent);
+    if spent > 0 {
+        let norm_model =
+            rrouter_router::free_mode::normalize_model_key(&candidate.provider, &candidate.model);
+        state.planner.free_rotation().note_model_tokens_if_tracked(
+            candidate.connection,
+            norm_model,
+            spent,
+        );
+    }
     let rec = UsageRecord {
         id: None,
         ts: crate::now_unix(),
@@ -5655,6 +5880,7 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
         reasoning_tokens: usage.reasoning_tokens,
         session_id: r.meta.session_id,
         fallback_reason: r.meta.fallback_reason,
+        unrouted_reason: None,
     };
     spawn_record(state, rec, r.budget_hold);
 }
@@ -6312,6 +6538,7 @@ mod tests {
             reasoning_tokens: 0,
             session_id: None,
             fallback_reason: None,
+            unrouted_reason: None,
         }
     }
 

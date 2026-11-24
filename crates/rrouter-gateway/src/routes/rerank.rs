@@ -468,6 +468,7 @@ async fn record_usage(
         reasoning_tokens: 0,
         session_id: None,
         fallback_reason: None,
+        unrouted_reason: None,
     };
     if let Err(e) = state.store.record_usage(&record).await {
         tracing::warn!(error = %e, "rerank usage row failed");

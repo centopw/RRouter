@@ -1059,6 +1059,16 @@ pub async fn discover(
                     }
                     let price = published_price(state.store.as_ref(), &conn.provider, &id).await?;
                     let (mut free, price, mut source) = classify_free(&conn.provider, &id, price);
+                    if !free && whole_key_free_model(&conn.provider, &id) {
+                        // A whole-key free tier (Groq, Cerebras, Gemini, Mistral) prices
+                        // nothing at zero and carries no `:free`/`-free` id marker, so only
+                        // the vendored catalog says which of its models are on the free
+                        // tier. Widen *only* those rows: a billed key flagged `free_mode`
+                        // must never leak a paid model (e.g. gemini-2.5-pro, imagen/veo/tts)
+                        // into the free pool.
+                        free = true;
+                        source = SOURCE_PROVIDER_LIST;
+                    }
                     if !free && declared.contains(&(conn.provider.clone(), id.clone())) {
                         // The document named this model as free. A list that merely omits
                         // the marker must not downgrade the operator's declaration; a list
@@ -1418,6 +1428,208 @@ pub struct BatchProbeResponse {
     pub ok: bool,
     pub checked_at: i64,
     pub results: Vec<SingleProbeResponse>,
+}
+
+// ---------------------------------------------------------------- vendored free tiers
+
+/// The vendored FreeLLMAPI catalog, hand-curated per `design/freellmapi-parity.md`.
+///
+/// It holds **only providers RRouter compiles** and records, per row, the upstream path and
+/// SHA it was read from. A row is a *seed*, never an authority over live evidence: the
+/// public catalogs (OpenCode, OpenRouter) and an account's own `/v1/models` still decide
+/// whether a model exists; this file supplies the free rule and the limits.
+const VENDORED_FREE_TIERS: &str = include_str!("../data/free-tiers.json");
+
+/// Provenance of the vendored file, so an operator (or the upstream-diff command) can tell
+/// exactly which upstream revision the data was read from.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VendoredUpstream {
+    pub repo: String,
+    pub sha: String,
+    pub reviewed_at: String,
+    pub license: String,
+    pub copyright: String,
+    pub paths: Vec<String>,
+}
+
+/// One provider's vendored free-tier facts.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VendoredProvider {
+    pub id: String,
+    pub base_url: String,
+    pub auth: String,
+    pub free_rule: String,
+    pub pool: String,
+    #[serde(default)]
+    pub provider_caps: Option<VendoredProviderCaps>,
+    #[serde(default)]
+    pub quota_headers: Map<String, Value>,
+    pub tos: String,
+    pub src: String,
+}
+
+/// Provider-wide request caps a free-tier pool enforces across every model on one account.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VendoredProviderCaps {
+    #[serde(default)]
+    pub rpd: Option<u32>,
+    /// The lower daily cap for accounts that have bought fewer than the credit threshold.
+    #[serde(default)]
+    pub rpd_low_credit: Option<u32>,
+}
+
+/// One model's vendored limits (all `Option`; an absent limit means "unknown, do not gate").
+#[derive(Debug, Clone, Deserialize)]
+pub struct VendoredModel {
+    pub provider: String,
+    pub model: String,
+    pub rpm: Option<u32>,
+    pub rpd: Option<u32>,
+    pub tpm: Option<u32>,
+    pub tpd: Option<u32>,
+    pub context: Option<u32>,
+    pub as_of: String,
+    pub src: String,
+}
+
+/// The whole vendored catalog, parsed once at module load.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VendoredFreeTiers {
+    pub upstream: VendoredUpstream,
+    pub providers: Vec<VendoredProvider>,
+    pub models: Vec<VendoredModel>,
+}
+
+/// Parse the vendored catalog. A malformed or empty file is a hard error at first use:
+/// silent fallback to "no limits" would turn a typo into unexpected paid-quota spend.
+pub fn vendored_free_tiers() -> &'static VendoredFreeTiers {
+    static TIERS: std::sync::LazyLock<VendoredFreeTiers> = std::sync::LazyLock::new(|| {
+        serde_json::from_str(VENDORED_FREE_TIERS).expect("data/free-tiers.json must parse")
+    });
+    &TIERS
+}
+
+/// The vendored `free_rule` for `provider`, or `None` when the provider is not in the file.
+///
+/// * `"all-models-on-free-key"` — every model a free-mode account lists is free, but only
+///   on a free-mode account (Groq, Cerebras, Gemini, Mistral whole-key free tiers).
+/// * `"id-suffix:free"` — OpenRouter's `:free` id convention.
+pub fn vendored_free_rule(provider: &str) -> Option<&'static str> {
+    vendored_free_tiers()
+        .providers
+        .iter()
+        .find(|p| p.id == provider)
+        .map(|p| p.free_rule.as_str())
+}
+
+/// True when `(provider, model)` is free by a whole-key free-tier rule: the provider
+/// (Groq, Cerebras, Gemini, Mistral) is a whole-key free tier **and** the model has a
+/// vendored row naming its free-tier limits. Restricting to vendored rows is what keeps a
+/// *billed* key flagged `free_mode` from leaking a paid model (gemini-2.5-pro,
+/// imagen/veo/tts) into the free pool — an unlisted model is never widened.
+pub fn whole_key_free_model(provider: &str, model: &str) -> bool {
+    vendored_free_rule(provider) == Some("all-models-on-free-key")
+        && vendored_model_limits(provider, model).is_some()
+}
+
+/// Vendored per-model limits for `(provider, model)`, or `None` when the file does not seed
+/// a row (the caller then treats limits as unknown and does not gate).
+///
+/// Gemini's OpenAI-compatible `/models` endpoint prefixes model ids with `"models/"`;
+/// [`rrouter_router::free_mode::normalize_model_key`] strips that prefix so discovery and
+/// runtime lookups resolve the vendored Gemini rows cleanly.
+pub fn vendored_model_limits(provider: &str, model: &str) -> Option<&'static VendoredModel> {
+    let normalized = rrouter_router::free_mode::normalize_model_key(provider, model);
+    vendored_free_tiers()
+        .models
+        .iter()
+        .find(|m| m.provider == provider && m.model == normalized)
+}
+
+/// Effective per-model free-tier limits for `(provider, model)`: the vendored baseline
+/// tightened (never raised) by anything learned from provider 429/413 error bodies.
+pub fn effective_model_limits(
+    rotation: &rrouter_router::FreeRotation,
+    provider: &str,
+    model: &str,
+) -> rrouter_router::free_mode::ModelLimits {
+    let base = vendored_model_limits(provider, model)
+        .map(|row| rrouter_router::free_mode::ModelLimits {
+            rpm: row.rpm.map(u64::from),
+            rpd: row.rpd.map(u64::from),
+            tpm: row.tpm.map(u64::from),
+            tpd: row.tpd.map(u64::from),
+        })
+        .unwrap_or_default();
+    let learned = rotation.learned_model_limits(provider, model);
+    rrouter_router::free_mode::ModelLimits::merge_tighter(base, learned)
+}
+
+/// Rebuild today's UTC-day request and token counters from durable `usage` rows once after
+/// boot so a restart does not forget an already-exhausted daily free-tier cap (gap 2).
+///
+/// Cheap on the steady-state hot path: an in-memory flag short-circuits after the first
+/// load, so normal requests pay zero database queries.
+pub async fn ensure_rotation_seeded(store: &Store, rotation: &rrouter_router::FreeRotation) {
+    if !rotation.needs_usage_seed() {
+        return;
+    }
+    let now = crate::now_unix().max(0) as u64;
+    let day_start = rrouter_router::free_mode::utc_day_start(now) as i64;
+    let rows = match store.usage_summary_by_connection(Some(day_start), None).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to seed free-mode daily counters from usage");
+            return;
+        }
+    };
+    let entries: Vec<(uuid::Uuid, String, String, u32, u64)> = rows
+        .into_iter()
+        .filter(|row| !row.provider.is_empty())
+        .filter_map(|row| {
+            let conn = row
+                .connection_id
+                .unwrap_or(rrouter_router::free_mode::ANONYMOUS_CONNECTION);
+            let requests = row
+                .requests
+                .saturating_sub(row.errors)
+                .min(u32::MAX as u64) as u32;
+            let tokens = row
+                .input_tokens
+                .saturating_add(row.output_tokens)
+                .saturating_add(row.cache_read_tokens)
+                .saturating_add(row.cache_write_tokens);
+            // `usage.model` stores `"{provider}/{model}"` (see `proxy.rs` `served_model`),
+            // whereas live counters key on the bare normalized `candidate.model`. Strip one
+            // leading `"{provider}/"` before normalizing so boot seeds match live lookups.
+            let stripped = row
+                .model
+                .strip_prefix(&format!("{}/", row.provider))
+                .unwrap_or(&row.model);
+            let model =
+                rrouter_router::free_mode::normalize_model_key(&row.provider, stripped).to_string();
+            (requests > 0 || tokens > 0).then_some((conn, row.provider, model, requests, tokens))
+        })
+        .collect();
+    rotation.seed_from_usage_at(&entries, now);
+}
+
+/// The provider-wide daily request cap for `provider` from the vendored file (OpenRouter
+/// 1000/day, 50 below the credit threshold), or `None` when the provider has no cap. `low`
+/// selects the lower tier for accounts that bought fewer than the credit threshold; the
+/// exact tier switch is a later header/key-poll concern, so callers pass it in.
+pub fn vendored_provider_daily_cap(provider: &str, low_credit: bool) -> Option<u32> {
+    let caps = vendored_free_tiers()
+        .providers
+        .iter()
+        .find(|p| p.id == provider)?
+        .provider_caps
+        .as_ref()?;
+    if low_credit {
+        caps.rpd_low_credit.or(caps.rpd)
+    } else {
+        caps.rpd
+    }
 }
 
 /// Configured public catalog sources (env-overridable; empty env var disables a source).
@@ -2609,7 +2821,9 @@ async fn run_single_probe(
     match resp {
         Ok(resp) => {
             let status = resp.status().as_u16();
-            let retry_after = parse_retry_after_secs(resp.headers());
+            let retry_after = retry_after_header_secs(resp.headers());
+            let norm_model =
+                rrouter_router::free_mode::normalize_model_key(&target.provider, &target.model);
             if resp.status().is_success() {
                 state
                     .dispatcher
@@ -2619,6 +2833,10 @@ async fn run_single_probe(
                     .planner
                     .free_rotation()
                     .clear_provider_limit(conn_id_for_breaker, &target.provider);
+                state
+                    .planner
+                    .free_rotation()
+                    .clear_model_daily_park(conn_id_for_breaker, norm_model);
                 SingleProbeResponse {
                     provider: target.provider.clone(),
                     model: target.model.clone(),
@@ -2634,12 +2852,29 @@ async fn run_single_probe(
                 }
             } else {
                 let text = resp.text().await.unwrap_or_default();
+                if matches!(status, 429 | 413) {
+                    if let Some((kind, limit)) = learn_limit_from_error(&text) {
+                        state.planner.free_rotation().learn_model_limit(
+                            &target.provider,
+                            &target.model,
+                            kind,
+                            limit,
+                        );
+                    }
+                }
                 let free_limit = is_free_usage_limit_error(status, &text);
                 if free_limit {
-                    let wait = Duration::from_secs(retry_after.unwrap_or(300).clamp(30, 3600));
+                    let wait = free_cooldown_duration(status, retry_after, &text, at);
                     state.planner.free_rotation().record_provider_limit(
                         conn_id_for_breaker,
                         &target.provider,
+                        wait,
+                    );
+                } else if is_daily_exhaustion(status, &text) {
+                    let wait = daily_park_duration(retry_after, &text, at);
+                    state.planner.free_rotation().record_model_daily_park(
+                        conn_id_for_breaker,
+                        norm_model,
                         wait,
                     );
                 }
@@ -2776,7 +3011,36 @@ pub async fn is_chat_only_free_model(store: &Store, provider: &str, model: &str)
     false
 }
 
-/// True when an upstream 429 body is OpenCode's account/IP-wide `FreeUsageLimitError`.
+/// True when `(provider, model)` is a verified free public-catalog model — one the planner
+/// may serve from a *keyed* account on that provider (OpenRouter `:free`) or anonymously
+/// (OpenCode). Distinct from [`is_chat_only_free_model`] (a dialect fact) and from
+/// [`anonymous_endpoint_for`] (which only admits anonymous-capable providers): the
+/// provider-wide free-tier cooldown must skip a keyed OpenRouter `:free` model just as it
+/// skips an anonymous OpenCode one, or one exhausted cap fans out across every model on the
+/// account.
+pub async fn is_public_catalog_free_model(store: &Store, provider: &str, model: &str) -> bool {
+    let Ok(rows) = store.list_free_models().await else {
+        return false;
+    };
+    rows.iter().any(|row| {
+        row.provider == provider
+            && row.model == model
+            && row.free
+            && row.source == SOURCE_PUBLIC_CATALOG
+    })
+}
+
+/// True when an upstream 429 is a *platform-wide* free-tier limit that should cool the
+/// whole provider rather than one model. Two providers publish such a limit:
+///
+/// * **OpenCode** — its account/IP-wide `FreeUsageLimitError`.
+/// * **OpenRouter** — its own `:free` request caps (`free-models-per-min` /
+///   `free-models-per-day`), signalled by a message `"Rate limit exceeded: free-models-per-…"`
+///   and `metadata.provider_name` absent *or* `null` (OpenRouter is the limiter, not an
+///   upstream model provider). An OpenRouter 429 that names a real `provider_name`/`raw`
+///   (e.g. Google) is the upstream provider throttling, not OpenRouter's platform cap: that
+///   is a per-model limit, so it must NOT cool the whole provider — the breaker's
+///   `(connection, model)` cooldown and cross-model fallback own it.
 pub fn is_free_usage_limit_error(status: u16, body: &str) -> bool {
     if status != 429 {
         return false;
@@ -2784,7 +3048,119 @@ pub fn is_free_usage_limit_error(status: u16, body: &str) -> bool {
     if body.contains("FreeUsageLimitError") {
         return true;
     }
-    body.to_ascii_lowercase().contains("free usage limit")
+    if body.to_ascii_lowercase().contains("free usage limit") {
+        return true;
+    }
+    // OpenRouter's platform cap is announced in prose, which a non-JSON or reshaped body
+    // still carries. Match the message prefix before any JSON parse so a plain-text body
+    // is classified too.
+    if body
+        .to_ascii_lowercase()
+        .contains("rate limit exceeded: free-models-per-")
+    {
+        return true;
+    }
+    // Otherwise, a platform cap is a 429 whose `metadata` names no upstream provider
+    // (absent or `null`) and carries no `raw` inner error.
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let Some(metadata) = value.pointer("/error/metadata") else {
+        return false;
+    };
+    // An upstream-provider error names who refused (a non-null string) or carries an inner
+    // `raw`; either is a per-model limit, not a platform cap.
+    if metadata
+        .get("provider_name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| !name.trim().is_empty())
+        || metadata.get("raw").is_some_and(|raw| !raw.is_null())
+    {
+        return false;
+    }
+    // `error_type` (when present) is a second, provider-independent signal.
+    matches!(
+        metadata.get("error_type").and_then(Value::as_str),
+        Some("rate_limit_exceeded" | "free_models_per_day" | "free_models_per_minute")
+    )
+}
+
+/// True when a 429/413 body names a *daily* exhaustion (per-day quota, "daily limit",
+/// "requests per day", "tokens per day", RPD/TPD) rather than a transient per-minute
+/// throttle. A daily-exhausted model/account parks until UTC midnight instead of the 1 h
+/// cap a transient 429 earns.
+pub fn is_daily_exhaustion(status: u16, body: &str) -> bool {
+    if status != 429 && status != 413 {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    if [
+        "per day",
+        "per-day",
+        "daily",
+        "requests/day",
+        "tokens/day",
+        "quota exceeded for the day",
+        "free-models-per-day",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return true;
+    }
+    has_ascii_word(&lower, "rpd") || has_ascii_word(&lower, "tpd")
+}
+
+fn is_ascii_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn has_ascii_word(haystack: &str, word: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = haystack[start..].find(word) {
+        let pos = start + rel;
+        let end = pos + word.len();
+        let left_ok = pos == 0 || !is_ascii_word_byte(bytes[pos - 1]);
+        let right_ok = end == bytes.len() || !is_ascii_word_byte(bytes[end]);
+        if left_ok && right_ok {
+            return true;
+        }
+        start = pos + 1;
+    }
+    false
+}
+
+/// Cooldown duration for a platform-wide free-tier 429 (`FreeUsageLimitError` or
+/// OpenRouter `free-models-per-*`). A daily cap lifts the 1 h clamp to 24 h (parking until
+/// the provider's `X-RateLimit-Reset` or the next UTC midnight), whereas a transient
+/// per-minute/unknown cap stays clamped at 1 h.
+pub fn free_cooldown_duration(
+    status: u16,
+    retry_after: Option<u64>,
+    body: &str,
+    now_unix: i64,
+) -> Duration {
+    if is_daily_exhaustion(status, body) {
+        return daily_park_duration(retry_after, body, now_unix);
+    }
+    let secs = free_tier_cooldown_secs(retry_after, body, now_unix)
+        .or_else(|| retry_hint_from_body(body))
+        .unwrap_or(300)
+        .clamp(30, 3600);
+    Duration::from_secs(secs)
+}
+
+/// Cooldown duration for a daily exhaustion: prefers an authoritative header/reset/body
+/// hint, otherwise parks until the next UTC midnight (clamped to `30..=86_400` s).
+pub fn daily_park_duration(retry_after: Option<u64>, body: &str, now_unix: i64) -> Duration {
+    let secs = free_tier_cooldown_secs(retry_after, body, now_unix)
+        .or_else(|| retry_hint_from_body(body))
+        .unwrap_or_else(|| {
+            rrouter_router::free_mode::seconds_until_utc_midnight(now_unix.max(0) as u64)
+        })
+        .clamp(30, MAX_RETRY_HINT_SECS);
+    Duration::from_secs(secs)
 }
 
 /// Parse an HTTP `Retry-After` header into whole seconds (ignores HTTP-date values).
@@ -2803,16 +3179,406 @@ pub fn parse_retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u6
         .map(|v| v.ceil() as u64)
 }
 
+/// Hard ceiling for a learned/observed retry delay: upstream clamps its own to 24 h, and
+/// parking a free account longer than a day is an operator action, not a throttle.
+const MAX_RETRY_HINT_SECS: u64 = 86_400;
+
+/// Retry delay in whole seconds from an upstream 429/503/413 answer, in the order the
+/// parity doc fixes: the `Retry-After` header (integer, fractional, or HTTP-date) wins;
+/// otherwise a bounded body walk for `retryDelay` / `retry_after` / `retryAfterSeconds`;
+/// otherwise anchored prose ("try again in N s/m/ms"). Clamped to 24 h. `None` when the
+/// upstream said nothing.
+pub fn retry_hint(headers: &reqwest::header::HeaderMap, body: &str) -> Option<u64> {
+    if let Some(secs) = retry_after_header_secs(headers) {
+        return Some(secs.min(MAX_RETRY_HINT_SECS));
+    }
+    retry_hint_from_body(body)
+}
+
+/// Body-only retry hint (field walk then anchored prose), for call sites that already
+/// parsed the header separately. Clamped to 24 h.
+pub fn retry_hint_from_body(body: &str) -> Option<u64> {
+    if let Some(secs) = body_retry_after(body) {
+        return Some(secs.min(MAX_RETRY_HINT_SECS));
+    }
+    prose_retry_after(body).map(|secs| secs.min(MAX_RETRY_HINT_SECS))
+}
+
+/// `Retry-After` header as whole seconds: integer, fractional, or an HTTP-date (RFC 7231
+/// IMF-fixdate / RFC 2822), clamped to 24 h.
+pub fn retry_after_header_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    retry_after_header_secs_at(headers, jiff::Timestamp::now())
+        .map(|secs| secs.min(MAX_RETRY_HINT_SECS))
+}
+
+fn retry_after_header_secs_at(
+    headers: &reqwest::header::HeaderMap,
+    now: jiff::Timestamp,
+) -> Option<u64> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(secs);
+    }
+    if let Ok(frac) = raw.parse::<f64>() {
+        if frac.is_finite() && frac >= 0.0 {
+            return Some(frac.ceil() as u64);
+        }
+    }
+    // HTTP-date form (RFC 7231 IMF-fixdate): "Wed, 21 Oct 2026 07:28:00 GMT".
+    let when = jiff::fmt::rfc2822::parse(raw).ok()?.timestamp();
+    let wait = when.as_second() - now.as_second();
+    (wait > 0).then_some(wait as u64)
+}
+
+/// Depth-capped walk of a JSON error body for a retry delay field.
+fn body_retry_after(body: &str) -> Option<u64> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    const KEYS: &[&str] = &[
+        "retryDelay",
+        "retry_after",
+        "retryAfterSeconds",
+        "retry_after_seconds",
+    ];
+    let mut stack = vec![(&value, 0usize)];
+    let mut visited = 0usize;
+    while let Some((node, depth)) = stack.pop() {
+        if depth > 8 || visited >= 256 {
+            continue;
+        }
+        visited += 1;
+        match node {
+            Value::Object(map) => {
+                for key in KEYS {
+                    if let Some(hit) = map.get(*key).and_then(parse_seconds_value) {
+                        return Some(hit);
+                    }
+                }
+                for child in map.values() {
+                    stack.push((child, depth + 1));
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    stack.push((item, depth + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_seconds_value(value: &Value) -> Option<u64> {
+    if let Some(n) = value.as_u64() {
+        return Some(n);
+    }
+    if let Some(n) = value.as_f64() {
+        if n.is_finite() && n >= 0.0 {
+            return Some(n.ceil() as u64);
+        }
+        return None;
+    }
+    // Protobuf / Gemini `google.rpc.RetryInfo.retryDelay` carries a duration string like
+    // `"45s"`, `"1.5s"`, or `"500ms"` (or a bare numeric string).
+    let raw = value.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(secs);
+    }
+    if let Ok(frac) = raw.parse::<f64>() {
+        if frac.is_finite() && frac >= 0.0 {
+            return Some(frac.ceil() as u64);
+        }
+    }
+    parse_duration_secs_exact(raw)
+}
+
+/// Anchored prose retry hints like `"Please try again in 640ms."`, `"in 2.04s"`,
+/// `"in 7m30.144s"`, `"retry in 2m"`, `"try again in 1 hour"`, `"retry after 45s"`.
+///
+/// Only word-bounded multi-word retry phrases followed by whitespace or `:` qualify, so
+/// unrelated text like `"contain 5m tokens"` or `"within 5m"` is never misread.
+fn prose_retry_after(body: &str) -> Option<u64> {
+    let lower = body.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut best: Option<u64> = None;
+    for needle in ["try again in", "retry again in", "retry in", "retry after"] {
+        let mut start = 0;
+        while let Some(rel) = lower[start..].find(needle) {
+            let pos = start + rel;
+            let end = pos + needle.len();
+            start = pos + 1;
+            if pos > 0 && is_ascii_word_byte(bytes[pos - 1]) {
+                continue;
+            }
+            let after = &lower[end..];
+            // Require a separator (` `, `\t`, `:`) right after the phrase so e.g.
+            // "retry into" cannot match.
+            let Some(first) = after.chars().next() else {
+                continue;
+            };
+            if !matches!(first, ' ' | '\t' | ':') {
+                continue;
+            }
+            let after = after.trim_start_matches([' ', '\t', ':']);
+            let Some((secs, _)) = parse_leading_duration_secs(after) else {
+                continue;
+            };
+            best = Some(best.map_or(secs, |b| b.min(secs)));
+        }
+    }
+    best
+}
+
+/// Parse an exact duration string (`"45s"`, `"1.5s"`, `"500ms"`, `"7m30.144s"`), rejecting
+/// any trailing garbage.
+fn parse_duration_secs_exact(s: &str) -> Option<u64> {
+    let lower = s.trim().to_ascii_lowercase();
+    let (secs, rest) = parse_leading_duration_secs(&lower)?;
+    rest.trim().is_empty().then_some(secs)
+}
+
+/// Parse one or more contiguous duration components from the start of lowercase `s`
+/// (longest unit match first: `ms`, `s`, `m`, `h`, `d` and their long English names),
+/// summing compound forms like `"7m30.144s"` or `"1h 30m"`. Positive sub-second waits
+/// (e.g. `"640ms"`, `"20ms"`) round up to `1` s.
+fn parse_leading_duration_secs(s: &str) -> Option<(u64, &str)> {
+    let mut rest = s.trim_start_matches([' ', '\t']);
+    let mut total_secs = 0.0_f64;
+    let mut parts = 0usize;
+
+    loop {
+        let candidate = if parts == 0 {
+            rest
+        } else {
+            rest.trim_start_matches([' ', '\t'])
+        };
+        let Some((part_secs, next)) = parse_single_duration_component(candidate) else {
+            break;
+        };
+        total_secs += part_secs;
+        parts += 1;
+        rest = next;
+    }
+
+    if parts == 0 || !total_secs.is_finite() || total_secs <= 0.0 {
+        return None;
+    }
+    Some(((total_secs.ceil() as u64).max(1), rest))
+}
+
+fn parse_single_duration_component(s: &str) -> Option<(f64, &str)> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 {
+        return None;
+    }
+    if i < bytes.len() && bytes[i] == b'.' {
+        let frac_start = i + 1;
+        let mut j = frac_start;
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j == frac_start {
+            return None;
+        }
+        i = j;
+    }
+    let num: f64 = s[..i].parse().ok()?;
+    if !num.is_finite() || num < 0.0 {
+        return None;
+    }
+    let after_num = s[i..].trim_start_matches([' ', '\t']);
+    // Longest unit match first so `ms` / `milliseconds` is matched before `m`.
+    const UNITS: &[(&str, f64)] = &[
+        ("milliseconds", 0.001),
+        ("millisecond", 0.001),
+        ("msecs", 0.001),
+        ("msec", 0.001),
+        ("ms", 0.001),
+        ("seconds", 1.0),
+        ("second", 1.0),
+        ("secs", 1.0),
+        ("sec", 1.0),
+        ("s", 1.0),
+        ("minutes", 60.0),
+        ("minute", 60.0),
+        ("mins", 60.0),
+        ("min", 60.0),
+        ("m", 60.0),
+        ("hours", 3600.0),
+        ("hour", 3600.0),
+        ("hrs", 3600.0),
+        ("hr", 3600.0),
+        ("h", 3600.0),
+        ("days", 86_400.0),
+        ("day", 86_400.0),
+        ("d", 86_400.0),
+    ];
+    for &(unit, mult) in UNITS {
+        if let Some(tail) = after_num.strip_prefix(unit) {
+            // Reject partial identifier matches like "5meters" or "5mb", while still
+            // allowing compound durations like "7m30.144s" where `'3'` is non-alphabetic.
+            if tail.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+                continue;
+            }
+            return Some((num * mult, tail));
+        }
+    }
+    None
+}
+
+/// Re-exported from `rrouter-router` so learned limits and rotation share one enum.
+pub use rrouter_router::free_mode::LimitKind;
+
+/// Parse a limit the provider states in an error body:
+/// - `"Limit 30000 requests per minute"` / `"Limit 12000 tokens per minute"`
+/// - `"on tokens per minute (TPM): Limit 12000, Used 11500, Requested 1000"` (Groq 413/429)
+/// - `"quota exceeded for the day: 50 requests per day"`
+///
+/// Only ever *tightens* the stored value at the call site, never raises it. `None` when no
+/// recognizable positive limit is present.
+pub fn learn_limit_from_error(body: &str) -> Option<(LimitKind, u64)> {
+    let lower = body.to_ascii_lowercase();
+    let units: &[(&str, LimitKind, bool)] = &[
+        ("requests per minute", LimitKind::RequestsPerMinute, false),
+        ("requests/minute", LimitKind::RequestsPerMinute, false),
+        ("request per minute", LimitKind::RequestsPerMinute, false),
+        ("requests per day", LimitKind::RequestsPerDay, false),
+        ("requests/day", LimitKind::RequestsPerDay, false),
+        ("request per day", LimitKind::RequestsPerDay, false),
+        ("tokens per minute", LimitKind::TokensPerMinute, false),
+        ("tokens/minute", LimitKind::TokensPerMinute, false),
+        ("tokens per day", LimitKind::TokensPerDay, false),
+        ("tokens/day", LimitKind::TokensPerDay, false),
+        ("tpm", LimitKind::TokensPerMinute, true),
+        ("rpm", LimitKind::RequestsPerMinute, true),
+        ("tpd", LimitKind::TokensPerDay, true),
+        ("rpd", LimitKind::RequestsPerDay, true),
+    ];
+    for &(unit, kind, word_bounded) in units {
+        let Some(idx) = find_unit(&lower, unit, word_bounded) else {
+            continue;
+        };
+        let before = &lower[..idx];
+        // 1. Number immediately before the unit: "Limit 30000 requests per minute".
+        if let Some(n) = trailing_number(before).filter(|&n| n > 0) {
+            return Some((kind, n));
+        }
+        // 2. Number immediately after the unit: "requests per minute: 30".
+        let after = &lower[idx + unit.len()..];
+        let after_clean = after.trim_start_matches([' ', '\t', ':', '=', ')']);
+        if let Some(n) = leading_number(after_clean).filter(|&n| n > 0) {
+            return Some((kind, n));
+        }
+        // 3. Groq 413/429 format: "on tokens per minute (TPM): Limit 12000, Used ...".
+        let window_after: String = after.chars().take(48).collect();
+        if let Some(lim_pos) = window_after.find("limit") {
+            let after_limit = window_after[lim_pos + "limit".len()..]
+                .trim_start_matches([' ', '\t', ':', '=']);
+            if let Some(n) = leading_number(after_limit).filter(|&n| n > 0) {
+                return Some((kind, n));
+            }
+        }
+    }
+    None
+}
+
+fn find_unit(haystack: &str, unit: &str, word_bounded: bool) -> Option<usize> {
+    if !word_bounded {
+        return haystack.find(unit);
+    }
+    let bytes = haystack.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = haystack[start..].find(unit) {
+        let pos = start + rel;
+        let end = pos + unit.len();
+        let left_ok = pos == 0 || !is_ascii_word_byte(bytes[pos - 1]);
+        let right_ok = end == bytes.len() || !is_ascii_word_byte(bytes[end]);
+        if left_ok && right_ok {
+            return Some(pos);
+        }
+        start = pos + 1;
+    }
+    None
+}
+
+fn trailing_number(s: &str) -> Option<u64> {
+    let digits: String = s
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == ',')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn leading_number(s: &str) -> Option<u64> {
+    let t = s.trim_start();
+    let digits: String = t
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ',')
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Whole seconds until a free-tier cap resets, from the most authoritative signal
+/// available. The HTTP `Retry-After` header (already parsed into `retry_after`) wins;
+/// otherwise an OpenRouter platform-cap 429 carries
+/// `error.metadata.headers.X-RateLimit-Reset` (epoch **milliseconds**, string or number),
+/// which parks a per-day cap until the provider's own reset instead of re-probing every
+/// 300 s. `None` when neither is present, so callers fall back to their own default.
+pub fn free_tier_cooldown_secs(retry_after: Option<u64>, body: &str, now_unix: i64) -> Option<u64> {
+    if let Some(secs) = retry_after {
+        return Some(secs);
+    }
+    let value: Value = serde_json::from_str(body).ok()?;
+    let reset_val = value.pointer("/error/metadata/headers/X-RateLimit-Reset")?;
+    let reset_ms = reset_val
+        .as_i64()
+        .or_else(|| reset_val.as_str().and_then(|s| s.trim().parse::<i64>().ok()))?;
+    let reset = reset_ms / 1000;
+    if reset <= now_unix {
+        return None;
+    }
+    Some((reset - now_unix) as u64)
+}
+
 /// Extract a concise, credential-scrubbed provider error message for probe responses.
+///
+/// OpenRouter wraps an upstream provider's refusal behind the generic
+/// `"Provider returned error"`; the real reason sits in `error.metadata.raw` (a JSON
+/// string the inner provider sent). Unwrap it so the operator and the UI see *why* the
+/// free model failed instead of a placeholder that names nothing.
 pub fn extract_provider_error_message(body: &str, creds: Option<&Credentials>) -> String {
     let extracted = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|v| {
-            v.pointer("/error/message")
-                .or_else(|| v.get("message"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
+            openrouter_inner_message(&v)
+                .or_else(|| v.pointer("/error/message").cloned())
+                .or_else(|| v.get("message").cloned())
         })
+        .and_then(|s| s.as_str().map(str::to_string))
         .unwrap_or_else(|| body.trim().to_string());
     let cleaned = match creds {
         Some(c) => scrub(&extracted, c),
@@ -2826,12 +3592,139 @@ pub fn extract_provider_error_message(body: &str, creds: Option<&Credentials>) -
     }
 }
 
+/// OpenRouter's `error.metadata.raw`, unwrapped one level, when the outer message is the
+/// unhelpful `"Provider returned error"`. `raw` is the inner provider's own error and can
+/// be a JSON string (a provider error body), an already-parsed object, or a plain-text
+/// sentence — the plain-text form is the common upstream 429. Read the inner
+/// `error.message`/`message` from JSON, else return the raw text itself.
+fn openrouter_inner_message(value: &Value) -> Option<Value> {
+    let metadata = value.pointer("/error/metadata")?;
+    let raw = metadata.get("raw")?;
+    match raw {
+        Value::String(text) => {
+            if let Ok(inner) = serde_json::from_str::<Value>(text) {
+                if let Some(message) = inner
+                    .pointer("/error/message")
+                    .or_else(|| inner.get("message"))
+                    .cloned()
+                {
+                    if message.as_str().is_some_and(|s| !s.trim().is_empty()) {
+                        return Some(message);
+                    }
+                }
+            }
+            // Plain-text raw (not JSON): the sentence is itself the reason.
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(Value::String(text.trim().to_string()))
+            }
+        }
+        Value::Object(_) => raw
+            .pointer("/error/message")
+            .or_else(|| raw.get("message"))
+            .cloned(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn price(input: f64, output: f64) -> Option<f64> {
         published_price_of(&json!({ "input": input, "output": output }))
+    }
+
+    /// The vendored catalog parses, records its upstream provenance (repo + sha + MIT
+    /// notice), and answers the free rule and per-model limits the routing paths read.
+    #[test]
+    fn vendored_free_tiers_parse_and_expose_rules_and_limits() {
+        let tiers = vendored_free_tiers();
+        assert_eq!(tiers.upstream.repo, "https://github.com/tashfeenahmed/freellmapi");
+        assert_eq!(
+            tiers.upstream.sha,
+            "6daa81b8def6a7e1d99fd67a611779913c287076"
+        );
+        assert_eq!(tiers.upstream.license, "MIT");
+        assert!(tiers.upstream.paths.len() >= 8, "tracked paths recorded");
+
+        // Whole-key free tiers carry the all-models-on-free-key rule; OpenRouter keeps
+        // its `:free` suffix rule.
+        assert_eq!(vendored_free_rule("groq"), Some("all-models-on-free-key"));
+        assert_eq!(vendored_free_rule("cerebras"), Some("all-models-on-free-key"));
+        assert_eq!(vendored_free_rule("gemini"), Some("all-models-on-free-key"));
+        assert_eq!(vendored_free_rule("mistral"), Some("all-models-on-free-key"));
+        assert_eq!(vendored_free_rule("openrouter"), Some("id-suffix:free"));
+        assert_eq!(vendored_free_rule("opencode"), None);
+
+        // OpenRouter's provider-wide daily cap is recorded (the gap-3 signal).
+        let openrouter = tiers
+            .providers
+            .iter()
+            .find(|p| p.id == "openrouter")
+            .expect("openrouter");
+        let caps = openrouter.provider_caps.as_ref().expect("caps");
+        assert_eq!(caps.rpd, Some(1000));
+        assert_eq!(caps.rpd_low_credit, Some(50));
+
+        // Groq's corrected final limits (TPM raised to 12000, TPD cut to 100000) survive
+        // the UPDATE-chain reconciliation the parity doc describes.
+        let groq = vendored_model_limits("groq", "llama-3.3-70b-versatile").expect("groq row");
+        assert_eq!(groq.rpm, Some(30));
+        assert_eq!(groq.rpd, Some(1000));
+        assert_eq!(groq.tpm, Some(12000));
+        assert_eq!(groq.tpd, Some(100000));
+        assert_eq!(groq.context, Some(131072));
+
+        // Gemini's stale 250/1000 RPD was corrected to the live 20 RPD free pool.
+        let gemini = vendored_model_limits("gemini", "gemini-2.5-flash").expect("gemini row");
+        assert_eq!(gemini.rpd, Some(20));
+
+        // Cerebras: the three originally-seeded rows were removed from the free tier (V2),
+        // and gpt-oss-120b was re-added (V10) and corrected to the shared 5 RPM / 30K TPM /
+        // 2400 RPD / 1M TPD free pool (V13). The removed qwen-3-coder-480b must not appear.
+        let cerebras = vendored_model_limits("cerebras", "gpt-oss-120b").expect("cerebras row");
+        assert_eq!(cerebras.rpm, Some(5));
+        assert_eq!(cerebras.rpd, Some(2400));
+        assert_eq!(cerebras.tpm, Some(30000));
+        assert_eq!(cerebras.tpd, Some(1000000));
+        assert!(vendored_model_limits("cerebras", "qwen-3-coder-480b").is_none());
+
+        // Mistral's context window was corrected 131K → 262K (V12).
+        let mistral = vendored_model_limits("mistral", "mistral-large-latest").expect("mistral row");
+        assert_eq!(mistral.context, Some(262144));
+
+        assert!(vendored_model_limits("groq", "does-not-exist").is_none());
+    }
+
+    /// The whole-key free rule widens only a vendored model row, so a billed key flagged
+    /// `free_mode` can never leak a paid model into the pool.
+    #[test]
+    fn whole_key_free_model_widens_only_vendored_rows() {
+        // A vendored Groq model is free; a non-vendored id on the same whole-key provider
+        // (gemini-2.5-pro, or any unlisted id) is not.
+        assert!(whole_key_free_model("groq", "llama-3.3-70b-versatile"));
+        assert!(whole_key_free_model("gemini", "gemini-2.5-flash"));
+        assert!(!whole_key_free_model("gemini", "gemini-2.5-pro"));
+        assert!(!whole_key_free_model("groq", "gpt-5-expensive"));
+
+        // Providers without the whole-key rule never widen, even for a vendored id.
+        assert!(!whole_key_free_model("openrouter", "llama-3.3-70b-versatile"));
+        assert!(!whole_key_free_model("opencode", "llama-3.3-70b-versatile"));
+        assert!(!whole_key_free_model("unknown", "llama-3.3-70b-versatile"));
+    }
+
+    /// The provider-wide daily cap comes from the vendored file, with a lower tier for
+    /// low-credit accounts; providers without a cap return `None`.
+    #[test]
+    fn vendored_provider_daily_cap_selects_the_tier() {
+        assert_eq!(vendored_provider_daily_cap("openrouter", false), Some(1000));
+        assert_eq!(vendored_provider_daily_cap("openrouter", true), Some(50));
+        // No cap for the whole-key providers.
+        assert_eq!(vendored_provider_daily_cap("groq", false), None);
+        assert_eq!(vendored_provider_daily_cap("gemini", true), None);
+        assert_eq!(vendored_provider_daily_cap("unknown", false), None);
     }
 
     /// The two signals, in the order the contract names them.
@@ -3023,6 +3916,61 @@ mod tests {
         assert!(!is_free_usage_limit_error(200, body));
     }
 
+    /// OpenRouter's own `:free` request cap is a platform-wide limit (cool the provider);
+    /// its upstream-provider 429 is per-model (cool the model, fall back). The real
+    /// platform-cap body carries `provider_name: null` and no `error_type` — it is
+    /// announced in the message prose — while the upstream-provider form names a real
+    /// provider.
+    #[test]
+    fn openrouter_free_tier_cap_cools_the_provider_but_provider_429_does_not() {
+        // OpenRouter's real per-day cap body (provider_name is null, no error_type).
+        let platform_day = r#"{"error":{"message":"Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day","code":429,"metadata":{"headers":{"X-RateLimit-Limit":"50","X-RateLimit-Remaining":"0","X-RateLimit-Reset":"1741305600000"},"provider_name":null}}}"#;
+        assert!(is_free_usage_limit_error(429, platform_day));
+
+        // The per-minute variant.
+        let platform_min = r#"{"error":{"message":"Rate limit exceeded: free-models-per-min","code":429,"metadata":{"provider_name":null}}}"#;
+        assert!(is_free_usage_limit_error(429, platform_min));
+
+        // The upstream provider (Google) throttled: named via a real provider_name.
+        let provider = r#"{"error":{"code":429,"message":"Provider returned error","metadata":{"provider_name":"Google AI Studio","raw":"google/gemma-3-27b-it:free is temporarily rate-limited upstream"}}}"#;
+        assert!(
+            !is_free_usage_limit_error(429, provider),
+            "an upstream provider 429 is per-model, not a platform cap"
+        );
+
+        // Neither signal: an ordinary 429 is not a free-tier limit.
+        assert!(!is_free_usage_limit_error(
+            429,
+            r#"{"error":{"code":429,"message":"too many requests"}}"#
+        ));
+    }
+
+    /// The probe surfaces the *inner* provider reason behind OpenRouter's generic
+    /// "Provider returned error", not the placeholder.
+    #[test]
+    fn extract_message_unwraps_openrouter_metadata_raw() {
+        // JSON-string raw: the inner provider's error body.
+        let json_raw = r#"{"error":{"code":429,"message":"Provider returned error","metadata":{"raw":"{\"error\":{\"message\":\"Resource exhausted: gemini rate limit\"}}","provider_name":"Google"}}}"#;
+        let msg = extract_provider_error_message(json_raw, None);
+        assert_eq!(msg, "Resource exhausted: gemini rate limit");
+
+        // Plain-text raw: the sentence is itself the reason.
+        let plain_raw = r#"{"error":{"code":429,"message":"Provider returned error","metadata":{"raw":"google/gemma-3-27b-it:free is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations","provider_name":"Google AI Studio"}}}"#;
+        let msg = extract_provider_error_message(plain_raw, None);
+        assert!(
+            msg.starts_with("google/gemma-3-27b-it:free is temporarily rate-limited"),
+            "plain-text raw must surface verbatim, got {msg:?}"
+        );
+
+        // Without a raw inner message, the outer message is the fallback.
+        let plain = r#"{"error":{"code":429,"message":"Provider returned error"}}"#;
+        assert_eq!(extract_provider_error_message(plain, None), "Provider returned error");
+
+        // A non-OpenRouter error still reads `/error/message`.
+        let anthropic = r#"{"type":"error","error":{"message":"rate_limit_error"}}"#;
+        assert_eq!(extract_provider_error_message(anthropic, None), "rate_limit_error");
+    }
+
     /// `Retry-After` is read as integer seconds, fractional seconds, and ignored when it is
     /// an HTTP-date or absent — never invented.
     #[test]
@@ -3042,6 +3990,221 @@ mod tests {
 
         let empty = reqwest::header::HeaderMap::new();
         assert_eq!(parse_retry_after_secs(&empty), None);
+    }
+
+    /// A free-tier cooldown prefers the already-parsed `Retry-After`, then reads the
+    /// OpenRouter platform cap's `metadata.headers.X-RateLimit-Reset` (epoch ms, string or
+    /// integer) so a per-day cap parks until the provider's own reset instead of re-probing
+    /// on the local default.
+    #[test]
+    fn free_tier_cooldown_secs_prefers_header_then_rate_limit_reset() {
+        assert_eq!(
+            free_tier_cooldown_secs(Some(90), "{}", 1_700_000_000),
+            Some(90),
+            "Retry-After wins"
+        );
+
+        // No header: the string reset (epoch ms) drives the wait.
+        let body = r#"{"error":{"code":429,"message":"Rate limit exceeded: free-models-per-day","metadata":{"headers":{"X-RateLimit-Reset":"1700001000000"},"provider_name":null}}}"#;
+        let now = 1_700_000_000;
+        assert_eq!(
+            free_tier_cooldown_secs(None, body, now),
+            Some(1000),
+            "1000 s until the epoch-ms reset"
+        );
+
+        // Numeric JSON X-RateLimit-Reset is accepted too.
+        let numeric = r#"{"error":{"code":429,"message":"Rate limit exceeded: free-models-per-day","metadata":{"headers":{"X-RateLimit-Reset":1700020000000},"provider_name":null}}}"#;
+        assert_eq!(
+            free_tier_cooldown_secs(None, numeric, now),
+            Some(20_000),
+            "numeric epoch-ms reset"
+        );
+        // Daily platform cap lifts the 1 h clamp and parks until reset (20,000 s > 3,600 s).
+        assert_eq!(
+            free_cooldown_duration(429, None, numeric, now),
+            Duration::from_secs(20_000)
+        );
+        // Transient per-minute platform cap stays clamped at 1 h.
+        let transient = r#"{"error":{"code":429,"message":"Rate limit exceeded: free-models-per-min","metadata":{"headers":{"X-RateLimit-Reset":1700020000000},"provider_name":null}}}"#;
+        assert_eq!(
+            free_cooldown_duration(429, None, transient, now),
+            Duration::from_secs(3600)
+        );
+
+        // A reset already in the past yields nothing.
+        assert_eq!(free_tier_cooldown_secs(None, body, 1_700_002_000), None);
+    }
+
+    /// `retry_hint` prefers the header (integer/fractional/RFC 2822 HTTP-date), then a body
+    /// field (including Gemini `RetryInfo.retryDelay: "45s"`), then word-anchored prose
+    /// (supporting `ms`, decimals, compound durations, and spaced long units), clamped to 24 h.
+    #[test]
+    fn retry_hint_reads_header_then_body_then_prose() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(reqwest::header::RETRY_AFTER, "61".parse().unwrap());
+        assert_eq!(retry_hint(&h, "{}"), Some(61), "integer header wins");
+
+        // RFC 2822 HTTP-date header parses via jiff::fmt::rfc2822::parse.
+        let mut date_h = reqwest::header::HeaderMap::new();
+        date_h.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        let one_min_before = jiff::fmt::rfc2822::parse("Wed, 21 Oct 2026 07:27:00 GMT")
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            retry_after_header_secs_at(&date_h, one_min_before),
+            Some(60),
+            "HTTP-date Retry-After"
+        );
+
+        // Body field when no header.
+        let empty = reqwest::header::HeaderMap::new();
+        let json_body = r#"{"error":{"message":"slow down","retry_after": 30}}"#;
+        assert_eq!(retry_hint(&empty, json_body), Some(30), "body field");
+
+        // Real Gemini RetryInfo protobuf duration strings ("45s", "1.5s", "500ms") and wide JSON.
+        let gemini = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"exhausted","a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"45s"}]}}"#;
+        assert_eq!(retry_hint(&empty, gemini), Some(45), "Gemini RetryInfo 45s");
+        let gemini_frac = r#"{"error":{"details":[{"retryDelay":"1.5s"}]}}"#;
+        assert_eq!(retry_hint(&empty, gemini_frac), Some(2), "Gemini RetryInfo 1.5s");
+        let gemini_ms = r#"{"error":{"details":[{"retryDelay":"500ms"}]}}"#;
+        assert_eq!(retry_hint(&empty, gemini_ms), Some(1), "Gemini RetryInfo 500ms");
+
+        // Real Groq / OpenAI prose formats: ms, decimals, compound durations, spaced units.
+        assert_eq!(
+            retry_hint(&empty, "Please try again in 640ms."),
+            Some(1),
+            "640ms rounds up to 1s, NOT 640 minutes"
+        );
+        assert_eq!(
+            retry_hint(&empty, "Please try again in 20ms."),
+            Some(1),
+            "20ms rounds up to 1s, NOT 20 minutes"
+        );
+        assert_eq!(
+            retry_hint(&empty, "Please try again in 2.04s."),
+            Some(3),
+            "fractional seconds ceil"
+        );
+        assert_eq!(
+            retry_hint(&empty, "Please try again in 7m30.144s."),
+            Some(451),
+            "compound 7m30.144s = 450.144s -> 451s"
+        );
+        assert_eq!(
+            retry_hint(&empty, "Please try again in 1 hour."),
+            Some(3600),
+            "spaced long unit"
+        );
+        assert_eq!(
+            retry_hint(&empty, "rate limited, try again in 30s"),
+            Some(30),
+            "prose seconds"
+        );
+        assert_eq!(
+            retry_hint(&empty, "please retry in 2m"),
+            Some(120),
+            "prose minutes"
+        );
+        assert_eq!(
+            retry_hint(&empty, "retry after 45 seconds"),
+            Some(45),
+            "retry after seconds"
+        );
+
+        // Unanchored or unrelated prose must NEVER produce a false-positive cooldown.
+        assert_eq!(
+            retry_hint(&empty, "the request may contain 5m tokens"),
+            None,
+            "contain 5m tokens must not match"
+        );
+        assert_eq!(
+            retry_hint(&empty, "error occurred within 5m of startup"),
+            None,
+            "within 5m must not match"
+        );
+        assert_eq!(
+            retry_hint(&empty, "retry into 5m buffer"),
+            None,
+            "retry into must not match"
+        );
+
+        // Clamped to 24 h.
+        let mut big = reqwest::header::HeaderMap::new();
+        big.insert(reqwest::header::RETRY_AFTER, "999999".parse().unwrap());
+        assert_eq!(retry_hint(&big, "{}"), Some(86_400), "clamped");
+    }
+
+    /// `learn_limit_from_error` extracts a numeric limit from provider prose (including
+    /// Groq's real `on tokens per minute (TPM): Limit 12000, Used ...` shape) and ignores
+    /// accidental substring hits.
+    #[test]
+    fn learn_limit_reads_provider_limit_prose() {
+        let groq_rpm =
+            "Rate limit reached for model in organization. Limit 30000 requests per minute.";
+        assert_eq!(
+            learn_limit_from_error(groq_rpm),
+            Some((LimitKind::RequestsPerMinute, 30000))
+        );
+
+        let groq_real_tpm = "Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_1` on tokens per minute (TPM): Limit 12000, Used 11500, Requested 1000. Please try again in 2.5s.";
+        assert_eq!(
+            learn_limit_from_error(groq_real_tpm),
+            Some((LimitKind::TokensPerMinute, 12000))
+        );
+
+        let daily = "quota exceeded for the day: 50 requests per day";
+        assert_eq!(
+            learn_limit_from_error(daily),
+            Some((LimitKind::RequestsPerDay, 50))
+        );
+
+        let tpm = "Limit 12,000 tokens per minute reached";
+        assert_eq!(
+            learn_limit_from_error(tpm),
+            Some((LimitKind::TokensPerMinute, 12000))
+        );
+
+        // No number near a limit unit, or substring inside another word → nothing.
+        assert_eq!(learn_limit_from_error("something went wrong"), None);
+        assert_eq!(learn_limit_from_error("httpmodel limit 500"), None);
+    }
+
+    /// Gemini's `/models` endpoint prefixes model ids with `models/`; vendored lookup and
+    /// whole-key matching strip that prefix while keeping paid / non-chat Gemini models out.
+    #[test]
+    fn vendored_gemini_normalizes_models_prefix_and_keeps_paid_out() {
+        assert!(whole_key_free_model("gemini", "gemini-2.5-flash"));
+        assert!(whole_key_free_model("gemini", "models/gemini-2.5-flash"));
+        assert_eq!(
+            vendored_model_limits("gemini", "models/gemini-2.5-flash").and_then(|m| m.rpd),
+            Some(20)
+        );
+        assert!(!whole_key_free_model("gemini", "models/gemini-2.5-pro"));
+        assert!(!whole_key_free_model("gemini", "models/text-embedding-004"));
+    }
+
+    /// `is_daily_exhaustion` flags daily / RPD / TPD exhaustions on 429/413 and leaves
+    /// transient per-minute throttles alone.
+    #[test]
+    fn is_daily_exhaustion_distinguishes_daily_from_transient() {
+        assert!(is_daily_exhaustion(
+            429,
+            "Rate limit exceeded: free-models-per-day"
+        ));
+        assert!(is_daily_exhaustion(
+            429,
+            "Quota exceeded for quota metric 'Generate Content API requests per day'"
+        ));
+        assert!(is_daily_exhaustion(413, "Exceeded model TPD limit"));
+        assert!(!is_daily_exhaustion(
+            429,
+            "Rate limit exceeded: free-models-per-min"
+        ));
+        assert!(!is_daily_exhaustion(200, "requests per day"));
     }
 
     /// A catalog-supplied endpoint may only be the provider's own https host with no

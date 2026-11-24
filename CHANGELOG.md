@@ -2,6 +2,27 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.35.0 — 2026-11-24
+
+### Features
+
+- feat(ui): Usage page redesigned as **Usage Overview** — the providers table lists only providers/accounts whose quota RRouter actually tracks; KPI tiles, quota alerts, a breakdown donut, a trend chart and recent activity, with unrouted requests in a secondary per-reason disclosure
+- feat(gateway): unrouted requests (failed before any provider was dispatched) now record a stable reason (`unknown_model`, `no_healthy_candidate`, `group_empty`, `auth`, `governance`, `budget`, `rate_limited`, …) in the new nullable `usage.unrouted_reason` column (migration V47); `GET /api/usage/summary` adds an `unrouted` object (`requests` plus a per-reason `reasons` list) on every grouping, additively
+- feat(free-mode): vendored free-tier catalog `crates/rrouter-gateway/data/free-tiers.json` from [freellmapi](https://github.com/tashfeenahmed/freellmapi) at upstream `6daa81b` (MIT, notice in `data/LICENSE.freellmapi`); see `design/freellmapi-parity.md` for the one-command upstream diff
+- feat(free-mode): whole-key free rule for Groq, Cerebras, Gemini and Mistral free-mode accounts, limited to models with a vendored row so a billed key never leaks a paid model into the free pool
+- feat(free-mode): proactive provider daily caps (OpenRouter 1000/day) skip a drained account before spending an attempt
+- feat(free-mode): retry hints read from 429/503/413 bodies (Gemini `RetryInfo.retryDelay`, "try again in Ns") drive the cooldown, and limits stated in error bodies are learned (only ever tightening the vendored baseline)
+- feat(free-mode): per-model RPD/TPM/TPD limits with a daily park until UTC midnight; today's counters are rebuilt from usage rows after a restart
+
+### Bug Fixes
+
+- fix(free-mode): OpenRouter's `:free` platform `429` is classified as a provider-wide cooldown (falls over instead of retrying each free model) and the real reason is unwrapped from `metadata.raw` instead of "Provider returned error"
+- fix(ui): Playground `/v1` calls send `x-admin-token` (same-origin only) so operators signed in with the admin token no longer get `403 key_scope`, which was a source of unrouted rows
+
+### Known issues
+
+- Gemini's free daily quota may reset at midnight Pacific time, but RRouter parks an exhausted Gemini model until the next UTC midnight; the two boundaries are 7–8 hours apart, so a parked Gemini model can come back before Google's reset (and hit `429` again) or stay parked for hours after it
+
 ## 0.34.1 — 2026-11-24
 
 ### Other Changes

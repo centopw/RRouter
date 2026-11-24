@@ -1115,10 +1115,35 @@ export function ensurePlaygroundKey(): Promise<PlaygroundKey> {
 
 /**
  * Every `/v1` call the playground makes carries this marker. The gateway refuses its
- * playground key without the marker and an admin dashboard session, so the plaintext
- * alone buys another client nothing.
+ * playground key without the marker and admin authority (an admin dashboard session or
+ * `x-admin-token`), so the plaintext alone buys another client nothing.
  */
 export const PLAYGROUND_HEADERS: Record<string, string> = { "x-rrouter-playground": "1" };
+
+/**
+ * True only for a same-origin path on this gateway (`/v1/...`), never an absolute,
+ * scheme-relative (`//host/...`), or backslash-prefixed URL. Prevents `x-admin-token`
+ * from ever being sent to another host.
+ */
+export function isSameOriginPath(path: string): boolean {
+  return path.startsWith("/") && !path.startsWith("//") && !path.startsWith("/\\");
+}
+
+/**
+ * Headers for same-origin playground `/v1` requests: always includes the playground marker,
+ * and attaches `x-admin-token` when the operator signed in via `RROUTER_ADMIN_TOKEN`
+ * (matching gateway `is_playground_request`, where `Authorization` carries the playground key).
+ */
+export function playgroundHeaders(
+  path: string,
+  token: string | null = adminToken(),
+): Record<string, string> {
+  const trimmed = token?.trim();
+  return {
+    ...PLAYGROUND_HEADERS,
+    ...(trimmed && isSameOriginPath(path) ? { "x-admin-token": trimmed } : {}),
+  };
+}
 
 /** What the enhancer asks the model to do; the draft itself is the user message. */
 const REWRITE_INSTRUCTION = [
@@ -1156,7 +1181,7 @@ export async function rewritePrompt({
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${key}`,
-      ...PLAYGROUND_HEADERS,
+      ...playgroundHeaders(path),
     },
     body: JSON.stringify({
       model,

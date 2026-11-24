@@ -1,28 +1,35 @@
 /**
  * Multi-provider Limits Board for `/usage`.
  *
- * Replaces the old single-account Headline + LimitsCard hero: every account of every
- * provider is visible at once, sorted by risk (exhausted and earliest projected limit
- * hit first, then failing accounts, then highest used share). Each card shows all plan
- * windows and operator caps right next to the account's range activity (requests, tokens,
- * spend, error rate, last used). Expanding a card lazily fetches daily usage history for
- * the selected window and renders `LimitChart` — zero N-per-card polling on mount.
+ * Every account of every provider is visible at once, sorted by risk and split into
+ * sections (needs attention → within limits → no limits reported → inactive) so a grid row
+ * only ever holds cards of the same shape. Each card has exactly one status, one compact
+ * line per quota window (label · meter · % · time left), at most one plain failure
+ * sentence, and a fixed four-column stats footer that lines up across cards.
+ *
+ * Requests that never reached a provider are not an account and live in `unrouted.tsx`.
+ * Expanding a card lazily fetches daily usage history for the selected window and renders
+ * `LimitChart` — zero N-per-card polling on mount.
  */
 
 import { memo, useId, useState } from "react";
 import { Link } from "react-router-dom";
-import { CaretRight, ChartLineUp } from "@phosphor-icons/react";
+import { ChartLineUp, WarningCircle } from "@phosphor-icons/react";
 import { HoverPreview } from "../../components/hover-preview";
-import { Badge, Button, Card, FilterChip, cx, type BadgeTone } from "../../components/ui";
+import { Badge, Button, Card, Dot, FilterChip, cx, type BadgeTone, type DotTone } from "../../components/ui";
 import { ago, compact, pct, splitRef, usd } from "../../lib/format";
 import { useAccountUsageHistory } from "../../lib/queries";
 import { refusalView } from "../../lib/refusal";
-import { barText } from "../providers/types";
+import { barFill, barText, until } from "../providers/types";
 import {
   defaultChartWindowId,
+  failureSummary,
+  groupBoardAccounts,
+  projectionTick,
   windowPaceStatus,
   type BoardAccount,
   type BoardFilter,
+  type BoardGroup,
   type BoardStatusKind,
   type BoardSummary,
   type OperatorBar,
@@ -30,19 +37,19 @@ import {
 import { chartable, LimitChart } from "./limit-chart";
 import type { WindowRisk } from "./pace";
 import { UsageProviderIcon } from "./provider-badge";
-import { capitalized, QuotaMeter, resetsIn, windowLabel } from "./quota";
+import { capitalized, resetsIn, windowLabel } from "./quota";
 
-const STATUS_META: Record<BoardStatusKind, { label: string; tone: BadgeTone }> = {
-  exhausted: { label: "Exhausted", tone: "neg" },
-  at_risk: { label: "At risk", tone: "warn" },
-  failing: { label: "Failing", tone: "neg" },
-  degraded: { label: "Degraded", tone: "warn" },
-  healthy: { label: "Healthy", tone: "pos" },
-  no_limit: { label: "No limit reported", tone: "neutral" },
-  unavailable: { label: "Limits unavailable", tone: "warn" },
-  loading: { label: "Checking limits…", tone: "neutral" },
-  admin_only: { label: "Admin only", tone: "neutral" },
-  inactive: { label: "Inactive", tone: "neutral" },
+const STATUS_META: Record<BoardStatusKind, { label: string; tone: BadgeTone; dot: DotTone }> = {
+  exhausted: { label: "Exhausted", tone: "neg", dot: "neg" },
+  at_risk: { label: "At risk", tone: "warn", dot: "warn" },
+  failing: { label: "Failing", tone: "neg", dot: "neg" },
+  degraded: { label: "Degraded", tone: "warn", dot: "warn" },
+  healthy: { label: "Healthy", tone: "pos", dot: "pos" },
+  no_limit: { label: "Not reported", tone: "neutral", dot: "muted" },
+  unavailable: { label: "Limits unavailable", tone: "warn", dot: "warn" },
+  loading: { label: "Checking…", tone: "neutral", dot: "muted" },
+  admin_only: { label: "Active", tone: "neutral", dot: "muted" },
+  inactive: { label: "Inactive", tone: "neutral", dot: "muted" },
 };
 
 const PACE_TONE = {
@@ -52,9 +59,20 @@ const PACE_TONE = {
   faint: "text-faint",
 } as const;
 
+/** label · meter · % · time left. Shared by plan windows and operator caps so they align. */
+const WINDOW_ROW =
+  "grid grid-cols-[minmax(0,6.25rem)_minmax(0,1fr)_2.5rem_minmax(0,5rem)] items-center gap-x-2.5";
+/** Indent that lines a note up with the meter column of `WINDOW_ROW`. */
+const WINDOW_NOTE_INDENT = "pl-[calc(6.25rem+0.625rem)]";
+
+/** Requests · tokens · spend · errors · chart toggle: identical columns on every card. */
+const STATS_ROW =
+  "grid grid-cols-[repeat(4,minmax(0,1fr))_1.75rem] items-center gap-x-2 text-caption tnum";
+
 /**
  * Top summary strip: counts at-risk, failing, healthy, and no-limit accounts as
- * interactive filter chips alongside total range spend.
+ * interactive filter chips alongside total range spend, plus a quiet pointer to the
+ * requests that never reached a provider.
  */
 export function SummaryStrip({
   summary,
@@ -62,12 +80,15 @@ export function SummaryStrip({
   filter,
   isAdmin,
   onFilterChange,
+  unroutedRequests = 0,
 }: {
   summary: BoardSummary;
   rangeLabel: string;
   filter: BoardFilter;
   isAdmin: boolean;
   onFilterChange: (next: BoardFilter) => void;
+  /** Range requests rejected before dispatch; links to their section when > 0. */
+  unroutedRequests?: number;
 }) {
   const toggle = (target: BoardFilter) => {
     onFilterChange(filter === target ? "all" : target);
@@ -94,47 +115,20 @@ export function SummaryStrip({
             onClick={() => toggle("at_risk")}
             ariaLabel={`Filter to ${summary.atRisk} at-risk accounts`}
           >
-            <span
-              className={cx(
-                filter !== "at_risk" && summary.atRisk > 0 && "font-medium text-[var(--color-warn)]",
-              )}
-            >
-              At risk
-            </span>
-            <span
-              className={cx(
-                "tnum",
-                filter !== "at_risk" && summary.atRisk > 0 ? "text-[var(--color-warn)]" : "opacity-80",
-              )}
-            >
-              {summary.atRisk}
-            </span>
+            {summary.atRisk > 0 && filter !== "at_risk" ? <Dot tone="warn" /> : null}
+            <span>At risk</span>
+            <span className="tnum opacity-80">{summary.atRisk}</span>
           </FilterChip>
         ) : null}
 
         <FilterChip
           on={filter === "failing"}
-          bad={summary.failing > 0}
           onClick={() => toggle("failing")}
           ariaLabel={`Filter to ${summary.failing} failing accounts`}
         >
-          <span
-            className={cx(
-              filter !== "failing" && summary.failing > 0 && "font-medium text-[var(--color-neg)]",
-            )}
-          >
-            Failing
-          </span>
-          <span
-            className={cx(
-              "tnum",
-              filter !== "failing" && summary.failing > 0
-                ? "text-[var(--color-neg)]"
-                : "opacity-90",
-            )}
-          >
-            {summary.failing}
-          </span>
+          {summary.failing > 0 && filter !== "failing" ? <Dot tone="neg" /> : null}
+          <span>Failing</span>
+          <span className="tnum opacity-80">{summary.failing}</span>
         </FilterChip>
 
         {isAdmin ? (
@@ -153,7 +147,7 @@ export function SummaryStrip({
               onClick={() => toggle("no_limit")}
               ariaLabel={`Filter to ${summary.noLimit} accounts with no limit reported`}
             >
-              <span>No limit reported</span>
+              <span>Not reported</span>
               <span className="tnum opacity-80">{summary.noLimit}</span>
             </FilterChip>
           </>
@@ -169,15 +163,16 @@ export function SummaryStrip({
         </span>
         <span className="text-faint">
           {compact(summary.totalRequests)} req
-          {summary.totalErrors > 0 ? (
-            <>
-              {" · "}
-              <span className={overallErrorRate >= 50 ? "font-medium text-[var(--color-neg)]" : "text-neg"}>
-                {pct(overallErrorRate)} err
-              </span>
-            </>
-          ) : null}
+          {summary.totalErrors > 0 ? ` · ${pct(overallErrorRate)} err` : null}
         </span>
+        {unroutedRequests > 0 ? (
+          <a
+            href="#usage-unrouted"
+            className="text-caption text-muted underline-offset-2 hover:text-fg hover:underline focus-visible:underline"
+          >
+            {compact(unroutedRequests)} never reached a provider
+          </a>
+        ) : null}
       </div>
     </Card>
   );
@@ -187,7 +182,7 @@ export function SummaryStrip({
  * Account name link (`/providers?inspect=<id>`) with a non-modal, control-free hover/focus
  * preview showing top models served in the current range and standing connection details.
  */
-function AccountPreviewLink({
+export function AccountPreviewLink({
   item,
   rangeLabel,
 }: {
@@ -195,7 +190,7 @@ function AccountPreviewLink({
   rangeLabel: string;
 }) {
   if (!item.connectionId) {
-    return <span className="truncate text-small text-muted">{item.accountName}</span>;
+    return <span className="min-w-0 truncate text-muted">{item.accountName}</span>;
   }
 
   const href = `/providers?inspect=${encodeURIComponent(item.connectionId)}`;
@@ -262,7 +257,7 @@ function AccountPreviewLink({
   return (
     <HoverPreview
       to={href}
-      linkClassName="min-w-0 truncate rounded-[var(--radius-control)] text-small text-accent-text underline-offset-2 hover:underline focus-visible:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+      linkClassName="min-w-0 truncate rounded-[var(--radius-control)] text-accent-text underline-offset-2 hover:underline focus-visible:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
       contentClassName="gap-2.5"
       content={content}
     >
@@ -271,60 +266,133 @@ function AccountPreviewLink({
   );
 }
 
+/** One status per account: a coloured dot and a word, no pill stack. */
+function StatusLabel({ status }: { status: BoardStatusKind }) {
+  const meta = STATUS_META[status];
+  const loud = meta.dot === "neg" || meta.dot === "warn";
+  return (
+    <span
+      className={cx(
+        "inline-flex shrink-0 items-center gap-1.5 text-caption",
+        loud ? "font-medium text-ink-soft" : "text-muted",
+      )}
+    >
+      <Dot tone={meta.dot} />
+      {meta.label}
+    </span>
+  );
+}
+
+/**
+ * 6px meter on the shared colour ladder, with an optional tick where the window is
+ * projected to land at reset.
+ */
+export function LimitMeter({
+  percent,
+  tick,
+  label,
+}: {
+  percent: number;
+  tick: number | null;
+  label: string;
+}) {
+  const width = Math.min(100, Math.max(0, percent));
+  return (
+    <span
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(percent)}
+      className="relative block h-1.5 w-full overflow-hidden rounded-full bg-rule"
+    >
+      <span
+        className={cx("block h-full rounded-full", barFill(percent))}
+        style={{ width: `${width}%` }}
+      />
+      {tick !== null ? (
+        <span
+          aria-hidden
+          className="absolute inset-y-0 w-0.5 rounded-full bg-faint"
+          style={{ left: `min(calc(${tick}% - 1px), calc(100% - 2px))` }}
+        />
+      ) : null}
+    </span>
+  );
+}
+
+function shortWindowLabel(risk: WindowRisk): string {
+  return windowLabel(risk.window).replace(/\s+window$/i, "");
+}
+
+function timeLeft(resetsAt: number | null): string {
+  const left = until(resetsAt);
+  return left ? `${left} left` : "";
+}
+
 function PlanWindowRow({ risk, now }: { risk: WindowRisk; now: number }) {
   const { window } = risk;
-  const label = windowLabel(window);
-  const reset = resetsIn(window.resets_at);
+  const label = shortWindowLabel(risk);
   const status = windowPaceStatus(risk, now);
+  const reset = resetsIn(window.resets_at);
+  const used = Math.round(window.used_percent);
+  const left = timeLeft(window.resets_at);
 
   return (
-    <li className="flex flex-col gap-1">
-      <div className="flex items-baseline justify-between gap-2 text-small">
-        <span className="min-w-0 truncate">
-          <span className="font-medium text-fg">{label}</span>
-          {reset ? <span className="text-faint tnum"> · {reset}</span> : null}
+    <li className="flex flex-col gap-0.5">
+      <div className={WINDOW_ROW}>
+        <span className="truncate text-small text-ink-soft">{label}</span>
+        <LimitMeter
+          percent={window.used_percent}
+          tick={projectionTick(risk)}
+          label={[`${windowLabel(window)}: ${used}% used`, reset, status.text]
+            .filter(Boolean)
+            .join(", ")}
+        />
+        <span className={cx("text-right text-small font-medium tnum", barText(window.used_percent))}>
+          {used}%
         </span>
-        <span className={cx("shrink-0 font-medium tnum", barText(window.used_percent))}>
-          {Math.round(window.used_percent)}%
-        </span>
+        <span className="truncate text-right text-caption text-faint tnum">{left || "—"}</span>
       </div>
-      <QuotaMeter
-        percent={window.used_percent}
-        label={reset ? `${label}, ${reset}` : label}
-      />
-      <span className={cx("text-caption tnum", PACE_TONE[status.tone])}>{status.text}</span>
+      {status.notable ? (
+        <span className={cx("text-caption tnum", WINDOW_NOTE_INDENT, PACE_TONE[status.tone])}>
+          {status.text}
+        </span>
+      ) : null}
     </li>
   );
 }
 
 function OperatorCapRow({ bar }: { bar: OperatorBar }) {
   const reset = resetsIn(bar.resets_at);
+  const used = Math.round(bar.percent);
+  const left = timeLeft(bar.resets_at);
+  const note = bar.exhausted
+    ? { text: `Cap reached · ${bar.detail}`, tone: PACE_TONE.neg }
+    : bar.percent >= 90
+      ? { text: `Close to cap · ${bar.detail}`, tone: PACE_TONE.warn }
+      : null;
+
   return (
-    <li className="flex flex-col gap-1">
-      <div className="flex items-baseline justify-between gap-2 text-small">
-        <span className="min-w-0 truncate">
-          <span className="font-medium text-fg">{bar.label}</span>
-          {reset ? <span className="text-faint tnum"> · {reset}</span> : null}
+    <li className="flex flex-col gap-0.5">
+      <div className={WINDOW_ROW}>
+        <span className="truncate text-small text-ink-soft">{bar.label}</span>
+        <LimitMeter
+          percent={bar.percent}
+          tick={null}
+          label={[`Operator cap, ${bar.label}: ${bar.detail}`, reset].filter(Boolean).join(", ")}
+        />
+        <span
+          title={bar.detail}
+          className={cx("text-right text-small font-medium tnum", barText(bar.percent))}
+        >
+          {used}%
         </span>
-        <span className={cx("shrink-0 font-medium tnum", barText(bar.percent))}>
-          {bar.detail}
-        </span>
+        <span className="truncate text-right text-caption text-faint tnum">{left || "—"}</span>
       </div>
-      <QuotaMeter percent={bar.percent} label={reset ? `${bar.label}, ${reset}` : bar.label} />
-      <span
-        className={cx(
-          "text-caption tnum",
-          bar.exhausted
-            ? "font-medium text-[var(--color-neg)]"
-            : bar.percent >= 90
-              ? "font-medium text-[var(--color-warn)]"
-              : "text-muted",
-        )}
-      >
-        {bar.exhausted
-          ? "Exhausted — operator cap reached"
-          : `Operator cap · ${Math.round(bar.percent)}% used`}
-      </span>
+      {note ? (
+        <span className={cx("text-caption tnum", WINDOW_NOTE_INDENT, note.tone)}>{note.text}</span>
+      ) : null}
     </li>
   );
 }
@@ -333,7 +401,7 @@ function OperatorCapRow({ bar }: { bar: OperatorBar }) {
  * Lazily mounted forecast chart panel: only fetches `/api/accounts/usage/{id}/history`
  * when the user opens this card's chart disclosure, and only for the selected window.
  */
-function AccountForecastPanel({
+export function AccountForecastPanel({
   connectionId,
   windows,
   now,
@@ -361,7 +429,7 @@ function AccountForecastPanel({
   const label = windowLabel(activeRisk.window);
 
   return (
-    <div className="mt-3 flex flex-col gap-3 border-t border-rule pt-3">
+    <div className="flex flex-col gap-3 border-t border-rule px-4 py-3">
       {windows.length > 1 ? (
         <div
           className="flex flex-wrap items-center gap-1.5"
@@ -414,64 +482,103 @@ function AccountForecastPanel({
   );
 }
 
-function NoLimitsReason({
+/** What the limits slot says when there are no bars to draw: one quiet line. */
+function NoLimitsLine({
   item,
   isAdmin,
   quotaLoaded,
   quotaError,
+  hasFailure,
 }: {
   item: BoardAccount;
   isAdmin: boolean;
   quotaLoaded: boolean;
   quotaError: boolean;
+  hasFailure: boolean;
 }) {
   if (!isAdmin) {
-    return (
-      <p className="rounded-[var(--radius-control)] border border-rule bg-surface-2 px-3 py-2 text-caption text-muted">
-        Plan limits and operator caps are visible to admins only.
-      </p>
-    );
+    return <p className="text-caption text-faint">Limits are visible to admins only.</p>;
   }
-  if (item.isUnrouted) {
+  if (item.limitError || quotaError) {
     return (
-      <p className="rounded-[var(--radius-control)] border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] px-3 py-2 text-caption text-[var(--color-neg-ink)]">
-        Requests failed before routing to any provider account (e.g. unknown model, auth, or no
-        healthy candidate).
-      </p>
-    );
-  }
-  if (item.limitError) {
-    return (
-      <p className="rounded-[var(--radius-control)] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-caption text-[var(--color-warn-ink)]">
-        Limits unavailable: {item.limitError}
-      </p>
-    );
-  }
-  if (quotaError) {
-    return (
-      <p className="rounded-[var(--radius-control)] border border-[var(--color-warn-line)] bg-[var(--color-warn-tint)] px-3 py-2 text-caption text-[var(--color-warn-ink)]">
-        Could not load plan limits right now.
+      <p className="flex min-w-0 flex-col gap-0.5 text-caption">
+        <span className="text-[var(--color-warn)]">Limits unavailable</span>
+        <span className="line-clamp-2 break-words text-faint">
+          {item.limitError ?? "Could not load plan limits right now."}
+        </span>
       </p>
     );
   }
   if (!quotaLoaded) {
-    return <p className="text-caption text-faint">Loading limits…</p>;
+    return <p className="text-caption text-faint">Checking limits…</p>;
+  }
+  // When the card is already explaining a failure, don't clutter it with a "no cap" note.
+  if (hasFailure) return null;
+  if (!item.isActive) {
+    return <p className="text-caption text-faint">Disabled on Providers</p>;
   }
   return (
-    <p className="rounded-[var(--radius-control)] border border-rule bg-surface-2 px-3 py-2 text-caption text-muted">
-      Not reported by {item.providerLabel}.
+    <div className="flex items-center justify-between gap-2 text-caption text-faint">
+      <span>No operator cap</span>
       {item.connectionId ? (
-        <>
-          {" "}
-          <Link
-            to={`/providers?inspect=${encodeURIComponent(item.connectionId)}`}
-            className="text-accent-text underline-offset-2 hover:underline focus-visible:underline"
-          >
-            Set an operator cap
-          </Link>
-        </>
+        <Link
+          to={`/providers?inspect=${encodeURIComponent(item.connectionId)}`}
+          className="shrink-0 text-accent-text underline-offset-2 hover:underline focus-visible:underline"
+        >
+          Set cap
+        </Link>
       ) : null}
-    </p>
+    </div>
+  );
+}
+
+/** At most one plain sentence about failures, with the newest error text under it. */
+function FailureNote({ item }: { item: BoardAccount }) {
+  const refusal = refusalView(item.refusal);
+  const summary = failureSummary(item);
+  if (!refusal && !summary) return null;
+  const severe = Boolean(refusal) || item.status === "failing" || item.isFailing;
+  const detail = refusal ? refusal.description : item.lastError;
+
+  return (
+    <div className="flex min-w-0 items-start gap-2 text-caption">
+      <WarningCircle
+        size={14}
+        weight="fill"
+        aria-hidden
+        className={cx(
+          "mt-px shrink-0",
+          severe ? "text-[var(--color-neg)]" : "text-[var(--color-warn)]",
+        )}
+      />
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-ink-soft">{refusal ? refusal.title : summary}</span>
+        {detail ? (
+          <span
+            className={cx("line-clamp-2 break-words text-faint", !refusal && "font-mono")}
+          >
+            {detail}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function StatCell({
+  value,
+  unit,
+  className,
+}: {
+  value: string;
+  unit?: string;
+  className?: string;
+}) {
+  return (
+    <span className={cx("min-w-0 truncate", className)}>
+      {value}
+      {unit ? <span className="text-faint"> {unit}</span> : null}
+    </span>
   );
 }
 
@@ -482,6 +589,7 @@ const AccountLimitCard = memo(function AccountLimitCard({
   quotaLoaded,
   quotaError,
   chartOpen,
+  stretch,
   onToggleChart,
   now,
 }: {
@@ -491,24 +599,17 @@ const AccountLimitCard = memo(function AccountLimitCard({
   quotaLoaded: boolean;
   quotaError: boolean;
   chartOpen: boolean;
+  stretch: boolean;
   onToggleChart: (key: string) => void;
   now: number;
 }) {
   const headingId = useId();
-  const badge = STATUS_META[item.status];
   const canOpenChart = isAdmin && item.connectionId !== null && item.windows.length > 0;
-  const refusal = refusalView(item.refusal);
-
-  const cardBorder =
-    item.status === "exhausted" || item.status === "failing"
-      ? "border-[var(--color-neg-line)]"
-      : item.status === "at_risk" || item.status === "degraded"
-        ? "border-[var(--color-warn-line)]"
-        : "border-line";
+  const hasFailure = Boolean(refusalView(item.refusal) || failureSummary(item));
 
   const lastUsedText =
     item.lastUsedAt !== null
-      ? `last used ${ago(item.lastUsedAt)}`
+      ? `used ${ago(item.lastUsedAt)}`
       : item.totals.requests > 0
         ? `used earlier in ${rangeLabel}`
         : `idle in ${rangeLabel}`;
@@ -517,47 +618,45 @@ const AccountLimitCard = memo(function AccountLimitCard({
     ? `${item.providerLabel} ${capitalized(item.plan)}`
     : item.providerLabel;
 
+  const errorTone =
+    item.totals.errors === 0
+      ? "text-faint"
+      : item.isFailing
+        ? "font-medium text-[var(--color-neg)]"
+        : item.status === "degraded"
+          ? "text-[var(--color-warn)]"
+          : "text-muted";
+
   return (
     <article
       aria-labelledby={headingId}
       className={cx(
-        "flex flex-col justify-between gap-3.5 rounded-[var(--radius-surface)] border bg-surface px-4 py-3.5",
-        cardBorder,
+        "flex flex-col rounded-[var(--radius-surface)] border border-line bg-surface",
+        stretch && "h-full",
         !item.isActive && "opacity-75",
       )}
     >
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-1 flex-col gap-3 px-4 pb-3 pt-3.5">
         <header className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-2.5">
             <span className="mt-0.5 shrink-0">
               <UsageProviderIcon provider={item.provider} size={18} />
             </span>
             <div className="flex min-w-0 flex-col">
-              <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
-                <h3 id={headingId} className="text-body font-semibold text-fg">
-                  {titleText}
-                </h3>
-                <span className="text-faint" aria-hidden>
-                  ·
-                </span>
+              <h3 id={headingId} className="truncate text-body font-semibold text-fg">
+                {titleText}
+              </h3>
+              <div className="flex min-w-0 items-baseline gap-1.5 text-caption">
                 <AccountPreviewLink item={item} rangeLabel={rangeLabel} />
+                <span className="shrink-0 text-faint">· {lastUsedText}</span>
               </div>
-              {item.email ? (
-                <span className="truncate text-caption text-faint">{item.email}</span>
-              ) : null}
             </div>
           </div>
-
-          <div className="flex shrink-0 items-center gap-1.5">
-            {item.isFailing && item.status !== "failing" ? (
-              <Badge tone="neg">Failing</Badge>
-            ) : null}
-            <Badge tone={badge.tone}>{badge.label}</Badge>
-          </div>
+          <StatusLabel status={item.status} />
         </header>
 
         {isAdmin && item.hasLimits ? (
-          <ul role="list" className="flex flex-col gap-3">
+          <ul role="list" className="flex flex-col gap-2">
             {item.operatorBars.map((bar) => (
               <OperatorCapRow key={bar.id} bar={bar} />
             ))}
@@ -566,97 +665,69 @@ const AccountLimitCard = memo(function AccountLimitCard({
             ))}
           </ul>
         ) : (
-          <NoLimitsReason
+          <NoLimitsLine
             item={item}
             isAdmin={isAdmin}
             quotaLoaded={quotaLoaded}
             quotaError={quotaError}
+            hasFailure={hasFailure}
           />
         )}
 
-        {refusal ? (
-          <p className="rounded-[var(--radius-control)] border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] px-2.5 py-1.5 text-caption text-[var(--color-neg-ink)]">
-            {refusal.title} — {refusal.description}
-          </p>
-        ) : item.isFailing && item.lastError ? (
-          <p className="line-clamp-2 break-words rounded-[var(--radius-control)] border border-[var(--color-neg-line)] bg-[var(--color-neg-tint)] px-2.5 py-1.5 font-mono text-caption text-[var(--color-neg-ink)]">
-            {item.lastError}
-          </p>
-        ) : null}
+        <FailureNote item={item} />
       </div>
 
-      <footer className="flex flex-col border-t border-rule pt-2.5">
-        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-caption tnum">
-          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-muted">
-            <span className="font-medium text-ink-soft">{rangeLabel}</span>
-            <span>{compact(item.totals.requests)} req</span>
-            <span>{compact(item.totals.tokens)} tok</span>
-            <span className={item.totals.costMicros > 0 ? "font-medium text-fg" : undefined}>
-              {usd(item.totals.costMicros)}
-            </span>
-            <span
-              className={cx(
-                item.isFailing
-                  ? "font-semibold text-[var(--color-neg)]"
-                  : item.totals.errors > 0
-                    ? "text-neg"
-                    : "text-faint",
-              )}
-            >
-              {pct(item.errorRate)} err
-              {item.isFailing && item.totals.requests > 0
-                ? ` (${compact(item.totals.errors)}/${compact(item.totals.requests)})`
-                : ""}
-            </span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-x-2 text-faint">
-            <span>{lastUsedText}</span>
-            {item.fetchedAt !== null ? (
-              <>
-                <span aria-hidden>·</span>
-                <span>checked {ago(item.fetchedAt)}</span>
-              </>
-            ) : null}
-          </div>
-        </div>
-
+      <footer className={cx(STATS_ROW, "min-h-11 border-t border-rule px-4 py-2 text-muted")}>
+        <StatCell value={compact(item.totals.requests)} unit="req" />
+        <StatCell value={compact(item.totals.tokens)} unit="tok" />
+        <StatCell
+          value={usd(item.totals.costMicros)}
+          className={item.totals.costMicros > 0 ? "text-ink-soft" : undefined}
+        />
+        <StatCell value={pct(item.errorRate)} unit="err" className={errorTone} />
         {canOpenChart ? (
-          <div className="mt-2 flex items-center">
-            <button
-              type="button"
-              aria-expanded={chartOpen}
-              onClick={() => onToggleChart(item.key)}
-              className="inline-flex min-h-[28px] items-center gap-1.5 rounded-[var(--radius-control)] px-1.5 py-1 text-caption font-medium text-muted transition-colors hover:bg-surface-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
-            >
-              <CaretRight
-                size={12}
-                aria-hidden
-                className={cx("shrink-0 transition-transform", chartOpen && "rotate-90")}
-              />
-              <ChartLineUp size={14} aria-hidden className="shrink-0" />
-              <span>
-                Forecast chart
-                <span className="sr-only">
-                  {" "}
-                  for {titleText} {item.accountName}
-                </span>
-              </span>
-            </button>
-          </div>
-        ) : null}
-
-        {canOpenChart && chartOpen && item.connectionId ? (
-          <AccountForecastPanel
-            connectionId={item.connectionId}
-            windows={item.windows}
-            now={now}
-          />
-        ) : null}
+          <button
+            type="button"
+            aria-expanded={chartOpen}
+            aria-label={`Forecast chart for ${titleText} ${item.accountName}`}
+            onClick={() => onToggleChart(item.key)}
+            className={cx(
+              "inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] transition-colors",
+              "hover:bg-surface-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]",
+              chartOpen ? "bg-surface-2 text-fg" : "text-faint",
+            )}
+          >
+            <ChartLineUp size={15} aria-hidden />
+          </button>
+        ) : (
+          <span aria-hidden className="h-7 w-7" />
+        )}
       </footer>
+
+      {canOpenChart && chartOpen && item.connectionId ? (
+        <AccountForecastPanel connectionId={item.connectionId} windows={item.windows} now={now} />
+      ) : null}
     </article>
   );
 });
+
+function groupHeading(group: BoardGroup, isAdmin: boolean): { title: string; note: string | null } {
+  switch (group) {
+    case "attention":
+      return { title: "Needs attention", note: "Out of quota, close to a limit, or failing requests" };
+    case "ok":
+      return { title: isAdmin ? "Within limits" : "Active", note: null };
+    case "untracked":
+      return isAdmin
+        ? {
+            title: "No limits reported",
+            note: "These providers don't report plan windows. Add an operator cap on Providers to track them against a limit.",
+          }
+        : { title: "Accounts", note: null };
+    case "inactive":
+      return { title: "Inactive", note: "Disabled accounts take no traffic" };
+  }
+}
 
 export function LimitsBoard({
   items,
@@ -709,31 +780,60 @@ export function LimitsBoard({
     );
   }
 
+  const groups = groupBoardAccounts(items);
+
   return (
     <section className="mb-5" aria-labelledby="usage-limits-board-heading">
-      <div className="mb-2.5 flex flex-wrap items-baseline justify-between gap-2">
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <h2 id="usage-limits-board-heading" className="text-small font-semibold text-fg">
           {isAdmin ? "Provider limits & accounts" : "Accounts & range activity"}
         </h2>
         <span className="text-caption text-faint">
-          Sorted by risk · limits are current-window; activity covers the last {rangeLabel}
+          {isAdmin
+            ? `Bars show the current window; the tick is where it will land at reset. Activity covers the last ${rangeLabel}.`
+            : `Activity covers the last ${rangeLabel}.`}
         </span>
       </div>
 
-      <div className="grid grid-cols-1 items-start gap-3.5 lg:grid-cols-2">
-        {items.map((item) => (
-          <AccountLimitCard
-            key={item.key}
-            item={item}
-            rangeLabel={rangeLabel}
-            isAdmin={isAdmin}
-            quotaLoaded={quotaLoaded}
-            quotaError={quotaError}
-            chartOpen={expandedCharts.has(item.key)}
-            onToggleChart={onToggleChart}
-            now={at}
-          />
-        ))}
+      <div className="flex flex-col gap-4">
+        {groups.map(({ group, items: groupItems }) => {
+          const heading = groupHeading(group, isAdmin);
+          const headingId = `usage-board-group-${group}`;
+          const anyChartOpen = groupItems.some((item) => expandedCharts.has(item.key));
+          return (
+            <section key={group} aria-labelledby={headingId} className="flex flex-col gap-2">
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                <h3 id={headingId} className="text-caption font-medium text-muted">
+                  {heading.title} <span className="tnum text-faint">{groupItems.length}</span>
+                </h3>
+                {heading.note ? (
+                  <span className="text-caption text-faint">{heading.note}</span>
+                ) : null}
+              </div>
+              <div
+                className={cx(
+                  "grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3",
+                  anyChartOpen ? "items-start" : "items-stretch",
+                )}
+              >
+                {groupItems.map((item) => (
+                  <AccountLimitCard
+                    key={item.key}
+                    item={item}
+                    rangeLabel={rangeLabel}
+                    isAdmin={isAdmin}
+                    quotaLoaded={quotaLoaded}
+                    quotaError={quotaError}
+                    chartOpen={expandedCharts.has(item.key)}
+                    stretch={!anyChartOpen}
+                    onToggleChart={onToggleChart}
+                    now={at}
+                  />
+                ))}
+              </div>
+            </section>
+          );
+        })}
       </div>
     </section>
   );

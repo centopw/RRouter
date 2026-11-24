@@ -838,6 +838,7 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
              ALTER TABLE usage DROP COLUMN reasoning_effort; ALTER TABLE usage DROP COLUMN reasoning_tokens; \
              ALTER TABLE usage DROP COLUMN session_id; \
              ALTER TABLE usage DROP COLUMN fallback_reason; \
+             ALTER TABLE usage DROP COLUMN unrouted_reason; \
              ALTER TABLE connections DROP COLUMN refusal; \
              PRAGMA user_version = 29;",
         )

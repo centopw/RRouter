@@ -21,7 +21,7 @@ import {
   Select,
   Textarea,
 } from "../../components/ui";
-import { PLAYGROUND_HEADERS, rewritePrompt, type Template, type TemplateVersion } from "../../lib/api";
+import { playgroundHeaders, rewritePrompt, type Template, type TemplateVersion } from "../../lib/api";
 import { ago, when } from "../../lib/format";
 import { useCreateTemplate, useTemplateVersions, useTemplates } from "../../lib/queries";
 import type { Turn } from "./turn-card";
@@ -109,7 +109,7 @@ export function buildWireRequest({
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    ...PLAYGROUND_HEADERS,
+    ...playgroundHeaders(ENDPOINTS[dialect]),
   };
   if (dialect === "messages") headers["anthropic-version"] = "2023-06-01";
   if (authKey) {

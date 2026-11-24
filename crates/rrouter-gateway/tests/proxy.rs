@@ -2466,6 +2466,7 @@ async fn budget_exhausted_blocks_the_next_request() {
             reasoning_tokens: 0,
             session_id: None,
             fallback_reason: None,
+            unrouted_reason: None,
         })
         .await
         .expect("seed spend");
@@ -4447,6 +4448,7 @@ async fn passthrough_refuses_an_exhausted_key_before_the_upstream_call() {
             reasoning_tokens: 0,
             session_id: None,
             fallback_reason: None,
+            unrouted_reason: None,
         })
         .await
         .expect("seed spend");
@@ -4898,6 +4900,7 @@ async fn seed_usage(
             reasoning_tokens: 0,
             session_id: None,
             fallback_reason: None,
+            unrouted_reason: None,
         })
         .await
         .expect("seed usage");
@@ -4926,6 +4929,121 @@ async fn wait_for_usage(h: &Harness, key: uuid::Uuid, model: &str) -> UsageRecor
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("no usage row for key {key} and model {model}");
+}
+
+/// A request that fails before any provider is dispatched leaves `provider` empty, and
+/// the row must carry a stable machine-readable reason so the dashboard can bucket the
+/// "unrouted" pile instead of showing one undifferentiated number.
+#[tokio::test]
+async fn pre_dispatch_failures_record_a_stable_unrouted_reason() {
+    // Unknown model: a key exists but no connection serves the id, so the planner
+    // refuses before dispatch with `NoRoute` ("no connection declares this model").
+    let mock = Mock::start(vec![]).await;
+    let h = harness(false);
+    let (key, id) = h.create_key().await;
+    let uuid = uuid::Uuid::parse_str(&id).expect("uuid");
+
+    let (status, _, body) = h.chat(Some(&key), "definitely-not-a-real-model-xyz").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    // The failure never reached an upstream.
+    assert_eq!(mock.hits(), 0, "unknown model is refused before dispatch");
+
+    let row = wait_for_usage(&h, uuid, "definitely-not-a-real-model-xyz").await;
+    assert_eq!(row.provider, "", "no provider was dispatched");
+    assert_eq!(
+        row.unrouted_reason.as_deref(),
+        Some("unknown_model"),
+        "the row names the pre-dispatch cause"
+    );
+
+    // Authentication failure is also pre-dispatch, but a different reason: an instance
+    // that requires a key refuses an anonymous request as `auth`, not `unknown_model`.
+    let h_auth = harness(true);
+    let (status, _, _body) = h_auth.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// Pre-dispatch failures that are *not* unknown-model must still land in the right
+/// bucket: a breaker/free cooldown is `no_healthy_candidate` (not "key not allowed"),
+/// and a spent budget is `budget` (not a throttle).
+#[tokio::test]
+async fn pre_dispatch_reasons_distinguish_cooldown_from_budget() {
+    // all_candidates_cooling_down: every candidate is in the breaker, raised before any
+    // dispatch. This is the path free mode hits most (OpenRouter/Zen 429 cooldowns).
+    let mock = Mock::start(vec![]).await;
+    let h = harness(false);
+    let connection = h.connect("openai", &mock).await;
+    h.state.dispatcher.breaker_arc().record_failure_for(
+        connection,
+        "gpt-4.1",
+        429,
+        Some(Duration::from_secs(42)),
+    );
+    let (status, _, body) = h.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"]["code"], "all_candidates_cooling_down");
+    let cooldown_row = wait_for_unrouted(&h, "gpt-4.1").await;
+    assert_eq!(
+        cooldown_row.unrouted_reason.as_deref(),
+        Some("no_healthy_candidate"),
+        "a cooldown is no healthy candidate, not a governance refusal"
+    );
+
+    // quota_exhausted: every account's quota is spent, so the request is refused before
+    // dispatch — labelled `budget`, a spend ceiling rather than a throttle or key error.
+    let h_quota = harness(false);
+    let qconn = h_quota.connect("openai", &mock).await;
+    h_quota
+        .state
+        .store
+        .set_account_quota(&AccountQuota {
+            connection_id: qconn,
+            window: BudgetWindow::Daily,
+            max_requests: 1,
+            max_tokens: 0,
+            max_cost_micros: 0,
+        })
+        .await
+        .expect("quota");
+    h_quota
+        .state
+        .store
+        .record_usage(&quota_usage(qconn))
+        .await
+        .expect("spend the quota");
+    let (status, _, body) = h_quota.chat(None, "gpt-4.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"]["code"], "quota_exhausted");
+    let budget_row = wait_for_unrouted(&h_quota, "gpt-4.1").await;
+    assert_eq!(
+        budget_row.unrouted_reason.as_deref(),
+        Some("budget"),
+        "a spent account quota is labelled budget, not governance"
+    );
+}
+
+/// Wait for the newest empty-provider usage row for `model`, tolerating the async write.
+async fn wait_for_unrouted(h: &Harness, model: &str) -> UsageRecord {
+    for _ in 0..100 {
+        if let Ok(rows) = h
+            .state
+            .store
+            .recent_usage(&UsageQuery {
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+        {
+            if let Some(row) = rows
+                .into_iter()
+                .find(|r| r.provider.is_empty() && r.model == model)
+            {
+                return row;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no unrouted usage row for model {model}");
 }
 
 /// Money beside the tokens: a priced request stores the exact micro-USD amount, the
@@ -5030,6 +5148,7 @@ async fn usage_api_pages_backwards_without_overlap() {
                 reasoning_tokens: 0,
                 session_id: None,
                 fallback_reason: None,
+                unrouted_reason: None,
             })
             .await
             .expect("record usage");
@@ -5128,6 +5247,7 @@ async fn usage_api_filters_compose_with_the_cursor() {
                 reasoning_tokens: 0,
                 session_id: None,
                 fallback_reason: None,
+                unrouted_reason: None,
             })
             .await
             .expect("record usage");
@@ -5249,6 +5369,7 @@ fn export_row(ts: i64) -> UsageRecord {
         reasoning_tokens: 0,
         session_id: None,
         fallback_reason: None,
+        unrouted_reason: None,
     }
 }
 
@@ -5733,6 +5854,7 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
             reasoning_tokens: 0,
             session_id: None,
             fallback_reason: None,
+            unrouted_reason: None,
         })
         .await
         .expect("seed last month");
@@ -5779,6 +5901,7 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
             reasoning_tokens: 0,
             session_id: None,
             fallback_reason: None,
+            unrouted_reason: None,
         })
         .await
         .expect("seed this month");
@@ -6796,6 +6919,7 @@ fn quota_usage(connection: uuid::Uuid) -> UsageRecord {
         reasoning_tokens: 0,
         session_id: None,
         fallback_reason: None,
+        unrouted_reason: None,
     }
 }
 
@@ -7729,6 +7853,7 @@ async fn seed_spend(store: &Store, key: uuid::Uuid, tokens: u32, cost_micros: u6
             reasoning_tokens: 0,
             session_id: None,
             fallback_reason: None,
+            unrouted_reason: None,
         })
         .await
         .expect("seed usage");

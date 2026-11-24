@@ -1,17 +1,17 @@
 /**
- * `/usage` — multi-provider limits board and consumption breakdown.
+ * `/usage` — Usage Overview.
  *
- * Top band: summary strip (at-risk / failing / healthy / no-limit counts + total range
- * spend) over a risk-sorted Limits Board showing EVERY account of EVERY provider and ALL
- * of its quota windows at once, alongside per-account range activity. Clicking "Forecast
- * chart" on any card lazily fetches that window's daily history without N-per-card polling.
- *
- * Below: the detailed provider → account → model drill-down table fed by the same
- * `/api/usage/summary?group_by=connection` query, so totals never disagree.
+ * Top row: 4 KPI tiles (Peak Quota Usage, Active Providers, Estimated Days Left, Total Spend).
+ * Middle band: Tracked Providers quota table (ONLY providers/accounts whose quota is tracked,
+ * with 5h / Daily / Weekly / Monthly progress bars) alongside Quota Alerts & Usage Breakdown.
+ * Bottom band: Usage Trend multi-line chart alongside Recent Activity.
+ * Secondary disclosures below: "Requests that never reached a provider" (per-reason breakdown)
+ * and the full provider → account → model drill-down table across all providers.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Card, ErrorNote, PageHeader, Segmented } from "../components/ui";
+import { CaretRight } from "@phosphor-icons/react";
+import { Button, Card, ErrorNote, PageHeader, Segmented, cx } from "../components/ui";
 import { RANGES, rangeOf, type RangeId } from "../lib/activity";
 import { useUrlFilterState } from "../lib/url-state";
 import {
@@ -21,7 +21,7 @@ import {
   useIsAdmin,
   useModelProviders,
   useUsage,
-  useUsageSummaryByConnection,
+  useUsageByModel,
 } from "../lib/queries";
 import {
   addTotals,
@@ -32,16 +32,26 @@ import {
   withQuotaShells,
   type ProviderNode,
 } from "./usage/aggregate";
+import { buildBoardAccounts, resolveProviderDisplay } from "./usage/board-model";
+import { UsageBreakdownCard, UsageTrendCard } from "./usage/overview-charts";
 import {
-  buildBoardAccounts,
-  filterBoardAccounts,
-  resolveProviderDisplay,
-  summarizeBoard,
-  type BoardFilter,
-} from "./usage/board-model";
-import { LimitsBoard, SummaryStrip } from "./usage/limits";
+  buildQuotaAlerts,
+  buildUsageBreakdown,
+  buildUsageTrend,
+  computeOverviewKpis,
+  trackedQuotaAccounts,
+} from "./usage/overview-model";
+import {
+  OverviewKpiRow,
+  QuotaAlertsCard,
+  RecentActivityCard,
+  TrackedProvidersTable,
+} from "./usage/overview-panels";
 import { worstQuotaPercent } from "./usage/quota";
+import { useUsageSummaryWithUnrouted } from "./usage/summary-query";
 import { UsageTable, type AccountInfo } from "./usage/table";
+import { UnroutedDisclosure } from "./usage/unrouted";
+import { buildUnroutedSummary } from "./usage/unrouted-model";
 
 const DEFAULT_RANGE: RangeId = "30d";
 const RECENT_EVENTS_LIMIT = 200;
@@ -57,25 +67,27 @@ export default function UsagePage() {
   const range = rangeOf(values.range as RangeId);
   const providerFilter = values.provider;
 
-  const summary = useUsageSummaryByConnection(range.hours);
+  const summary = useUsageSummaryWithUnrouted(range.hours);
+  const summaryRows = summary.data?.rows;
   const recentEvents = useUsage(RECENT_EVENTS_LIMIT, range.hours);
+  const trendQuery = useUsageByModel(range.hours, range.bucket);
   const connections = useConnections();
   const modelProviders = useModelProviders();
   const quotas = useAccountQuotas(isAdmin);
   const subscriptions = useAccountSubscriptions(isAdmin);
 
-  // Both sources answered: only then may a bar-less account read "Not reported".
   const quotaLoaded = isAdmin && quotas.isSuccess && subscriptions.isSuccess;
   const quotaError = isAdmin && (quotas.isError || subscriptions.isError);
 
-  const [statusFilter, setStatusFilter] = useState<BoardFilter>("all");
   const [expandedCharts, setExpandedCharts] = useState<Set<string>>(() => new Set());
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(() => new Set());
   const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(() => new Set());
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
 
-  // A `/providers` deep link opens that provider in the breakdown table automatically.
+  // A `/providers` deep link opens that provider in the full breakdown disclosure automatically.
   useEffect(() => {
     if (!providerFilter) return;
+    setBreakdownOpen(true);
     setExpandedProviders((prev) =>
       prev.has(providerFilter) ? prev : new Set(prev).add(providerFilter),
     );
@@ -89,7 +101,6 @@ export default function UsagePage() {
     return map;
   }, [modelProviders.data]);
 
-  /** Providers with at least one active account that reports a limit right now. */
   const providersWithQuota = useMemo(() => {
     const inactive = new Set(
       (connections.data ?? []).filter((c) => !c.is_active).map((c) => c.id),
@@ -112,14 +123,13 @@ export default function UsagePage() {
   }, [connections.data, quotas.data, subscriptions.data]);
 
   const allProviders = useMemo(
-    () => withQuotaShells(buildProviderNodes(summary.data ?? []), providersWithQuota),
-    [summary.data, providersWithQuota],
+    () => withQuotaShells(buildProviderNodes(summaryRows ?? []), providersWithQuota),
+    [summaryRows, providersWithQuota],
   );
 
   const providers = useMemo<ProviderNode[]>(() => {
     if (!providerFilter) return allProviders;
     const match = allProviders.filter((node) => node.provider === providerFilter);
-    // Keep an empty provider shell so its accounts and quota still render.
     return match.length > 0
       ? match
       : [{ provider: providerFilter, totals: emptyTotals(), models: [] }];
@@ -130,10 +140,15 @@ export default function UsagePage() {
     [providers],
   );
 
-  // Compute one shared clock snapshot whenever data refreshes so pace comparisons stay coherent.
   const snapshotNow = useMemo(
     () => Date.now(),
-    [summary.dataUpdatedAt, subscriptions.dataUpdatedAt, quotas.dataUpdatedAt, connections.dataUpdatedAt],
+    [
+      summary.dataUpdatedAt,
+      subscriptions.dataUpdatedAt,
+      quotas.dataUpdatedAt,
+      connections.dataUpdatedAt,
+      trendQuery.dataUpdatedAt,
+    ],
   );
 
   const boardAccounts = useMemo(
@@ -142,7 +157,7 @@ export default function UsagePage() {
         connections: connections.data ?? [],
         subscriptions: subscriptions.data ?? [],
         quotas: quotas.data ?? [],
-        summaryRows: summary.data ?? [],
+        summaryRows: summaryRows ?? [],
         recentEvents: recentEvents.data ?? [],
         providerDisplayMap,
         providerFilter,
@@ -155,7 +170,7 @@ export default function UsagePage() {
       connections.data,
       subscriptions.data,
       quotas.data,
-      summary.data,
+      summaryRows,
       recentEvents.data,
       providerDisplayMap,
       providerFilter,
@@ -166,14 +181,65 @@ export default function UsagePage() {
     ],
   );
 
-  const boardSummary = useMemo(
-    () => summarizeBoard(boardAccounts, totals),
-    [boardAccounts, totals],
+  // Strictly ONLY accounts with tracked quota appear in the Providers quota table & alerts.
+  const trackedAccounts = useMemo(() => trackedQuotaAccounts(boardAccounts), [boardAccounts]);
+
+  const kpis = useMemo(
+    () =>
+      computeOverviewKpis({
+        boardAccounts,
+        trackedAccounts,
+        totals,
+        isAdmin,
+        quotaLoaded,
+        now: snapshotNow,
+      }),
+    [boardAccounts, trackedAccounts, totals, isAdmin, quotaLoaded, snapshotNow],
   );
 
-  const visibleBoardAccounts = useMemo(
-    () => filterBoardAccounts(boardAccounts, statusFilter),
-    [boardAccounts, statusFilter],
+  const quotaAlerts = useMemo(
+    () => (isAdmin && quotaLoaded ? buildQuotaAlerts(trackedAccounts, snapshotNow) : []),
+    [isAdmin, quotaLoaded, trackedAccounts, snapshotNow],
+  );
+
+  const usageBreakdown = useMemo(
+    () => buildUsageBreakdown(providers, providerDisplayMap),
+    [providers, providerDisplayMap],
+  );
+
+  const colorByProvider = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const slice of usageBreakdown.slices) {
+      if (slice.id !== "__others__") map.set(slice.id, slice.color);
+    }
+    return map;
+  }, [usageBreakdown.slices]);
+
+  const filteredTrendBuckets = useMemo(() => {
+    const rows = trendQuery.data ?? [];
+    if (!providerFilter) return rows;
+    return rows.filter((row) => row.provider === providerFilter);
+  }, [trendQuery.data, providerFilter]);
+
+  const usageTrend = useMemo(
+    () => buildUsageTrend(filteredTrendBuckets, range, snapshotNow, providerDisplayMap),
+    [filteredTrendBuckets, range, snapshotNow, providerDisplayMap],
+  );
+
+  const filteredRecentEvents = useMemo(() => {
+    const rows = recentEvents.data ?? [];
+    if (!providerFilter) return rows;
+    return rows.filter((ev) => ev.provider === providerFilter);
+  }, [recentEvents.data, providerFilter]);
+
+  const unroutedSummary = useMemo(
+    () =>
+      buildUnroutedSummary({
+        summaryRows: summaryRows ?? [],
+        recentEvents: recentEvents.data ?? [],
+        breakdown: summary.data?.unrouted ?? null,
+      }),
+    [summaryRows, recentEvents.data, summary.data?.unrouted],
   );
 
   const accountsByProvider = useMemo(() => {
@@ -188,10 +254,10 @@ export default function UsagePage() {
       }
     }
     return mergeKnownAccounts(
-      buildAccountNodes(summary.data ?? []),
+      buildAccountNodes(summaryRows ?? []),
       [...known].map(([id, provider]) => ({ id, provider })),
     );
-  }, [connections.data, quotas.data, subscriptions.data, summary.data]);
+  }, [connections.data, quotas.data, subscriptions.data, summaryRows]);
 
   const accountInfo = useMemo(() => {
     const info = new Map<string, AccountInfo>();
@@ -256,8 +322,6 @@ export default function UsagePage() {
     });
   }, []);
 
-  const handleClearFilter = useCallback(() => setStatusFilter("all"), []);
-
   const filteredProviderLabel = providerFilter
     ? resolveProviderDisplay(providerFilter, providerDisplayMap).label
     : "";
@@ -266,13 +330,11 @@ export default function UsagePage() {
     ? `No usage for ${filteredProviderLabel} in the last ${range.id}.`
     : `No requests in the last ${range.id}.`;
 
-  const boardLoading =
-    connections.isLoading && summary.isLoading && (!isAdmin || subscriptions.isLoading);
-
   return (
     <>
       <PageHeader
-        title="Usage"
+        title="Usage Overview"
+        subtitle="Monitor your quota across tracked providers"
         actions={
           <Segmented
             options={RANGES.map((item) => ({ id: item.id, label: item.id }))}
@@ -297,68 +359,108 @@ export default function UsagePage() {
         </div>
       ) : null}
 
-      <SummaryStrip
-        summary={boardSummary}
-        rangeLabel={range.id}
-        filter={statusFilter}
-        isAdmin={isAdmin}
-        onFilterChange={setStatusFilter}
-      />
-
-      <LimitsBoard
-        items={visibleBoardAccounts}
-        rangeLabel={range.id}
-        isAdmin={isAdmin}
-        quotaLoaded={quotaLoaded}
-        quotaError={quotaError}
-        loading={boardLoading}
-        activeFilter={statusFilter}
-        onClearFilter={handleClearFilter}
-        expandedCharts={expandedCharts}
-        onToggleChart={handleToggleChart}
-        now={snapshotNow}
-      />
-
-      <section aria-labelledby="usage-breakdown-heading">
-        <div className="mb-2.5 flex flex-wrap items-baseline justify-between gap-2">
-          <h2 id="usage-breakdown-heading" className="text-small font-semibold text-fg">
-            Breakdown by provider, account and model
-          </h2>
-          <span className="text-caption text-faint">Last {range.id}</span>
+      {summary.isError ? (
+        <div className="mb-4">
+          <ErrorNote error={summary.error} onRetry={() => void summary.refetch()} />
         </div>
+      ) : null}
+
+      <OverviewKpiRow
+        kpis={kpis}
+        rangeLabel={range.id}
+        spendSeries={usageTrend.spendMicros}
+        isAdmin={isAdmin}
+      />
+
+      <div className="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_316px]">
+        <TrackedProvidersTable
+          accounts={trackedAccounts}
+          rangeLabel={range.id}
+          isAdmin={isAdmin}
+          quotaLoaded={quotaLoaded}
+          quotaError={quotaError}
+          expandedCharts={expandedCharts}
+          onToggleChart={handleToggleChart}
+          now={snapshotNow}
+        />
+
+        <div className="flex min-w-0 flex-col gap-4">
+          <QuotaAlertsCard
+            alerts={quotaAlerts}
+            isAdmin={isAdmin}
+            quotaLoaded={quotaLoaded}
+            hasTracked={trackedAccounts.length > 0}
+          />
+          <UsageBreakdownCard breakdown={usageBreakdown} rangeLabel={range.id} />
+        </div>
+      </div>
+
+      <div className="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_316px]">
+        <UsageTrendCard
+          trend={usageTrend}
+          range={range}
+          now={snapshotNow}
+          loading={trendQuery.isLoading}
+        />
+        <RecentActivityCard
+          events={filteredRecentEvents}
+          providerDisplayMap={providerDisplayMap}
+          colorByProvider={colorByProvider}
+          loading={recentEvents.isLoading}
+        />
+      </div>
+
+      <div className="flex flex-col gap-3">
+        {!providerFilter ? (
+          <UnroutedDisclosure summary={unroutedSummary} rangeLabel={range.id} />
+        ) : null}
 
         <Card className="overflow-hidden">
-          {summary.isError ? (
-            <div className="px-4 pt-3">
-              <ErrorNote error={summary.error} onRetry={() => void summary.refetch()} />
-            </div>
-          ) : null}
+          <button
+            type="button"
+            aria-expanded={breakdownOpen}
+            onClick={() => setBreakdownOpen((prev) => !prev)}
+            className="flex w-full flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-row-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+          >
+            <span className="flex items-center gap-2 text-small">
+              <CaretRight
+                size={12}
+                aria-hidden
+                className={cx("shrink-0 text-faint transition-transform", breakdownOpen && "rotate-90")}
+              />
+              <span className="font-medium text-fg">
+                All providers, accounts &amp; models
+              </span>
+              <span className="text-caption text-faint tnum">
+                · {providers.length} {providers.length === 1 ? "provider" : "providers"}
+              </span>
+            </span>
+            <span className="text-caption text-faint">Last {range.id}</span>
+          </button>
 
-          <UsageTable
-            providers={providers}
-            totals={totals}
-            accountsByProvider={accountsByProvider}
-            accountInfo={accountInfo}
-            quotaByConnection={quotaByConnection}
-            subscriptionByConnection={subscriptionByConnection}
-            providerDisplayMap={providerDisplayMap}
-            showQuota={isAdmin}
-            quotaLoaded={quotaLoaded}
-            loading={summary.isLoading}
-            emptyText={emptyText}
-            expandedProviders={expandedProviders}
-            expandedAccounts={expandedAccounts}
-            onToggleProvider={handleToggleProvider}
-            onToggleAccount={handleToggleAccount}
-          />
-
-          {quotaError ? (
-            <div className="border-t border-line px-4 py-2.5 text-caption text-warn">
-              Quota data unavailable; usage totals are unaffected.
+          {breakdownOpen ? (
+            <div className="border-t border-rule">
+              <UsageTable
+                providers={providers}
+                totals={totals}
+                accountsByProvider={accountsByProvider}
+                accountInfo={accountInfo}
+                quotaByConnection={quotaByConnection}
+                subscriptionByConnection={subscriptionByConnection}
+                providerDisplayMap={providerDisplayMap}
+                showQuota={isAdmin}
+                quotaLoaded={quotaLoaded}
+                loading={summary.isLoading}
+                emptyText={emptyText}
+                expandedProviders={expandedProviders}
+                expandedAccounts={expandedAccounts}
+                onToggleProvider={handleToggleProvider}
+                onToggleAccount={handleToggleAccount}
+              />
             </div>
           ) : null}
         </Card>
-      </section>
+      </div>
     </>
   );
 }

@@ -1,0 +1,99 @@
+{
+  "upstream": {
+    "repo": "https://github.com/tashfeenahmed/freellmapi",
+    "sha": "6daa81b8def6a7e1d99fd67a611779913c287076",
+    "reviewed_at": "2026-11-24",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2026 Tashfeen Ahmed",
+    "paths": [
+      "server/src/providers/index.ts",
+      "server/src/services/ratelimit.ts",
+      "server/src/services/provider-quota.ts",
+      "server/src/lib/error-classify.ts",
+      "server/src/db/migrations/20260101_000000_legacy_baseline.ts",
+      "docs/en/providers/01-supported-platforms.md",
+      "docs/en/providers/02-quotas-and-cooldowns.md",
+      "docs/en/architecture/00-high-level-index.md"
+    ]
+  },
+  "providers": [
+    {
+      "id": "groq",
+      "base_url": "https://api.groq.com/openai/v1",
+      "auth": "key",
+      "free_rule": "all-models-on-free-key",
+      "pool": "per-model",
+      "provider_caps": null,
+      "quota_headers": {
+        "requests": ["x-ratelimit-limit-requests", "x-ratelimit-remaining-requests", "x-ratelimit-reset-requests"],
+        "tokens": ["x-ratelimit-limit-tokens", "x-ratelimit-remaining-tokens"]
+      },
+      "tos": "likely-ok",
+      "src": "server/src/providers/index.ts"
+    },
+    {
+      "id": "cerebras",
+      "base_url": "https://api.cerebras.ai/v1",
+      "auth": "key",
+      "free_rule": "all-models-on-free-key",
+      "pool": "per-model",
+      "provider_caps": null,
+      "quota_headers": {},
+      "tos": "likely-ok",
+      "src": "server/src/providers/index.ts"
+    },
+    {
+      "id": "gemini",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "auth": "key",
+      "free_rule": "all-models-on-free-key",
+      "pool": "per-model",
+      "provider_caps": null,
+      "quota_headers": {},
+      "tos": "caution",
+      "src": "server/src/providers/index.ts"
+    },
+    {
+      "id": "mistral",
+      "base_url": "https://api.mistral.ai/v1",
+      "auth": "key",
+      "free_rule": "all-models-on-free-key",
+      "pool": "per-model",
+      "provider_caps": null,
+      "quota_headers": {},
+      "tos": "likely-ok",
+      "src": "server/src/providers/index.ts"
+    },
+    {
+      "id": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "auth": "key",
+      "free_rule": "id-suffix:free",
+      "pool": "account",
+      "provider_caps": { "rpd": 1000, "rpd_low_credit": 50 },
+      "quota_headers": {},
+      "tos": "likely-ok",
+      "src": "server/src/services/ratelimit.ts"
+    }
+  ],
+  "models": [
+    { "provider": "groq", "model": "llama-3.3-70b-versatile",
+      "rpm": 30, "rpd": 1000, "tpm": 12000, "tpd": 100000, "context": 131072,
+      "as_of": "2026-10-24", "src": "server/src/db/migrations/20260101_000000_legacy_baseline.ts" },
+    { "provider": "groq", "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+      "rpm": 30, "rpd": 1000, "tpm": 30000, "tpd": 1000000, "context": 131072,
+      "as_of": "2026-10-24", "src": "server/src/db/migrations/20260101_000000_legacy_baseline.ts" },
+    { "provider": "cerebras", "model": "gpt-oss-120b",
+      "rpm": 5, "rpd": 2400, "tpm": 30000, "tpd": 1000000, "context": 131072,
+      "as_of": "2026-10-24", "src": "server/src/db/migrations/20260101_000000_legacy_baseline.ts" },
+    { "provider": "gemini", "model": "gemini-2.5-flash",
+      "rpm": 10, "rpd": 20, "tpm": 250000, "tpd": null, "context": 1048576,
+      "as_of": "2026-04-25", "src": "server/src/db/migrations/20260101_000000_legacy_baseline.ts" },
+    { "provider": "gemini", "model": "gemini-2.5-flash-lite",
+      "rpm": 15, "rpd": 20, "tpm": 250000, "tpd": null, "context": 1048576,
+      "as_of": "2026-04-25", "src": "server/src/db/migrations/20260101_000000_legacy_baseline.ts" },
+    { "provider": "mistral", "model": "mistral-large-latest",
+      "rpm": 2, "rpd": null, "tpm": 500000, "tpd": null, "context": 262144,
+      "as_of": "2026-10-24", "src": "server/src/db/migrations/20260101_000000_legacy_baseline.ts" }
+  ]
+}

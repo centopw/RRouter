@@ -2064,6 +2064,7 @@ mod tests {
                     reasoning_tokens: 0,
                     session_id: None,
                     fallback_reason: None,
+                    unrouted_reason: None,
                 })
                 .await
                 .expect("usage");

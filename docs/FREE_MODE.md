@@ -68,6 +68,8 @@ fallback never hides the real failure behind a secondary one.
 OpenCode's account/IP-wide `FreeUsageLimitError` (`429`) cools the whole provider (honoring
 the HTTP `Retry-After`, capped at one hour) instead of burning one attempt per free model,
 so a single exhausted bucket fails over to another provider rather than fanning out.
+OpenRouter's account-wide `:free` platform `429` is handled the same way, and its real
+reason is unwrapped from `metadata.raw` instead of the generic "Provider returned error".
 
 ## Advanced: the JSON document
 
@@ -427,7 +429,11 @@ using `models_registry::models_url` / `parse_models`. Each id is classified by
    case-insensitive (`deepseek-r1:free`, `llama-3-70b-free`, `free-gpt-oss`). Source
    `provider-list`.
 2. **The registry prices it at exactly zero** for input *and* output. Source `registry`.
-3. Otherwise it is not free. An unknown price is not a free price: guessing would spend paid
+3. **A vendored whole-key free tier lists it** — on a Groq, Cerebras, Gemini or Mistral
+   free-mode account, a model with a row in `crates/rrouter-gateway/data/free-tiers.json`
+   (vendored from freellmapi; see `design/freellmapi-parity.md`). Only those rows: other
+   models on the same key stay paid. Source `provider-list`.
+4. Otherwise it is not free. An unknown price is not a free price: guessing would spend paid
    quota by accident. Such rows are still stored with `free = false`, so the dashboard can
    show what an account serves without pretending it belongs in the pool.
 
@@ -448,8 +454,9 @@ Four refs are reserved, and none of them ever widens to a non-free account:
 | `free:PROVIDER/MODEL` | One model on one provider's free-mode accounts. |
 
 A normal (non-`free_mode`) account on a provider is eligible for a **verified-free** model
-but never for a paid one. A model is verified free only by a public catalog's zero price or a
-`:free`/`-free` id; an unknown price is not a free price.
+but never for a paid one. A model is verified free only by a public catalog's zero price, a
+`:free`/`-free` id, or (on a free-mode account only) a vendored whole-key free-tier row; an
+unknown price is not a free price.
 
 A concrete call:
 

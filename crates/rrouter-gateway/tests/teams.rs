@@ -236,6 +236,7 @@ impl H {
             reasoning_tokens: 0,
             session_id: None,
             fallback_reason: None,
+            unrouted_reason: None,
         };
         self.state.store.record_usage(&record).await.expect("usage");
     }

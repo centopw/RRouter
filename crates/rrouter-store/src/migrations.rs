@@ -12,14 +12,25 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 46;
+pub const SCHEMA_VERSION: i64 = 47;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
     V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40,
-    V41, V42, V43, V44, V45, V46,
+    V41, V42, V43, V44, V45, V46, V47,
 ];
+
+/// V47: pre-dispatch failure attribution.
+///
+/// `unrouted_reason` records a stable machine-readable reason on a usage row whose
+/// request failed before any provider was dispatched (`provider` stays empty). The code
+/// (`unknown_model`, `no_healthy_candidate`, `group_empty`, `auth`, `governance`, …) is
+/// what the dashboard buckets on; the human sentence is already in `error`. Additive and
+/// nullable: served requests and pre-v47 rows read as `None`.
+const V47: &str = r#"
+ALTER TABLE usage ADD COLUMN unrouted_reason TEXT;
+"#;
 
 /// V46: per-key `default_group` + stable routing `slug` backfill on preset groups.
 ///

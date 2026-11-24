@@ -63,6 +63,7 @@ fn row_json(r: &UsageRecord) -> Value {
         "reasoning_tokens": r.reasoning_tokens,
         "session_id": r.session_id,
         "fallback_reason": r.fallback_reason,
+        "unrouted_reason": r.unrouted_reason,
         // Every route that writes a usage row is a `POST`; the method is a property of
         // the log, not a stored column. `protocol` is the client dialect the endpoint
         // names, `None` for a passthrough whose path is not a canonical dialect.
@@ -700,6 +701,10 @@ pub async fn summary(
         Ok(scope) => scope,
         Err(response) => return *response,
     };
+    // Per-reason breakdown of requests that failed before dispatch, so the "Unrouted"
+    // card can name the cause instead of one undifferentiated pile. Fetched once and
+    // attached to whichever grouping the caller asked for.
+    let unrouted = unrouted_json(&state, since, teams.as_deref()).await;
     // `group_by=connection` splits each model by the account that served it; any other
     // value (or none) keeps the historical provider+model rows, key for key.
     if param(&query, "group_by") == Some("connection") {
@@ -727,7 +732,7 @@ pub async fn summary(
                         })
                     })
                     .collect();
-                ok_json(json!({ "data": data }))
+                ok_json(json!({ "data": data, "unrouted": unrouted }))
             }
             Err(e) => admin_error(&e),
         };
@@ -755,9 +760,40 @@ pub async fn summary(
                     })
                 })
                 .collect();
-            ok_json(json!({ "data": data }))
+            ok_json(json!({ "data": data, "unrouted": unrouted }))
         }
         Err(e) => admin_error(&e),
+    }
+}
+
+/// The additive `unrouted` payload: total pre-dispatch failures plus a per-reason list.
+/// A breakdown read failure degrades to an empty answer rather than failing the summary.
+async fn unrouted_json(state: &Arc<AppState>, since: Option<i64>, teams: Option<&[Uuid]>) -> Value {
+    match state
+        .store
+        .unrouted_reasons_in_teams(since, teams)
+        .await
+    {
+        Ok(reasons) => {
+            let reasons_json: Vec<serde_json::Value> = reasons
+                .iter()
+                .map(|r| {
+                    json!({
+                        "reason": r.reason,
+                        "requests": r.requests,
+                        "last_ts": r.last_ts,
+                        "sample_model": r.sample_model,
+                        "sample_error": r.sample_error,
+                    })
+                })
+                .collect();
+            let requests: u64 = reasons.iter().map(|r| r.requests).sum();
+            json!({ "requests": requests, "reasons": reasons_json })
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "unrouted breakdown failed");
+            json!({ "requests": 0, "reasons": [] })
+        }
     }
 }
 
@@ -793,6 +829,7 @@ mod tests {
             reasoning_tokens: 0,
             session_id: None,
             fallback_reason: fallback_reason.map(str::to_string),
+            unrouted_reason: None,
         }
     }
 

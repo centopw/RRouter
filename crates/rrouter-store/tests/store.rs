@@ -249,6 +249,7 @@ const UNDO_AFTER_V24: &str = "\
     ALTER TABLE usage DROP COLUMN requested_model; ALTER TABLE usage DROP COLUMN finish_reason; \
     ALTER TABLE usage DROP COLUMN reasoning_effort; ALTER TABLE usage DROP COLUMN reasoning_tokens; \
     ALTER TABLE usage DROP COLUMN session_id; ALTER TABLE usage DROP COLUMN fallback_reason; \
+    ALTER TABLE usage DROP COLUMN unrouted_reason; \
     DROP INDEX IF EXISTS idx_connections_team; \
     ALTER TABLE connections DROP COLUMN refusal; \
     ALTER TABLE connections DROP COLUMN owner_user_id; \
@@ -869,6 +870,7 @@ fn spent_tokens_sums_only_that_key() {
             session_id: None,
             requested_model: None,
             fallback_reason: None,
+            unrouted_reason: None,
         };
         // a: 100 + 20 + 5 + 5 = 130 across two rows; b: 7; anonymous: excluded.
         s.record_usage(&rec(Some(a.id), 100, 60, 10, 5, 5))
@@ -940,6 +942,7 @@ fn cost_micros_round_trips_and_sums_per_key() {
             session_id: None,
             requested_model: None,
             fallback_reason: None,
+            unrouted_reason: None,
         };
         s.record_usage(&rec(Some(a.id), 1_250)).await.expect("a1");
         s.record_usage(&rec(Some(a.id), 3_000)).await.expect("a2");
@@ -1969,6 +1972,7 @@ fn usage_records_summary_and_recent_order() {
             session_id: None,
             requested_model: None,
             fallback_reason: None,
+            unrouted_reason: None,
         }
     };
     rt().block_on(async {
@@ -2093,6 +2097,7 @@ fn usage_record_keeps_request_context() {
             reasoning_tokens: 2,
             session_id: Some("ses_abc123".into()),
             fallback_reason: Some("quota".into()),
+            unrouted_reason: None,
         })
         .await
         .expect("record");
@@ -2228,6 +2233,7 @@ fn attempts_round_trip_under_the_request_id() {
             session_id: None,
             requested_model: None,
             fallback_reason: None,
+            unrouted_reason: None,
         })
         .await
         .expect("usage");
@@ -2608,6 +2614,7 @@ fn prune_usage_deletes_history_older_than_the_cutoff() {
         session_id: None,
         requested_model: None,
         fallback_reason: None,
+        unrouted_reason: None,
     };
     // Attempts carry their own request id, so each timestamp is separately reachable.
     let attempt_request = |ts: i64| Uuid::from_u128(0xa000 + ts as u128);
@@ -2877,6 +2884,7 @@ fn spend_since_counts_only_rows_inside_the_window() {
             session_id: None,
             requested_model: None,
             fallback_reason: None,
+            unrouted_reason: None,
         };
         let since = 1_000;
         s.record_usage(&rec(a.id, 999, 40, 400))
@@ -3332,6 +3340,7 @@ fn page_row(ts: i64, marker: &str) -> UsageRecord {
         session_id: None,
         requested_model: None,
         fallback_reason: None,
+        unrouted_reason: None,
     }
 }
 
@@ -4077,6 +4086,7 @@ fn account_quota_exhausts_only_on_usage_inside_its_window() {
             session_id: None,
             requested_model: None,
             fallback_reason: None,
+            unrouted_reason: None,
         };
 
         // Yesterday's rows are outside today's window but inside this week's.
@@ -4199,6 +4209,7 @@ fn account_quota_enforces_token_and_cost_limits() {
             session_id: None,
             requested_model: None,
             fallback_reason: None,
+            unrouted_reason: None,
         };
         store
             .record_usage(&rec(cost.id, 600, 1, 1))
@@ -4711,6 +4722,7 @@ fn usage_trace_id_roundtrips_and_absent_stays_null() {
             session_id: None,
             requested_model: None,
             fallback_reason: None,
+            unrouted_reason: None,
         }))
         .expect("record");
     }
@@ -4981,6 +4993,7 @@ fn usage_summary_by_connection_splits_and_sums() {
         session_id: None,
         requested_model: None,
         fallback_reason: None,
+        unrouted_reason: None,
     };
     rt().block_on(async {
         s.record_usage(&rec(100, Some(first), 10, 20, 200))
@@ -5032,6 +5045,84 @@ fn usage_summary_by_connection_splits_and_sums() {
             .expect("since");
         assert_eq!(recent.len(), 2);
         assert!(recent.iter().all(|r| r.requests == 1));
+    });
+}
+
+/// `unrouted_reasons_in_teams` buckets only the pre-dispatch failures (`provider` empty)
+/// by their stable reason, leaves served rows out, and folds legacy `NULL` reasons into
+/// `other` so pre-v47 rows still show up instead of vanishing from the breakdown.
+#[test]
+fn unrouted_reasons_buckets_pre_dispatch_failures_by_reason() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    let rec = |ts: i64, provider: &str, reason: Option<&str>| UsageRecord {
+        id: None,
+        ts,
+        request_id: Some(Uuid::from_u128(ts as u128)),
+        trace_id: None,
+        provider: provider.to_string(),
+        model: "gpt-4.1".to_string(),
+        connection_id: None,
+        endpoint: Some("/v1/chat/completions".to_string()),
+        key_id: None,
+        cost_micros: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        latency_ms: 1,
+        ttft_ms: 0,
+        upstream_ms: 0,
+        status: 404,
+        streamed: false,
+        error: Some("no eligible upstream".to_string()),
+        finish_reason: None,
+        reasoning_effort: None,
+        reasoning_tokens: 0,
+        session_id: None,
+        requested_model: Some("gpt-4.1".to_string()),
+        fallback_reason: None,
+        unrouted_reason: reason.map(str::to_string),
+    };
+    rt().block_on(async {
+        s.record_usage(&rec(100, "", Some("unknown_model")))
+            .await
+            .expect("unknown_model 1");
+        s.record_usage(&rec(200, "", Some("unknown_model")))
+            .await
+            .expect("unknown_model 2");
+        s.record_usage(&rec(300, "", Some("auth"))).await.expect("auth");
+        // Legacy pre-v47 row: unrouted, but no reason recorded.
+        s.record_usage(&rec(400, "", None)).await.expect("legacy");
+        // A served request must not appear in the breakdown.
+        s.record_usage(&rec(500, "openai", None)).await.expect("served");
+
+        let rows = s
+            .unrouted_reasons_in_teams(None, None)
+            .await
+            .expect("breakdown");
+        // Three buckets: unknown_model (2), auth (1), other (1 legacy). Served is out.
+        assert_eq!(rows.len(), 3, "rows: {rows:?}");
+        let by_reason = |reason: &str| {
+            rows.iter()
+                .find(|r| r.reason == reason)
+                .map(|r| r.requests)
+                .unwrap_or(0)
+        };
+        assert_eq!(by_reason("unknown_model"), 2);
+        assert_eq!(by_reason("auth"), 1);
+        assert_eq!(by_reason("other"), 1, "legacy NULL reason folds into other");
+
+        // Most recent ts per reason is exact.
+        let unknown = rows.iter().find(|r| r.reason == "unknown_model").unwrap();
+        assert_eq!(unknown.last_ts, Some(200));
+
+        // The time filter applies.
+        let recent = s
+            .unrouted_reasons_in_teams(Some(250), None)
+            .await
+            .expect("since");
+        assert_eq!(recent.iter().map(|r| r.requests).sum::<u64>(), 2, "only ts>=250 rows");
     });
 }
 

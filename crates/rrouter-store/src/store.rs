@@ -844,6 +844,12 @@ pub struct UsageRecord {
     /// Reason the request fell back to the free pool (`quota`, `rate_limit`,
     /// `payment_required`), or `None` when served normally.
     pub fallback_reason: Option<String>,
+    /// Stable machine-readable reason a request failed before any provider was
+    /// dispatched (`provider` is empty): `unknown_model`, `no_healthy_candidate`,
+    /// `group_empty`, `auth`, `governance`, `budget`, `rate_limited`, `overloaded`,
+    /// `bad_request`, `upstream`, `translation`, `timeout`, `store`, `transport`, or
+    /// `other`. `None` on served requests and pre-v47 rows.
+    pub unrouted_reason: Option<String>,
 }
 
 /// Outcome class for [`UsageQuery::status`]. `Success` is a 2xx answer with no error text;
@@ -1076,6 +1082,20 @@ pub struct UsageSummaryByConnection {
     /// Summed micro-USD over the same rows.
     pub cost_micros: u64,
     pub avg_latency_ms: u32,
+}
+
+/// One pre-dispatch failure reason: how many requests failed before reaching any
+/// provider, bucketed by the stable [`UsageRecord::unrouted_reason`] code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnroutedReason {
+    pub reason: String,
+    pub requests: u64,
+    /// Unix seconds of the most recent row in this bucket; `None` when empty.
+    pub last_ts: Option<i64>,
+    /// A representative model the client asked for, when one was recorded.
+    pub sample_model: Option<String>,
+    /// A representative error sentence, when one was recorded.
+    pub sample_error: Option<String>,
 }
 
 /// One time bucket of usage, for charts that must stay honest at high volume.
@@ -3967,9 +3987,10 @@ impl Store {
              (ts, request_id, provider, model, connection_id, endpoint, key_id, input_tokens, \
               output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, \
               streamed, error, cost_micros, upstream_ms, trace_id, team_id, requested_model, \
-              finish_reason, reasoning_effort, reasoning_tokens, session_id, fallback_reason) \
+              finish_reason, reasoning_effort, reasoning_tokens, session_id, fallback_reason, \
+              unrouted_reason) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-                     ?19, (SELECT team_id FROM api_keys WHERE id = ?7), ?20, ?21, ?22, ?23, ?24, ?25)",
+                     ?19, (SELECT team_id FROM api_keys WHERE id = ?7), ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             params![
                 r.ts,
                 r.request_id.map(|u| u.to_string()).unwrap_or_default(),
@@ -3996,6 +4017,7 @@ impl Store {
                 r.reasoning_tokens,
                 r.session_id,
                 r.fallback_reason,
+                r.unrouted_reason,
             ],
         )
         .map_err(migrations::db_err)?;
@@ -4510,6 +4532,46 @@ impl Store {
         rows.map(|r| r.map_err(migrations::db_err)).collect()
     }
 
+    /// Per-reason totals of requests that failed before any provider was dispatched
+    /// (`provider` empty), restricted to `teams`. The dashboard buckets the otherwise
+    /// undifferentiated "unrouted" pile by the stable [`UsageRecord::unrouted_reason`].
+    ///
+    /// `sample_model` and `sample_error` are a representative row's values from the group
+    /// (SQLite returns an arbitrary member); they are hints for the dashboard, not a
+    /// guarantee of the most recent failure. `last_ts` is exact.
+    pub async fn unrouted_reasons_in_teams(
+        &self,
+        since: Option<i64>,
+        teams: Option<&[Uuid]>,
+    ) -> Result<Vec<UnroutedReason>> {
+        let (team_sql, team_args) = team_filter(teams, 2);
+        let mut args: Vec<SqlValue> = vec![since.into()];
+        args.extend(team_args);
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT coalesce(unrouted_reason, 'other'), count(*), max(ts), \
+                        requested_model, error \
+                 FROM usage WHERE provider = '' AND {}{team_sql} \
+                 GROUP BY coalesce(unrouted_reason, 'other') \
+                 ORDER BY count(*) DESC",
+                since_filter(1),
+            ))
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map(params_from_iter(args), |r| {
+                Ok(UnroutedReason {
+                    reason: r.get(0)?,
+                    requests: r.get_u64(1)?,
+                    last_ts: r.get(2)?,
+                    sample_model: r.get(3)?,
+                    sample_error: r.get(4)?,
+                })
+            })
+            .map_err(migrations::db_err)?;
+        rows.map(|r| r.map_err(migrations::db_err)).collect()
+    }
+
     /// Per connection+provider+model totals restricted to `teams`.
     ///
     /// Same counters and team scoping as [`Store::usage_summary_in_teams`]; the extra
@@ -4988,7 +5050,7 @@ fn opt_uuid_col(raw: Option<String>) -> rusqlite::Result<Option<Uuid>> {
 const USAGE_COLUMNS: &str = "id, ts, request_id, provider, model, connection_id, endpoint, \
      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, \
      status, streamed, error, key_id, cost_micros, upstream_ms, trace_id, requested_model, \
-     finish_reason, reasoning_effort, reasoning_tokens, session_id, fallback_reason";
+     finish_reason, reasoning_effort, reasoning_tokens, session_id, fallback_reason, unrouted_reason";
 
 /// Empty `request_id` is the v8 "unknown" default written before request ids existed.
 fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
@@ -5022,6 +5084,7 @@ fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         reasoning_tokens: r.get(23)?,
         session_id: r.get(24)?,
         fallback_reason: r.get(25)?,
+        unrouted_reason: r.get(26)?,
     })
 }
 
@@ -5733,6 +5796,7 @@ mod capture_tests {
             reasoning_tokens: 0,
             session_id: None,
             fallback_reason: None,
+            unrouted_reason: None,
         }
     }
 

@@ -1,5 +1,6 @@
 target/
-data/
+/data/
+!crates/rrouter-gateway/data/
 .env
 .orca-specs/
 backups/

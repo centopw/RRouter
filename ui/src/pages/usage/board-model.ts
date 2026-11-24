@@ -81,8 +81,6 @@ export type BoardAccount = {
   provider: string;
   /** Human-readable provider label, never blank. */
   providerLabel: string;
-  /** True when `provider` is empty (requests failed before dispatch). */
-  isUnrouted: boolean;
   accountName: string;
   email: string | null;
   plan: string | null;
@@ -241,7 +239,6 @@ function resolveAccountName(
   subscription: AccountSubscription | undefined,
   quota: AccountQuotaRow | undefined,
   providerLabel: string,
-  isUnrouted: boolean,
   connectionId: string | null,
 ): string {
   if (connection) {
@@ -253,7 +250,6 @@ function resolveAccountName(
   }
   if (subscription?.name?.trim()) return subscription.name.trim();
   if (quota?.name?.trim()) return quota.name.trim();
-  if (isUnrouted) return "Failed before dispatch";
   if (connectionId === null) return "Unattributed traffic";
   return "Unnamed account";
 }
@@ -410,13 +406,14 @@ export function buildBoardAccounts(input: BuildBoardInput): BoardAccount[] {
       provider,
       providerDisplayMap,
     );
+    // Requests rejected before dispatch are not an account: `unrouted-model.ts` owns them.
+    if (isUnrouted) continue;
     const isActive = connection?.is_active ?? quota?.is_active ?? true;
     const accountName = resolveAccountName(
       connection,
       subscription,
       quota,
       providerLabel,
-      isUnrouted,
       connectionId,
     );
     const email =
@@ -511,7 +508,6 @@ export function buildBoardAccounts(input: BuildBoardInput): BoardAccount[] {
       connectionId,
       provider,
       providerLabel,
-      isUnrouted,
       accountName,
       email,
       plan: subscription?.plan ?? null,
@@ -620,46 +616,131 @@ function shortDateLabel(ms: number): string {
   return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+export type WindowPaceStatus = {
+  text: string;
+  tone: "neg" | "warn" | "muted" | "faint";
+  /**
+   * Worth a visible line under the bar: the window is exhausted or will run out before it
+   * resets. Everything else stays in the meter (projection tick + accessible name) so a
+   * healthy card is not a stack of identical "on pace for N%" sentences.
+   */
+  notable: boolean;
+};
+
 /**
- * Per-window pace/status label shown under each bar on the Limits Board.
- * Always returns an honest status rather than leaving the user guessing.
+ * Per-window pace/status for the Limits Board. Always an honest answer; `notable` decides
+ * whether it is printed or only announced.
  */
-export function windowPaceStatus(
-  risk: WindowRisk,
-  now: number,
-): { text: string; tone: "neg" | "warn" | "muted" | "faint" } {
+export function windowPaceStatus(risk: WindowRisk, now: number): WindowPaceStatus {
   const { window, pace: p } = risk;
   if (p.state === "exhausted") {
-    return { text: "Exhausted — limit reached", tone: "neg" };
+    return { text: "Limit reached", tone: "neg", notable: true };
   }
   if (p.state === "on_pace_to_hit" && p.limitHitAt !== null) {
     const at =
       p.limitHitAt - now < DAY_MS ? `at ${clockTime(p.limitHitAt)}` : shortDateLabel(p.limitHitAt);
     return {
-      text: `On pace to hit ${p.approximate ? "~" : ""}${at}`,
+      text: `On pace to hit the limit ${p.approximate ? "~" : ""}${at}`,
       tone: "warn",
+      notable: true,
     };
   }
   if (p.state === "ok") {
     if (window.used_percent <= 0) {
-      return { text: "OK · 0% used", tone: "muted" };
+      return { text: "Unused this window", tone: "muted", notable: false };
     }
     if (p.projectedAtReset !== null) {
       return {
-        text: `OK · on pace for ${p.approximate ? "~" : ""}${Math.round(p.projectedAtReset)}% by reset`,
+        text: `On pace for ${p.approximate ? "~" : ""}${Math.round(p.projectedAtReset)}% by reset`,
         tone: "muted",
+        notable: false,
       };
     }
-    return { text: "OK", tone: "muted" };
+    return { text: "Within limit", tone: "muted", notable: false };
   }
   // `unknown` state: distinguish reset-in-past, too-young window, and missing reset metadata.
   if (window.resets_at !== null && now >= window.resets_at * 1000) {
-    return { text: "Window reset pending refresh", tone: "faint" };
+    return { text: "Window reset pending refresh", tone: "faint", notable: false };
   }
   if (p.startMs !== null) {
-    return { text: "Too early in window to forecast", tone: "faint" };
+    return { text: "Too early in window to forecast", tone: "faint", notable: false };
   }
-  return { text: "No reset window reported", tone: "faint" };
+  return { text: "No reset window reported", tone: "faint", notable: false };
+}
+
+/** Projected % at reset worth drawing as a tick on the meter, or `null`. */
+export function projectionTick(risk: WindowRisk): number | null {
+  const { pace: p, window } = risk;
+  if (p.state !== "ok" || p.projectedAtReset === null) return null;
+  if (p.projectedAtReset <= window.used_percent + 0.5) return null;
+  return Math.min(100, p.projectedAtReset);
+}
+
+/**
+ * Board sections. Cards are grouped so a row only ever holds cards of the same shape:
+ * accounts with limit bars next to each other, accounts without limits next to each other.
+ */
+export type BoardGroup = "attention" | "ok" | "untracked" | "inactive";
+
+export const BOARD_GROUP_ORDER: ReadonlyArray<BoardGroup> = [
+  "attention",
+  "ok",
+  "untracked",
+  "inactive",
+];
+
+export function boardGroupOf(item: Pick<BoardAccount, "status" | "isActive" | "hasLimits">): BoardGroup {
+  if (!item.isActive || item.status === "inactive") return "inactive";
+  switch (item.status) {
+    case "exhausted":
+    case "at_risk":
+    case "failing":
+    case "degraded":
+    case "unavailable":
+      return "attention";
+    case "no_limit":
+      return "untracked";
+    case "loading":
+    case "admin_only":
+      return item.hasLimits ? "ok" : "untracked";
+    case "healthy":
+      return "ok";
+  }
+}
+
+/** Split already-sorted board items into ordered, non-empty groups (order preserved). */
+export function groupBoardAccounts(
+  items: ReadonlyArray<BoardAccount>,
+): { group: BoardGroup; items: BoardAccount[] }[] {
+  const buckets = new Map<BoardGroup, BoardAccount[]>();
+  for (const item of items) {
+    const group = boardGroupOf(item);
+    const list = buckets.get(group);
+    if (list) list.push(item);
+    else buckets.set(group, [item]);
+  }
+  return BOARD_GROUP_ORDER.filter((g) => buckets.has(g)).map((group) => ({
+    group,
+    items: buckets.get(group)!,
+  }));
+}
+
+/**
+ * One plain sentence about failures on this account, or `null` when there is nothing to
+ * explain. Shown once per card instead of a second red "Failing" pill.
+ */
+export function failureSummary(
+  item: Pick<BoardAccount, "refusal" | "totals" | "isFailing" | "status" | "backoffLevel">,
+): string | null {
+  const { requests, errors } = item.totals;
+  if (item.refusal) return null; // the refusal view explains itself
+  if (errors > 0 && (item.isFailing || item.status === "degraded")) {
+    return errors === requests
+      ? `All ${compactCount(requests)} requests failed`
+      : `${compactCount(errors)} of ${compactCount(requests)} requests failed`;
+  }
+  if (item.backoffLevel > 0) return "Backing off after recent upstream errors";
+  return null;
 }
 
 /** Re-export `pace` for convenience in board callers without changing `pace.ts`. */
