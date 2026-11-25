@@ -3006,9 +3006,7 @@ impl Store {
             // normaliser (`My Alias`) is also callable as `my-alias` — routing resolves
             // aliases exactly one hop, before combos.
             let canonical = crate::canonical_ref(&alias.alias);
-            if canonical.is_empty()
-                || out.iter().any(|a: &ModelAlias| a.alias == canonical)
-            {
+            if canonical.is_empty() || out.iter().any(|a: &ModelAlias| a.alias == canonical) {
                 continue;
             }
             out.push(ModelAlias {
@@ -3756,7 +3754,9 @@ impl Store {
         let rows = stmt
             .query_map([], row_to_combo)
             .map_err(migrations::db_err)?;
-        let rows = rows.collect::<Result<Vec<_>, _>>().map_err(migrations::db_err)?;
+        let rows = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(migrations::db_err)?;
         let legacy = legacy_named(&conn, "combos", "name", name)?;
         match rows.into_iter().find(|row| legacy.contains(&row.name)) {
             Some(row) => decode_combo(row).map(Some),
@@ -5494,7 +5494,11 @@ fn decode_combo(raw: RawCombo) -> Result<Combo> {
     let models: Vec<String> = serde_json::from_str(&raw.models)
         .map_err(|e| Error::Store(format!("combo {} has invalid models JSON: {e}", raw.name)))?;
     let canonical = crate::canonical_ref(&raw.name);
-    let name = if canonical.is_empty() { raw.name.clone() } else { canonical };
+    let name = if canonical.is_empty() {
+        raw.name.clone()
+    } else {
+        canonical
+    };
     Ok(Combo {
         id: raw.id,
         name,
@@ -5618,8 +5622,13 @@ pub fn zero_config_routing() -> serde_json::Value {
 /// and new rows in one spelling, so a dashboard filter matches both; routing never
 /// compared these case-sensitively, so nothing is lost.
 fn folded_model(raw: Option<&str>) -> Option<String> {
-    raw.map(|name| name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase())
-        .filter(|name| !name.is_empty())
+    raw.map(|name| {
+        name.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    })
+    .filter(|name| !name.is_empty())
 }
 
 fn legacy_named(
@@ -5644,7 +5653,9 @@ fn legacy_named(
         .into_iter()
         .filter(|(_, raw)| {
             serde_json::from_str::<Vec<String>>(raw).is_ok_and(|names| {
-                names.iter().any(|old| old.eq_ignore_ascii_case(name) || old == name)
+                names
+                    .iter()
+                    .any(|old| old.eq_ignore_ascii_case(name) || old == name)
             })
         })
         .map(|(stored, _)| stored)

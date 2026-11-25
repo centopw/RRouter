@@ -186,7 +186,10 @@ async fn plan_records_the_alias_and_combo_it_resolved_through() {
     store
         .upsert_combo_with(
             "  Main Combo ",
-            &["claude/primary-x".to_string(), "claude/primary-y".to_string()],
+            &[
+                "claude/primary-x".to_string(),
+                "claude/primary-y".to_string(),
+            ],
             rrouter_store::ComboStrategy::Fallback,
             None,
         )
@@ -202,13 +205,11 @@ async fn plan_records_the_alias_and_combo_it_resolved_through() {
         .expect("plan");
     assert_eq!(
         plan.route,
-        vec![
-            RouteStep::Combo {
-                name: "main-combo".into(),
-                strategy: "fallback",
-                models: vec!["claude/primary-x".into(), "claude/primary-y".into()],
-            },
-        ]
+        vec![RouteStep::Combo {
+            name: "main-combo".into(),
+            strategy: "fallback",
+            models: vec!["claude/primary-x".into(), "claude/primary-y".into()],
+        },]
     );
     assert_eq!(
         plan.route[0].summary(),
@@ -230,7 +231,11 @@ async fn plan_records_the_alias_and_combo_it_resolved_through() {
 
     // A bare id needs no lookup, so it records no steps.
     let bare = Planner::new()
-        .plan(&Catalog::builtin(), &store, PlanRequest::new("claude/primary-x"))
+        .plan(
+            &Catalog::builtin(),
+            &store,
+            PlanRequest::new("claude/primary-x"),
+        )
         .await
         .expect("plan");
     assert!(bare.route.is_empty());

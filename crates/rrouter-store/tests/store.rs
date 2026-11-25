@@ -1916,7 +1916,9 @@ fn combo_and_alias_names_are_canonical_and_lookups_tolerate_case() {
         assert_eq!(again.id, combo.id);
         assert_eq!(s.list_combos().await.expect("list").len(), 1);
 
-        s.upsert_alias("  Fast Path ", "openai/gpt-4.1").await.expect("alias");
+        s.upsert_alias("  Fast Path ", "openai/gpt-4.1")
+            .await
+            .expect("alias");
         let aliases = s.list_aliases().await.expect("aliases");
         assert_eq!(aliases.len(), 1);
         assert_eq!(aliases[0].alias, "fast-path");
@@ -1954,13 +1956,19 @@ fn legacy_rows_are_rewritten_by_the_backfill_and_their_old_names_still_resolve()
             Ok((r.get(0)?, r.get(1)?))
         })
         .expect("combo row");
-    assert_eq!(combo, ("main-combo".to_string(), r#"["Main Combo"]"#.to_string()));
+    assert_eq!(
+        combo,
+        ("main-combo".to_string(), r#"["Main Combo"]"#.to_string())
+    );
     let alias: (String, String) = conn
         .query_row("SELECT alias, legacy_names FROM model_aliases", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })
         .expect("alias");
-    assert_eq!(alias, ("fast-path".to_string(), r#"["Fast Path"]"#.to_string()));
+    assert_eq!(
+        alias,
+        ("fast-path".to_string(), r#"["Fast Path"]"#.to_string())
+    );
     drop(conn);
 
     rt().block_on(async {
@@ -1987,7 +1995,10 @@ fn legacy_rows_are_rewritten_by_the_backfill_and_their_old_names_still_resolve()
             .await
             .expect("repost");
         assert_eq!(s.list_combos().await.expect("list").len(), 1);
-        assert_eq!(s.next_combo_start("Main Combo").await.expect("start"), Some(0));
+        assert_eq!(
+            s.next_combo_start("Main Combo").await.expect("start"),
+            Some(0)
+        );
 
         // Deleting by the old spelling deletes the renamed row.
         assert!(s.delete_alias("Fast Path").await.expect("delete"));
@@ -2051,7 +2062,10 @@ fn preset_and_group_names_are_canonical_and_legacy_spellings_resolve() {
         assert_eq!(found[0].id, preset.id);
         // And so does another case of its canonical name.
         assert_eq!(
-            s.model_presets_named("OPS-BOARD").await.expect("lookup").len(),
+            s.model_presets_named("OPS-BOARD")
+                .await
+                .expect("lookup")
+                .len(),
             1
         );
 

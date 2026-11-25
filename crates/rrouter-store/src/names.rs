@@ -110,7 +110,10 @@ mod tests {
 
     #[test]
     fn keeps_version_and_colon_but_drops_path_hostile_characters() {
-        assert_eq!(canonical_name("DeepSeek-V4.1-Flash-1017"), "deepseek-v4.1-flash-1017");
+        assert_eq!(
+            canonical_name("DeepSeek-V4.1-Flash-1017"),
+            "deepseek-v4.1-flash-1017"
+        );
         assert_eq!(canonical_name("combo:Main"), "combo:main");
         assert_eq!(canonical_name("a?b#c%d"), "a-b-c-d");
         assert_eq!(canonical_name("a/b"), "a-b");
@@ -118,7 +121,10 @@ mod tests {
 
     #[test]
     fn slash_survives_only_between_real_parts() {
-        assert_eq!(canonical_ref("Main / OAI // DeepSeek-V4.1"), "main/oai/deepseek-v4.1");
+        assert_eq!(
+            canonical_ref("Main / OAI // DeepSeek-V4.1"),
+            "main/oai/deepseek-v4.1"
+        );
         assert_eq!(canonical_ref("main/"), "main");
         assert_eq!(canonical_ref("/main"), "main");
         assert_eq!(canonical_ref("main//x/"), "main/x");

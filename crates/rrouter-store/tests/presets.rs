@@ -457,7 +457,10 @@ fn preset_crud_covers_meta_duplicate_default_and_delete() {
             .expect("default")
             .expect("v30 seeds the default");
         assert_eq!(seed.id, DEFAULT_MODEL_PRESET_ID);
-        assert_eq!(seed.name, "default", "the seeded name is stored canonical (V49)");
+        assert_eq!(
+            seed.name, "default",
+            "the seeded name is stored canonical (V49)"
+        );
         assert!(seed.is_default);
         assert_eq!(seed.revision, 1);
         assert_eq!(seed.layout, LayoutDocument::default());

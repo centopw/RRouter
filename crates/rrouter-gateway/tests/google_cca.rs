@@ -282,11 +282,7 @@ impl Harness {
         let response = self
             .router
             .clone()
-            .oneshot(
-                builder
-                    .body(Body::from(body.to_string()))
-                    .expect("request"),
-            )
+            .oneshot(builder.body(Body::from(body.to_string())).expect("request"))
             .await
             .expect("response");
         let status = response.status();
@@ -569,7 +565,10 @@ async fn a_chat_request_carries_no_session_id_on_the_wire() {
         calls[0].body
     );
     assert_eq!(calls[0].body["project"], PROJECT);
-    assert_eq!(calls[0].body["request"]["contents"][0]["parts"][0]["text"], "hi");
+    assert_eq!(
+        calls[0].body["request"]["contents"][0]["parts"][0]["text"],
+        "hi"
+    );
 }
 
 #[tokio::test]

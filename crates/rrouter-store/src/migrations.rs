@@ -1070,10 +1070,7 @@ fn backfill_canonical_names(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     /// `(key, stored name)` pairs grouped by canonical name: one stored name per canonical
     /// name is a rename, two are a collision whatever their keys (`combos.name` alone is
     /// unique, `models` is keyed by `(provider, model)`).
-    fn plan(
-        what: &str,
-        pairs: Vec<(String, String)>,
-    ) -> Result<Vec<(String, String, String)>> {
+    fn plan(what: &str, pairs: Vec<(String, String)>) -> Result<Vec<(String, String, String)>> {
         let mut grouped: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
         for (key, stored) in pairs {
             grouped

@@ -1511,7 +1511,14 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(
             sorted,
-            ["model", "project", "request", "requestId", "requestType", "userAgent"],
+            [
+                "model",
+                "project",
+                "request",
+                "requestId",
+                "requestType",
+                "userAgent"
+            ],
             "the envelope is exactly what the current wire declares"
         );
         assert!(build_request(&request(), "gemini-3-pro", "proj-1").is_ok());
@@ -1757,7 +1764,10 @@ mod tests {
             "sessionId is neither optional nor identity any more: {rejection:?}"
         );
         assert!(rejected_fields(body.to_string().as_bytes()).is_empty());
-        assert!(rejection.error().is_none(), "an absent member is no reason to fail");
+        assert!(
+            rejection.error().is_none(),
+            "an absent member is no reason to fail"
+        );
     }
 
     #[test]

@@ -840,7 +840,10 @@ async fn v1_models_groups_follow_the_default_preset() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let groups = body["groups"].as_array().expect("groups");
     assert_eq!(groups[0]["id"], "g-fast");
-    assert_eq!(groups[0]["name"], "fast", "a group name is stored canonical");
+    assert_eq!(
+        groups[0]["name"], "fast",
+        "a group name is stored canonical"
+    );
     assert_eq!(groups[0]["slug"], "fast");
     assert_eq!(groups[0]["provider"], Value::Null);
     assert_eq!(groups[1]["id"], "provider:openai");
@@ -2781,7 +2784,10 @@ async fn stable_group_slug_reference_also_matches_and_normalization() {
         .iter()
         .find(|g| g["id"] == "g-main")
         .expect("g-main");
-    assert_eq!(group_entry["name"], "primary", "the rename is stored canonical");
+    assert_eq!(
+        group_entry["name"], "primary",
+        "the rename is stored canonical"
+    );
     assert_eq!(group_entry["slug"], "main");
     assert!(
         body["data"]

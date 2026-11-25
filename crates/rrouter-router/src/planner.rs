@@ -1437,10 +1437,7 @@ impl Planner {
 
         // 1. Alias, exactly one hop: a self-referential or cyclic alias must not loop.
         //    The alias list is canonical, so a spelling whose case differs still matches.
-        if let Some(alias) = aliases
-            .iter()
-            .find(|a| a.alias == current)
-        {
+        if let Some(alias) = aliases.iter().find(|a| a.alias == current) {
             route.push(RouteStep::Alias {
                 name: alias.alias.clone(),
                 target: alias.target.clone(),

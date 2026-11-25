@@ -340,7 +340,11 @@ async fn a_rename_keeps_the_layout_and_the_revision() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{renamed}");
-    assert_eq!(renamed["name"], json!("renamed"), "renames are canonical too");
+    assert_eq!(
+        renamed["name"],
+        json!("renamed"),
+        "renames are canonical too"
+    );
     assert_eq!(
         renamed["description"],
         json!("seeded"),
