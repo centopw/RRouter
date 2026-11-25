@@ -24,27 +24,39 @@
 //! `request` deliberately carries no `model` and no `safetySettings`: neither belongs in
 //! the inner Gemini request, and the Antigravity backend rejects a nested model.
 //!
+//! # `sessionId`
+//!
+//! Cloud Code Assist used to accept an optional top-level `sessionId`, a locally derived
+//! conversation handle that nothing in the canonical request carries and nothing on the
+//! response side reads. Older builds sent one; cloudcode-pa no longer declares the member,
+//! so every model now answers
+//!
+//! ```json
+//! {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+//!   "message": "Invalid JSON payload received. Unknown name \"sessionId\": Cannot find field."}}
+//! ```
+//!
+//! The envelope therefore carries **no** `sessionId`: it is neither built, derived nor
+//! repaired back in. Asserting its absence in [`tests::builds_the_antigravity_envelope`] is
+//! the regression guard — a member this builder never knew as valid may not reappear
+//! without an upstream that declares it.
+//!
 //! # Envelope repair
 //!
-//! `sessionId` is undocumented: the same host serves models that accept it and models that
-//! answer `400` `Unknown name "sessionId"`. [`rejected_fields`] reads such an answer and
-//! [`without_fields`] rebuilds the envelope without exactly the fields it named, so the
-//! gateway repairs the account that rejected it instead of guessing for all of them.
-//!
-//! The repair is **subtractive**: whatever it drops is missing from that account's later
-//! requests, with no re-add and no alert. It may therefore only ever remove a member whose
-//! absence still leaves a valid request, and [`DROPPABLE`] holds exactly one name —
-//! `sessionId`.
+//! The envelope has no optional member today, so [`rejected_fields`] is always empty and
+//! [`without_fields`] removes nothing: the gateway still asks the question, and the answer
+//! is "nothing may be dropped". The machinery stays because it is the only path that may
+//! ever lose a member whose absence still leaves a valid request, and it is gated on
+//! [`DROPPABLE`] rather than on what an upstream happens to name.
 //!
 //! Identity is *not* repairable. `model`, `userAgent`, `requestType`, `project` and
 //! `requestId` are what makes the call this account's call; an envelope without them still
 //! parses, so nothing fails loudly while every later request runs under a partial identity.
 //! An upstream answering `Unknown name "userAgent"` is saying the envelope shape is wrong
 //! for this account or model version — not that `userAgent` is optional. Those names are
-//! kept in a separate [`REQUIRED`] bucket: they are never dropped, [`EnvelopeRejection`]
-//! reports them as [`UnrepairableEnvelope`] so the caller can surface them, and
-//! [`rejected_fields`] — the repair-only view — reports nothing for such an answer, so a
-//! caller that ignores the distinction still cannot mutilate an envelope.
+//! kept in the [`REQUIRED`] bucket: [`EnvelopeRejection`] reports them as
+//! [`UnrepairableEnvelope`] so the caller surfaces them, and [`rejected_fields`] — the
+//! repair-only view — reports nothing for such an answer.
 //!
 //! # Account refusals
 //!
@@ -346,9 +358,6 @@ pub fn build_request_with(
     envelope.insert("requestType".into(), Value::from("agent"));
     envelope.insert("project".into(), Value::from(project.to_string()));
     envelope.insert("requestId".into(), Value::from(request_id.to_string()));
-    if let Some(session_id) = session_id(req) {
-        envelope.insert("sessionId".into(), Value::from(session_id));
-    }
     envelope.insert("request".into(), Value::Object(request));
     Ok(Value::Object(envelope))
 }
@@ -374,40 +383,6 @@ fn generation_config(req: &ChatRequest) -> Map<String, Value> {
         );
     }
     config
-}
-
-/// Stable conversation id derived from the system prompt and the first user turn.
-///
-/// The Antigravity envelope treats `sessionId` as a conversation handle; nothing in the
-/// canonical request carries one, so it is derived from the part of the conversation that
-/// does not change between turns. Requests with neither field omit it.
-fn session_id(req: &ChatRequest) -> Option<String> {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut wrote = false;
-    let feed = |text: &str, hash: &mut u64, wrote: &mut bool| {
-        if text.is_empty() {
-            return;
-        }
-        *wrote = true;
-        for byte in text.as_bytes() {
-            *hash ^= u64::from(*byte);
-            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        // A separator keeps ("ab","c") and ("a","bc") distinct.
-        *hash ^= 0xff;
-        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    };
-    if let Some(system) = req.system.as_deref() {
-        feed(system, &mut hash, &mut wrote);
-    }
-    if let Some(first_user) = req
-        .messages
-        .iter()
-        .find(|message| message.role == Role::User)
-    {
-        feed(&first_user.joined_text(), &mut hash, &mut wrote);
-    }
-    wrote.then(|| format!("{hash:016x}"))
 }
 
 /// Adapts JSON Schema type unions into Gemini `Schema` proto compatible fields.
@@ -517,14 +492,17 @@ fn gemini_schema(schema: &mut Value) {
 ///
 /// The repair is subtractive and remembered per account: whatever is dropped here is absent
 /// from every later request until the process restarts, with no re-add and no alert. A name
-/// may only be listed when the envelope without it is still a valid request. `sessionId` is
-/// the sole such member — undocumented, derived locally (see [`session_id`]), and omitted
-/// by the desktop client on hosts that do not know it.
+/// may only be listed when the envelope without it is still a valid request — which is why
+/// the set is **empty**. `sessionId` used to be the sole member; cloudcode-pa now rejects
+/// it with `Unknown name`, so a build that still sent it would pay a rejected round trip on
+/// every account, and listing it here would only repair accounts one probe at a time. The
+/// envelope no longer sends it (see the module docs), and the empty table means the repair
+/// path can never re-introduce or silently strip anything for an upstream that says so.
 ///
 /// Identity keys are in [`REQUIRED`] and are never droppable. `request` is deliberately
 /// absent from both: it carries the translated conversation, so dropping a member of it
 /// would answer a different question instead of the same one in an older envelope shape.
-const DROPPABLE: [&str; 1] = ["sessionId"];
+const DROPPABLE: [&str; 0] = [];
 
 /// Top-level keys that make the envelope a valid request for this account.
 ///
@@ -547,7 +525,9 @@ const REQUIRED: [&str; 5] = ["model", "userAgent", "requestType", "project", "re
 /// Two buckets, because the two answers call for opposite actions:
 ///
 /// * [`droppable`](Self::droppable) — optional members the upstream does not know. Removing
-///   them yields a valid request, so the resend drops them ([`without_fields`]).
+///   them yields a valid request, so the resend drops them ([`without_fields`]). Nothing is
+///   in that class today ([`DROPPABLE`] is empty), so the bucket stays empty and every
+///   named field the envelope knows lands in `required`.
 /// * [`required`](Self::required) — identity members the upstream does not know. Removing
 ///   them yields a request that still parses but is no longer this account's request, so
 ///   nothing in this bucket is ever dropped: [`fields_to_drop`](Self::fields_to_drop) is
@@ -732,16 +712,16 @@ pub fn without_fields(envelope: Value, fields: &[&str]) -> Value {
     Value::Object(envelope)
 }
 
-/// Note `field` when it names a top-level key: `sessionId`, `$.sessionId` and
-/// `sessionId.contents` all name the top-level `sessionId`.
+/// Note `field` when it names a top-level key: `requestId`, `$.requestId` and
+/// `requestId.contents` all name the top-level `requestId`.
 fn named_field(rejection: &mut EnvelopeRejection, field: &str) {
     let path = field.trim().trim_start_matches("$.").trim_matches('"');
     let name = path.split('.').next().unwrap_or_default().trim();
     rejection.note(name);
 }
 
-/// Note fields named in the parser's own wording: `Unknown name "sessionId"` and
-/// `Unknown name sessionId: Cannot find field.`
+/// Note fields named in the parser's own wording: `Unknown name "userAgent"` and
+/// `Unknown name userAgent: Cannot find field.`
 fn named_in_text(rejection: &mut EnvelopeRejection, text: &str) {
     const MARKER: &str = "Unknown name";
     let mut rest = text;
@@ -1505,14 +1485,36 @@ mod tests {
             "get_weather"
         );
         assert!(
-            envelope["sessionId"].is_string(),
-            "a conversation id is stable"
+            envelope.get("sessionId").is_none(),
+            "cloudcode-pa answers `Unknown name sessionId`: {envelope}"
         );
+    }
+
+    /// Regression: cloudcode-pa rejects `sessionId` with `400 INVALID_ARGUMENT`, so the
+    /// serialized body — not just the in-memory map — must carry no such member, top-level
+    /// or otherwise. The streaming path serializes the same builder, so one body covers it.
+    #[test]
+    fn the_serialized_envelope_has_no_session_id() {
+        let envelope =
+            build_request_with(&request(), "gemini-3-pro", "proj-1", "agent-test").unwrap();
+        let serialized = envelope.to_string();
+        assert!(!serialized.contains("sessionId"), "{serialized}");
+        let body: Value = serde_json::from_str(&serialized).expect("round trip");
+        let top_level: Vec<&str> = body
+            .as_object()
+            .expect("object envelope")
+            .keys()
+            .map(String::as_str)
+            .filter(|key| *key != "sessionId")
+            .collect();
+        let mut sorted = top_level.clone();
+        sorted.sort_unstable();
         assert_eq!(
-            build_request_with(&request(), "gemini-3-pro", "proj-1", "agent-test").unwrap()
-                ["sessionId"],
-            envelope["sessionId"]
+            sorted,
+            ["model", "project", "request", "requestId", "requestType", "userAgent"],
+            "the envelope is exactly what the current wire declares"
         );
+        assert!(build_request(&request(), "gemini-3-pro", "proj-1").is_ok());
     }
 
     #[test]
@@ -1733,8 +1735,10 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_request_violation_names_the_droppable_envelope_field() {
-        // The shape cloudcode-pa answers for the undocumented `sessionId`.
+    fn the_field_this_build_used_to_send_is_no_longer_repairable() {
+        // The exact answer cloudcode-pa gives for `sessionId`. The envelope no longer sends
+        // it, so it is not a member repair may act on: naming it must not put it back on
+        // any later request build, and it must not fail the account either.
         let body = json!({"error": {
             "code": 400,
             "message": "Invalid JSON payload received. Unknown name \"sessionId\": Cannot find field.",
@@ -1747,7 +1751,13 @@ mod tests {
                 }]
             }]
         }});
-        assert_eq!(rejected_fields(body.to_string().as_bytes()), ["sessionId"]);
+        let rejection = EnvelopeRejection::parse(body.to_string().as_bytes());
+        assert!(
+            rejection.is_empty(),
+            "sessionId is neither optional nor identity any more: {rejection:?}"
+        );
+        assert!(rejected_fields(body.to_string().as_bytes()).is_empty());
+        assert!(rejection.error().is_none(), "an absent member is no reason to fail");
     }
 
     #[test]
@@ -1765,25 +1775,24 @@ mod tests {
             ["requestId"],
             "a path names its first segment, and requestId is identity"
         );
-        assert_eq!(
-            rejection.droppable(),
-            ["sessionId"],
-            "the optional member is still recognised next to it"
-        );
         assert!(
-            rejection.fields_to_drop().is_empty(),
-            "a mixed answer drops nothing: the envelope is wrong for this account"
+            rejection.droppable().is_empty(),
+            "the envelope has no optional member left to drop"
         );
+        assert!(rejection.fields_to_drop().is_empty());
 
         let by_message = json!({"error": {
             "code": 400,
             "status": "INVALID_ARGUMENT",
-            "message": "Invalid JSON payload received. Unknown name sessionId: Cannot find field."
+            "message": "Invalid JSON payload received. Unknown name userAgent: Cannot find field."
         }});
+        assert!(
+            rejected_fields(by_message.to_string().as_bytes()).is_empty(),
+            "the parser's own wording is read, and identity is never droppable"
+        );
         assert_eq!(
-            rejected_fields(by_message.to_string().as_bytes()),
-            ["sessionId"],
-            "the parser's own wording names the field even without a violation"
+            EnvelopeRejection::parse(by_message.to_string().as_bytes()).required(),
+            ["userAgent"]
         );
     }
 
@@ -1887,7 +1896,7 @@ mod tests {
             }]
         }});
         let rejection = EnvelopeRejection::parse(body.to_string().as_bytes());
-        assert_eq!(rejection.droppable(), ["sessionId"]);
+        assert!(rejection.droppable().is_empty());
         assert_eq!(rejection.required(), ["userAgent"]);
         assert!(
             rejection.fields_to_drop().is_empty(),
@@ -1925,7 +1934,7 @@ mod tests {
         );
         assert!(
             repaired.get("sessionId").is_none(),
-            "the optional member goes"
+            "a name outside DROPPABLE is never removed, and never added either"
         );
         for identity in REQUIRED {
             assert!(
@@ -1942,10 +1951,13 @@ mod tests {
     fn rebuilding_without_fields_keeps_everything_else() {
         let envelope = build_request_with(&request(), "gemini-3-pro", "proj-1", "agent-test")
             .expect("envelope");
-        assert!(envelope["sessionId"].is_string());
+        assert!(envelope.get("sessionId").is_none());
 
         let repaired = without_fields(envelope.clone(), &["sessionId"]);
-        assert!(repaired.get("sessionId").is_none(), "{repaired}");
+        assert_eq!(
+            repaired, envelope,
+            "asking to drop an absent member changes nothing"
+        );
         assert_eq!(repaired["model"], "gemini-3-pro");
         assert_eq!(repaired["requestId"], "agent-test");
         assert_eq!(

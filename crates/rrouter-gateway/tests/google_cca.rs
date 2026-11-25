@@ -54,20 +54,6 @@ struct Call {
 enum Reply {
     Json(u16, Value),
     Sse(String),
-    /// Answer like cloudcode-pa for an undocumented envelope member: a `400` naming
-    /// `field` whenever the body still carries it, and `then` otherwise. Sticky, so it
-    /// keeps rejecting every call until the body is repaired instead of consuming a queue
-    /// entry — which is what lets a test tell "repaired" from "probed again".
-    RejectField {
-        field: &'static str,
-        then: Box<Reply>,
-    },
-}
-
-impl Reply {
-    fn sticky(&self) -> bool {
-        matches!(self, Self::RejectField { .. })
-    }
 }
 
 impl Mock {
@@ -132,19 +118,18 @@ async fn handle(State(mock): State<Mock>, req: Request<Body>) -> Response {
         headers,
         body: body.clone(),
     });
-    let reply = {
-        let mut replies = mock.inner.replies.lock().expect("replies");
-        match replies.front() {
-            Some(Reply::RejectField { field, .. }) if body.get(*field).is_some() => {
-                return unknown_field(field);
-            }
-            Some(reply) if reply.sticky() => reply.clone(),
-            _ => replies.pop_front().unwrap_or(Reply::Json(
-                500,
-                json!({"error": {"message": "no reply queued"}}),
-            )),
-        }
-    };
+    // One queued reply per call: a test that sees an extra upstream call sees it as a
+    // 500 here and an unexpected count in `calls()`, never a silently repeated answer.
+    let reply = mock
+        .inner
+        .replies
+        .lock()
+        .expect("replies")
+        .pop_front()
+        .unwrap_or(Reply::Json(
+            500,
+            json!({"error": {"message": "no reply queued"}}),
+        ));
     render(reply)
 }
 
@@ -159,28 +144,7 @@ fn render(reply: Reply) -> Response {
             .header("content-type", "text/event-stream")
             .body(Body::from(body))
             .expect("sse"),
-        Reply::RejectField { then, .. } => render(*then),
     }
-}
-
-/// The real cloudcode-pa answer for an undocumented envelope member, at both carriers the
-/// gateway reads: the `BadRequest` violation and protobuf's own `Unknown name` wording.
-fn unknown_field(field: &str) -> Response {
-    let message =
-        format!("Invalid JSON payload received. Unknown name \"{field}\": Cannot find field.");
-    (
-        StatusCode::BAD_REQUEST,
-        axum::Json(json!({"error": {
-            "code": 400,
-            "message": message,
-            "status": "INVALID_ARGUMENT",
-            "details": [{
-                "@type": "type.googleapis.com/google.rpc.BadRequest",
-                "fieldViolations": [{"field": field, "description": message}]
-            }]
-        }})),
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------- harness
@@ -299,14 +263,27 @@ impl Harness {
     }
 
     async fn post(&self, uri: &str, body: Value) -> (StatusCode, Value) {
+        self.post_with(uri, body, &[]).await
+    }
+
+    async fn post_with(
+        &self,
+        uri: &str,
+        body: Value,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
         let response = self
             .router
             .clone()
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header("content-type", "application/json")
+                builder
                     .body(Body::from(body.to_string()))
                     .expect("request"),
             )
@@ -563,74 +540,89 @@ async fn a_missing_project_is_a_clear_400_without_an_upstream_call() {
 }
 
 #[tokio::test]
-async fn an_unknown_envelope_field_is_dropped_for_the_retry_and_remembered() {
-    let mock = Mock::start(vec![Reply::RejectField {
-        field: "sessionId",
-        then: Box::new(Reply::Json(200, cca_response("repaired", 5, 2))),
-    }])
-    .await;
+async fn a_chat_request_carries_no_session_id_on_the_wire() {
+    let mock = Mock::start(vec![Reply::Json(200, cca_response("plain", 5, 2))]).await;
     let h = harness();
     h.connect(&mock, PROJECT).await;
-    let request = json!({
-        "model": format!("{PROVIDER}/gemini-3.8-flash-tiered"),
-        "messages": [{"role": "user", "content": "hi"}]
-    });
 
-    let (status, body) = h.post("/v1/chat/completions", request.clone()).await;
+    let (status, body) = h
+        .post(
+            "/v1/chat/completions",
+            json!({
+                "model": format!("{PROVIDER}/gemini-3-pro"),
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["choices"][0]["message"]["content"], "repaired");
+    assert_eq!(body["choices"][0]["message"]["content"], "plain");
 
     let calls = mock.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(
-        calls.len(),
-        2,
-        "one probe and one repaired resend: {calls:?}"
+        calls[0].uri, "/v1internal:generateContent",
+        "the non-streaming path"
     );
     assert!(
-        calls[0].body["sessionId"].is_string(),
-        "the field is still sent on the first request after startup: {}",
+        calls[0].body.get("sessionId").is_none(),
+        "cloudcode-pa rejects `Unknown name sessionId`: {}",
         calls[0].body
     );
-    assert!(
-        calls[1].body.get("sessionId").is_none(),
-        "the resend omits exactly the field the 400 named: {}",
-        calls[1].body
-    );
-    assert_eq!(calls[1].body["model"], "gemini-3.8-flash-tiered");
-    assert_eq!(calls[1].body["project"], PROJECT);
-    assert_eq!(
-        calls[1].body["request"]["contents"][0]["parts"][0]["text"], "hi",
-        "the inner request is untouched: {}",
-        calls[1].body
-    );
-
-    // The second client request must not pay for the same probe again.
-    let (status, body) = h.post("/v1/chat/completions", request).await;
-    assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["choices"][0]["message"]["content"], "repaired");
-    let calls = mock.calls();
-    assert_eq!(calls.len(), 3, "no second probe: {calls:?}");
-    assert_eq!(mock.hits(), 3);
-    assert!(
-        calls[2].body.get("sessionId").is_none(),
-        "the repair is remembered per connection: {}",
-        calls[2].body
-    );
+    assert_eq!(calls[0].body["project"], PROJECT);
+    assert_eq!(calls[0].body["request"]["contents"][0]["parts"][0]["text"], "hi");
 }
 
 #[tokio::test]
-async fn a_streaming_400_is_repairable_before_any_byte_reaches_the_client() {
+async fn the_connection_test_probe_carries_no_session_id() {
+    let mock = Mock::start(vec![Reply::Json(
+        200,
+        json!({"response": {"candidates": [{"content": {"parts": [{"text": "pong"}]},
+                "finishReason": "STOP"}]}}),
+    )])
+    .await;
+    let h = harness();
+    h.connect(&mock, PROJECT).await;
+    let id = h
+        .state
+        .store
+        .list_connections(Some(PROVIDER))
+        .await
+        .expect("connections")
+        .first()
+        .expect("one connection")
+        .id;
+
+    let (status, body) = h
+        .post_with(
+            &format!("/api/connections/{id}/test"),
+            json!({}),
+            &[("x-admin-token", "adm-test")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["ok"], true, "body: {body}");
+    assert_eq!(body["status"], 200, "body: {body}");
+
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(
+        calls[0].body.get("sessionId").is_none(),
+        "the probe builds the same envelope, so it must be clean too: {}",
+        calls[0].body
+    );
+    assert_eq!(calls[0].body["project"], PROJECT);
+    assert_eq!(calls[0].body["requestType"], "agent");
+}
+
+#[tokio::test]
+async fn a_streaming_request_carries_no_session_id() {
     let sse = concat!(
         "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}]}}]}}\n\n",
         "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" there\"}]},\"finishReason\":\"STOP\"}],",
         "\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":2}}}\n\n"
     )
     .to_string();
-    let mock = Mock::start(vec![Reply::RejectField {
-        field: "sessionId",
-        then: Box::new(Reply::Sse(sse)),
-    }])
-    .await;
+    let mock = Mock::start(vec![Reply::Sse(sse)]).await;
     let h = harness();
     h.connect(&mock, PROJECT).await;
 
@@ -638,7 +630,7 @@ async fn a_streaming_400_is_repairable_before_any_byte_reaches_the_client() {
         .post_stream(
             "/v1/messages",
             json!({
-                "model": format!("{PROVIDER}/gemini-3.8-flash-tiered"),
+                "model": format!("{PROVIDER}/gemini-3-pro"),
                 "max_tokens": 64,
                 "stream": true,
                 "messages": [{"role": "user", "content": "say hello"}]
@@ -651,20 +643,12 @@ async fn a_streaming_400_is_repairable_before_any_byte_reaches_the_client() {
     assert!(body.contains("message_stop"), "{body}");
 
     let calls = mock.calls();
-    assert_eq!(
-        calls.len(),
-        2,
-        "one probe and one repaired resend: {calls:?}"
-    );
-    assert!(calls[0].body["sessionId"].is_string(), "{}", calls[0].body);
-    assert_eq!(
-        calls[1].uri, "/v1internal:streamGenerateContent?alt=sse",
-        "the resend keeps the streaming path"
-    );
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].uri, "/v1internal:streamGenerateContent?alt=sse");
     assert!(
-        calls[1].body.get("sessionId").is_none(),
-        "the resend omits the rejected field: {}",
-        calls[1].body
+        calls[0].body.get("sessionId").is_none(),
+        "the streaming path shares the builder: {}",
+        calls[0].body
     );
 }
 
