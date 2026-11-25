@@ -703,6 +703,8 @@ async fn record_usage(
         session_id: None,
         fallback_reason: None,
         unrouted_reason: None,
+        resolved_ref: None,
+        route_trail: None,
     };
     if let Err(e) = state.store.record_usage(&record).await {
         tracing::warn!(error = %e, "search usage row failed");

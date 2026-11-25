@@ -778,6 +778,15 @@ export type UsageEvent = {
   reasoning_tokens: number;
   /** Conversation id the client sent, when it sent one. */
   session_id: string | null;
+  /**
+   * The ref routing dispatched on after alias and combo resolution
+   * (`main/deepseek-v4.1-flash-1017`), or null when nothing resolved.
+   */
+  resolved_ref: string | null;
+  /** The resolution steps as one text block, one line each; null when there were none. */
+  route_trail?: string | null;
+  /** `route_trail` split into lines: `combo main (fallback): a, b`, `alias fast -> x`. */
+  route?: string[];
   /** Always `POST`: only POST routes write usage rows. */
   method: string;
   /** Client dialect the endpoint names, e.g. `openai_chat`. */

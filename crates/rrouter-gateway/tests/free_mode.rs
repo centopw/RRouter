@@ -1211,6 +1211,8 @@ async fn boot_usage_seed_enforces_gemini_rpd_and_never_gates_paid_account() {
                 session_id: None,
                 fallback_reason: None,
                 unrouted_reason: None,
+                resolved_ref: None,
+                route_trail: None,
             })
             .await
             .expect("record usage");
@@ -1286,6 +1288,8 @@ async fn boot_usage_seed_enforces_gemini_rpd_and_never_gates_paid_account() {
                 session_id: None,
                 fallback_reason: None,
                 unrouted_reason: None,
+                resolved_ref: None,
+                route_trail: None,
             })
             .await
             .expect("record paid usage");

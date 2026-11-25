@@ -351,6 +351,9 @@ pub struct Catalog {
     by_model: HashMap<String, Vec<ModelInfo>>,
     /// version core → model ids, so suffix-stripped lookups avoid a full scan.
     by_core: HashMap<String, Vec<String>>,
+    /// lower-case id → its canonical id, so a name typed in another case still
+    /// resolves to the published spelling (ids are ASCII).
+    by_lower: HashMap<String, String>,
 }
 
 impl Catalog {
@@ -371,24 +374,50 @@ impl Catalog {
 
     fn from_map(by_model: HashMap<String, Vec<ModelInfo>>) -> Self {
         let mut by_core: HashMap<String, Vec<String>> = HashMap::new();
+        let mut by_lower: HashMap<String, String> = HashMap::with_capacity(by_model.len());
         for id in by_model.keys() {
             by_core
                 .entry(core_of(id).to_string())
                 .or_default()
                 .push(id.clone());
+            let lower = id.to_ascii_lowercase();
+            if !by_lower.contains_key(&lower) || *id == lower {
+                // Two ids differing only in case: the all-lower one is the spelling.
+                by_lower.insert(lower, id.clone());
+            }
         }
         for ids in by_core.values_mut() {
             ids.sort();
         }
-        Self { by_model, by_core }
+        Self {
+            by_model,
+            by_core,
+            by_lower,
+        }
+    }
+
+    /// The published spelling of `model`, matched case-insensitively.
+    ///
+    /// A mixed-case bare id is the same model as its lower-case form — upstreams spell
+    /// ids in lower case — so routing and the usage row keep the canonical id instead of
+    /// sending a spelling the provider never published.
+    pub fn canonical_id<'a>(&'a self, model: &'a str) -> Option<&'a str> {
+        if self.by_model.contains_key(model) {
+            return Some(model);
+        }
+        self.by_lower
+            .get(&model.to_ascii_lowercase())
+            .map(String::as_str)
     }
 
     /// Providers that declare `model`. Exact id first; otherwise a version-core
     /// match so date suffixes resolve to the curated entries. Embeddings never
     /// resolve to chat models and vice versa.
     pub fn resolve(&self, model: &str) -> Vec<ModelInfo> {
-        if let Some(hit) = self.by_model.get(model) {
-            return hit.clone();
+        if let Some(canonical) = self.canonical_id(model) {
+            if let Some(hit) = self.by_model.get(canonical) {
+                return hit.clone();
+            }
         }
         let want_embedding = model.contains("embedding");
         let Some(ids) = self.by_core.get(core_of(model)) else {

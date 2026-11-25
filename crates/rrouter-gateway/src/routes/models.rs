@@ -1313,6 +1313,15 @@ pub async fn custom(State(state): State<Arc<AppState>>, body: Body) -> Response 
     else {
         return admin_error(&Error::BadRequest("provider and id are required".into()));
     };
+    // The id is a path segment of every ref that names this row, so it is stored in its
+    // canonical spelling whatever an operator typed (`My Model` -> `my-model`); the
+    // provider is a registry key and stays exactly as named.
+    let id = rrouter_store::canonical_name(&id);
+    if id.is_empty() {
+        return admin_error(&Error::BadRequest(
+            "model id is empty once normalised".into(),
+        ));
+    }
     let row = ModelRow {
         provider: provider.clone(),
         model: id.clone(),

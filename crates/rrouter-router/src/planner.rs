@@ -62,7 +62,7 @@ use rrouter_core::{Dialect, Error, Result};
 use rrouter_store::{AccountQuotaState, Connection, ConnectionScope, Store};
 use uuid::Uuid;
 
-use crate::candidate::{Candidate, CapacityHints, Plan};
+use crate::candidate::{Candidate, CapacityHints, Plan, RouteStep};
 use crate::capabilities::capabilities;
 use crate::catalog::Catalog;
 use crate::free_mode::{
@@ -667,6 +667,8 @@ impl Planner {
                 .map(|target| (target.provider.clone(), target.model.clone(), true))
                 .collect::<Vec<(String, String, bool)>>()
         });
+        let mut route: Vec<RouteStep> = Vec::new();
+        let mut dispatched = model.to_string();
         let targets = match pool {
             Some(targets) => targets,
             None => {
@@ -678,15 +680,27 @@ impl Planner {
                     req.combo_start,
                     &providers,
                     req.default_group,
+                    &mut route,
+                    &mut dispatched,
                 )
                 .await?
             }
         };
         if targets.is_empty() {
+            // Name what was tried, in the order routing tried it: the combo and the alias
+            // hop are the operator's own configuration, so a bare upstream 400 that hides
+            // them sends them looking in the wrong place.
+            let trail = route_summary(&route);
             return Err(Error::NoRoute {
                 model: model.to_string(),
-                detail: "no connection declares this model and no alias/combo resolves it"
-                    .to_string(),
+                detail: match trail {
+                    Some(trail) => format!(
+                        "no connection declares this model and no alias/combo resolves it \
+                         (resolved through {trail})"
+                    ),
+                    None => "no connection declares this model and no alias/combo resolves it"
+                        .to_string(),
+                },
             });
         }
 
@@ -930,6 +944,10 @@ impl Planner {
             } else {
                 format!("; excluded by request policy: {}", summarize(&excluded))
             };
+            // The operator's own configuration is what made this ref mean these targets;
+            // naming it in the error says which combo/alias to go and fix.
+            let via = route_summary(&route).map(|trail| format!(" (resolved through {trail})"));
+            let via = via.as_deref().unwrap_or("");
             let detail = if let Some(plan) = &free {
                 let resolved: Vec<String> = plan
                     .targets
@@ -951,17 +969,17 @@ impl Planner {
                 format!(
                     "team {team} has no eligible connection for {model}: resolved to {} \
                      (a team-scoped key is routed only to that team's accounts, never to \
-                     shared instance-wide ones){policy_note}",
+                     shared instance-wide ones){policy_note}{via}",
                     summarize(&resolved)
                 )
             } else if excluded.is_empty() {
                 format!(
-                    "resolved to {target_count} provider/model target(s) but none has an active connection",
+                    "resolved to {target_count} provider/model target(s) but none has an active connection{via}",
                 )
             } else {
                 format!(
                     "resolved to {target_count} provider/model target(s), none with an active \
-                     connection; excluded by request policy: {}",
+                     connection; excluded by request policy: {}{via}",
                     summarize(&excluded)
                 )
             };
@@ -1083,9 +1101,10 @@ impl Planner {
         }
 
         Ok(Plan {
-            model: model.to_string(),
+            model: dispatched,
             candidates,
             stream,
+            route,
         })
     }
 
@@ -1411,11 +1430,21 @@ impl Planner {
         combo_start: Option<usize>,
         providers: &RuntimeProviders,
         default_group: Option<&str>,
+        route: &mut Vec<RouteStep>,
+        dispatched: &mut String,
     ) -> Result<Vec<(String, String, bool)>> {
         let mut current = model.to_string();
 
         // 1. Alias, exactly one hop: a self-referential or cyclic alias must not loop.
-        if let Some(alias) = aliases.iter().find(|a| a.alias == current) {
+        //    The alias list is canonical, so a spelling whose case differs still matches.
+        if let Some(alias) = aliases
+            .iter()
+            .find(|a| a.alias == current)
+        {
+            route.push(RouteStep::Alias {
+                name: alias.alias.clone(),
+                target: alias.target.clone(),
+            });
             current = alias.target.clone();
         }
 
@@ -1423,6 +1452,15 @@ impl Planner {
         //    `provider/model` so a combo named `openrouter/x` stays a combo.
         let combo_name = current.strip_prefix(COMBO_PREFIX).unwrap_or(&current);
         if let Some(combo) = store.get_combo(combo_name).await? {
+            // The combo is recorded and dispatched by its name, never by the spelling the
+            // client typed: the plan's model is what the usage row says it dispatched on.
+            current = combo.name.clone();
+            dispatched.clone_from(&current);
+            route.push(RouteStep::Combo {
+                name: combo.name.clone(),
+                strategy: combo.strategy.as_str(),
+                models: combo.models.clone(),
+            });
             let mut out = Vec::with_capacity(combo.models.len());
             let mut inner_aliases: HashMap<&str, &str> = HashMap::with_capacity(aliases.len());
             for a in aliases {
@@ -1578,6 +1616,18 @@ impl Planner {
             .map(|provider| (provider.to_string(), entry.to_string(), false))
             .collect()
     }
+}
+
+/// The resolution steps as one phrase (`combo main (fallback): a, b; alias f -> x`), or
+/// `None` when the ref needed no lookup.
+fn route_summary(route: &[RouteStep]) -> Option<String> {
+    (!route.is_empty()).then(|| {
+        route
+            .iter()
+            .map(RouteStep::summary)
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
 }
 
 /// Log once per `(legacy_prefix, slug)` pair at debug level when a client uses a group's
@@ -2065,6 +2115,8 @@ mod tests {
                     session_id: None,
                     fallback_reason: None,
                     unrouted_reason: None,
+                    resolved_ref: None,
+                    route_trail: None,
                 })
                 .await
                 .expect("usage");

@@ -13,7 +13,7 @@ use rrouter_router::breaker::{BreakerState, ProbeTicket};
 use rrouter_router::dispatch::{AttemptOutcome, RetryPolicy};
 use rrouter_router::stream_dispatch::{byte_stream, collect_stream};
 use rrouter_router::{
-    Breaker, Candidate, Catalog, Dispatcher, Plan, PlanRequest, Planner, Strategy,
+    Breaker, Candidate, Catalog, Dispatcher, Plan, PlanRequest, Planner, RouteStep, Strategy,
 };
 use rrouter_store::{
     LayoutDocument, LayoutGroup, LayoutItem, ModelRow, Store, LAYOUT_SCHEMA_VERSION,
@@ -113,6 +113,7 @@ fn plan_of(n: usize) -> Plan {
             })
             .collect(),
         stream: false,
+        route: Vec::new(),
     }
 }
 
@@ -132,6 +133,7 @@ fn plan_models(connection: Uuid, models: &[&str]) -> Plan {
             })
             .collect(),
         stream: false,
+        route: Vec::new(),
     }
 }
 
@@ -173,6 +175,91 @@ async fn alias_resolves_one_hop_without_looping() {
     // Exactly one hop: the second alias is not followed.
     assert_eq!(plan.candidates[0].model, "primary-x");
     assert_eq!(plan.candidates[0].connection, id);
+}
+
+/// The plan records how the client's spelling reached its targets, so a usage row can say
+/// "asked `fast` -> alias -> combo `main`" instead of only the two endpoint spellings.
+#[tokio::test]
+async fn plan_records_the_alias_and_combo_it_resolved_through() {
+    let store = Store::open_in_memory().unwrap();
+    conn(&store, "claude", "primary", 0).await;
+    store
+        .upsert_combo_with(
+            "  Main Combo ",
+            &["claude/primary-x".to_string(), "claude/primary-y".to_string()],
+            rrouter_store::ComboStrategy::Fallback,
+            None,
+        )
+        .await
+        .unwrap();
+    store.upsert_alias("Fast Path", "Main Combo").await.unwrap();
+
+    // The alias and combo names are stored canonically, and a spelling whose case or
+    // spacing differs still resolves to them.
+    let plan = Planner::new()
+        .plan(&Catalog::builtin(), &store, PlanRequest::new("main combo"))
+        .await
+        .expect("plan");
+    assert_eq!(
+        plan.route,
+        vec![
+            RouteStep::Combo {
+                name: "main-combo".into(),
+                strategy: "fallback",
+                models: vec!["claude/primary-x".into(), "claude/primary-y".into()],
+            },
+        ]
+    );
+    assert_eq!(
+        plan.route[0].summary(),
+        "combo main-combo (fallback): claude/primary-x, claude/primary-y"
+    );
+
+    // The alias is a separate hop, recorded when the client names the alias itself.
+    let via_alias = Planner::new()
+        .plan(&Catalog::builtin(), &store, PlanRequest::new("fast-path"))
+        .await
+        .expect("plan");
+    assert_eq!(
+        via_alias.route[0],
+        RouteStep::Alias {
+            name: "fast-path".into(),
+            target: "Main Combo".into(),
+        }
+    );
+
+    // A bare id needs no lookup, so it records no steps.
+    let bare = Planner::new()
+        .plan(&Catalog::builtin(), &store, PlanRequest::new("claude/primary-x"))
+        .await
+        .expect("plan");
+    assert!(bare.route.is_empty());
+}
+
+/// When nothing can serve a request, the error names the combo and alias it resolved
+/// through — the operator's own configuration is what made the ref mean those targets.
+#[tokio::test]
+async fn no_route_error_names_the_combo_and_alias_it_resolved_through() {
+    let store = Store::open_in_memory().unwrap();
+    // No connection at all, so every target the combo names is unroutable.
+    store
+        .upsert_combo("Main Combo", &["claude/primary-x".to_string()])
+        .await
+        .unwrap();
+    store.upsert_alias("fast", "main-combo").await.unwrap();
+    let err = Planner::new()
+        .plan(&Catalog::builtin(), &store, PlanRequest::new("fast"))
+        .await
+        .expect_err("nothing can serve it");
+    let message = err.to_string();
+    assert!(
+        message.contains("alias fast -> main-combo"),
+        "names the alias hop: {message}"
+    );
+    assert!(
+        message.contains("combo main-combo (fallback): claude/primary-x"),
+        "names the combo and its candidates: {message}"
+    );
 }
 
 #[tokio::test]
@@ -2165,6 +2252,7 @@ fn plan_with(entries: &[(&str, i32)]) -> Plan {
             })
             .collect(),
         stream: false,
+        route: Vec::new(),
     }
 }
 
@@ -2615,6 +2703,7 @@ async fn all_candidates_cooling_down_is_a_429_not_a_404() {
         model: "missing".into(),
         candidates: Vec::new(),
         stream: false,
+        route: Vec::new(),
     };
     let error = dispatcher
         .run(&empty, |_| async { Ok(resp("never sent")) })

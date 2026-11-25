@@ -203,26 +203,19 @@ pub fn is_valid_group_slug(slug: &str) -> bool {
 
 /// Derive a deterministic, URL/path-safe routing slug from a group display name.
 pub fn slugify_group_name(name: &str, fallback: &str) -> String {
+    // One normaliser for every stored name: a group's slug is the canonical ref of its
+    // display name with the characters a routing segment cannot hold dropped.
     fn clean(raw: &str) -> String {
-        let mut out = String::with_capacity(raw.len());
-        let mut last_dash = false;
-        for ch in raw.chars() {
-            let lower = ch.to_ascii_lowercase();
-            if lower.is_ascii_lowercase() || lower.is_ascii_digit() || lower == '_' {
-                out.push(lower);
-                last_dash = false;
-            } else if !out.is_empty() && !last_dash {
-                out.push('-');
-                last_dash = true;
-            }
+        let mut out: String = crate::canonical_ref(raw)
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+            .collect();
+        out = out.trim_matches(|c| c == '-' || c == '_').to_string();
+        if out.len() > MAX_LAYOUT_GROUP_SLUG {
+            out.truncate(MAX_LAYOUT_GROUP_SLUG);
+            out = out.trim_end_matches(['-', '_']).to_string();
         }
-        let trimmed = out.trim_matches(|c| c == '-' || c == '_');
-        let mut result = trimmed.to_string();
-        if result.len() > MAX_LAYOUT_GROUP_SLUG {
-            result.truncate(MAX_LAYOUT_GROUP_SLUG);
-            result = result.trim_end_matches(['-', '_']).to_string();
-        }
-        result
+        out
     }
     let candidate = clean(name);
     if is_valid_group_slug(&candidate) {
@@ -233,6 +226,15 @@ pub fn slugify_group_name(name: &str, fallback: &str) -> String {
         return fallback_clean;
     }
     "group".to_string()
+}
+
+/// The canonical spelling of a free-form group's display name.
+///
+/// A group name is representation a person reads *and* a routing prefix, so it is stored
+/// in [`crate::canonical_ref`] form: lower case, `-` between words, no `/`. Provider
+/// buckets keep their display name, which is only shown.
+pub fn group_name(raw: &str) -> String {
+    crate::canonical_ref(raw)
 }
 
 /// Ensure every free-form group in `layout` has a valid, unique, immutable `slug`.
@@ -268,6 +270,14 @@ pub(crate) fn normalize_group_slugs(
             group.slug = None;
             continue;
         }
+        let canonical = group_name(&group.name);
+        if canonical.is_empty() {
+            return Err(Error::BadRequest(format!(
+                "group {} name {:?} is empty once normalised",
+                group.id, group.name
+            )));
+        }
+        group.name = canonical;
         if let Some(&stored) = prev_by_id.get(group.id.as_str()) {
             if let Some(incoming) = group
                 .slug
@@ -385,11 +395,17 @@ impl LayoutDocument {
         if let Some(group) = self.group_by_slug(prefix) {
             return Some((group, false));
         }
+        // Names stored before V49 keep their own case, so the display fallback compares
+        // canonical forms; a client calling `<group>/<model>` any way gets one group.
+        let want = crate::canonical_ref(prefix);
         let group = self
             .groups
             .iter()
-            .find(|group| group.provider.is_none() && group.name == prefix)?;
-        let legacy = group.slug.as_deref().is_some_and(|slug| slug != prefix);
+            .find(|group| group.provider.is_none() && group_name(&group.name) == want)?;
+        let legacy = group
+            .slug
+            .as_deref()
+            .is_some_and(|slug| slug != prefix && group.name != prefix);
         Some((group, legacy))
     }
 
@@ -685,6 +701,22 @@ pub struct ModelPreset {
     pub created_by: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Spellings this preset answered to before a rename (the V49 backfill and later
+    /// re-posts); a client still calling one of them reaches this preset.
+    #[serde(default)]
+    pub legacy_names: Vec<String>,
+    /// Whether this row is real. [`is_live`] is `false` only for the zero value produced
+    /// by a lookup miss (`Default`), so a caller can tell "no such preset" from "a preset
+    /// named the empty string".
+    #[serde(default)]
+    is_live: bool,
+}
+
+impl ModelPreset {
+    /// Whether this is a stored preset rather than a lookup miss.
+    pub fn is_live(&self) -> bool {
+        self.is_live
+    }
 }
 
 /// One snapshot of a preset's layout. Newest revision first from
@@ -715,7 +747,7 @@ pub enum PresetUpdateOutcome {
 }
 
 const PRESET_COLUMNS: &str = "id, name, description, scope, owner_user_id, team_id, is_default, \
-     revision, layout_json, created_by, created_at, updated_at";
+     revision, layout_json, created_by, created_at, updated_at, legacy_names";
 
 fn uuid_col(index: usize, raw: String) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(&raw).map_err(|e| {
@@ -745,6 +777,8 @@ fn row_to_preset(r: &Row<'_>) -> rusqlite::Result<ModelPreset> {
         created_by: r.get(9)?,
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
+        legacy_names: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
+        is_live: true,
     })
 }
 
@@ -770,7 +804,9 @@ fn now() -> i64 {
 }
 
 fn check_name(raw: &str) -> Result<String> {
-    let name = raw.trim();
+    // Stored canonical like every other operator-typed name, so two presets cannot differ
+    // only by case; the old spelling keeps resolving through `legacy_names`.
+    let name = crate::canonical_ref(raw);
     if name.is_empty() {
         return Err(Error::BadRequest("a preset name is required".into()));
     }
@@ -876,6 +912,25 @@ impl Store {
         rows.map(|r| r.map_err(migrations::db_err)).collect()
     }
 
+    /// Every preset a client spelling `name` reaches: the canonical match, and every
+    /// preset that used to be called that before the V49 rename.
+    pub async fn model_presets_named(&self, name: &str) -> Result<Vec<ModelPreset>> {
+        let canonical = crate::canonical_ref(name);
+        Ok(self
+            .list_model_presets()
+            .await?
+            .into_iter()
+            .filter(|preset| {
+                preset.name == canonical
+                    || crate::names::same_ref(&preset.name, name)
+                    || preset
+                        .legacy_names
+                        .iter()
+                        .any(|old| old.eq_ignore_ascii_case(name) || old == name)
+            })
+            .collect())
+    }
+
     pub async fn get_model_preset(&self, id: Uuid) -> Result<Option<ModelPreset>> {
         self.conn()
             .query_row(
@@ -973,6 +1028,8 @@ impl Store {
             created_by: Some(actor.clone()),
             created_at: stamp,
             updated_at: stamp,
+            legacy_names: Vec::new(),
+            is_live: true,
         };
 
         let mut conn = self.conn();
@@ -1031,7 +1088,30 @@ impl Store {
             return Ok(None);
         };
         if let Some(name) = name {
-            preset.name = check_name(name)?;
+            let name = check_name(name)?;
+            if name != preset.name {
+                // Same rule as a re-posted combo or alias: the old spelling stays a name
+                // the preset answers to, and a live preset already holding the new name
+                // refuses the rename instead of shadowing it.
+                let taken: bool = tx
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM model_presets WHERE name = ?1 AND id != ?2)",
+                        params![name, id.to_string()],
+                        |r| r.get(0),
+                    )
+                    .map_err(migrations::db_err)?;
+                if taken {
+                    return Err(Error::BadRequest(format!(
+                        "a preset named {name:?} already exists"
+                    )));
+                }
+                tx.execute(
+                    "UPDATE model_presets                      SET legacy_names = (SELECT json_insert(legacy_names, '$[#]', ?2) FROM model_presets WHERE id = ?1)                      WHERE id = ?1",
+                    params![id.to_string(), preset.name],
+                )
+                .map_err(migrations::db_err)?;
+            }
+            preset.name = name;
         }
         if let Some(description) = description {
             preset.description = check_description(description)?;
@@ -1139,7 +1219,8 @@ impl Store {
     }
 
     /// Copy a preset's layout into a new preset at revision 1. The caller names the copy;
-    /// names are not unique, so a caller that wants "Copy of X" can have it.
+    /// names are not unique, so a caller that wants "Copy of X" can have it (the write
+    /// path stores it as `copy-of-x`).
     pub async fn duplicate_model_preset(
         &self,
         id: Uuid,
@@ -1171,6 +1252,8 @@ impl Store {
             created_by: Some(actor.clone()),
             created_at: stamp,
             updated_at: stamp,
+            legacy_names: Vec::new(),
+            is_live: true,
         };
         tx.execute(
             "INSERT INTO model_presets \

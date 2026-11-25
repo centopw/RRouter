@@ -28,6 +28,7 @@ import {
   usePatchPreset,
 } from "../../lib/queries";
 import type { ComboStrategy, Model, ModelPreset, PresetSummary } from "../../lib/api";
+import { normalisedPreview } from "../../lib/model-name";
 import type { DraftState, LayoutDraft } from "../../lib/layout-draft";
 import { presetOptionLabel } from "./params";
 
@@ -1138,6 +1139,7 @@ export function AliasCreateDialog({
       >
         <Field label="alias name" hint="the name clients send">
           <Input value={alias} onChange={setAlias} placeholder="fast" ariaLabel="alias name" autoFocus />
+          <NamePreviewHint name={alias} />
         </Field>
         <Field label="target model" hint="the model this alias resolves to">
           <ModelSelect
@@ -1290,6 +1292,7 @@ export function ComboCreateDialog({
       >
         <Field label="combo name" hint="the name clients send">
           <Input value={name} onChange={setName} placeholder="research" ariaLabel="combo name" />
+          <NamePreviewHint name={name} />
         </Field>
 
         <Field
@@ -1400,5 +1403,16 @@ export function SaveAsNewDialog({
         </div>
       ) : null}
     </Modal>
+  );
+}
+
+/** The name the gateway will store, when normalising changes what was typed. */
+function NamePreviewHint({ name }: { name: string }) {
+  const preview = normalisedPreview(name);
+  if (!preview) return null;
+  return (
+    <span className="block font-mono text-caption text-faint">
+      saved as <span className="text-muted">{preview}</span>
+    </span>
   );
 }

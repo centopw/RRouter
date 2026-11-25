@@ -21,7 +21,7 @@ import {
   sameAsRef,
 } from "../lib/model-ref";
 import { useModels, useUsageDetail } from "../lib/queries";
-import type { UsageEvent } from "../lib/api";
+import type { RequestAttempt, UsageEvent } from "../lib/api";
 
 export type RequestInspectorDrawerProps = {
   row: UsageEvent | null;
@@ -142,6 +142,12 @@ function RequestInspectorBody({
 
   const requestedRef = requestedRefOf(row);
   const routedTo = routedTargetOf(row, registry.data);
+  // The resolution chain the gateway recorded: asked -> combo/alias -> targets. A row
+  // written before v48 (or by a non-chat route) has none, and shows nothing extra.
+  const resolvedRef = row.resolved_ref?.trim() || "";
+  const route = (row.route ?? row.route_trail?.split("\n") ?? [])
+    .map((step) => step.trim())
+    .filter(Boolean);
   const sameAs = sameAsRef(row, registry.data);
   const modelRef = canonicalEventRef(row, registry.data) || requestedRef;
   const inspectConnectionId =
@@ -249,7 +255,27 @@ function RequestInspectorBody({
             note={sameAs ? `same as ${sameAs}` : undefined}
             mono
           />
-          <DetailRow k="Routed to" v={routedTo || "—"} mono />
+          <DetailRow
+            k="Routed to"
+            v={routedTo || "—"}
+            note={resolvedRef && resolvedRef !== routedTo ? `dispatched as ${resolvedRef}` : undefined}
+            mono
+          />
+          {route.length > 0 ? (
+            <div className="py-2">
+              <dt className="text-faint">Resolved through</dt>
+              <dd className="mt-1 space-y-1">
+                {route.map((step) => (
+                  <span
+                    key={step}
+                    className="block break-words rounded-[var(--radius-surface)] bg-surface-2 px-2 py-1 font-mono text-caption text-muted"
+                  >
+                    {step}
+                  </span>
+                ))}
+              </dd>
+            </div>
+          ) : null}
           <DetailRow k="Provider" v={providerName ?? row.provider} />
           <DetailRow k="API key" v={(row.key_id ? keyNames?.get(row.key_id) : undefined) ?? "—"} />
           {row.endpoint ? <DetailRow k="Endpoint" v={`${row.method} ${row.endpoint}`} mono /> : null}
@@ -302,6 +328,7 @@ function RequestInspectorBody({
                     attempt.status === 0 || attempt.status >= 400 || attempt.error !== null;
                   const { provider, id } = splitRef(attempt.model);
                   const served = !attemptFailed && index === attempts.length - 1;
+                  const nextAttempt = attempts[index + 1];
                   const barPct =
                     maxAttemptLatency > 0
                       ? Math.max(4, Math.min(100, (attempt.latency_ms / maxAttemptLatency) * 100))
@@ -350,6 +377,11 @@ function RequestInspectorBody({
                       {attemptFailed && attempt.error ? (
                         <p className="break-words text-small leading-[1.45] text-neg">
                           {attempt.error}
+                        </p>
+                      ) : null}
+                      {attemptFailed && nextAttempt ? (
+                        <p className="text-caption text-faint">
+                          fell back to {attemptTargetName(nextAttempt)}
                         </p>
                       ) : null}
                     </li>
@@ -482,6 +514,12 @@ function DetailRow({
       </dd>
     </div>
   );
+}
+
+/** `provider/model` of one attempt, as the attempt list spells it. */
+function attemptTargetName(attempt: RequestAttempt): string {
+  const { provider, id } = splitRef(attempt.model);
+  return `${provider ?? attempt.provider}/${id}`;
 }
 
 /** A replay command for the endpoint this request used; the key stays a placeholder. */

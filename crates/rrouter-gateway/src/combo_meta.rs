@@ -768,6 +768,7 @@ mod tests {
         Combo {
             id: uuid::Uuid::nil(),
             name: "test".to_string(),
+            stored_name: "test".to_string(),
             models: models.iter().map(|model| model.to_string()).collect(),
             strategy: ComboStrategy::Fallback,
             router_model: None,

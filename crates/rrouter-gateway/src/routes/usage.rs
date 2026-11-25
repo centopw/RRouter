@@ -64,6 +64,16 @@ fn row_json(r: &UsageRecord) -> Value {
         "session_id": r.session_id,
         "fallback_reason": r.fallback_reason,
         "unrouted_reason": r.unrouted_reason,
+        // The resolution chain: the ref routing dispatched on, and one line per step
+        // (`combo main (fallback): …`, `alias a -> b`) that got there from the client's
+        // spelling. `route` is the same text split for a list UI.
+        "resolved_ref": r.resolved_ref,
+        "route_trail": r.route_trail,
+        "route": r
+            .route_trail
+            .as_deref()
+            .map(|trail| trail.lines().map(str::to_string).collect::<Vec<_>>())
+            .unwrap_or_default(),
         // Every route that writes a usage row is a `POST`; the method is a property of
         // the log, not a stored column. `protocol` is the client dialect the endpoint
         // names, `None` for a passthrough whose path is not a canonical dialect.
@@ -826,7 +836,27 @@ mod tests {
             session_id: None,
             fallback_reason: fallback_reason.map(str::to_string),
             unrouted_reason: None,
+            resolved_ref: Some("main-big-pickle".to_string()),
+            route_trail: Some(
+                "combo main-combo (fallback): openai/gpt-4.1, opencode/big-pickle".to_string(),
+            ),
         }
+    }
+
+    /// The inspector's resolution chain reaches the client as the dispatched ref, the
+    /// one-text trail, and the same trail split for a list.
+    #[test]
+    fn row_json_exposes_the_resolution_chain() {
+        let row = row_json(&sample_usage(None));
+        assert_eq!(row["resolved_ref"], json!("main-big-pickle"));
+        assert_eq!(
+            row["route"],
+            json!(["combo main-combo (fallback): openai/gpt-4.1, opencode/big-pickle"])
+        );
+        assert_eq!(
+            row["route_trail"],
+            json!("combo main-combo (fallback): openai/gpt-4.1, opencode/big-pickle")
+        );
     }
 
     #[test]

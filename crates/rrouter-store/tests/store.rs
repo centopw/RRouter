@@ -66,6 +66,31 @@ fn rt() -> &'static Runtime {
     &RT
 }
 
+/// Write the two named rows the way a pre-v48 build stored them: the operator's own
+/// spelling, no normalisation.
+/// What a v48 database holds: only the tables V49 touches, in their v48 shape, and rows
+/// with whatever the operator typed at the time.
+fn seed_legacy_named_rows(dir: &TempDir) {
+    let conn = rusqlite::Connection::open(dir.db()).expect("create");
+    conn.execute_batch(
+        "CREATE TABLE combos ( \
+           id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, models TEXT NOT NULL, \
+           created_at INTEGER NOT NULL); \
+         CREATE TABLE model_aliases (alias TEXT PRIMARY KEY, target TEXT NOT NULL); \
+         CREATE TABLE usage ( \
+           id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, provider TEXT NOT NULL, \
+           model TEXT NOT NULL, status INTEGER NOT NULL); \
+         CREATE INDEX idx_usage_ts ON usage(ts DESC); \
+         INSERT INTO combos (id, name, models, created_at) \
+         VALUES ('6f2b1c00-0000-4000-8000-000000000001', 'Main Combo', '[\"fast\"]', 0); \
+         INSERT INTO model_aliases (alias, target) VALUES ('Fast Path', 'openai/gpt-4.1'); \
+         INSERT INTO usage (ts, provider, model, status) VALUES (1, '', 'fast', 200); \
+         ALTER TABLE usage ADD COLUMN connection_id TEXT; \
+         CREATE INDEX idx_usage_connection_ts ON usage(connection_id, ts);",
+    )
+    .expect("seed legacy rows");
+}
+
 fn creds(token: &str) -> Credentials {
     Credentials {
         access_token: Some(token.to_string()),
@@ -250,6 +275,8 @@ const UNDO_AFTER_V24: &str = "\
     ALTER TABLE usage DROP COLUMN reasoning_effort; ALTER TABLE usage DROP COLUMN reasoning_tokens; \
     ALTER TABLE usage DROP COLUMN session_id; ALTER TABLE usage DROP COLUMN fallback_reason; \
     ALTER TABLE usage DROP COLUMN unrouted_reason; \
+    ALTER TABLE usage DROP COLUMN resolved_ref; \
+    ALTER TABLE usage DROP COLUMN route_trail; \
     DROP INDEX IF EXISTS idx_connections_team; \
     ALTER TABLE connections DROP COLUMN refusal; \
     ALTER TABLE connections DROP COLUMN owner_user_id; \
@@ -259,7 +286,10 @@ const UNDO_AFTER_V24: &str = "\
     ALTER TABLE api_keys DROP COLUMN last_used_at; ALTER TABLE api_keys DROP COLUMN default_group; \
     ALTER TABLE combos DROP COLUMN strategy; \
     ALTER TABLE combos DROP COLUMN router_model; \
-    ALTER TABLE combos DROP COLUMN cursor; ";
+    ALTER TABLE combos DROP COLUMN cursor; \
+    ALTER TABLE combos DROP COLUMN legacy_names; \
+    ALTER TABLE model_aliases DROP COLUMN legacy_names; \
+    ALTER TABLE usage DROP COLUMN legacy_names; ";
 
 fn rewind_past_v24(conn: &rusqlite::Connection) {
     conn.execute_batch(UNDO_AFTER_V24)
@@ -871,6 +901,8 @@ fn spent_tokens_sums_only_that_key() {
             requested_model: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         };
         // a: 100 + 20 + 5 + 5 = 130 across two rows; b: 7; anonymous: excluded.
         s.record_usage(&rec(Some(a.id), 100, 60, 10, 5, 5))
@@ -943,6 +975,8 @@ fn cost_micros_round_trips_and_sums_per_key() {
             requested_model: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         };
         s.record_usage(&rec(Some(a.id), 1_250)).await.expect("a1");
         s.record_usage(&rec(Some(a.id), 3_000)).await.expect("a2");
@@ -1088,6 +1122,16 @@ fn v6_database_migrates_to_current() {
              INSERT INTO usage (ts, provider, model, status, input_tokens)
              VALUES (1700000000, 'claude', 'haiku', 200, 42);
 
+             CREATE TABLE model_aliases (
+               alias  TEXT PRIMARY KEY,
+               target TEXT NOT NULL
+             );
+             CREATE TABLE combos (
+               id         TEXT PRIMARY KEY,
+               name       TEXT UNIQUE NOT NULL,
+               models     TEXT NOT NULL,
+               created_at INTEGER NOT NULL
+             );
              PRAGMA user_version = 6;",
         )
         .expect("v6 schema");
@@ -1235,6 +1279,16 @@ fn v8_database_migrates_to_current() {
                error              TEXT,
                key_id             TEXT
              );
+             CREATE TABLE model_aliases (
+               alias  TEXT PRIMARY KEY,
+               target TEXT NOT NULL
+             );
+             CREATE TABLE combos (
+               id         TEXT PRIMARY KEY,
+               name       TEXT UNIQUE NOT NULL,
+               models     TEXT NOT NULL,
+               created_at INTEGER NOT NULL
+             );
              PRAGMA user_version = 8;",
         )
         .expect("v8 schema");
@@ -1353,6 +1407,16 @@ fn v9_database_migrates_to_current() {
              VALUES (1700000000, '', 'claude', 'haiku', 42, 8, 200,
                      '11111111-1111-4111-8111-111111111111');
 
+             CREATE TABLE model_aliases (
+               alias  TEXT PRIMARY KEY,
+               target TEXT NOT NULL
+             );
+             CREATE TABLE combos (
+               id         TEXT PRIMARY KEY,
+               name       TEXT UNIQUE NOT NULL,
+               models     TEXT NOT NULL,
+               created_at INTEGER NOT NULL
+             );
              PRAGMA user_version = 9;",
         )
         .expect("v9 schema");
@@ -1819,6 +1883,269 @@ fn aliases_and_disabled_models_upsert_list_delete() {
     });
 }
 
+/// A name an operator typed is stored in its canonical spelling, and every later call
+/// reaches that row whichever way the spelling is typed — the mixed case the pre-v48 rows
+/// hold is resolved by comparing canonical forms, not by rewriting the row.
+#[test]
+fn combo_and_alias_names_are_canonical_and_lookups_tolerate_case() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let combo = s
+            .upsert_combo("  Main  Combo ", &["fast".to_string()])
+            .await
+            .expect("combo");
+        assert_eq!(combo.name, "main-combo");
+        assert_eq!(combo.stored_name, "main-combo");
+        for spelling in ["Main  Combo", "MAIN-COMBO", "main-combo"] {
+            let hit = s.get_combo(spelling).await.expect("get").expect(spelling);
+            assert_eq!(hit.id, combo.id, "{spelling} resolves to the one row");
+        }
+        assert!(s.get_combo("main combs").await.expect("miss").is_none());
+        assert_eq!(
+            s.list_combos().await.expect("list"),
+            vec![combo.clone()],
+            "no second spelling of one combo"
+        );
+
+        // Re-posting under another spelling is the same combo, not a new one.
+        let again = s
+            .upsert_combo("main combo", &["fast".to_string(), "slow".to_string()])
+            .await
+            .expect("update");
+        assert_eq!(again.id, combo.id);
+        assert_eq!(s.list_combos().await.expect("list").len(), 1);
+
+        s.upsert_alias("  Fast Path ", "openai/gpt-4.1").await.expect("alias");
+        let aliases = s.list_aliases().await.expect("aliases");
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].alias, "fast-path");
+        for spelling in ["Fast Path", "FAST-PATH", "fast-path"] {
+            assert_eq!(
+                s.alias_target(spelling).await.expect("target").as_deref(),
+                Some("openai/gpt-4.1"),
+                "{spelling} resolves"
+            );
+        }
+        assert!(s.delete_alias("Fast Path").await.expect("delete"));
+        assert!(s.list_aliases().await.expect("aliases").is_empty());
+
+        // A name with nothing left after normalisation is refused, not stored unreachable.
+        assert!(s.upsert_combo("///", &["fast".to_string()]).await.is_err());
+        assert!(s.upsert_alias(" - ", "openai/gpt-4.1").await.is_err());
+    });
+}
+
+/// V49 rewrites what a v48 database holds to canonical spelling and keeps the old names
+/// answering, so a client compiled against `Main Combo` keeps resolving after the upgrade.
+///
+/// Seeded before the first open so the open *is* the upgrade, the way a deployment sees it.
+#[test]
+fn legacy_rows_are_rewritten_by_the_backfill_and_their_old_names_still_resolve() {
+    let dir = TempDir::new("legacy-rows");
+    seed_legacy_named_rows(&dir);
+    let store = Store::open(&dir.db(), None).expect("open");
+    let s = &store;
+
+    // The rows on disk are canonical now, and the old spelling is parked on the row.
+    let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+    let combo: (String, String) = conn
+        .query_row("SELECT name, legacy_names FROM combos", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .expect("combo row");
+    assert_eq!(combo, ("main-combo".to_string(), r#"["Main Combo"]"#.to_string()));
+    let alias: (String, String) = conn
+        .query_row("SELECT alias, legacy_names FROM model_aliases", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .expect("alias");
+    assert_eq!(alias, ("fast-path".to_string(), r#"["Fast Path"]"#.to_string()));
+    drop(conn);
+
+    rt().block_on(async {
+        // Every spelling the row used to answer to still reaches it.
+        for spelling in ["Main Combo", "main combo", "MAIN-COMBO", "main-combo"] {
+            let hit = s.get_combo(spelling).await.expect("get").expect(spelling);
+            assert_eq!(hit.name, "main-combo", "{spelling} resolves");
+        }
+        for spelling in ["Fast Path", "fast path", "FAST-PATH"] {
+            assert_eq!(
+                s.alias_target(spelling).await.expect("alias").as_deref(),
+                Some("openai/gpt-4.1"),
+                "{spelling} resolves"
+            );
+        }
+        assert_eq!(
+            s.list_aliases().await.expect("list")[0].alias,
+            "fast-path",
+            "the routing list is canonical"
+        );
+
+        // A re-post under another case updates the same row; nothing is duplicated.
+        s.upsert_combo(" Main Combo ", &["slow".to_string()])
+            .await
+            .expect("repost");
+        assert_eq!(s.list_combos().await.expect("list").len(), 1);
+        assert_eq!(s.next_combo_start("Main Combo").await.expect("start"), Some(0));
+
+        // Deleting by the old spelling deletes the renamed row.
+        assert!(s.delete_alias("Fast Path").await.expect("delete"));
+        assert!(s.alias_target("fast-path").await.expect("gone").is_none());
+    });
+}
+
+/// Two names that collapse onto one are reported, naming both, rather than one row being
+/// silently lost. Seeded before the first open like the upgrade above.
+#[test]
+fn backfill_refuses_names_that_collide_instead_of_dropping_one() {
+    let dir = TempDir::new("collide");
+    seed_legacy_named_rows(&dir);
+    {
+        let conn = rusqlite::Connection::open(dir.db()).expect("reopen");
+        conn.execute_batch(
+            "INSERT INTO combos (id, name, models, created_at) \
+             VALUES ('6f2b1c00-0000-4000-8000-000000000002', 'main-combo', '[\"b\"]', 0);",
+        )
+        .expect("second spelling");
+    }
+    let err = Store::open(&dir.db(), None).expect_err("collision must fail the upgrade");
+    let text = err.to_string();
+    assert!(
+        text.contains("Main Combo") && text.contains("main-combo"),
+        "both names reported: {text}"
+    );
+}
+
+/// A preset and its free-form group are stored canonical, the old spelling keeps
+/// resolving, and a second preset cannot take the name back in another case.
+#[test]
+fn preset_and_group_names_are_canonical_and_legacy_spellings_resolve() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let layout = rrouter_store::LayoutDocument {
+            schema_version: rrouter_store::LAYOUT_SCHEMA_VERSION,
+            auto_include_new: false,
+            items: Vec::new(),
+            groups: vec![rrouter_store::LayoutGroup {
+                id: "g-1".into(),
+                name: "Main Board".into(),
+                slug: None,
+                provider: None,
+                visible: true,
+                access: None,
+            }],
+        };
+        let preset = s
+            .create_model_preset("Ops Board", None, &layout, "test")
+            .await
+            .expect("create");
+        assert_eq!(preset.name, "ops-board");
+        assert_eq!(preset.layout.groups[0].name, "main-board");
+        assert_eq!(preset.layout.groups[0].slug.as_deref(), Some("main-board"));
+
+        // The pre-rename spelling reaches the preset.
+        let found = s.model_presets_named("Ops Board").await.expect("lookup");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, preset.id);
+        // And so does another case of its canonical name.
+        assert_eq!(
+            s.model_presets_named("OPS-BOARD").await.expect("lookup").len(),
+            1
+        );
+
+        // A live preset holding the name refuses a rename onto it instead of shadowing it.
+        let copy = s
+            .duplicate_model_preset(preset.id, "Copy", "test")
+            .await
+            .expect("duplicate");
+        assert_eq!(copy.name, "copy");
+        let err = s
+            .update_model_preset_meta(copy.id, Some("Ops Board"), None, "test")
+            .await
+            .expect_err("name taken");
+        assert!(err.to_string().contains("ops-board"), "{err}");
+
+        // Renaming keeps the old spelling as a name that still resolves.
+        let renamed = s
+            .update_model_preset_meta(copy.id, Some("Copied Board"), None, "test")
+            .await
+            .expect("rename")
+            .expect("found");
+        assert_eq!(renamed.name, "copied-board");
+        let by_old = s.model_presets_named("copy").await.expect("legacy lookup");
+        assert_eq!(by_old.len(), 1);
+        assert_eq!(by_old[0].id, copy.id);
+    });
+}
+
+/// Usage rows store the model columns in the V49 spelling (case and whitespace folded), so
+/// a filter matches rows written before and after the backfill.
+#[test]
+fn usage_model_columns_are_stored_folded() {
+    let store = Store::open_in_memory().expect("mem");
+    let s = &store;
+    rt().block_on(async {
+        let mut row = rrouter_store::UsageRecord {
+            id: None,
+            ts: 1,
+            request_id: None,
+            trace_id: None,
+            provider: "openai".into(),
+            model: "  DeepSeek-V4.1-Flash-1017 ".into(),
+            connection_id: None,
+            endpoint: Some("/v1/chat/completions".into()),
+            key_id: None,
+            cost_micros: 0,
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            latency_ms: 1,
+            ttft_ms: 0,
+            upstream_ms: 0,
+            status: 200,
+            streamed: false,
+            error: None,
+            requested_model: Some("Main  Combo".into()),
+            finish_reason: None,
+            reasoning_effort: None,
+            reasoning_tokens: 0,
+            session_id: None,
+            fallback_reason: None,
+            unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
+        };
+        s.record_usage(&row).await.expect("record");
+        let events = s
+            .recent_usage(&rrouter_store::UsageQuery {
+                limit: 5,
+                ..Default::default()
+            })
+            .await
+            .expect("usage");
+        assert_eq!(events[0].model, "deepseek-v4.1-flash-1017");
+        assert_eq!(events[0].requested_model.as_deref(), Some("main combo"));
+
+        // A name that is already folded is stored unchanged.
+        row.ts = 2;
+        row.model = "openai/gpt-4.1".into();
+        row.requested_model = None;
+        s.record_usage(&row).await.expect("record again");
+        let events = s
+            .recent_usage(&rrouter_store::UsageQuery {
+                limit: 5,
+                ..Default::default()
+            })
+            .await
+            .expect("usage");
+        assert_eq!(events[0].model, "openai/gpt-4.1");
+        assert_eq!(events[0].requested_model, None);
+    });
+}
+
 #[test]
 fn quota_ping_config_round_trips_validates_and_samples_prune() {
     let store = Store::open_in_memory().expect("mem");
@@ -1973,6 +2300,8 @@ fn usage_records_summary_and_recent_order() {
             requested_model: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         }
     };
     rt().block_on(async {
@@ -2098,6 +2427,8 @@ fn usage_record_keeps_request_context() {
             session_id: Some("ses_abc123".into()),
             fallback_reason: Some("quota".into()),
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         })
         .await
         .expect("record");
@@ -2234,6 +2565,8 @@ fn attempts_round_trip_under_the_request_id() {
             requested_model: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         })
         .await
         .expect("usage");
@@ -2615,6 +2948,8 @@ fn prune_usage_deletes_history_older_than_the_cutoff() {
         requested_model: None,
         fallback_reason: None,
         unrouted_reason: None,
+        resolved_ref: None,
+        route_trail: None,
     };
     // Attempts carry their own request id, so each timestamp is separately reachable.
     let attempt_request = |ts: i64| Uuid::from_u128(0xa000 + ts as u128);
@@ -2885,6 +3220,8 @@ fn spend_since_counts_only_rows_inside_the_window() {
             requested_model: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         };
         let since = 1_000;
         s.record_usage(&rec(a.id, 999, 40, 400))
@@ -3341,6 +3678,8 @@ fn page_row(ts: i64, marker: &str) -> UsageRecord {
         requested_model: None,
         fallback_reason: None,
         unrouted_reason: None,
+        resolved_ref: None,
+        route_trail: None,
     }
 }
 
@@ -4087,6 +4426,8 @@ fn account_quota_exhausts_only_on_usage_inside_its_window() {
             requested_model: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         };
 
         // Yesterday's rows are outside today's window but inside this week's.
@@ -4210,6 +4551,8 @@ fn account_quota_enforces_token_and_cost_limits() {
             requested_model: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         };
         store
             .record_usage(&rec(cost.id, 600, 1, 1))
@@ -4723,6 +5066,8 @@ fn usage_trace_id_roundtrips_and_absent_stays_null() {
             requested_model: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         }))
         .expect("record");
     }
@@ -4994,6 +5339,8 @@ fn usage_summary_by_connection_splits_and_sums() {
         requested_model: None,
         fallback_reason: None,
         unrouted_reason: None,
+        resolved_ref: None,
+        route_trail: None,
     };
     rt().block_on(async {
         s.record_usage(&rec(100, Some(first), 10, 20, 200))
@@ -5083,6 +5430,8 @@ fn unrouted_reasons_buckets_pre_dispatch_failures_by_reason() {
         requested_model: Some("gpt-4.1".to_string()),
         fallback_reason: None,
         unrouted_reason: reason.map(str::to_string),
+        resolved_ref: None,
+        route_trail: None,
     };
     rt().block_on(async {
         s.record_usage(&rec(100, "", Some("unknown_model")))

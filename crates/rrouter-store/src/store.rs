@@ -647,7 +647,13 @@ pub struct KeyModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Combo {
     pub id: Uuid,
+    /// The name routing resolves this combo by: [`crate::canonical_ref`] of
+    /// [`Self::stored_name`], so a row written before the normaliser (`My Combo`) is
+    /// called as `my-combo` without being rewritten.
     pub name: String,
+    /// The name exactly as the row holds it: equal to `name` for every row the
+    /// normaliser wrote.
+    pub stored_name: String,
     pub models: Vec<String>,
     pub strategy: ComboStrategy,
     /// Decision model for [`ComboStrategy::Smart`]; always `None` for the other
@@ -850,6 +856,13 @@ pub struct UsageRecord {
     /// `bad_request`, `upstream`, `translation`, `timeout`, `store`, `transport`, or
     /// `other`. `None` on served requests and pre-v47 rows.
     pub unrouted_reason: Option<String>,
+    /// The ref routing dispatched on after alias and combo resolution
+    /// (`main/deepseek-v4.1-flash-1017`), or `None` when nothing resolved (pre-v48 rows,
+    /// and requests that failed before planning).
+    pub resolved_ref: Option<String>,
+    /// The resolution steps as one line each (`combo main (fallback): a, b`,
+    /// `alias fast -> x`), newline-separated. `None` when there were none.
+    pub route_trail: Option<String>,
 }
 
 /// Outcome class for [`UsageQuery::status`]. `Success` is a 2xx answer with no error text;
@@ -2627,7 +2640,15 @@ impl Store {
 
     // ----- model routing config ----------------------------------------------------
 
+    /// Create or retarget an alias. The name is stored canonically, and a row written
+    /// before [`crate::canonical_ref`] (`My Alias`) is renamed in place rather than
+    /// shadowed by a second spelling of the same name.
     pub async fn upsert_alias(&self, alias: &str, target: &str) -> Result<()> {
+        let Some(alias) = self.canonical_alias_name(alias).await? else {
+            return Err(Error::BadRequest(format!(
+                "alias name {alias:?} is empty once normalised"
+            )));
+        };
         let conn = self.conn();
         conn.execute(
             "INSERT INTO model_aliases (alias, target) VALUES (?1, ?2) \
@@ -2638,17 +2659,105 @@ impl Store {
         Ok(())
     }
 
-    /// One alias target, without scanning the table. Routing reads this on the combo
-    /// path, where only the exact name matters.
+    /// Rename one alias row, keeping the spelling it answered to before in its legacy
+    /// list so a client calling it that way still resolves, and refusing a rename that
+    /// would sit on another live alias.
+    fn rename_alias(&self, from: &str, to: &str) -> Result<()> {
+        let conn = self.conn();
+        let taken: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM model_aliases WHERE alias = ?1 AND alias != ?2)",
+                params![to, from],
+                |r| r.get(0),
+            )
+            .map_err(migrations::db_err)?;
+        if taken {
+            return Err(Error::BadRequest(format!(
+                "alias {to:?} already exists; delete it before re-posting {from:?}"
+            )));
+        }
+        conn.execute(
+            "UPDATE model_aliases              SET legacy_names = (SELECT json_insert(legacy_names, '$[#]', ?2) FROM model_aliases WHERE alias = ?1),                  alias = ?3              WHERE alias = ?1",
+            params![from, from, to],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// The canonical name an alias called `alias` is stored under, or `None` when there
+    /// is nothing left after normalisation.
+    async fn canonical_alias_name(&self, alias: &str) -> Result<Option<String>> {
+        let canonical = crate::canonical_ref(alias);
+        if canonical.is_empty() {
+            return Ok(None);
+        }
+        let Some(stored) = self.alias_stored_name(alias).await? else {
+            return Ok(Some(canonical));
+        };
+        if stored != canonical {
+            self.rename_alias(&stored, &canonical)?;
+        }
+        Ok(Some(canonical))
+    }
+
+    /// One alias target. Routing reads this before combos, so the lookup is canonical:
+    /// the exact stored spelling wins and a row written before [`crate::canonical_ref`]
+    /// (`My Alias`) still resolves from its canonical spelling.
     pub async fn alias_target(&self, alias: &str) -> Result<Option<String>> {
+        let Some(stored) = self.alias_stored_name(alias).await? else {
+            // A row the V49 backfill renamed is still reachable by every spelling it was
+            // called before.
+            let legacy = legacy_named(&self.conn(), "model_aliases", "alias", alias)?;
+            return match legacy.first() {
+                Some(name) => self
+                    .conn()
+                    .query_row(
+                        "SELECT target FROM model_aliases WHERE alias = ?1",
+                        params![name],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(migrations::db_err),
+                None => Ok(None),
+            };
+        };
         self.conn()
             .query_row(
                 "SELECT target FROM model_aliases WHERE alias = ?1",
-                params![alias],
+                params![stored],
                 |r| r.get(0),
             )
             .optional()
             .map_err(migrations::db_err)
+    }
+
+    /// The stored spelling of the alias whose canonical name is `alias`'s.
+    async fn alias_stored_name(&self, alias: &str) -> Result<Option<String>> {
+        let want = crate::canonical_ref(alias);
+        if want.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT alias FROM model_aliases ORDER BY alias ASC")
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(migrations::db_err)?;
+        let mut fallback = None;
+        let mut exact = None;
+        for row in rows {
+            let stored = row.map_err(migrations::db_err)?;
+            if crate::canonical_ref(&stored) != want {
+                continue;
+            }
+            if stored == alias || stored == want {
+                exact = Some(stored);
+                break;
+            }
+            fallback.get_or_insert(stored);
+        }
+        Ok(exact.or(fallback))
     }
 
     // ----- quota auto-ping ---------------------------------------------------------
@@ -2892,15 +3001,44 @@ impl Store {
             .map_err(migrations::db_err)?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(migrations::db_err)?);
+            let alias = r.map_err(migrations::db_err)?;
+            // Stored rows are canonicalised on read, so a row written before the
+            // normaliser (`My Alias`) is also callable as `my-alias` — routing resolves
+            // aliases exactly one hop, before combos.
+            let canonical = crate::canonical_ref(&alias.alias);
+            if canonical.is_empty()
+                || out.iter().any(|a: &ModelAlias| a.alias == canonical)
+            {
+                continue;
+            }
+            out.push(ModelAlias {
+                alias: canonical,
+                target: alias.target,
+            });
         }
         Ok(out)
     }
 
+    /// Delete the alias `alias` names, in either its canonical or its stored spelling.
     pub async fn delete_alias(&self, alias: &str) -> Result<bool> {
+        let Some(stored) = self.alias_stored_name(alias).await? else {
+            // Deleting by a spelling a V49-renamed alias used to answer to still deletes it.
+            let conn = self.conn();
+            let legacy = legacy_named(&conn, "model_aliases", "alias", alias)?;
+            let mut deleted = 0;
+            for old in legacy {
+                deleted += conn
+                    .execute("DELETE FROM model_aliases WHERE alias = ?1", params![old])
+                    .map_err(migrations::db_err)?;
+            }
+            return Ok(deleted > 0);
+        };
         let conn = self.conn();
         let n = conn
-            .execute("DELETE FROM model_aliases WHERE alias = ?1", params![alias])
+            .execute(
+                "DELETE FROM model_aliases WHERE alias = ?1",
+                params![stored],
+            )
             .map_err(migrations::db_err)?;
         Ok(n > 0)
     }
@@ -3450,6 +3588,10 @@ impl Store {
         strategy: ComboStrategy,
         router_model: Option<&str>,
     ) -> Result<Combo> {
+        // The name is a ref clients call by, so it is stored in one spelling whatever an
+        // operator typed: `Main  Combo` and `main-combo` are the same combo.
+        let name = self.canonical_combo_name(name).await?;
+        let name = name.as_str();
         let mut unique = Vec::with_capacity(models.len());
         for model in models {
             if !unique.contains(model) {
@@ -3521,6 +3663,7 @@ impl Store {
         Ok(Combo {
             id,
             name: name.to_string(),
+            stored_name: name.to_string(),
             models: unique,
             strategy,
             router_model,
@@ -3535,6 +3678,10 @@ impl Store {
     /// cursor advances in one immediate transaction, so two concurrent requests cannot
     /// observe the same position. `None` means no combo by that name.
     pub async fn next_combo_start(&self, name: &str) -> Result<Option<usize>> {
+        let stored = match self.combo_stored_name(name).await? {
+            Some(stored) => stored,
+            None => return Ok(None),
+        };
         let mut conn = self.conn();
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -3542,7 +3689,7 @@ impl Store {
         let row: Option<(i64, String)> = tx
             .query_row(
                 "SELECT cursor, models FROM combos WHERE name = ?1",
-                params![name],
+                params![stored],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
@@ -3559,24 +3706,62 @@ impl Store {
         let start = cursor.rem_euclid(count as i64) as usize;
         tx.execute(
             "UPDATE combos SET cursor = ?2 WHERE name = ?1",
-            params![name, ((start + 1) % count) as i64],
+            params![stored, ((start + 1) % count) as i64],
         )
         .map_err(migrations::db_err)?;
         tx.commit().map_err(migrations::db_err)?;
         Ok(Some(start))
     }
 
+    /// The stored spelling of the combo whose canonical name is `name`'s.
+    async fn combo_stored_name(&self, name: &str) -> Result<Option<String>> {
+        Ok(self.get_combo(name).await?.map(|combo| combo.stored_name))
+    }
+
+    /// One combo by name. Lookup is canonical: an exact stored name wins, and a row
+    /// written before [`crate::canonical_ref`] existed (`My Combo`) still resolves from
+    /// its canonical spelling because every stored name is compared canonicalised.
     pub async fn get_combo(&self, name: &str) -> Result<Option<Combo>> {
         let conn = self.conn();
-        let row = conn
-            .query_row(
-                "SELECT id, name, models, strategy, router_model, cursor, created_at FROM combos WHERE name = ?1",
-                params![name],
-                row_to_combo,
-            )
-            .optional()
+        let mut stmt = conn
+            .prepare("SELECT id, name, models, strategy, router_model, cursor, created_at FROM combos ORDER BY name ASC")
             .map_err(migrations::db_err)?;
-        row.map(decode_combo).transpose()
+        let want = crate::canonical_ref(name);
+        if want.is_empty() {
+            return Ok(None);
+        }
+        let rows = stmt
+            .query_map([], row_to_combo)
+            .map_err(migrations::db_err)?;
+        let mut exact = None;
+        for row in rows {
+            let row = row.map_err(migrations::db_err)?;
+            if crate::canonical_ref(&row.name) != want {
+                continue;
+            }
+            if row.name == name || row.name == want {
+                exact = Some(row);
+                break;
+            }
+            exact.get_or_insert(row);
+        }
+        if let Some(row) = exact {
+            return decode_combo(row).map(Some);
+        }
+        // Nothing is called `name` any more: the V49 backfill renamed a row that used to
+        // be, and this spelling is one of the names it answers to.
+        let mut stmt = conn
+            .prepare("SELECT id, name, models, strategy, router_model, cursor, created_at FROM combos ORDER BY name ASC")
+            .map_err(migrations::db_err)?;
+        let rows = stmt
+            .query_map([], row_to_combo)
+            .map_err(migrations::db_err)?;
+        let rows = rows.collect::<Result<Vec<_>, _>>().map_err(migrations::db_err)?;
+        let legacy = legacy_named(&conn, "combos", "name", name)?;
+        match rows.into_iter().find(|row| legacy.contains(&row.name)) {
+            Some(row) => decode_combo(row).map(Some),
+            None => Ok(None),
+        }
     }
 
     pub async fn list_combos(&self) -> Result<Vec<Combo>> {
@@ -3597,12 +3782,52 @@ impl Store {
         rows.into_iter().map(decode_combo).collect()
     }
 
+    /// Delete the combo `name` resolves to, in either its canonical or stored spelling.
     pub async fn delete_combo(&self, name: &str) -> Result<bool> {
+        let Some(stored) = self.combo_stored_name(name).await? else {
+            // Deleting by a spelling a V49-renamed combo used to answer to still deletes it.
+            let conn = self.conn();
+            let legacy = legacy_named(&conn, "combos", "name", name)?;
+            let mut deleted = 0;
+            for old in legacy {
+                deleted += conn
+                    .execute("DELETE FROM combos WHERE name = ?1", params![old])
+                    .map_err(migrations::db_err)?;
+            }
+            return Ok(deleted > 0);
+        };
         let conn = self.conn();
         let n = conn
-            .execute("DELETE FROM combos WHERE name = ?1", params![name])
+            .execute("DELETE FROM combos WHERE name = ?1", params![stored])
             .map_err(migrations::db_err)?;
         Ok(n > 0)
+    }
+
+    /// The canonical spelling a combo called `name` is stored under.
+    ///
+    /// An existing row wins: re-posting a legacy row under its normalised name renames
+    /// that row in place, so a lookup can never find two spellings of one combo. A fresh
+    /// name is [`crate::canonical_ref`], and a name with nothing left after normalisation
+    /// is refused instead of being stored unreachable.
+    async fn canonical_combo_name(&self, name: &str) -> Result<String> {
+        let canonical = crate::canonical_ref(name);
+        if canonical.is_empty() {
+            return Err(Error::BadRequest(format!(
+                "combo name {name:?} is empty once normalised"
+            )));
+        }
+        if let Some(stored) = self.combo_stored_name(name).await? {
+            if stored != canonical {
+                self.conn()
+                    .execute(
+                        "UPDATE combos SET name = ?2 WHERE name = ?1",
+                        params![stored, canonical],
+                    )
+                    .map_err(migrations::db_err)?;
+            }
+            return Ok(canonical);
+        }
+        Ok(canonical)
     }
 
     // ----- prompt templates --------------------------------------------------------
@@ -4037,14 +4262,15 @@ impl Store {
               output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, status, \
               streamed, error, cost_micros, upstream_ms, trace_id, team_id, requested_model, \
               finish_reason, reasoning_effort, reasoning_tokens, session_id, fallback_reason, \
-              unrouted_reason) \
+              unrouted_reason, resolved_ref, route_trail) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-                     ?19, (SELECT team_id FROM api_keys WHERE id = ?7), ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                     ?19, (SELECT team_id FROM api_keys WHERE id = ?7), ?20, ?21, ?22, ?23, ?24, ?25, ?26, \
+                     ?27, ?28)",
             params![
                 r.ts,
                 r.request_id.map(|u| u.to_string()).unwrap_or_default(),
                 r.provider,
-                r.model,
+                folded_model(Some(&r.model)).unwrap_or_default(),
                 r.connection_id.map(|u| u.to_string()),
                 r.endpoint,
                 r.key_id.map(|u| u.to_string()),
@@ -4060,13 +4286,15 @@ impl Store {
                 sql_u64(r.cost_micros),
                 r.upstream_ms,
                 r.trace_id,
-                r.requested_model,
+                folded_model(r.requested_model.as_deref()),
                 r.finish_reason,
                 r.reasoning_effort,
                 r.reasoning_tokens,
                 r.session_id,
                 r.fallback_reason,
                 r.unrouted_reason,
+                r.resolved_ref,
+                r.route_trail,
             ],
         )
         .map_err(migrations::db_err)?;
@@ -5099,7 +5327,8 @@ fn opt_uuid_col(raw: Option<String>) -> rusqlite::Result<Option<Uuid>> {
 const USAGE_COLUMNS: &str = "id, ts, request_id, provider, model, connection_id, endpoint, \
      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, ttft_ms, \
      status, streamed, error, key_id, cost_micros, upstream_ms, trace_id, requested_model, \
-     finish_reason, reasoning_effort, reasoning_tokens, session_id, fallback_reason, unrouted_reason";
+     finish_reason, reasoning_effort, reasoning_tokens, session_id, fallback_reason, \
+     unrouted_reason, resolved_ref, route_trail";
 
 /// Empty `request_id` is the v8 "unknown" default written before request ids existed.
 fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
@@ -5134,6 +5363,8 @@ fn row_to_usage(r: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         session_id: r.get(24)?,
         fallback_reason: r.get(25)?,
         unrouted_reason: r.get(26)?,
+        resolved_ref: r.get(27)?,
+        route_trail: r.get(28)?,
     })
 }
 
@@ -5262,9 +5493,12 @@ fn row_to_combo(r: &Row<'_>) -> rusqlite::Result<RawCombo> {
 fn decode_combo(raw: RawCombo) -> Result<Combo> {
     let models: Vec<String> = serde_json::from_str(&raw.models)
         .map_err(|e| Error::Store(format!("combo {} has invalid models JSON: {e}", raw.name)))?;
+    let canonical = crate::canonical_ref(&raw.name);
+    let name = if canonical.is_empty() { raw.name.clone() } else { canonical };
     Ok(Combo {
         id: raw.id,
-        name: raw.name,
+        name,
+        stored_name: raw.name,
         models,
         strategy: ComboStrategy::from_stored(&raw.strategy),
         router_model: raw.router_model,
@@ -5371,6 +5605,50 @@ pub fn zero_config_routing() -> serde_json::Value {
         "prefer": "spread",
         "disabled_models": [],
     })
+}
+
+/// Stored names of `table`'s rows whose `legacy_names` list contains `name` case-insensitively.
+///
+/// The V49 backfill moved operator-typed names to their canonical spelling and parked the
+/// old one on the row; this is how a client still calling that spelling finds the row.
+/// A model name as it is stored: case and whitespace runs collapsed, nothing else.
+///
+/// `usage` repeats whatever the client typed in `requested_model` and `model`, and the V49
+/// backfill folded the rows written before it. Folding the name on the way in keeps old
+/// and new rows in one spelling, so a dashboard filter matches both; routing never
+/// compared these case-sensitively, so nothing is lost.
+fn folded_model(raw: Option<&str>) -> Option<String> {
+    raw.map(|name| name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase())
+        .filter(|name| !name.is_empty())
+}
+
+fn legacy_named(
+    conn: &rusqlite::Connection,
+    table: &str,
+    name_column: &str,
+    name: &str,
+) -> Result<Vec<String>> {
+    let sql = format!(
+        "SELECT {name_column}, legacy_names FROM {table} WHERE instr(lower(legacy_names), ?1) > 0"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(migrations::db_err)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![format!("\"{}\"", name.to_lowercase())],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .map_err(migrations::db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(migrations::db_err)?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, raw)| {
+            serde_json::from_str::<Vec<String>>(raw).is_ok_and(|names| {
+                names.iter().any(|old| old.eq_ignore_ascii_case(name) || old == name)
+            })
+        })
+        .map(|(stored, _)| stored)
+        .collect())
 }
 
 fn now() -> i64 {
@@ -5861,6 +6139,8 @@ mod capture_tests {
             session_id: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         }
     }
 

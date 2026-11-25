@@ -23,7 +23,7 @@ pub mod policy;
 pub mod stream_dispatch;
 
 pub use breaker::{Breaker, BreakerState};
-pub use candidate::{Candidate, CapacityHint, CapacityHints, Plan};
+pub use candidate::{Candidate, CapacityHint, CapacityHints, Plan, RouteStep};
 pub use capabilities::{capabilities, ProviderCapabilities, QUANTIZATIONS};
 pub use catalog::{Catalog, ModelInfo};
 pub use dispatch::{AttemptOutcome, Dispatcher, DEFAULT_MAX_ATTEMPTS};

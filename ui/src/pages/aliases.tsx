@@ -18,6 +18,7 @@ import { DataTable, type Column } from "../components/table";
 import { ModelSelect } from "../components/model-select";
 import { qk, useAliases } from "../lib/queries";
 import { api, type Alias } from "../lib/api";
+import { normalisedPreview } from "../lib/model-name";
 
 export default function Aliases() {
   const aliases = useAliases();
@@ -180,6 +181,7 @@ export default function Aliases() {
               autoFocus
               disabled={save.isPending}
             />
+            <NamePreviewHint name={name} />
           </Field>
           <Field label="Target" hint="Any model listed in this gateway">
             <ModelSelect
@@ -247,5 +249,19 @@ export default function Aliases() {
         />
       </Card>
     </>
+  );
+}
+
+/**
+ * The name this form will actually store, when it differs from what was typed: the
+ * gateway normalises every combo/alias name, so say so before saving rather than after.
+ */
+function NamePreviewHint({ name }: { name: string }) {
+  const preview = normalisedPreview(name);
+  if (!preview) return null;
+  return (
+    <span className="block font-mono text-caption text-faint">
+      saved as <span className="text-muted">{preview}</span>
+    </span>
   );
 }

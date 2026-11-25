@@ -344,7 +344,10 @@ async fn group_slug_is_derived_and_immutable_on_rename() {
     else {
         panic!("expected updated");
     };
-    assert_eq!(after_rename.layout.groups[0].name, "Primary");
+    assert_eq!(
+        after_rename.layout.groups[0].name, "primary",
+        "a display name is stored canonical (V49)"
+    );
     assert_eq!(
         after_rename.layout.groups[0].slug.as_deref(),
         Some("main-pool")
@@ -454,7 +457,7 @@ fn preset_crud_covers_meta_duplicate_default_and_delete() {
             .expect("default")
             .expect("v30 seeds the default");
         assert_eq!(seed.id, DEFAULT_MODEL_PRESET_ID);
-        assert_eq!(seed.name, "Default");
+        assert_eq!(seed.name, "default", "the seeded name is stored canonical (V49)");
         assert!(seed.is_default);
         assert_eq!(seed.revision, 1);
         assert_eq!(seed.layout, LayoutDocument::default());
@@ -489,11 +492,11 @@ fn preset_crud_covers_meta_duplicate_default_and_delete() {
         assert_eq!(listed[0].id, seed.id, "the default sorts first");
 
         let renamed = store
-            .update_model_preset_meta(preset.id, Some("Focus 2"), Some(None), "admin:1")
+            .update_model_preset_meta(preset.id, Some("  Focus 2 "), Some(None), "admin:1")
             .await
             .expect("meta")
             .expect("exists");
-        assert_eq!(renamed.name, "Focus 2");
+        assert_eq!(renamed.name, "focus-2");
         assert_eq!(renamed.description, None, "Some(None) clears");
         assert_eq!(renamed.revision, 1, "metadata does not bump the revision");
         let described = store
@@ -501,7 +504,7 @@ fn preset_crud_covers_meta_duplicate_default_and_delete() {
             .await
             .expect("meta")
             .expect("exists");
-        assert_eq!(described.name, "Focus 2", "absent fields keep their value");
+        assert_eq!(described.name, "focus-2", "absent fields keep their value");
         assert_eq!(described.description.as_deref(), Some("newer"));
         assert!(store
             .update_model_preset_meta(Uuid::new_v4(), None, None, "admin:1")
@@ -839,7 +842,12 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
              ALTER TABLE usage DROP COLUMN session_id; \
              ALTER TABLE usage DROP COLUMN fallback_reason; \
              ALTER TABLE usage DROP COLUMN unrouted_reason; \
+             ALTER TABLE usage DROP COLUMN resolved_ref; \
+             ALTER TABLE usage DROP COLUMN route_trail; \
              ALTER TABLE connections DROP COLUMN refusal; \
+             ALTER TABLE combos DROP COLUMN legacy_names; \
+             ALTER TABLE model_aliases DROP COLUMN legacy_names; \
+             ALTER TABLE usage DROP COLUMN legacy_names; \
              PRAGMA user_version = 29;",
         )
         .expect("rewind to v29");
@@ -855,7 +863,7 @@ fn v29_database_upgrades_to_v30_and_seeds_the_default() {
         .expect("default")
         .expect("the upgrade seeds a default");
     assert_eq!(preset.id, DEFAULT_MODEL_PRESET_ID);
-    assert_eq!(preset.name, "Default");
+    assert_eq!(preset.name, "default");
     assert!(preset.is_default);
     assert_eq!(preset.revision, 1);
     assert_eq!(preset.layout, LayoutDocument::default());

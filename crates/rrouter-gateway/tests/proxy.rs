@@ -2467,6 +2467,8 @@ async fn budget_exhausted_blocks_the_next_request() {
             session_id: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         })
         .await
         .expect("seed spend");
@@ -4449,6 +4451,8 @@ async fn passthrough_refuses_an_exhausted_key_before_the_upstream_call() {
             session_id: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         })
         .await
         .expect("seed spend");
@@ -4901,6 +4905,8 @@ async fn seed_usage(
             session_id: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         })
         .await
         .expect("seed usage");
@@ -5149,6 +5155,8 @@ async fn usage_api_pages_backwards_without_overlap() {
                 session_id: None,
                 fallback_reason: None,
                 unrouted_reason: None,
+                resolved_ref: None,
+                route_trail: None,
             })
             .await
             .expect("record usage");
@@ -5248,6 +5256,8 @@ async fn usage_api_filters_compose_with_the_cursor() {
                 session_id: None,
                 fallback_reason: None,
                 unrouted_reason: None,
+                resolved_ref: None,
+                route_trail: None,
             })
             .await
             .expect("record usage");
@@ -5370,6 +5380,8 @@ fn export_row(ts: i64) -> UsageRecord {
         session_id: None,
         fallback_reason: None,
         unrouted_reason: None,
+        resolved_ref: None,
+        route_trail: None,
     }
 }
 
@@ -5424,7 +5436,9 @@ async fn usage_export_csv_has_the_contract_header_and_escapes_cells() {
     let key_id = uuid::Uuid::new_v4();
     let mut tricky = export_row(1_794_017_491); // 2026-11-07T02:11:31Z
     tricky.request_id = Some(request_id);
-    tricky.model = "weird,\"model\"\nline2".to_string();
+    // Deliberately not lower case and with a whitespace run: the store folds both when it
+    // writes, so this row also pins that the export prints the stored spelling.
+    tricky.model = "Weird,\"Model\"\n Line2".to_string();
     tricky.endpoint = Some("/v1/chat/completions?x=1,2".to_string());
     tricky.key_id = Some(key_id);
     tricky.cost_micros = 1_234_567;
@@ -5498,7 +5512,7 @@ async fn usage_export_csv_has_the_contract_header_and_escapes_cells() {
             "1794017491",
             "2026-11-07T02:11:31Z",
             "openai",
-            "weird,\"model\"\nline2",
+            "weird,\"model\" line2",
             &request_id.to_string(),
             &key_id.to_string(),
             "/v1/chat/completions?x=1,2",
@@ -5855,6 +5869,8 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
             session_id: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         })
         .await
         .expect("seed last month");
@@ -5902,6 +5918,8 @@ async fn monthly_window_admits_when_the_spend_is_outside_and_blocks_inside() {
             session_id: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         })
         .await
         .expect("seed this month");
@@ -6920,6 +6938,8 @@ fn quota_usage(connection: uuid::Uuid) -> UsageRecord {
         session_id: None,
         fallback_reason: None,
         unrouted_reason: None,
+        resolved_ref: None,
+        route_trail: None,
     }
 }
 
@@ -7648,6 +7668,44 @@ async fn round_robin_combo_advances_once_per_request_and_wraps() {
     );
 }
 
+/// A request that names a combo records the combo it resolved through and the ref routing
+/// dispatched on, so the inspector can say "asked `rr`, combo `rr` (round_robin): a, b,
+/// dispatched as `<combo>/<model>`" instead of only the client's spelling.
+#[tokio::test]
+async fn a_combo_request_records_the_combo_it_resolved_through() {
+    let mock = Mock::start(vec![openai_reply("first")]).await;
+    let h = harness(false);
+    h.connect("openai", &mock).await;
+    h.state
+        .store
+        .upsert_combo(" Main Chain ", &["openai/gpt-4.1".into()])
+        .await
+        .expect("combo");
+
+    // The operator's typed spelling is not the stored one; both reach the combo.
+    let (status, headers, body) = h.chat(None, "Main Chain").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let row = h.usage_for(request_id_of(&headers)).await;
+    assert_eq!(
+        row.requested_model.as_deref(),
+        Some("main chain"),
+        "the client's string as stored (case folded)"
+    );
+    assert_eq!(
+        row.resolved_ref.as_deref(),
+        Some("main-chain"),
+        "routing dispatched on the canonical combo name"
+    );
+    assert_eq!(
+        row.route_trail.as_deref(),
+        Some("combo main-chain (fallback): openai/gpt-4.1")
+    );
+    // The served pair is what was sent; the chain is what explains it.
+    assert_eq!(row.provider, "openai");
+    assert_eq!(row.model, "main-chain");
+}
+
 /// A smart combo asks its decision model with the compact candidate list and honours an
 /// exact choice. The decision is an ordinary counted completion.
 #[tokio::test]
@@ -7854,6 +7912,8 @@ async fn seed_spend(store: &Store, key: uuid::Uuid, tokens: u32, cost_micros: u6
             session_id: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         })
         .await
         .expect("seed usage");

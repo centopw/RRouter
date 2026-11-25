@@ -21,6 +21,7 @@ import { ModelChain } from "../components/model-select";
 import { IconButton } from "../components/atoms";
 import { qk, useCombos, useModels } from "../lib/queries";
 import { api, type Combo, type ComboStrategy } from "../lib/api";
+import { normalisedPreview } from "../lib/model-name";
 
 /** The rows-per-page choices every table in the app offers. */
 const PAGE_SIZES = [10, 25, 50, 100];
@@ -346,6 +347,7 @@ export default function Combos() {
               autoFocus
               disabled={save.isPending}
             />
+            <NamePreviewHint name={name} />
           </Field>
 
           <fieldset className="min-w-0">
@@ -492,5 +494,19 @@ export default function Combos() {
         />
       </Card>
     </>
+  );
+}
+
+/**
+ * The name this form will actually store, when it differs from what was typed: the
+ * gateway normalises every combo/alias name, so say so before saving rather than after.
+ */
+function NamePreviewHint({ name }: { name: string }) {
+  const preview = normalisedPreview(name);
+  if (!preview) return null;
+  return (
+    <span className="block font-mono text-caption text-faint">
+      saved as <span className="text-muted">{preview}</span>
+    </span>
   );
 }

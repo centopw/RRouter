@@ -237,6 +237,8 @@ impl H {
             session_id: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         };
         self.state.store.record_usage(&record).await.expect("usage");
     }

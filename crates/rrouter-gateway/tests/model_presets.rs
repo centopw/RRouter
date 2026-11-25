@@ -287,7 +287,11 @@ async fn an_admin_creates_lists_and_reads_a_preset() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().expect("id").to_string();
-    assert_eq!(created["name"], json!("Default board"));
+    assert_eq!(
+        created["name"],
+        json!("default-board"),
+        "a preset name is stored canonical"
+    );
     assert_eq!(created["revision"], json!(1));
     assert_eq!(created["layout"], layout(), "the layout round-trips");
     assert_eq!(created["is_default"], json!(false));
@@ -296,7 +300,11 @@ async fn an_admin_creates_lists_and_reads_a_preset() {
     // seeded preset is present from the start.
     let (status, list) = h.get("/api/model-presets", &auth_headers(&owner)).await;
     assert_eq!(status, StatusCode::OK, "{list}");
-    assert_eq!(names(&list), vec!["Default", "Default board"]);
+    assert_eq!(
+        names(&list),
+        vec!["default", "default-board"],
+        "the seeded preset's name is canonical too"
+    );
     assert!(
         list["data"]
             .as_array()
@@ -332,7 +340,7 @@ async fn a_rename_keeps_the_layout_and_the_revision() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{renamed}");
-    assert_eq!(renamed["name"], json!("Renamed"));
+    assert_eq!(renamed["name"], json!("renamed"), "renames are canonical too");
     assert_eq!(
         renamed["description"],
         json!("seeded"),
@@ -354,7 +362,7 @@ async fn a_rename_keeps_the_layout_and_the_revision() {
         .await;
     assert_eq!(status, StatusCode::OK, "{cleared}");
     assert_eq!(cleared["description"], Value::Null);
-    assert_eq!(cleared["name"], json!("Renamed"));
+    assert_eq!(cleared["name"], json!("renamed"));
 }
 
 #[tokio::test]
@@ -479,7 +487,7 @@ async fn duplicating_copies_the_layout_under_a_new_name() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{copy}");
     assert_ne!(copy["id"], json!(source));
-    assert_eq!(copy["name"], json!("Copy"));
+    assert_eq!(copy["name"], json!("copy"));
     assert_eq!(copy["layout"], layout(), "the copy keeps the board");
     assert_eq!(copy["revision"], json!(1), "a copy starts at revision 1");
 }

@@ -29,6 +29,7 @@ mod audit;
 mod crypto;
 mod evals;
 mod migrations;
+mod names;
 mod presets;
 mod store;
 mod teams;
@@ -43,6 +44,7 @@ pub use evals::{
     MAX_EVAL_TEXT,
 };
 pub use migrations::SCHEMA_VERSION;
+pub use names::{canonical_name, canonical_ref, same_ref, MAX_CANONICAL_NAME};
 pub use presets::{
     GroupAccess, LayoutDocument, LayoutGroup, LayoutItem, ModelPreset, ModelPresetVersion,
     PresetUpdateOutcome, DEFAULT_MODEL_PRESET_ID, LAYOUT_SCHEMA_VERSION, MAX_GROUP_ACCESS,

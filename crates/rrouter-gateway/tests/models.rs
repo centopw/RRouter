@@ -840,7 +840,7 @@ async fn v1_models_groups_follow_the_default_preset() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let groups = body["groups"].as_array().expect("groups");
     assert_eq!(groups[0]["id"], "g-fast");
-    assert_eq!(groups[0]["name"], "Fast");
+    assert_eq!(groups[0]["name"], "fast", "a group name is stored canonical");
     assert_eq!(groups[0]["slug"], "fast");
     assert_eq!(groups[0]["provider"], Value::Null);
     assert_eq!(groups[1]["id"], "provider:openai");
@@ -2568,6 +2568,58 @@ async fn alias_and_combo_cannot_claim_one_name() {
     assert_eq!(body["target"], "openai/gpt-4.2");
 }
 
+/// The write paths store the canonical spelling and routing finds it: a client typing the
+/// operator's mixed-case name reaches the row the API created, and the owner check runs on
+/// that canonical name so a spelling cannot smuggle a second owner past it.
+#[tokio::test]
+async fn names_are_stored_canonically_and_mixed_case_calls_still_resolve() {
+    let mock = start_mock().await;
+    let h = harness();
+    h.connect("openai", &mock).await;
+
+    let (status, body) = h
+        .post(
+            "/api/combos",
+            json!({"name": "  Main Combo ", "models": ["openai/gpt-4.1"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], json!("main-combo"));
+
+    // The alias path sees the combo under its canonical name, so another case cannot
+    // claim it.
+    let (status, body) = h
+        .send(
+            "PUT",
+            "/api/aliases",
+            json!({"alias": "MAIN COMBO", "target": "openai/gpt-4.1"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // The combo lists the canonical spelling, so a client listing models finds what it
+    // was told to call.
+    let (status, body) = h.get("/api/combos").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<&str> = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .filter_map(|combo| combo["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["main-combo"]);
+
+    // A custom model id is a path segment, so it is stored canonical too.
+    let (status, body) = h
+        .post(
+            "/api/models/custom",
+            json!({"provider": "openai", "id": "My Model"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], json!("my-model"));
+}
+
 /// Rows written before the validation (or straight into the store) can still collide.
 /// Discovery then advertises the alias entry once, and the combo stays callable as
 /// `combo:<name>`.
@@ -2666,7 +2718,8 @@ async fn stable_group_slug_reference_also_matches_and_normalization() {
     };
     assert_eq!(saved.layout.groups[0].slug.as_deref(), Some("main"));
 
-    // Rename display name from "main" to "Primary": slug remains "main".
+    // Rename display name from "main" to "Primary": slug remains "main", and the stored
+    // display name is the canonical "primary".
     let mut renamed = saved.layout.clone();
     renamed.groups[0].name = "Primary".into();
     h.state
@@ -2692,7 +2745,7 @@ async fn stable_group_slug_reference_also_matches_and_normalization() {
         .filter_map(Value::as_str)
         .collect();
     assert!(also.contains(&"main/openai/gpt-4.1"), "{also:?}");
-    assert!(also.contains(&"Primary/oai/gpt-4.1"), "{also:?}");
+    assert!(also.contains(&"primary/oai/gpt-4.1"), "{also:?}");
     assert!(also.contains(&"oai/gpt-4.1"), "{also:?}");
     assert!(also.contains(&"openai/gpt-4.1"), "{also:?}");
     assert!(also.contains(&"gpt-4.1"), "{also:?}");
@@ -2728,7 +2781,7 @@ async fn stable_group_slug_reference_also_matches_and_normalization() {
         .iter()
         .find(|g| g["id"] == "g-main")
         .expect("g-main");
-    assert_eq!(group_entry["name"], "Primary");
+    assert_eq!(group_entry["name"], "primary", "the rename is stored canonical");
     assert_eq!(group_entry["slug"], "main");
     assert!(
         body["data"]
@@ -2780,8 +2833,8 @@ async fn stable_group_slug_reference_also_matches_and_normalization() {
     let latest = events.first().expect("usage row");
     assert_eq!(
         latest.requested_model.as_deref(),
-        Some("Primary/openai/gpt-4.1"),
-        "usage requested_model must keep the client's literal string"
+        Some("primary/openai/gpt-4.1"),
+        "usage requested_model is the client's string in stored (canonical) spelling"
     );
     assert_eq!(
         latest.model, "main/oai/gpt-4.1",

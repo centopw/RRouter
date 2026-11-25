@@ -5,6 +5,7 @@ import { Checkbox } from "../../components/atoms";
 import { CAPABILITY_KEYS, CAPABILITY_LABELS } from "../../components/capability-chips";
 import { api, type Capabilities, type Model, type ModelProvider } from "../../lib/api";
 import { numeric } from "./rows";
+import { normalisedPreview } from "../../lib/model-name";
 
 /** The one free-text model field in the app. Mounted only while open, so typing in it
  *  never re-renders the registry table behind the dialog. */
@@ -104,6 +105,7 @@ export function CustomModelModal({
               ariaLabel="custom model id"
               disabled={Boolean(initial)}
             />
+            {initial ? null : <ModelIdPreview id={form.id} />}
           </Field>
         </div>
         <Field label="display">
@@ -170,5 +172,16 @@ export function CustomModelModal({
         {create.isError ? <ErrorNote error={create.error} /> : null}
       </div>
     </Modal>
+  );
+}
+
+/** The model id the gateway will store, when normalising changes what was typed. */
+function ModelIdPreview({ id }: { id: string }) {
+  const preview = normalisedPreview(id);
+  if (!preview) return null;
+  return (
+    <span className="block font-mono text-caption text-faint">
+      saved as <span className="text-muted">{preview}</span>
+    </span>
   );
 }

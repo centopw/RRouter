@@ -842,6 +842,8 @@ async fn special_inner(
             Recorded {
                 candidate: &outcome.candidate,
                 model: &plan.model,
+                resolved_ref: trace.resolved_ref(),
+                route_trail: trace.route_trail(),
                 endpoint: kind.endpoint(),
                 usage,
                 key: caller.key_id(),
@@ -1263,6 +1265,7 @@ async fn json_plan(
             },
         )
         .await?;
+    trace.label_plan(&plan);
     Ok(supported(state, plan, kind))
 }
 
@@ -1531,6 +1534,7 @@ async fn transcriptions_inner(
                 model: candidate.model.clone(),
                 candidates: vec![candidate],
                 stream: false,
+                route: Vec::new(),
             }
         }
     };
@@ -1581,6 +1585,7 @@ async fn voices_inner(
         model: candidate.model.clone(),
         candidates: vec![candidate],
         stream: false,
+        route: Vec::new(),
     };
     let started = Instant::now();
     let outcome = state
@@ -1684,6 +1689,8 @@ fn record_passthrough(
         Recorded {
             candidate,
             model,
+            resolved_ref: trace.resolved_ref(),
+            route_trail: trace.route_trail(),
             endpoint: kind.endpoint(),
             usage,
             key,
@@ -1833,6 +1840,7 @@ async fn try_free_fallback(
         "falling back to free model pool"
     );
     trace.set_fallback_reason(Some(reason));
+    trace.label_plan(&plan);
     // Free fallback costs 0; release any paid budget hold so it does not serialize free traffic.
     let _ = trace.take_budget_hold();
 
@@ -1889,6 +1897,8 @@ async fn try_free_fallback(
         let recorded = Recorded {
             candidate: &candidate,
             model: &served_model,
+            resolved_ref: trace.resolved_ref(),
+            route_trail: trace.route_trail(),
             endpoint: endpoint_of(inbound),
             usage: resp.usage,
             key: key_id,
@@ -1943,6 +1953,8 @@ async fn try_free_fallback(
             state: Arc::clone(state),
             candidate: candidate.clone(),
             model: served_model,
+            resolved_ref: trace.resolved_ref(),
+            route_trail: trace.route_trail(),
             started,
             upstream_ms: trace.upstream_ms(),
             key: key_id,
@@ -2113,6 +2125,7 @@ async fn handle(
             .await;
         }
     };
+    trace.label_plan(&plan);
     let client_stream = plan.stream || canonical.stream;
     // A stream-only upstream (codex) refuses every non-streaming request, so a
     // non-streaming client is served by streaming upstream and reassembling.
@@ -2300,6 +2313,8 @@ async fn handle(
             let recorded = Recorded {
                 candidate: &candidate,
                 model: &plan.model,
+                resolved_ref: trace.resolved_ref(),
+                route_trail: trace.route_trail(),
                 endpoint: endpoint_of(inbound),
                 usage: assembled.usage,
                 key: key_id,
@@ -2482,6 +2497,8 @@ async fn handle(
             state: Arc::clone(state),
             candidate,
             model: plan.model.clone(),
+            resolved_ref: trace.resolved_ref(),
+            route_trail: trace.route_trail(),
             started,
             upstream_ms: trace.upstream_ms(),
             key: key_id,
@@ -2626,6 +2643,7 @@ async fn complete_traced(
             f64::from(config.subscription_reserve_percent),
         )
         .await?;
+    trace.label_plan(&plan);
     let upstream_stream =
         plan.stream || canonical.stream || plan.candidates.iter().any(|c| stream_only(state, c));
     let attempt = Attempt {
@@ -2652,6 +2670,8 @@ async fn complete_traced(
         let recorded = Recorded {
             candidate: &candidate,
             model: &plan.model,
+            resolved_ref: trace.resolved_ref(),
+            route_trail: trace.route_trail(),
             endpoint: endpoint_of(inbound),
             usage: resp.usage,
             key,
@@ -2686,6 +2706,8 @@ async fn complete_traced(
     let recorded = Recorded {
         candidate: &candidate,
         model: &plan.model,
+        resolved_ref: trace.resolved_ref(),
+        route_trail: trace.route_trail(),
         endpoint: endpoint_of(inbound),
         usage: assembled.usage,
         key,
@@ -3361,6 +3383,8 @@ async fn serve_cache_hit(
         let recorded = Recorded {
             candidate,
             model,
+            resolved_ref: trace.resolved_ref(),
+            route_trail: trace.route_trail(),
             endpoint: endpoint_of(inbound),
             usage: Usage::default(),
             key: key_id,
@@ -3451,6 +3475,8 @@ fn record_cache_hit(
             session_id: meta.session_id,
             fallback_reason: meta.fallback_reason,
             unrouted_reason: None,
+            resolved_ref: trace.resolved_ref(),
+            route_trail: trace.route_trail(),
         },
         budget_hold,
     );
@@ -4605,6 +4631,11 @@ struct TraceLabels {
     /// Reason this request fell back to the free pool (`"quota"`, `"rate_limit"`,
     /// `"payment_required"`), or `None` for direct routing.
     fallback_reason: Option<String>,
+    /// The ref routing dispatched on after alias and combo resolution, once a plan was
+    /// built. `None` while the request has not planned (and forever, if it never did).
+    resolved_ref: Option<String>,
+    /// Resolution steps, one line each (`combo main (fallback): …`, `alias a -> b`).
+    route_trail: Vec<String>,
     /// Provider of the most recent attempt, empty before any dispatch.
     provider: String,
     /// Account the most recent attempt went through. A request that fails after dispatch
@@ -4662,6 +4693,26 @@ impl RequestTrace {
 
     fn set_fallback_reason(&self, reason: Option<&str>) {
         self.labels().fallback_reason = reason.map(str::to_string);
+    }
+
+    /// Record how this request reached its targets: the steps (combo, alias) and the ref
+    /// routing dispatched on. Together with `requested_model` this is the whole answer to
+    /// "asked X, resolved through Y, tried Z" that the inspector shows.
+    fn label_plan(&self, plan: &Plan) {
+        let mut labels = self.labels();
+        labels.resolved_ref = Some(plan.model.clone());
+        labels.route_trail = plan.route.iter().map(|step| step.summary()).collect();
+    }
+
+    fn resolved_ref(&self) -> Option<String> {
+        self.labels().resolved_ref.clone()
+    }
+
+    /// The resolution steps as one newline-separated text, or `None` when there were none
+    /// (a bare id or `provider/model` that needed no lookup).
+    fn route_trail(&self) -> Option<String> {
+        let trail = self.labels().route_trail.join("\n");
+        (!trail.is_empty()).then_some(trail)
     }
 
     /// The 32-hex trace id the client sees as `x-trace-id`.
@@ -5044,6 +5095,8 @@ impl RequestTrace {
             session_id: meta.session_id,
             fallback_reason: meta.fallback_reason,
             unrouted_reason,
+            resolved_ref: self.resolved_ref(),
+            route_trail: self.route_trail(),
         };
         let store = Arc::clone(&state.store);
         let access_log = state.config.load().access_log;
@@ -5604,6 +5657,10 @@ struct PendingRecord {
     state: Arc<AppState>,
     candidate: Candidate,
     model: String,
+    /// The ref routing dispatched on after alias/combo resolution.
+    resolved_ref: Option<String>,
+    /// The resolution steps, one line each, newline-separated.
+    route_trail: Option<String>,
     started: Instant,
     /// Time to the winning attempt's response headers.
     upstream_ms: u32,
@@ -5692,6 +5749,8 @@ impl ResponseStream {
             Recorded {
                 candidate: &pending.candidate,
                 model: &pending.model,
+                resolved_ref: pending.resolved_ref.clone(),
+                route_trail: pending.route_trail.clone(),
                 endpoint: endpoint_of(self.inner.inbound),
                 usage: tokens,
                 key: pending.key,
@@ -5805,6 +5864,12 @@ struct RequestMeta {
 struct Recorded<'a> {
     candidate: &'a Candidate,
     model: &'a str,
+    /// The ref routing dispatched on after alias/combo resolution, for the usage row's
+    /// chain. Copied out of the trace because a streamed request records after the
+    /// handler returned.
+    resolved_ref: Option<String>,
+    /// The resolution steps, one line each, newline-separated.
+    route_trail: Option<String>,
     endpoint: &'static str,
     usage: Usage,
     /// Gateway key that paid the request; `None` for anonymous traffic.
@@ -5882,6 +5947,8 @@ fn record_once(state: &AppState, r: Recorded<'_>) {
         session_id: r.meta.session_id,
         fallback_reason: r.meta.fallback_reason,
         unrouted_reason: None,
+        resolved_ref: r.resolved_ref,
+        route_trail: r.route_trail,
     };
     spawn_record(state, rec, r.budget_hold);
 }
@@ -6202,6 +6269,7 @@ async fn embeddings_inner(
             },
         )
         .await?;
+    trace.label_plan(&plan);
     let candidate = plan
         .candidates
         .first()
@@ -6300,6 +6368,8 @@ async fn embeddings_inner(
                 Recorded {
                     candidate: &candidate,
                     model: &model,
+                    resolved_ref: None,
+                    route_trail: None,
                     endpoint: "/v1/embeddings",
                     usage: embedding_usage(&value),
                     key: caller.key_id(),
@@ -6540,6 +6610,8 @@ mod tests {
             session_id: None,
             fallback_reason: None,
             unrouted_reason: None,
+            resolved_ref: None,
+            route_trail: None,
         }
     }
 

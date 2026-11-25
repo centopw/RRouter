@@ -3,6 +3,8 @@
 //! Every migration runs inside one transaction together with its `user_version` bump, so a
 //! crash mid-migration leaves the database at the previous version.
 
+use std::collections::BTreeMap;
+
 use rusqlite::Connection;
 
 use rrouter_core::{Error, Result};
@@ -12,14 +14,47 @@ use rrouter_core::{Error, Result};
 /// Public because an upgrade is a deployment-visible fact: the gateway reports it, and
 /// the migration tests assert against it so a schema bump cannot leave a stale number in
 /// the suite.
-pub const SCHEMA_VERSION: i64 = 47;
+pub const SCHEMA_VERSION: i64 = 49;
 
 /// Ordered migrations; index 0 takes the DB from version 0 to version 1.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
     V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40,
-    V41, V42, V43, V44, V45, V46, V47,
+    V41, V42, V43, V44, V45, V46, V47, V48, V49,
 ];
+
+/// V49: rewrite the names operators typed into their canonical spelling.
+///
+/// Additive in mechanism (one shadow column, two aliases), a rename in effect: combo,
+/// alias and preset names, plus preset group names and the custom-model ids the catalog
+/// rows hold, move to [`crate::canonical_ref`] spelling so one name has one row. The
+/// old spelling stays reachable two ways, both read on every request:
+///
+/// - `<table>_legacy_names` holds what the row was called before, at *any* case close
+///   enough to the canonical name (the write paths' [`crate::same_ref`] tolerance).
+///   `Store::legacy_*` lookups check it, so a client compiling `My/Model` in another case
+///   still resolves to the row.
+/// - `usage.requested_model` and `usage.model` (which repeats whatever the client put in
+///   the body) are lower-cased and have their whitespace collapsed. Routing never
+///   matched those case-sensitively, so the case carries no routing meaning.
+const V49: &str = r#"
+ALTER TABLE combos ADD COLUMN legacy_names TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE model_aliases ADD COLUMN legacy_names TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE model_presets ADD COLUMN legacy_names TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE usage ADD COLUMN legacy_names TEXT NOT NULL DEFAULT '[]';
+"#;
+
+/// V48: which combo/alias a request resolved through.
+///
+/// `usage.resolved_ref` is the ref routing actually dispatched on after alias and combo
+/// resolution (`main/deepseek-v4.1-flash-1017` for a combo named so), and `route_trail`
+/// the human steps that got there (`combo main (fallback): a, b` / `alias fast -> x`),
+/// newline-separated, as plain text so an inspector never has to join tables. Additive
+/// and nullable: served requests up to v47 read as `NULL`.
+const V48: &str = r#"
+ALTER TABLE usage ADD COLUMN resolved_ref TEXT;
+ALTER TABLE usage ADD COLUMN route_trail TEXT;
+"#;
 
 /// V47: pre-dispatch failure attribution.
 ///
@@ -970,6 +1005,7 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(db_err)?;
+
     if version > SCHEMA_VERSION {
         return Err(Error::Store(format!(
             "database schema version {version} is newer than this build supports \
@@ -983,13 +1019,310 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
         }
         let tx = conn.transaction().map_err(db_err)?;
         tx.execute_batch(sql).map_err(db_err)?;
-        if target == 46 {
-            backfill_preset_group_slugs(&tx)?;
+        match target {
+            46 => backfill_preset_group_slugs(&tx)?,
+            49 => backfill_canonical_names(&tx)?,
+            _ => {}
         }
         // `PRAGMA user_version` does not accept a bound parameter.
         tx.execute_batch(&format!("PRAGMA user_version = {target}"))
             .map_err(db_err)?;
         tx.commit().map_err(db_err)?;
+    }
+    Ok(())
+}
+
+/// V49 data backfill: move every stored name to its canonical spelling and keep the old
+/// spellings that could reach it in `legacy_names` (see [`V49`]).
+///
+/// Collisions are reported, never resolved by dropping a row: two names that collapse
+/// onto one are a configuration the operator must settle, so the error names both.
+/// Whether `table` exists in the database `tx` is working on.
+fn table_exists(tx: &rusqlite::Transaction<'_>, table: &str) -> Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        rusqlite::params![table],
+        |r| r.get(0),
+    )
+    .map_err(db_err)
+}
+
+fn backfill_canonical_names(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    /// A client spelling `old` still reaches the row now called `new` when the write
+    /// paths' rule holds ([`crate::same_ref`], which covers case) or when the two differ
+    /// only by case, which is what a route-ref lookup compares per segment.
+    fn reaches(old: &str, new: &str) -> bool {
+        crate::names::same_ref(old, new) || old.to_lowercase() == new.to_lowercase()
+    }
+
+    fn json_names(names: &[String]) -> String {
+        serde_json::to_string(names).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Collapse case and whitespace runs, the way a client's model name is compared.
+    fn fold(raw: &str) -> String {
+        raw.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+
+    /// `(key, stored name)` pairs grouped by canonical name: one stored name per canonical
+    /// name is a rename, two are a collision whatever their keys (`combos.name` alone is
+    /// unique, `models` is keyed by `(provider, model)`).
+    fn plan(
+        what: &str,
+        pairs: Vec<(String, String)>,
+    ) -> Result<Vec<(String, String, String)>> {
+        let mut grouped: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        for (key, stored) in pairs {
+            grouped
+                .entry(crate::canonical_ref(&stored))
+                .or_default()
+                .push((key, stored));
+        }
+        let mut out = Vec::with_capacity(grouped.len());
+        for (canonical, rows) in grouped {
+            if let Some((_, second)) = rows.get(1) {
+                return Err(Error::Store(format!(
+                    "cannot canonicalise {what}: {:?} and {:?} both become {canonical:?}; \
+                     rename or delete one of them and restart",
+                    rows[0].1, second
+                )));
+            }
+            let (key, old) = rows.into_iter().next().unwrap_or_default();
+            let legacy = if old != canonical && reaches(&old, &canonical) {
+                json_names(std::slice::from_ref(&old))
+            } else {
+                "[]".to_string()
+            };
+            out.push((key, canonical, legacy));
+        }
+        Ok(out)
+    }
+
+    /// Park `(key, canonical name, legacy list)` in a temp table.
+    fn stage_names(
+        tx: &rusqlite::Transaction<'_>,
+        table: &str,
+        planned: &[(String, String, String)],
+    ) -> Result<()> {
+        for (key, name, legacy) in planned {
+            tx.execute(
+                &format!("INSERT INTO {table} (key, name, legacy) VALUES (?1, ?2, ?3)"),
+                rusqlite::params![key, name, legacy],
+            )
+            .map_err(db_err)?;
+        }
+        Ok(())
+    }
+
+    // ----- names ----------------------------------------------------------------
+    // Every target name is parked in a temp table first and the real columns are written
+    // once at the end: an in-place `a` -> `b` while another row still holds `b` would trip
+    // the unique index even though `plan` already accepted the pair as one row. A table a
+    // hand-built older database never got is skipped, so the upgrade reaches a version
+    // that has all of them.
+    let mut combos = Vec::new();
+    if table_exists(tx, "combos")? {
+        let mut stmt = tx
+            .prepare("SELECT id, name FROM combos ORDER BY id ASC")
+            .map_err(db_err)?;
+        combos = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+    }
+    let combos = plan("combo names", combos)?;
+    let mut aliases = Vec::new();
+    if table_exists(tx, "model_aliases")? {
+        let mut stmt = tx
+            .prepare("SELECT alias FROM model_aliases ORDER BY alias ASC")
+            .map_err(db_err)?;
+        aliases = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(0)?)))
+            .map_err(db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+    }
+    let aliases = plan("alias names", aliases)?;
+    let mut presets = Vec::new();
+    if table_exists(tx, "model_presets")? {
+        let mut stmt = tx
+            .prepare("SELECT id, name FROM model_presets ORDER BY id ASC")
+            .map_err(db_err)?;
+        presets = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+    }
+    let presets = plan("preset names", presets)?;
+    tx.execute_batch(
+        "CREATE TEMP TABLE combo_names (key TEXT, name TEXT, legacy TEXT); \
+         CREATE TEMP TABLE alias_names (key TEXT, name TEXT, legacy TEXT); \
+         CREATE TEMP TABLE preset_names (key TEXT, name TEXT, legacy TEXT); \
+         CREATE TEMP TABLE custom_models (provider TEXT, model TEXT, name TEXT);",
+    )
+    .map_err(db_err)?;
+    stage_names(tx, "temp.combo_names", &combos)?;
+    stage_names(tx, "temp.alias_names", &aliases)?;
+    stage_names(tx, "temp.preset_names", &presets)?;
+
+    // Preset group names first: the layout is a document, and the preset's own name is
+    // written with the other staged rows below.
+    let layouts: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT id, layout_json FROM model_presets")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        rows
+    };
+    for (id, old_layout) in layouts {
+        // A layout this build cannot read is left exactly as it is: rewriting a document
+        // it does not understand would be a guess, and reads accept either spelling.
+        let Ok(mut layout) = serde_json::from_str::<crate::presets::LayoutDocument>(&old_layout)
+        else {
+            continue;
+        };
+        for group in &mut layout.groups {
+            let name = crate::canonical_ref(&group.name);
+            if !name.is_empty() {
+                group.name = name;
+            }
+        }
+        let updated = serde_json::to_string(&layout)
+            .map_err(|e| Error::Store(format!("serialize canonicalised preset {id}: {e}")))?;
+        tx.execute(
+            "UPDATE model_presets SET layout_json = ?2 WHERE id = ?1",
+            rusqlite::params![id, updated],
+        )
+        .map_err(db_err)?;
+    }
+
+    tx.execute(
+        "UPDATE combos SET legacy_names = (SELECT legacy FROM temp.combo_names \
+         WHERE key = combos.id), \
+         name = (SELECT name FROM temp.combo_names WHERE key = combos.id) \
+         WHERE id IN (SELECT key FROM temp.combo_names)",
+        [],
+    )
+    .map_err(db_err)?;
+    tx.execute(
+        "UPDATE model_aliases SET legacy_names = (SELECT legacy FROM temp.alias_names \
+         WHERE key = model_aliases.alias), alias = (SELECT name FROM temp.alias_names \
+         WHERE key = model_aliases.alias) \
+         WHERE alias IN (SELECT key FROM temp.alias_names)",
+        [],
+    )
+    .map_err(db_err)?;
+    tx.execute(
+        "UPDATE model_presets SET legacy_names = (SELECT legacy FROM temp.preset_names \
+         WHERE key = model_presets.id), \
+         name = (SELECT name FROM temp.preset_names WHERE key = model_presets.id) \
+         WHERE id IN (SELECT key FROM temp.preset_names)",
+        [],
+    )
+    .map_err(db_err)?;
+
+    // ----- custom model ids ------------------------------------------------------
+    // `models` keys on `(provider, model)`; only the operator-typed rows move, the
+    // catalog ids come from the provider already canonical. Two providers may hold one
+    // id, so rows are grouped by the pair, staged, then written across all rows at once.
+    let mut custom: Vec<(String, String)> = Vec::new();
+    let models_has_source = table_exists(tx, "models")?
+        && tx
+            .prepare("SELECT source FROM models LIMIT 0")
+            .map_err(db_err)
+            .is_ok();
+    if models_has_source {
+        let mut stmt = tx
+            .prepare(
+                "SELECT provider, model FROM models WHERE source LIKE 'custom%' \
+                 OR source LIKE 'local%' OR source = 'manual'",
+            )
+            .map_err(db_err)?;
+        custom = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+    }
+    let mut by_row: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    for (provider, stored) in custom {
+        by_row
+            .entry((provider, crate::canonical_ref(&stored)))
+            .or_default()
+            .push(stored);
+    }
+    for ((provider, canonical), stored) in by_row {
+        if let Some(second) = stored.get(1) {
+            return Err(Error::Store(format!(
+                "cannot canonicalise custom model ids: {:?} and {:?} both become {canonical:?} \
+                 under {provider}; rename or delete one of them and restart",
+                stored[0], second
+            )));
+        }
+        tx.execute(
+            "INSERT INTO temp.custom_models (provider, model, name) VALUES (?1, ?2, ?3)",
+            rusqlite::params![provider, stored[0], canonical],
+        )
+        .map_err(db_err)?;
+    }
+    if models_has_source {
+        tx.execute(
+            "UPDATE models SET model = (SELECT name FROM temp.custom_models \
+             WHERE provider = models.provider AND model = models.model) \
+             WHERE EXISTS (SELECT 1 FROM temp.custom_models \
+             WHERE provider = models.provider AND model = models.model)",
+            [],
+        )
+        .map_err(db_err)?;
+    }
+
+    tx.execute_batch(
+        "DROP TABLE temp.combo_names; DROP TABLE temp.alias_names; \
+         DROP TABLE temp.preset_names; DROP TABLE temp.custom_models;",
+    )
+    .map_err(db_err)?;
+
+    // ----- usage rows -------------------------------------------------------------
+    // Served and requested columns repeat whatever the client typed; folding case and
+    // whitespace keeps them joinable with the names above. The old spelling is kept where
+    // it differs, so an inspector can still show exactly what was asked for.
+    let rows: Vec<(i64, Option<String>, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT id, requested_model, model FROM usage ORDER BY id ASC")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        rows
+    };
+    for (id, requested, served) in rows {
+        let folded_requested = requested.as_deref().map(fold);
+        let folded_served = fold(&served);
+        let changed_requested = folded_requested != requested;
+        let legacy = match (requested.as_deref(), folded_requested.as_deref()) {
+            (Some(raw), Some(folded)) if raw != folded => json_names(&[raw.to_string()]),
+            _ => "[]".to_string(),
+        };
+        if !changed_requested && folded_served == served {
+            continue;
+        }
+        let requested = folded_requested.filter(|name| !name.is_empty());
+        tx.execute(
+            "UPDATE usage SET requested_model = ?2, model = ?3, legacy_names = ?4 WHERE id = ?1",
+            rusqlite::params![id, requested, folded_served, legacy],
+        )
+        .map_err(db_err)?;
     }
     Ok(())
 }
@@ -1954,7 +2287,7 @@ mod tests {
                 },
             )
             .expect("seeded default preset");
-        assert_eq!(name, "Default");
+        assert_eq!(name, "default", "V49 stores the seeded name canonical");
         assert_eq!(scope, "global");
         assert_eq!((is_default, revision), (1, 1));
         assert_eq!(layout, seed_layout);
