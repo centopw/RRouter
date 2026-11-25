@@ -849,13 +849,18 @@ async fn teardown_clears_both_tables_and_keeps_credentials() {
     assert_eq!(body["ok"], true);
     assert_eq!(body["disabled"], 2);
 
-    assert!(h
+    let config = h
         .state
         .store
         .free_mode_config()
         .await
         .expect("config")
-        .is_none());
+        .expect("teardown keeps the row");
+    assert!(config.document.is_null(), "teardown forgets the document");
+    assert_eq!(
+        config.routing["teardown"], true,
+        "the row marks the teardown so the next read does not re-discover"
+    );
     assert!(h
         .state
         .store
@@ -880,6 +885,14 @@ async fn teardown_clears_both_tables_and_keeps_credentials() {
     assert!(body["document"].is_null());
     assert!(body["models"].as_array().expect("models").is_empty());
     assert_eq!(body["accounts"][0]["is_active"], false);
+    // Reading is not a request to discover: the torn-down rows stay gone.
+    assert!(h
+        .state
+        .store
+        .list_free_models()
+        .await
+        .expect("rows")
+        .is_empty());
 }
 
 /// Gemini's OpenAI-compatible `/models` endpoint prefixes ids with `models/`. Discovery

@@ -3135,12 +3135,61 @@ impl Store {
     /// Forget the document and every discovery row. Accounts themselves are left alone:
     /// disabling them is the operator's decision, and a teardown that deleted credentials
     /// could not be undone by a re-import.
+    ///
+    /// The `free_mode` row is reset rather than deleted, keeping the operator's routing and
+    /// zeroing the rest. Deleting it would be indistinguishable from a fresh install — and
+    /// on a fresh install the public catalogs are discovered on the next read, so a teardown
+    /// followed by a state read would have its own cleared rows written straight back. The
+    /// reset row is also what keeps "the operator tore this down" observable at all, since
+    /// discovery rows in every table survive nothing but this statement.
     pub async fn clear_free_mode(&self) -> Result<()> {
+        let mut routing = self
+            .free_mode_config()
+            .await?
+            .map(|config| config.routing)
+            .unwrap_or_else(zero_config_routing);
+        let obj = match &mut routing {
+            serde_json::Value::Object(obj) => obj,
+            other => {
+                *other = serde_json::Value::Object(Default::default());
+                other.as_object_mut().expect("object initialized above")
+            }
+        };
+        for key in [
+            "catalogs",
+            "probes",
+            "last_checked_at",
+            "_meta",
+            "unusable_models",
+        ] {
+            obj.remove(key);
+        }
+        obj.insert("teardown".to_string(), serde_json::Value::Bool(true));
+
         let conn = self.conn();
-        conn.execute("DELETE FROM free_mode", [])
-            .map_err(migrations::db_err)?;
         conn.execute("DELETE FROM free_models", [])
             .map_err(migrations::db_err)?;
+        conn.execute(
+            "INSERT INTO free_mode (id, document, routing, updated_at) VALUES (1, 'null', ?1, ?2) \
+             ON CONFLICT(id) DO UPDATE SET document = 'null', routing = excluded.routing, \
+             updated_at = excluded.updated_at",
+            params![routing.to_string(), now()],
+        )
+        .map_err(migrations::db_err)?;
+        Ok(())
+    }
+
+    /// Leave the torn-down state so the next read may discover the catalogs again.
+    pub async fn clear_free_mode_teardown(&self) -> Result<()> {
+        let Some(config) = self.free_mode_config().await? else {
+            return Ok(());
+        };
+        let mut routing = config.routing;
+        if let serde_json::Value::Object(obj) = &mut routing {
+            obj.remove("teardown");
+        }
+        self.save_free_mode_config(&config.document, &routing)
+            .await?;
         Ok(())
     }
 
@@ -5307,6 +5356,21 @@ fn merge_into(dst: &mut Credentials, patch: Credentials) {
             dst.extra.insert(k, v);
         }
     }
+}
+
+/// The routing knobs a fresh install starts from; a teardown keeps the previous ones.
+///
+/// These values are the ones the gateway's `DEFAULT_MAX_ATTEMPTS`/`DEFAULT_PREFER` fall back
+/// to, so a zero-config row is what a reader with no row would have seen.
+pub fn zero_config_routing() -> serde_json::Value {
+    serde_json::json!({
+        "enabled": false,
+        "fallback_on_quota": false,
+        "per_account_rpm": null,
+        "max_attempts": 8,
+        "prefer": "spread",
+        "disabled_models": [],
+    })
 }
 
 fn now() -> i64 {

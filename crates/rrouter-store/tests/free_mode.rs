@@ -5,7 +5,7 @@
 //! a reopen unchanged — so a later schema or SQL change cannot quietly break idempotency.
 
 use rrouter_store::{FreeModel, Store};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
@@ -158,16 +158,51 @@ fn the_document_round_trips_verbatim_and_clears_with_discovery() {
 
     rt().block_on(store.upsert_free_model(&row("openrouter", "x:free", true, None, "document")))
         .expect("row");
+    let catalog = json!([{"provider": "openrouter", "url": "u", "discovered_at": 5, "models": 1,
+                          "usable": 1, "error": null}]);
+    rt().block_on(store.save_free_mode_config(
+        &document,
+        &json!({
+            "enabled": true,
+            "prefer": "cheapest",
+            "max_attempts": 4,
+            "catalogs": catalog,
+            "probes": {"a/b": {"at": 1}},
+        }),
+    ))
+    .expect("routing metadata");
     rt().block_on(store.clear_free_mode()).expect("clear");
-    assert!(
-        rt().block_on(store.free_mode_config())
-            .expect("read")
-            .is_none(),
+
+    let stored = rt()
+        .block_on(store.free_mode_config())
+        .expect("read")
+        .expect("teardown keeps the row");
+    assert_eq!(
+        stored.document,
+        Value::Null,
         "teardown forgets the document"
+    );
+    assert_eq!(
+        stored.routing,
+        json!({"enabled": true, "prefer": "cheapest", "max_attempts": 4, "teardown": true}),
+        "teardown keeps the operator's knobs, drops discovery metadata and marks the row"
     );
     assert_eq!(
         rt().block_on(store.list_free_models()).expect("list").len(),
         0,
         "teardown forgets discovery"
     );
+
+    rt().block_on(store.clear_free_mode_teardown())
+        .expect("ask again");
+    let stored = rt()
+        .block_on(store.free_mode_config())
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        stored.routing,
+        json!({"enabled": true, "prefer": "cheapest", "max_attempts": 4}),
+        "an explicit discovery clears the teardown marker and nothing else"
+    );
+    assert_eq!(stored.document, Value::Null);
 }

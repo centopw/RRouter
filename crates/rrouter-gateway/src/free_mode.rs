@@ -866,6 +866,11 @@ pub async fn apply(
             }
         }
     }
+    // An import is the operator asking for free mode again: whatever a teardown left in the
+    // routing, the next read may discover the catalogs.
+    if let Some(obj) = routing.as_object_mut() {
+        obj.remove("teardown");
+    }
     store
         .save_free_mode_config(&public_document(&stored), &routing)
         .await?;
@@ -1122,6 +1127,8 @@ pub async fn discover(
             .filter(|source| only.is_empty() || only.iter().any(|p| p == source.provider))
             .collect();
         if !sources.is_empty() {
+            // An explicit discovery is the operator asking for rows again, teardown included.
+            state.store.clear_free_mode_teardown().await?;
             report.catalogs = sync_public_catalogs_from(state, &sources).await?;
         }
     }
@@ -1662,6 +1669,20 @@ fn should_auto_discover_catalogs(state: &AppState) -> bool {
         || std::env::var("RROUTER_FREE_OPENROUTER_CATALOG_URL").is_ok()
 }
 
+/// Whether this instance's zero-config reads may reach the public catalogs.
+///
+/// A teardown (`DELETE /api/free-mode`) clears every discovery row, and the state read runs
+/// again immediately after — so that read would put the catalogs straight back and "cleared"
+/// would never be observable. The teardown therefore leaves a row with `routing.teardown:
+/// true`, and reads leave discovery alone until the operator asks for it again through
+/// `?refresh=true` or the discovery endpoint.
+fn catalogs_wanted(routing: Option<&Value>) -> bool {
+    !routing
+        .and_then(|routing| routing.get("teardown"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn model_key(provider: &str, model: &str) -> String {
     format!("{provider}/{model}")
 }
@@ -2069,23 +2090,19 @@ pub fn spawn_catalog_sync(state: Arc<AppState>) {
     });
 }
 
-/// Read the stored `(document, routing)` pair, initializing zero-config defaults when no
-/// row has been written yet.
+/// Read the stored `(document, routing)` pair. A fresh install starts from the zero-config
+/// defaults; a teardown keeps its routing (the operator's knobs and the teardown marker)
+/// but has no document.
 async fn load_config_parts(store: &Store) -> rrouter_core::Result<(Value, Value)> {
-    match store.free_mode_config().await? {
-        Some(cfg) => Ok((cfg.document, cfg.routing)),
-        None => Ok((
-            Value::Null,
-            json!({
-                "enabled": false,
-                "fallback_on_quota": false,
-                "per_account_rpm": null,
-                "max_attempts": DEFAULT_MAX_ATTEMPTS,
-                "prefer": DEFAULT_PREFER,
-                "disabled_models": [],
-            }),
-        )),
-    }
+    let config = store.free_mode_config().await?;
+    Ok(match config {
+        Some(cfg) if has_imported_document(&cfg.document) => (cfg.document, cfg.routing),
+        // A row without a document (teardown) still carries the routing the operator
+        // toggled and the teardown marker, so follow-ups keep both; a missing row starts
+        // from the defaults.
+        Some(cfg) => (Value::Null, cfg.routing),
+        None => (Value::Null, rrouter_store::zero_config_routing()),
+    })
 }
 
 fn ensure_object(value: &mut Value) -> &mut Map<String, Value> {
@@ -2147,21 +2164,22 @@ pub async fn state_view(
     state: &AppState,
     refresh: bool,
 ) -> rrouter_core::Result<FreeModeStateView> {
-    let catalogs_stale = {
+    let (catalogs_stale, routing_teardown) = {
         let cfg = state.store.free_mode_config().await?;
+        let routing = cfg.as_ref().map(|c| &c.routing);
         let now = crate::now_unix();
-        match cfg
-            .as_ref()
-            .and_then(|c| c.routing.get("catalogs"))
+        let stale = match routing
+            .and_then(|r| r.get("catalogs"))
             .and_then(|v| serde_json::from_value::<Vec<CatalogStatus>>(v.clone()).ok())
         {
             Some(list) if !list.is_empty() => list
                 .iter()
                 .all(|c| now.saturating_sub(c.discovered_at) >= CATALOG_TTL_SECS),
             _ => true,
-        }
+        };
+        (stale, !catalogs_wanted(routing))
     };
-    if refresh || (catalogs_stale && should_auto_discover_catalogs(state)) {
+    if refresh || (catalogs_stale && !routing_teardown && should_auto_discover_catalogs(state)) {
         if let Err(err) = sync_public_catalogs(state).await {
             tracing::warn!(%err, "free-mode catalog refresh failed; returning cached view");
         }
