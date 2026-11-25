@@ -1,18 +1,25 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link } from "react-router-dom";
 import * as Popover from "@radix-ui/react-popover";
-import { DotsThree, PlugsConnected } from "@phosphor-icons/react";
+import {
+  CaretDown,
+  CheckCircle,
+  DotsThree,
+  MinusCircle,
+  Plus,
+  SlidersHorizontal,
+  WarningCircle,
+} from "@phosphor-icons/react";
 import { HealthBadge } from "../../components/molecules/HealthBadge";
+import { KpiTile, type KpiTone } from "../../components/molecules/KpiTile";
 import { ProviderIcon } from "../../components/provider-icon";
 import { PaginationBar } from "../../components/table";
 import {
   Badge,
   Button,
   Card,
-  CardHeader,
   Dot,
   Meter,
-  Segmented,
   barText,
   cx,
 } from "../../components/ui";
@@ -21,40 +28,30 @@ import {
   type AccountSubscription,
   type Connection,
   type ModelProvider,
+  type OAuthProvider,
 } from "../../lib/api";
 import { compact, ms } from "../../lib/format";
 import { refusalView } from "../../lib/refusal";
-import { resetsIn, worstQuotaBar } from "../usage/quota";
+import { accountRisk } from "../usage/pace";
+import { quotaBars, resetsIn } from "../usage/quota";
 import { AccountNameLink } from "./account-preview";
 import {
+  accountSentence,
   accountStatus,
   connectionLabel,
   derivedIdentifiers,
   hostOf,
   isCustomConnection,
   protocolLabel,
-  type AccountFilter,
+  providerOptions,
+  providerSentence,
   type AccountStatus,
   type AccountTraffic24h,
   type ConnectionTestResult,
+  type ProviderFilter,
   type ProviderGroup,
+  type ProvidersSummary,
 } from "./types";
-
-/**
- * Aligned column grid from `md` (768px) upward:
- *   md:  account | owner | limit | status | actions
- *   lg+: account | owner | priority | limit | 24h | status | actions
- *
- * Keeps Account proportional (~280–320 px at 1440) instead of a 530 px void, and gives
- * Owner, 24 h traffic, and the limit bar their own dedicated columns.
- */
-const DESKTOP_GRID =
-  "md:grid md:items-center md:gap-x-3 md:grid-cols-[minmax(0,1.15fr)_5.5rem_minmax(11rem,1fr)_7.75rem_2.25rem] " +
-  "lg:grid-cols-[minmax(10rem,1.2fr)_5.5rem_2.75rem_minmax(12rem,1.15fr)_4.5rem_8rem_2.25rem] " +
-  "xl:grid-cols-[minmax(12rem,1.3fr)_6.5rem_3rem_minmax(14rem,1.25fr)_5.25rem_8.5rem_2.5rem]";
-
-const OWNER_TOOLTIP =
-  "Team keys route only to their own team's accounts; shared accounts serve instance-wide keys.";
 
 /**
  * Kept exported for backwards compatibility with any caller importing `AccountCell`.
@@ -94,145 +91,174 @@ export function AccountCell({
 }
 
 /**
- * Single limit readout for one account: the worst bar across operator caps and provider
- * plan windows (`worstQuotaBar`), rendered with the shared `Meter` and `barText`
- * ladder. Never mixes two different windows into one cell, and never prints "no cap set"
- * unless both limit sources have actually answered.
+ * The top strip answers "are my providers OK?" in four counts: connected (every provider),
+ * healthy (every account ready), need attention (an account needs an operator) and
+ * disabled (every account switched off). Each tile doubles as the filter for the cards.
  */
-function LimitCell({
-  quota,
-  subscription,
-  quotaLoaded,
-  providerId,
+export function ProvidersKpiRow({
+  summary,
+  healthyProviders,
+  attentionProviders,
+  disabledProviders,
+  connectedProviders,
+  filter,
+  onFilter,
 }: {
-  quota?: AccountQuotaRow;
-  subscription?: AccountSubscription;
-  quotaLoaded: boolean;
-  providerId: string;
+  summary: ProvidersSummary;
+  connectedProviders: number;
+  healthyProviders: number;
+  attentionProviders: number;
+  disabledProviders: number;
+  filter: ProviderFilter;
+  onFilter: (next: ProviderFilter) => void;
 }) {
-  const bar = worstQuotaBar(quota, subscription);
-  const href = `/usage?provider=${encodeURIComponent(providerId)}`;
+  const overall = providerVerdict(summary);
+  const readyPercent =
+    summary.expected > 0 ? (summary.ready / summary.expected) * 100 : summary.disabled > 0 ? 0 : 100;
+  const readyTone: KpiTone =
+    summary.expected === 0
+      ? "neutral"
+      : summary.ready === 0
+        ? "neg"
+        : summary.ready < summary.expected
+          ? "warn"
+          : "pos";
 
-  if (bar) {
-    const reset = resetsIn(bar.resets_at);
-    const showResetInline = Boolean(reset) && bar.detail.length <= 12;
-    return (
-      <Link
-        to={href}
-        className="flex min-w-0 flex-col gap-1 rounded-[var(--radius-input)] text-caption hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+  const toggle = (id: ProviderFilter) => onFilter(filter === id ? "connected" : id);
+
+  return (
+    <div className="mb-4 flex flex-col gap-2.5">
+      <div
+        className={cx(
+          "flex items-center gap-2 rounded-[var(--radius-surface)] border border-line bg-surface-2/60 px-3 py-2 text-small",
+          VERDICT_TEXT[overall.tone],
+        )}
       >
-        <span className="flex min-w-0 items-baseline justify-between gap-2">
-          <span className="min-w-0 truncate text-muted">
-            {bar.label}
-            {showResetInline ? (
-              <span className="hidden text-faint lg:inline"> · {reset}</span>
-            ) : null}
-          </span>
-          <span className={cx("shrink-0 tnum", barText(bar.percent))}>{bar.detail}</span>
+        <Dot tone={overall.dot} />
+        <span className="min-w-0 flex-1">{overall.sentence}</span>
+        <span className="hidden shrink-0 text-caption text-faint tnum sm:block">
+          {summary.traffic24h.requests > 0
+            ? `${compact(summary.traffic24h.requests)} requests · ${summary.traffic24h.errorRate > 0 ? `${summary.traffic24h.errorRate.toFixed(1)}% errors` : "no errors"} (24h)`
+            : "No traffic in 24h"}
         </span>
-        <Meter
-          percent={bar.percent}
-          label={reset ? `${bar.label}, ${reset}` : bar.label}
+      </div>
+      <div className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
+        <KpiTile
+          icon={<CheckCircle size={18} weight="fill" />}
+          tone="info"
+          label="Connected"
+          value={connectedProviders}
+          suffix={connectedProviders === 1 ? "provider" : "providers"}
+          detail={
+            summary.total === 0
+              ? "Nothing connected"
+              : `${summary.total} account${summary.total === 1 ? "" : "s"}`
+          }
+          onClick={() => toggle("connected")}
+          active={filter === "connected"}
         />
-      </Link>
-    );
-  }
-
-  if (subscription?.error) {
-    return (
-      <Link
-        to={href}
-        className="block truncate rounded-[var(--radius-input)] text-caption text-faint underline-offset-2 hover:text-muted hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
-      >
-        unavailable
-      </Link>
-    );
-  }
-
-  if (!quotaLoaded) {
-    return (
-      <span className="block text-caption text-faint" aria-label="Limits unavailable for this role">
-        —
-      </span>
-    );
-  }
-
-  return (
-    <Link
-      to={href}
-      className="block truncate rounded-[var(--radius-input)] text-caption text-faint underline-offset-2 hover:text-muted hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
-    >
-      no cap set
-    </Link>
+        <KpiTile
+          icon={<CheckCircle size={18} weight="fill" />}
+          tone={readyTone}
+          label="Healthy"
+          value={healthyProviders}
+          suffix={healthyProviders === 1 ? "provider" : "providers"}
+          meter={<Meter percent={readyPercent} label={`${Math.round(readyPercent)}% of accounts ready`} />}
+          detail={
+            summary.expected === 0
+              ? "No enabled accounts"
+              : `${summary.ready} of ${summary.expected} account${summary.expected === 1 ? "" : "s"} ready`
+          }
+          onClick={() => toggle("healthy")}
+          active={filter === "healthy"}
+        />
+        <KpiTile
+          icon={<WarningCircle size={18} weight="fill" />}
+          tone={summary.attention === 0 ? "pos" : summary.severe > 0 ? "neg" : "warn"}
+          label="Need attention"
+          value={attentionProviders}
+          suffix={attentionProviders === 1 ? "provider" : "providers"}
+          detail={
+            summary.attention === 0
+              ? "Everything is routing"
+              : `${summary.attention} account${summary.attention === 1 ? "" : "s"} · ${summary.attentionDetail}`
+          }
+          onClick={() => toggle("attention")}
+          active={filter === "attention"}
+        />
+        <KpiTile
+          icon={<MinusCircle size={18} weight="fill" />}
+          tone="neutral"
+          label="Disabled"
+          value={disabledProviders}
+          suffix={disabledProviders === 1 ? "provider" : "providers"}
+          detail={
+            summary.disabled === 0
+              ? "None turned off"
+              : `${summary.disabled} account${summary.disabled === 1 ? "" : "s"} off`
+          }
+          onClick={() => toggle("disabled")}
+          active={filter === "disabled"}
+        />
+      </div>
+    </div>
   );
 }
 
-/**
- * Standing status pill (`HealthBadge`), or the live test result from this session when
- * the operator just tested this account. Standing state stays visible in the preview and drawer.
- */
-function StatusCell({
-  connection,
-  status,
-  testing,
-  lastTest,
-}: {
-  connection: Connection;
-  status: AccountStatus;
-  testing: boolean;
-  lastTest: ConnectionTestResult | null;
-}) {
-  if (testing) {
-    return (
-      <span role="status" className="flex min-w-0 items-center gap-1.5 text-caption text-muted">
-        <Dot tone="muted" />
-        <span className="truncate">Testing…</span>
-      </span>
-    );
-  }
+const VERDICT_TEXT: Record<"pos" | "warn" | "neg" | "muted", string> = {
+  pos: "text-fg",
+  warn: "text-[var(--color-warn-ink)]",
+  neg: "text-[var(--color-neg-ink)]",
+  muted: "text-muted",
+};
 
-  if (lastTest) {
-    return (
-      <span role="status" className="flex min-w-0 items-center gap-1.5 text-caption tnum">
-        <Dot tone={lastTest.ok ? "pos" : "neg"} />
-        <span
-          className={cx(
-            "truncate",
-            lastTest.ok ? "text-[var(--color-pos)]" : "text-[var(--color-neg)]",
-          )}
-        >
-          {lastTest.ok
-            ? `works · ${ms(lastTest.latency_ms)}`
-            : `test failed${lastTest.status ? ` · ${lastTest.status}` : ""}`}
-        </span>
-      </span>
-    );
+/** One sentence a non-expert can act on, built from the same counts as the tiles. */
+function providerVerdict(summary: ProvidersSummary): {
+  sentence: string;
+  tone: "pos" | "warn" | "neg" | "muted";
+  dot: "pos" | "warn" | "neg" | "muted";
+} {
+  if (summary.total === 0) {
+    return { sentence: "No provider accounts yet.", tone: "muted", dot: "muted" };
   }
-
-  return (
-    <span className="flex min-w-0 items-center">
-      <HealthBadge
-        status={status.health}
-        label={status.label}
-        tone={status.kind === "refusal" ? status.refusal.tone : undefined}
-        title={
-          status.kind === "backoff"
-            ? `Backoff level ${connection.backoff_level}`
-            : (status.reason ?? undefined)
-        }
-      />
-    </span>
-  );
+  if (summary.expected === 0) {
+    return {
+      sentence: `Every account is turned off (${summary.disabled}) — nothing can route.`,
+      tone: "muted",
+      dot: "muted",
+    };
+  }
+  if (summary.attention === 0) {
+    return {
+      sentence: "All providers are routing. Nothing needs your attention.",
+      tone: "pos",
+      dot: "pos",
+    };
+  }
+  if (summary.ready === 0) {
+    return {
+      sentence: `Nothing can route: all ${summary.expected} enabled accounts need attention.`,
+      tone: "neg",
+      dot: "neg",
+    };
+  }
+  return {
+    sentence: `${summary.attention} of ${summary.expected} enabled accounts need attention; the rest still route.`,
+    tone: summary.severe > 0 ? "neg" : "warn",
+    dot: summary.severe > 0 ? "neg" : "warn",
+  };
 }
 
 /**
- * Every per-account action behind one trigger, visible at every viewport width.
+ * Every per-account action behind one trigger: configuration, test, enable/disable and
+ * remove. The trigger is labelled with the account name for screen readers.
  */
 function ConnectionMenu({
   connection,
   display,
   scope,
   testing,
+  onConfigure,
   onTest,
   onToggle,
   onRemove,
@@ -241,6 +267,7 @@ function ConnectionMenu({
   display: string;
   scope: string;
   testing: boolean;
+  onConfigure: () => void;
   onTest: () => void;
   onToggle: () => void;
   onRemove: () => void;
@@ -318,8 +345,10 @@ function ConnectionMenu({
           className="popover-panel z-[var(--z-popover-portal)] flex w-56 flex-col rounded-[var(--radius-overlay)] border border-[var(--color-line-strong)] bg-surface p-1 shadow-[var(--shadow-popover)] focus:outline-none"
         >
           <div className="px-2 pb-1.5 pt-1 text-caption leading-relaxed text-faint tnum">
-            {scope} · p{connection.priority} · w{connection.weight}
+            {scope} · priority {connection.priority} · weight {connection.weight}
           </div>
+          <div className="px-2 pb-1.5 text-caption leading-relaxed text-faint">{display}</div>
+          {entry("Configure…", onConfigure)}
           {entry(testing ? "Testing…" : "Test", onTest, false, testing)}
           {entry(
             connection.is_active
@@ -337,9 +366,137 @@ function ConnectionMenu({
   );
 }
 
+/**
+ * Every limit bar for an account, labelled in words. Shares `quotaBars` with Usage so the
+ * two surfaces can never disagree about which window is tightest.
+ */
+function LimitBars({
+  quota,
+  subscription,
+  quotaLoaded,
+}: {
+  quota?: AccountQuotaRow;
+  subscription?: AccountSubscription;
+  quotaLoaded: boolean;
+}) {
+  const bars = quotaBars(quota, subscription);
+  if (bars.length > 0) {
+    return (
+      <ul className="flex min-w-0 flex-col gap-1.5">
+        {bars.map((bar) => {
+          const reset = resetsIn(bar.resets_at);
+          return (
+            <li key={bar.id} className="flex min-w-0 flex-col gap-1">
+              <span className="flex min-w-0 items-baseline justify-between gap-2 text-caption">
+                <span className="min-w-0 truncate text-muted">
+                  {bar.label}
+                  {reset ? <span className="text-faint"> · {reset}</span> : null}
+                </span>
+                <span className={cx("shrink-0 tnum", barText(bar.percent))}>{bar.detail}</span>
+              </span>
+              <Meter percent={bar.percent} label={reset ? `${bar.label}, ${reset}` : bar.label} />
+            </li>
+          );
+        })}
+      </ul>
+    );
+  }
+  if (subscription?.error) {
+    return <span className="text-caption text-faint">Limits unavailable — the provider did not answer.</span>;
+  }
+  if (!quotaLoaded) {
+    return (
+      <span className="text-caption text-faint" aria-label="Limits unavailable for this role">
+        Limits hidden for this role
+      </span>
+    );
+  }
+  return <span className="text-caption text-faint">No limit set — this account is uncapped.</span>;
+}
+
+/**
+ * "How soon does it run out?" for a subscription account, from the same pace model Usage
+ * uses. Only the windows projected to hit their limit are named.
+ */
+function PaceNote({ subscription }: { subscription?: AccountSubscription }) {
+  if (!subscription || subscription.windows.length === 0) return null;
+  const risk = accountRisk(subscription, Date.now());
+  const alarming = (risk?.windows ?? []).filter(
+    (entry) => entry.pace.state === "on_pace_to_hit" || entry.pace.state === "exhausted",
+  );
+  if (alarming.length === 0) return null;
+  return (
+    <li className="text-caption text-[var(--color-warn)]">
+      At this pace,{" "}
+      {alarming
+        .map((entry) => `${entry.window.label} ${entry.pace.state === "exhausted" ? "is already used up" : "runs out before it resets"}`)
+        .join("; ")}
+      .
+    </li>
+  );
+}
+
+/** Status pill, or the live test result from this session when the operator just tested. */
+function StatusCell({
+  connection,
+  status,
+  testing,
+  lastTest,
+}: {
+  connection: Connection;
+  status: AccountStatus;
+  testing: boolean;
+  lastTest: ConnectionTestResult | null;
+}) {
+  if (testing) {
+    return (
+      <span role="status" className="flex min-w-0 items-center gap-1.5 text-caption text-muted">
+        <Dot tone="muted" />
+        <span className="truncate">Testing…</span>
+      </span>
+    );
+  }
+
+  if (lastTest) {
+    return (
+      <span role="status" className="flex min-w-0 items-center gap-1.5 text-caption tnum">
+        <Dot tone={lastTest.ok ? "pos" : "neg"} />
+        <span
+          className={cx(
+            "truncate",
+            lastTest.ok ? "text-[var(--color-pos)]" : "text-[var(--color-neg)]",
+          )}
+        >
+          {lastTest.ok
+            ? `works · ${ms(lastTest.latency_ms)}`
+            : `test failed${lastTest.status ? ` · ${lastTest.status}` : ""}`}
+        </span>
+      </span>
+    );
+  }
+
+  return (
+    <span className="flex min-w-0 items-center">
+      <HealthBadge
+        status={status.health}
+        label={status.label}
+        tone={status.kind === "refusal" ? status.refusal.tone : undefined}
+        title={
+          status.kind === "backoff"
+            ? `Backoff level ${connection.backoff_level}`
+            : (status.reason ?? undefined)
+        }
+      />
+    </span>
+  );
+}
+
+/**
+ * One account inside an expanded provider card. No cryptic columns: the name, one plain
+ * sentence ("Ready · 920 requests in 24h"), barred limits in words, and the actions menu.
+ */
 function AccountRow({
   connection,
-  group,
   providers,
   quota,
   subscription,
@@ -352,12 +509,12 @@ function AccountRow({
   inspectHref,
   teamName,
   displayOf,
+  onConfigure,
   onTest,
   onToggle,
   onRemove,
 }: {
   connection: Connection;
-  group: ProviderGroup;
   providers?: ModelProvider[];
   quota?: AccountQuotaRow;
   subscription?: AccountSubscription;
@@ -370,32 +527,31 @@ function AccountRow({
   inspectHref: string;
   teamName: (id: string | null) => string | null;
   displayOf: (id: string) => string;
+  onConfigure: () => void;
   onTest: (connectionId: string) => void;
   onToggle: (connection: Connection) => void;
   onRemove: (connection: Connection) => void;
 }) {
   const custom = isCustomConnection(connection);
   const display = displayOf(connection.provider);
-  const providerId = group.provider ?? connection.provider;
   const status = accountStatus(connection, quota, subscription, providers);
   const ownerLabel = teamName(connection.team_id) ?? "Shared";
   const lastError = connection.last_error?.trim() || null;
   const requests24h = traffic?.requests ?? 0;
   const errors24h = traffic?.errors ?? 0;
+  const sentence = accountSentence(status, traffic);
 
   return (
     <li
       className={cx(
-        "flex flex-col gap-2 px-4 py-2.5 transition-colors hover:bg-[var(--color-row-hover)] md:min-h-[52px] md:gap-y-0 md:py-2",
-        DESKTOP_GRID,
+        "flex flex-col gap-2 rounded-[var(--radius-input)] px-2 py-2 transition-colors hover:bg-[var(--color-row-hover)]",
         status.kind === "disabled" && "opacity-75",
         selected && "bg-[var(--color-selected)] hover:bg-[var(--color-selected)]",
       )}
     >
-      {/* Mobile top row: identity + menu. Desktop col 1: indented identity. */}
-      <div className="flex min-w-0 items-center justify-between gap-2 md:pl-4">
-        <span className="flex min-w-0 flex-1 items-center gap-2">
-          <ProviderIcon provider={connection.provider} size={17} />
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+          <ProviderIcon provider={connection.provider} size={16} />
           <AccountNameLink
             connection={connection}
             display={display}
@@ -410,216 +566,316 @@ function AccountRow({
           />
           {connection.free_mode ? <Badge tone="neutral">free</Badge> : null}
           {custom ? <Badge tone="neutral">custom</Badge> : null}
-          {connection.team_id ? (
-            <span className="shrink-0 truncate text-caption text-muted md:hidden">{ownerLabel}</span>
-          ) : null}
+          <span className="shrink-0 text-caption text-faint">
+            {connection.team_id ? `${ownerLabel} team` : "Shared"}
+            {requests24h > 0
+              ? ` · ${compact(requests24h)} req/24h${errors24h > 0 ? ` · ${compact(errors24h)} errors` : ""}`
+              : " · idle 24h"}
+          </span>
         </span>
-        {isAdmin ? (
-          <span className="md:hidden">
+        <span className="flex shrink-0 items-center gap-1.5">
+          <StatusCell connection={connection} status={status} testing={testing} lastTest={lastTest} />
+          {isAdmin ? (
             <ConnectionMenu
               connection={connection}
               display={display}
               scope={ownerLabel}
               testing={testing}
+              onConfigure={onConfigure}
               onTest={() => onTest(connection.id)}
               onToggle={() => onToggle(connection)}
               onRemove={() => onRemove(connection)}
             />
-          </span>
-        ) : null}
-      </div>
-
-      {/* Desktop md+ col 2: owner */}
-      <span
-        title={ownerLabel}
-        className={cx(
-          "hidden min-w-0 truncate text-caption md:block",
-          connection.team_id ? "font-medium text-fg" : "text-muted",
-        )}
-      >
-        {ownerLabel}
-      </span>
-
-      {/* Desktop lg+ col 3: priority */}
-      <span className="hidden truncate text-right text-caption text-muted tnum lg:block">
-        p{connection.priority}
-      </span>
-
-      {/* Mobile bottom row / Desktop cols 4, 5, 6: limit + 24h traffic + status */}
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 pl-6 md:contents md:pl-0">
-        <div className="min-w-0 flex-1">
-          <LimitCell
-            quota={quota}
-            subscription={subscription}
-            quotaLoaded={quotaLoaded}
-            providerId={providerId}
-          />
-        </div>
-        <span
-          title={
-            requests24h > 0
-              ? `${requests24h.toLocaleString()} requests${errors24h > 0 ? ` · ${errors24h.toLocaleString()} errors` : ""} in last 24h`
-              : "No requests in last 24h"
-          }
-          className={cx(
-            "hidden min-w-0 flex-col items-end text-right text-caption leading-tight tnum lg:flex",
-            requests24h > 0 ? "text-fg" : "text-faint",
-          )}
-        >
-          {requests24h > 0 ? (
-            <>
-              <span className="truncate">{compact(requests24h)}</span>
-              {errors24h > 0 ? (
-                <span className="truncate text-[10px] text-[var(--color-neg)]">
-                  {compact(errors24h)} err
-                </span>
-              ) : null}
-            </>
-          ) : (
-            "—"
-          )}
+          ) : null}
         </span>
-        <div className="shrink-0 md:min-w-0">
-          <StatusCell
-            connection={connection}
-            status={status}
-            testing={testing}
-            lastTest={lastTest}
-          />
-        </div>
       </div>
 
-      {/* Desktop col 7: actions menu */}
-      <span className="hidden items-center justify-end md:flex">
-        {isAdmin ? (
-          <ConnectionMenu
-            connection={connection}
-            display={display}
-            scope={ownerLabel}
-            testing={testing}
-            onTest={() => onTest(connection.id)}
-            onToggle={() => onToggle(connection)}
-            onRemove={() => onRemove(connection)}
-          />
-        ) : null}
-      </span>
+      <p className="min-w-0 text-caption text-muted [overflow-wrap:anywhere]">{sentence}</p>
 
-      {/* Inline error sub-row whenever last_error is set, including stale errors when backoff is 0 */}
       {lastError ? (
-        <div className="min-w-0 pl-6 md:col-span-full md:pl-10 md:pt-1">
-          <Link
-            to={inspectHref}
-            title={lastError}
-            className="flex min-w-0 items-baseline gap-1.5 rounded-[var(--radius-input)] text-caption text-[var(--color-neg-ink)] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
-          >
-            <span aria-hidden className="shrink-0 text-[var(--color-neg)]">
-              ↳
-            </span>
-            <span className="min-w-0 truncate font-mono">
-              {status.kind === "last_error" ? "" : connection.backoff_level === 0 ? "Last error: " : ""}
-              {lastError}
-            </span>
-          </Link>
-        </div>
+        <Link
+          to={inspectHref}
+          title={lastError}
+          className="flex min-w-0 items-baseline gap-1.5 rounded-[var(--radius-input)] text-caption text-[var(--color-neg-ink)] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+        >
+          <span aria-hidden className="shrink-0 text-[var(--color-neg)]">
+            ↳
+          </span>
+          <span className="min-w-0 truncate font-mono">{lastError}</span>
+        </Link>
       ) : null}
+
+      <div className="grid min-w-0 gap-2.5 border-t border-rule pt-2 sm:grid-cols-2">
+        <div className="min-w-0">
+          <span className="mb-1 block text-caption font-medium text-ink-soft">Limits</span>
+          <LimitBars quota={quota} subscription={subscription} quotaLoaded={quotaLoaded} />
+          <PaceNote subscription={subscription} />
+        </div>
+        <dl className="grid min-w-0 grid-cols-2 gap-x-3 gap-y-1.5 text-caption">
+          <div className="min-w-0">
+            <dt className="text-faint">Used by</dt>
+            <dd className="truncate text-fg">{connection.team_id ? `${ownerLabel} team` : "Shared"}</dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="text-faint">Priority</dt>
+            <dd className="truncate text-fg tnum" title="Lower numbers are tried first; equal priorities share traffic.">
+              {connection.priority}
+            </dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="text-faint">Traffic share</dt>
+            <dd
+              className="truncate text-fg tnum"
+              title="Share of traffic among accounts with equal priority. Only used by the weighted strategy."
+            >
+              {connection.weight}
+            </dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="text-faint">Endpoint</dt>
+            <dd className="truncate text-fg" title={connection.base_url_override ?? undefined}>
+              {custom && connection.base_url_override
+                ? hostOf(connection.base_url_override)
+                : "Provider default"}
+            </dd>
+          </div>
+        </dl>
+      </div>
     </li>
   );
 }
 
 /**
- * Provider header: name links to `/models?provider=<id>`, one visible readiness readout
- * scoped strictly to non-disabled accounts ("N/M enabled ready · K off"), and a direct
- * link to Usage. Accounts stay expanded underneath — no collapse caret.
+ * One provider, one card: logo, name, a plain-language sentence, and the two actions a
+ * reader needs (Configure, Usage). Accounts live inside, collapsed behind a labelled
+ * disclosure that says how many are there, and never a subset of what the header counted.
  */
-function ProviderHeader({ group }: { group: ProviderGroup }) {
+function ProviderCard({
+  group,
+  expanded,
+  onToggleExpanded,
+  quotas,
+  subscriptions,
+  quotaLoaded,
+  trafficById,
+  providers,
+  oauth,
+  isAdmin,
+  testingId,
+  testsById,
+  inspectHrefFor,
+  displayOf,
+  teamName,
+  selectedId,
+  onConfigure,
+  onAdd,
+  onTest,
+  onToggle,
+  onRemove,
+}: {
+  group: ProviderGroup;
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  quotas?: AccountQuotaRow[];
+  subscriptions?: AccountSubscription[];
+  quotaLoaded: boolean;
+  trafficById: ReadonlyMap<string, AccountTraffic24h>;
+  providers?: ModelProvider[];
+  oauth?: OAuthProvider[];
+  isAdmin: boolean;
+  testingId: string | null;
+  testsById: Record<string, ConnectionTestResult>;
+  inspectHrefFor: (connectionId: string) => string;
+  displayOf: (id: string) => string;
+  teamName: (id: string | null) => string | null;
+  selectedId?: string;
+  onConfigure: (connection: Connection) => void;
+  onAdd: (provider: string) => void;
+  onTest: (connectionId: string) => void;
+  onToggle: (connection: Connection) => void;
+  onRemove: (connection: Connection) => void;
+}) {
+  const quotaBy = useMemo(
+    () => new Map((quotas ?? []).map((row) => [row.connection_id, row])),
+    [quotas],
+  );
+  const subscriptionBy = useMemo(
+    () => new Map((subscriptions ?? []).map((row) => [row.connection_id, row])),
+    [subscriptions],
+  );
   const providerId = group.provider ?? group.connections[0]?.provider ?? "";
-
-  const readiness =
-    group.expected === 0 && group.disabled > 0
-      ? `${group.disabled} disabled`
-      : group.disabled > 0
-        ? `${group.ready}/${group.expected} enabled ready · ${group.disabled} off`
-        : `${group.ready}/${group.expected} ready`;
-
-  const textCls =
-    group.state === "healthy"
-      ? "text-muted"
-      : group.state === "degraded"
-        ? "text-[var(--color-warn)]"
-        : group.state === "down"
-          ? "text-[var(--color-neg)]"
-          : "text-faint";
+  const custom = group.key.startsWith("custom:");
+  const sentence = providerSentence(group, isAdmin);
+  const accounts = group.connections.length;
+  /** Configure edits the first account when there is only one; otherwise the reader picks. */
+  const primary = group.connections.find((account) => account.is_active) ?? group.connections[0];
+  const addable = providerOptions(
+    providers?.find((row) => row.id === providerId),
+    oauth?.find((row) => row.id === providerId),
+  );
+  const mixedState = group.state !== "healthy" && group.state !== "disabled";
+  const addLabel = addable[0]?.kind === "oauth" ? "Add account" : "Add API key";
+  const addTitle =
+    addable.length === 0
+      ? "This provider is not listed in this build's catalogue."
+      : addable[0]!.kind === "oauth"
+        ? `Sign in to another ${addable[0]!.display} account.`
+        : `Add another ${addable[0]!.display} API key.`;
+  const iconBase = group.connections.find((c) => c.base_url_override)?.base_url_override;
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 bg-surface-2/70 px-4 py-2.5 md:min-h-[42px] md:py-2">
-      <span className="flex min-w-0 items-center gap-2">
-        <ProviderIcon provider={group.provider ?? "custom"} size={18} />
-        <Link
-          to={`/models?provider=${encodeURIComponent(providerId)}`}
-          className="min-w-0 truncate font-medium text-fg underline-offset-2 hover:text-[var(--color-accent-text)] hover:underline focus-visible:text-[var(--color-accent-text)] focus-visible:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
-        >
-          {group.label}
-        </Link>
-        {group.code ? <Badge tone="neutral">{group.code}</Badge> : null}
-      </span>
-
-      <span className="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span className="flex min-w-0 items-center gap-1.5 text-caption tnum">
-          {group.state === "disabled" ? (
+    <li
+      className={cx(
+        "rounded-[var(--radius-card)] border bg-surface transition-colors",
+        mixedState && group.state !== "disabled"
+          ? "border-[var(--color-line-strong)]"
+          : "border-line",
+      )}
+    >
+      <div className="flex flex-wrap items-start gap-x-3 gap-y-2 px-3 py-2.5 sm:px-4">
+        <span className="flex min-w-0 flex-1 items-start gap-3">
+          <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-surface-2">
+            <ProviderIcon
+              provider={group.provider ?? "custom"}
+              size={20}
+              baseUrl={custom ? iconBase : undefined}
+            />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <Link
+                to={`/models?provider=${encodeURIComponent(providerId)}`}
+                className="min-w-0 truncate font-medium text-fg underline-offset-2 hover:text-[var(--color-accent-text)] hover:underline focus-visible:text-[var(--color-accent-text)] focus-visible:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+                title="Models this provider serves"
+              >
+                {group.label}
+              </Link>
+              {custom ? <Badge tone="neutral">custom endpoint</Badge> : null}
+              {group.code && !custom ? (
+                <Badge tone="neutral" title="Shorthand used in model references">
+                  {group.code}
+                </Badge>
+              ) : null}
+            </span>
             <span
-              aria-hidden
-              className="inline-block h-1.5 w-1.5 shrink-0 rounded-full border border-faint"
-            />
-          ) : (
-            <Dot
-              tone={
-                group.state === "healthy"
-                  ? "pos"
-                  : group.state === "degraded"
-                    ? "warn"
-                    : "neg"
-              }
-            />
-          )}
-          <span className={cx("truncate", textCls)}>{readiness}</span>
+              className={cx("mt-0.5 block text-small [overflow-wrap:anywhere]", SENTENCE_TEXT[sentence.tone])}
+            >
+              {sentence.text}
+            </span>
+          </span>
         </span>
-        <Link
-          to={`/usage?provider=${encodeURIComponent(providerId)}`}
-          className="whitespace-nowrap rounded-[var(--radius-input)] text-caption text-accent-text underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+
+        <span className="flex shrink-0 flex-wrap items-center gap-1.5">
+          {isAdmin && primary ? (
+            <Button variant="secondary" size="sm" onClick={() => onConfigure(primary)}>
+              Configure
+            </Button>
+          ) : null}
+          <Link
+            to={`/usage?provider=${encodeURIComponent(providerId)}`}
+            className="inline-flex h-7 items-center rounded-[var(--radius-input)] px-2 text-small text-accent-text underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
+          >
+            Usage
+          </Link>
+          {isAdmin ? (
+            <Button
+              variant="quiet"
+              size="sm"
+              onClick={() => onAdd(providerId)}
+              disabled={addable.length === 0}
+              title={addTitle}
+            >
+              <span className="flex items-center gap-1">
+                <Plus size={13} aria-hidden />
+                {addLabel}
+              </span>
+            </Button>
+          ) : null}
+        </span>
+      </div>
+
+      <div className="border-t border-rule px-3 sm:px-4">
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={`accounts-${group.key}`}
+          onClick={onToggleExpanded}
+          className="flex w-full items-center gap-2 rounded-[var(--radius-input)] py-1.5 text-left text-caption text-muted transition-colors hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus-ring)]"
         >
-          Usage →
-        </Link>
-      </span>
-    </div>
+          <CaretDown
+            size={12}
+            aria-hidden
+            className={cx("shrink-0 text-faint transition-transform", expanded && "rotate-180")}
+          />
+          <span className="tnum">
+            {accounts} account{accounts === 1 ? "" : "s"}
+          </span>
+          {group.disabled > 0 ? <span className="tnum">· {group.disabled} off</span> : null}
+          <span className="ml-auto text-faint">{expanded ? "Hide" : "Show"}</span>
+        </button>
+      </div>
+
+      {expanded ? (
+        <ul
+          id={`accounts-${group.key}`}
+          className="flex flex-col divide-y divide-rule border-t border-rule px-1.5 py-1.5"
+        >
+          {group.connections.map((connection) => (
+            <AccountRow
+              key={connection.id}
+              connection={connection}
+              providers={providers}
+              quota={quotaBy.get(connection.id)}
+              subscription={subscriptionBy.get(connection.id)}
+              quotaLoaded={quotaLoaded}
+              traffic={trafficById.get(connection.id)}
+              isAdmin={isAdmin}
+              selected={selectedId === connection.id}
+              testing={testingId === connection.id}
+              lastTest={testsById[connection.id] ?? null}
+              inspectHref={inspectHrefFor(connection.id)}
+              teamName={teamName}
+              displayOf={displayOf}
+              onConfigure={() => onConfigure(connection)}
+              onTest={onTest}
+              onToggle={onToggle}
+              onRemove={onRemove}
+            />
+          ))}
+        </ul>
+      ) : null}
+    </li>
   );
 }
 
+const SENTENCE_TEXT: Record<"pos" | "info" | "warn" | "neg" | "muted", string> = {
+  pos: "text-muted",
+  info: "text-muted",
+  warn: "text-[var(--color-warn-ink)]",
+  neg: "text-[var(--color-neg-ink)]",
+  muted: "text-faint",
+};
+
 /**
- * Loading state on the same grid so rows do not shift when accounts land.
+ * Loading state on the card shape so cards do not jump when accounts land.
  */
 function InventorySkeleton() {
   return (
-    <div aria-busy="true">
-      <span className="sr-only">Loading accounts…</span>
-      {Array.from({ length: 4 }, (_, index) => (
+    <div aria-busy="true" className="flex flex-col gap-2">
+      <span className="sr-only">Loading providers…</span>
+      {Array.from({ length: 3 }, (_, index) => (
         <div
           key={index}
           aria-hidden="true"
-          className={cx(
-            "flex min-h-[52px] items-center justify-between gap-3 border-b border-line px-4 py-2 last:border-b-0",
-            DESKTOP_GRID,
-          )}
+          className="rounded-[var(--radius-card)] border border-line bg-surface px-4 py-3"
         >
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="h-4 w-4 shrink-0 animate-pulse rounded bg-surface-3" />
-            <span className="h-3 w-28 max-w-full animate-pulse rounded bg-surface-3" />
-          </span>
-          <span className="hidden h-3 w-14 animate-pulse rounded bg-surface-3 md:block" />
-          <span className="hidden h-3 w-7 animate-pulse rounded bg-surface-3 lg:ml-auto lg:block" />
-          <span className="h-3 w-24 max-w-full animate-pulse rounded bg-surface-3" />
-          <span className="hidden h-3 w-10 animate-pulse rounded bg-surface-3 lg:ml-auto lg:block" />
-          <span className="h-5 w-16 max-w-full animate-pulse rounded-full bg-surface-3" />
-          <span className="ml-auto hidden h-3 w-6 animate-pulse rounded bg-surface-3 md:block" />
+          <div className="flex items-center gap-3">
+            <span className="h-8 w-8 shrink-0 animate-pulse rounded-[10px] bg-surface-3" />
+            <span className="flex min-w-0 flex-1 flex-col gap-1.5">
+              <span className="h-3 w-32 max-w-full animate-pulse rounded bg-surface-3" />
+              <span className="h-2.5 w-48 max-w-full animate-pulse rounded bg-surface-3" />
+            </span>
+          </div>
         </div>
       ))}
     </div>
@@ -630,16 +886,12 @@ const PAGE_SIZES = [10, 25, 50, 100];
 const DEFAULT_PAGE_SIZE = 10;
 
 /**
- * The inventory: one section per provider, its accounts underneath, always expanded so
- * unhealthy accounts are never hidden behind a toggle. Providers are paged cleanly on
- * group boundaries.
+ * The inventory: one card per provider, its accounts collapsed underneath. The card's
+ * sentence and counts always describe every account — the filter picks whole cards, and
+ * expanding shows the accounts themselves.
  */
 export function ProviderInventory({
   groups,
-  totalAccounts,
-  totalProviders,
-  attentionCount,
-  disabledCount,
   filter,
   onFilterChange,
   quotas,
@@ -647,6 +899,7 @@ export function ProviderInventory({
   quotaLoaded,
   trafficById,
   providers,
+  oauth,
   isAdmin,
   testingId,
   testsById,
@@ -655,23 +908,22 @@ export function ProviderInventory({
   teamName,
   selectedId,
   loading,
+  onConfigure,
+  onAdd,
   onTest,
   onToggle,
   onRemove,
   onOpenCodes,
 }: {
   groups: ProviderGroup[];
-  totalAccounts: number;
-  totalProviders: number;
-  attentionCount: number;
-  disabledCount: number;
-  filter: AccountFilter;
-  onFilterChange: (next: AccountFilter) => void;
+  filter: ProviderFilter;
+  onFilterChange: (next: ProviderFilter) => void;
   quotas?: AccountQuotaRow[];
   subscriptions?: AccountSubscription[];
   quotaLoaded: boolean;
   trafficById: ReadonlyMap<string, AccountTraffic24h>;
   providers?: ModelProvider[];
+  oauth?: OAuthProvider[];
   isAdmin: boolean;
   testingId: string | null;
   testsById: Record<string, ConnectionTestResult>;
@@ -680,6 +932,8 @@ export function ProviderInventory({
   teamName: (id: string | null) => string | null;
   selectedId?: string;
   loading: boolean;
+  onConfigure: (connection: Connection) => void;
+  onAdd: (provider: string) => void;
   onTest: (connectionId: string) => void;
   onToggle: (connection: Connection) => void;
   onRemove: (connection: Connection) => void;
@@ -687,14 +941,7 @@ export function ProviderInventory({
 }) {
   const [page, setPage] = useState(1);
   const [size, setSize] = useState(DEFAULT_PAGE_SIZE);
-  const quotaBy = useMemo(
-    () => new Map((quotas ?? []).map((row) => [row.connection_id, row])),
-    [quotas],
-  );
-  const subscriptionBy = useMemo(
-    () => new Map((subscriptions ?? []).map((row) => [row.connection_id, row])),
-    [subscriptions],
-  );
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const lastPage = Math.max(1, Math.ceil(groups.length / size));
   const current = Math.min(page, lastPage);
   const visible = groups.slice((current - 1) * size, current * size);
@@ -708,131 +955,110 @@ export function ProviderInventory({
     setPage(1);
   }, [size, filter]);
 
-  return (
-    <Card className="overflow-hidden">
-      <CardHeader
-        icon={<PlugsConnected size={16} />}
-        title="Accounts"
-        meta={
-          !loading
-            ? `${totalAccounts} · ${totalProviders} provider${totalProviders === 1 ? "" : "s"}`
-            : undefined
-        }
-        padding="compact"
-        className="border-b border-line"
-        action={
-          <div className="flex flex-wrap items-center gap-2">
-            <Segmented
-              ariaLabel="Filter accounts by status"
-              value={filter}
-              onChange={onFilterChange}
-              options={[
-                { id: "all", label: "All" },
-                {
-                  id: "attention",
-                  label:
-                    attentionCount > 0 ? `Needs attention (${attentionCount})` : "Needs attention",
-                },
-                {
-                  id: "disabled",
-                  label: disabledCount > 0 ? `Disabled (${disabledCount})` : "Disabled",
-                },
-              ]}
-            />
-            {isAdmin ? (
-              <Button variant="quiet" size="sm" onClick={onOpenCodes}>
-                Provider codes
-              </Button>
-            ) : null}
-          </div>
-        }
-      />
+  // An inspected account's card opens so the deep link lands on a visible row.
+  useEffect(() => {
+    if (!selectedId) return;
+    const group = groups.find((row) => row.connections.some((c) => c.id === selectedId));
+    if (!group) return;
+    setExpanded((prev) => (prev.has(group.key) ? prev : new Set(prev).add(group.key)));
+  }, [selectedId, groups]);
 
-      <div id="providers-connected">
-        {loading ? (
-          <InventorySkeleton />
-        ) : groups.length === 0 ? (
-          <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
-            <p className="text-small text-muted">
-              {filter === "attention"
-                ? "No accounts need attention right now."
-                : "No accounts are disabled."}
-            </p>
-            <Button variant="quiet" size="sm" onClick={() => onFilterChange("all")}>
-              Show all accounts
-            </Button>
-          </div>
-        ) : (
-          <>
-            <div
-              className={cx(
-                "hidden bg-surface px-4 py-2 text-caption font-medium text-faint md:grid",
-                DESKTOP_GRID,
-              )}
-            >
-              <span>Account</span>
-              <span>
-                <span
-                  title={OWNER_TOOLTIP}
-                  className="cursor-help underline decoration-dotted decoration-faint/60 underline-offset-2"
-                >
-                  Owner
-                </span>
-              </span>
-              <span className="hidden text-right lg:block">Prio</span>
-              <span>Limit</span>
-              <span className="hidden text-right lg:block">24h</span>
-              <span>Status</span>
-              <span className="sr-only">Actions</span>
-            </div>
-            <ul className="divide-y divide-line border-t border-line">
-              {visible.map((group) => (
-                <li key={group.key}>
-                  <ProviderHeader group={group} />
-                  <ul
-                    id={`accounts-${group.key}`}
-                    className="divide-y divide-rule border-t border-line"
-                  >
-                    {group.connections.map((connection) => (
-                      <AccountRow
-                        key={connection.id}
-                        connection={connection}
-                        group={group}
-                        providers={providers}
-                        quota={quotaBy.get(connection.id)}
-                        subscription={subscriptionBy.get(connection.id)}
-                        quotaLoaded={quotaLoaded}
-                        traffic={trafficById.get(connection.id)}
-                        isAdmin={isAdmin}
-                        selected={selectedId === connection.id}
-                        testing={testingId === connection.id}
-                        lastTest={testsById[connection.id] ?? null}
-                        inspectHref={inspectHrefFor(connection.id)}
-                        teamName={teamName}
-                        displayOf={displayOf}
-                        onTest={onTest}
-                        onToggle={onToggle}
-                        onRemove={onRemove}
-                      />
-                    ))}
-                  </ul>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-        <PaginationBar
-          pagination={{
-            page: current,
-            size,
-            total: groups.length,
-            sizes: PAGE_SIZES,
-            label: "providers",
-            onPage: setPage,
-            onSize: setSize,
-          }}
-        />
+  const toggleExpanded = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  const emptyCopy =
+    filter === "healthy"
+      ? "No provider is fully healthy right now."
+      : filter === "attention"
+        ? "Nothing needs attention — every provider is routing."
+        : filter === "disabled"
+          ? "No provider is turned off."
+          : "No providers match.";
+
+  return (
+    <div id="providers-connected" className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-small font-semibold text-fg">
+          Providers
+          {!loading ? (
+            <span className="ml-2 font-normal text-faint tnum">
+              {groups.length} shown
+            </span>
+          ) : null}
+        </h2>
+        {isAdmin ? (
+          <Button variant="quiet" size="sm" onClick={onOpenCodes}>
+            <span className="flex items-center gap-1">
+              <SlidersHorizontal size={13} aria-hidden />
+              Provider codes
+            </span>
+          </Button>
+        ) : null}
       </div>
-    </Card>
+
+      {loading ? (
+        <InventorySkeleton />
+      ) : groups.length === 0 ? (
+        <Card className="flex flex-col items-center gap-2 px-4 py-10 text-center">
+          <p className="text-small text-muted">{emptyCopy}</p>
+          {filter !== "connected" ? (
+            <Button variant="quiet" size="sm" onClick={() => onFilterChange("connected")}>
+              Show all providers
+            </Button>
+          ) : null}
+        </Card>
+      ) : (
+        <>
+          <ul className="flex flex-col gap-2" aria-label="Provider accounts">
+            {visible.map((group) => (
+              <ProviderCard
+                key={group.key}
+                group={group}
+                expanded={expanded.has(group.key)}
+                onToggleExpanded={() => toggleExpanded(group.key)}
+                quotas={quotas}
+                subscriptions={subscriptions}
+                quotaLoaded={quotaLoaded}
+                trafficById={trafficById}
+                providers={providers}
+                oauth={oauth}
+                isAdmin={isAdmin}
+                testingId={testingId}
+                testsById={testsById}
+                inspectHrefFor={inspectHrefFor}
+                displayOf={displayOf}
+                teamName={teamName}
+                selectedId={selectedId}
+                onConfigure={onConfigure}
+                onAdd={onAdd}
+                onTest={onTest}
+                onToggle={onToggle}
+                onRemove={onRemove}
+              />
+            ))}
+          </ul>
+          {groups.length > size ? (
+            <div className="rounded-[var(--radius-card)] border border-line bg-surface">
+              <PaginationBar
+                pagination={{
+                  page: current,
+                  size,
+                  total: groups.length,
+                  sizes: PAGE_SIZES,
+                  label: "providers",
+                  onPage: setPage,
+                  onSize: setSize,
+                }}
+              />
+            </div>
+          ) : null}
+        </>
+      )}
+    </div>
   );
 }

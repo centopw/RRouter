@@ -1,20 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { CheckCircle, Lightning, Pulse, WarningCircle } from "@phosphor-icons/react";
-import { KpiTile, type KpiTone } from "../components/molecules/KpiTile";
 import { OAuthDialog } from "../components/oauth-dialog";
 import {
   AlertBanner,
   Button,
   ConfirmDialog,
   ErrorNote,
-  Meter,
   PageHeader,
   Select,
 } from "../components/ui";
 import { type Connection, type OAuthProvider } from "../lib/api";
 import { apiCode } from "../lib/auth";
-import { compact, pct } from "../lib/format";
 import { refusalView, reenableConsequence } from "../lib/refusal";
 import {
   useAccountQuotas,
@@ -24,11 +20,9 @@ import {
   useModelProviders,
   useOAuthProviders,
   useTeams,
-  useUsageSeries,
   useUsageSummaryByConnection,
 } from "../lib/queries";
-import { MiniSparkline } from "./usage/overview-charts";
-import { ProviderInventory } from "./providers/account-row";
+import { ProviderInventory, ProvidersKpiRow } from "./providers/account-row";
 import {
   AddProviderFlow,
   EmptyProviders,
@@ -41,137 +35,10 @@ import {
   buildTrafficByConnection,
   filterProviderGroups,
   summarizeProviders,
-  until,
   useConnectionMutations,
-  type AccountFilter,
+  type ProviderFilter,
   type ProviderNotice,
-  type ProvidersSummary,
 } from "./providers/types";
-
-function ProvidersKpiRow({
-  summary,
-  trafficSeries,
-  isAdmin,
-  quotaLoaded,
-  filter,
-  onToggleAttention,
-}: {
-  summary: ProvidersSummary;
-  trafficSeries: ReadonlyArray<number>;
-  isAdmin: boolean;
-  quotaLoaded: boolean;
-  filter: AccountFilter;
-  onToggleAttention: () => void;
-}) {
-  const readyTone: KpiTone =
-    summary.expected === 0
-      ? "neutral"
-      : summary.ready === 0
-        ? "neg"
-        : summary.ready < summary.expected
-          ? "warn"
-          : "pos";
-
-  const readyDetail =
-    summary.expected === 0 && summary.disabled > 0
-      ? `${summary.disabled} disabled`
-      : summary.disabled > 0
-        ? `${summary.disabled} disabled`
-        : summary.ready === summary.expected && summary.expected > 0
-          ? "All enabled ready"
-          : `${summary.expected - summary.ready} not ready`;
-
-  const attentionTone: KpiTone =
-    summary.attention === 0 ? "pos" : summary.severe > 0 ? "neg" : "warn";
-
-  const tightest = summary.tightest;
-  const tightestTone: KpiTone =
-    !isAdmin || !tightest
-      ? "info"
-      : tightest.percent >= 90
-        ? "neg"
-        : tightest.percent >= 70
-          ? "warn"
-          : "info";
-  const tightestReset = tightest ? until(tightest.resetsAt) : "";
-
-  const trafficTone: KpiTone =
-    summary.traffic24h.requests > 0 && summary.traffic24h.errorRate >= 10 ? "warn" : "info";
-
-  return (
-    <div className="mb-4 grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
-      <KpiTile
-        icon={<CheckCircle size={18} weight="fill" />}
-        tone={readyTone}
-        label="Ready"
-        value={summary.ready}
-        suffix={`/ ${summary.expected}`}
-        detail={readyDetail}
-      />
-
-      <KpiTile
-        icon={<WarningCircle size={18} weight="fill" />}
-        tone={attentionTone}
-        label="Needs attention"
-        value={summary.attention}
-        detail={summary.attentionDetail}
-        onClick={onToggleAttention}
-        active={filter === "attention"}
-      />
-
-      <KpiTile
-        icon={<Lightning size={18} weight="fill" />}
-        tone={tightestTone}
-        label="Tightest limit"
-        value={isAdmin && tightest ? `${Math.round(tightest.percent)}%` : "—"}
-        meter={
-          isAdmin && tightest ? (
-            <Meter
-              percent={tightest.percent}
-              label={`Tightest limit: ${Math.round(tightest.percent)}%, ${tightest.accountName} ${tightest.windowLabel}`}
-            />
-          ) : undefined
-        }
-        detail={
-          !isAdmin
-            ? "Admin only"
-            : tightest
-              ? `${tightest.accountName} · ${tightest.windowLabel}${tightestReset ? ` · ${tightestReset}` : ""}`
-              : quotaLoaded
-                ? "No caps set"
-                : "Checking limits…"
-        }
-      />
-
-      <KpiTile
-        icon={<Pulse size={18} weight="fill" />}
-        tone={trafficTone}
-        label="Traffic 24h"
-        value={compact(summary.traffic24h.requests)}
-        suffix="req"
-        detail={
-          summary.traffic24h.requests > 0
-            ? summary.traffic24h.errors > 0
-              ? `${pct(summary.traffic24h.errorRate)} err`
-              : "0% err"
-            : "No traffic in 24h"
-        }
-        aside={
-          trafficSeries.length >= 2 ? (
-            <div className="hidden sm:block">
-              <MiniSparkline
-                values={trafficSeries}
-                color="var(--color-series-2)"
-                width={64}
-                height={20}
-              />
-            </div>
-          ) : undefined
-        }
-      />
-    </div>
-  );
-}
 
 export default function Providers() {
   const isAdmin = useIsAdmin();
@@ -191,11 +58,10 @@ export default function Providers() {
   const quotas = useAccountQuotas(isAdmin);
   const subscriptions = useAccountSubscriptions(isAdmin);
   const usage24h = useUsageSummaryByConnection(24, true, teamFilter);
-  const series24h = useUsageSeries(24, undefined, teamFilter);
   // Both limit sources answered: only then may an account without bars read "no cap set".
   const quotaLoaded = isAdmin && quotas.isSuccess && subscriptions.isSuccess;
 
-  const [filter, setFilter] = useState<AccountFilter>("all");
+  const [filter, setFilter] = useState<ProviderFilter>("connected");
   const [adding, setAdding] = useState(false);
   const [initialCustomProtocol, setInitialCustomProtocol] = useState<
     "openai" | "anthropic" | null
@@ -243,19 +109,11 @@ export default function Providers() {
     [accounts, providers.data, quotas.data, subscriptions.data],
   );
 
-  const filteredGroups = useMemo(
-    () => filterProviderGroups(groups, filter, quotas.data, subscriptions.data, providers.data),
-    [groups, filter, quotas.data, subscriptions.data, providers.data],
-  );
+  const filteredGroups = useMemo(() => filterProviderGroups(groups, filter), [groups, filter]);
 
   const trafficById = useMemo(
     () => buildTrafficByConnection(usage24h.data),
     [usage24h.data],
-  );
-
-  const trafficSeries = useMemo(
-    () => (series24h.data ?? []).map((bucket) => bucket.requests),
-    [series24h.data],
   );
 
   const summary = useMemo(
@@ -290,6 +148,31 @@ export default function Providers() {
     [params, setParams],
   );
 
+  /** `Configure` on a card, a row menu or a click opens the one drawer. */
+  const openConfigure = useCallback(
+    (connection: Connection) => {
+      if (!isAdmin) return;
+      const next = new URLSearchParams(params);
+      next.delete("add");
+      next.delete("protocol");
+      next.set("inspect", connection.id);
+      setParams(next, { replace: false });
+    },
+    [isAdmin, params, setParams],
+  );
+
+  const providerCounts = useMemo(() => {
+    let healthy = 0;
+    let attention = 0;
+    let disabled = 0;
+    for (const group of groups) {
+      if (group.state === "healthy") healthy += 1;
+      else if (group.state === "disabled") disabled += 1;
+      else attention += 1;
+    }
+    return { healthy, attention, disabled, connected: groups.length };
+  }, [groups]);
+
   const inspectHrefFor = useCallback(
     (connectionId: string) => {
       const next = new URLSearchParams(params);
@@ -299,10 +182,13 @@ export default function Providers() {
     [params],
   );
 
-  const closeInspect = useCallback(() => {
-    if (!params.has("inspect")) return;
+  /** Closing either surface drops both keys, so the other deep link cannot re-open behind it. */
+  const closeConfigure = useCallback(() => {
+    if (!params.has("inspect") && !params.has("add")) return;
     const next = new URLSearchParams(params);
     next.delete("inspect");
+    next.delete("add");
+    next.delete("protocol");
     setParams(next, { replace: true });
   }, [params, setParams]);
 
@@ -348,13 +234,22 @@ export default function Providers() {
     setParams(next, { replace: true });
   }, [params, setParams, isAdmin]);
 
-  // `?add=<provider-id>` opens the add flow straight on that provider's key form.
+  // `?add=<provider-id>` opens the add flow straight on that provider's key form, or the
+  // sign-in dialog when the provider only has an OAuth flow.
   useEffect(() => {
     const requested = params.get("add");
     if (!requested || requested === "custom") return;
-    if (!providers.data) return;
+    if (!providers.data || !oauth.isSuccess) return;
     const found = providers.data.find((provider) => provider.id === requested);
-    if (isAdmin && found && found.kind !== "oauth") {
+    const signedIn =
+      isAdmin && found?.kind === "oauth"
+        ? oauth.data.find((row) => row.id === requested)
+        : undefined;
+    if (signedIn) {
+      setSignIn(signedIn);
+      setAdding(false);
+      setNotice(null);
+    } else if (isAdmin && found && found.kind !== "oauth") {
       setInitialCustomProtocol(null);
       setInitialProvider(requested);
       setAdding(true);
@@ -370,7 +265,7 @@ export default function Providers() {
     const next = new URLSearchParams(params);
     next.delete("add");
     setParams(next, { replace: true });
-  }, [params, setParams, isAdmin, providers.data]);
+  }, [params, setParams, isAdmin, providers.data, oauth.isSuccess, oauth.data]);
 
   const handleOAuthConnected = useCallback(
     (label: string, warning: string | null) => {
@@ -546,21 +441,16 @@ export default function Providers() {
           {!connections.isLoading && accounts.length > 0 ? (
             <ProvidersKpiRow
               summary={summary}
-              trafficSeries={trafficSeries}
-              isAdmin={isAdmin}
-              quotaLoaded={quotaLoaded}
+              connectedProviders={providerCounts.connected}
+              healthyProviders={providerCounts.healthy}
+              attentionProviders={providerCounts.attention}
+              disabledProviders={providerCounts.disabled}
               filter={filter}
-              onToggleAttention={() =>
-                setFilter((prev) => (prev === "attention" ? "all" : "attention"))
-              }
+              onFilter={setFilter}
             />
           ) : null}
           <ProviderInventory
             groups={filteredGroups}
-            totalAccounts={accounts.length}
-            totalProviders={groups.length}
-            attentionCount={summary.attention}
-            disabledCount={summary.disabled}
             filter={filter}
             onFilterChange={setFilter}
             quotas={quotas.data}
@@ -568,6 +458,7 @@ export default function Providers() {
             quotaLoaded={quotaLoaded}
             trafficById={trafficById}
             providers={providers.data}
+            oauth={oauth.data}
             selectedId={inspected?.id}
             loading={connections.isLoading}
             isAdmin={isAdmin}
@@ -576,6 +467,14 @@ export default function Providers() {
             inspectHrefFor={inspectHrefFor}
             displayOf={displayOf}
             teamName={teamName}
+            onConfigure={openConfigure}
+            onAdd={(provider) => {
+              // The add flow reads `?add=` on its own, so the card only has to write it.
+              const next = new URLSearchParams(params);
+              next.delete("inspect");
+              next.set("add", provider);
+              setParams(next, { replace: false });
+            }}
             onTest={(id) => test.mutate(id)}
             onToggle={requestToggle}
             onRemove={(c) => {
@@ -591,7 +490,10 @@ export default function Providers() {
         open={adding}
         initialCustomProtocol={initialCustomProtocol}
         initialProvider={initialProvider}
-        onClose={() => setAdding(false)}
+        onClose={() => {
+          setAdding(false);
+          closeConfigure();
+        }}
         onChooseOAuth={(provider) => {
           setSignIn(provider);
           setAdding(false);
@@ -623,7 +525,7 @@ export default function Providers() {
             remove.reset();
             setRemoving(inspected);
           }}
-          onClose={closeInspect}
+          onClose={closeConfigure}
         />
       ) : null}
 

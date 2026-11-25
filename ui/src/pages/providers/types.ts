@@ -8,6 +8,7 @@ import {
   type AccountSubscription,
   type Connection,
   type ModelProvider,
+  type OAuthProvider,
   type QuotaPingMode,
   type QuotaPingRow,
   type UsageSummaryByConnection,
@@ -18,7 +19,87 @@ import { refusalView, type RefusalView } from "../../lib/refusal";
 
 export type ProviderNotice = { tone: "pos" | "neg"; text: string };
 
-export type AccountFilter = "all" | "attention" | "disabled";
+/**
+ * A provider-level filter: `connected` is every card, `healthy` the ready ones, `attention`
+ * those with an account that needs an operator, `disabled` those an operator switched off.
+ * Cards are filtered whole, so a card never lists a subset of its accounts.
+ */
+export type ProviderFilter = "connected" | "healthy" | "attention" | "disabled";
+
+/**
+ * The one-line, plain-language answer to "is this okay?" under a provider name. The
+ * sentence states what it is first (accounts, readiness) and appends the single most
+ * pressing fact (a limit, a reset, an outage), never a column of codes.
+ */
+export type ProviderSentence = {
+  text: string;
+  /** `info` is "ready, with a limit worth knowing" — never amber, which means act. */
+  tone: "pos" | "info" | "warn" | "neg" | "muted";
+};
+
+export function providerSentence(group: ProviderGroup, isAdmin: boolean): ProviderSentence {
+  if (group.disabled > 0 && group.expected === 0) {
+    return {
+      text: `Turned off · ${group.disabled} account${group.disabled === 1 ? "" : "s"} disabled`,
+      tone: "muted",
+    };
+  }
+  const total = group.connections.length;
+  const accounts = `${total} account${total === 1 ? "" : "s"}`;
+  if (group.ready === 0) {
+    const cause =
+      group.refused > 0
+        ? "the provider refused an account"
+        : group.overQuota > 0
+          ? "out of quota"
+          : group.backoff > 0
+            ? "unreachable right now"
+            : "not ready";
+    return { text: `Not ready · ${cause}`, tone: "neg" };
+  }
+  const plain =
+    group.ready === group.expected
+      ? `Ready · ${accounts}`
+      : `Partly ready · ${group.ready} of ${group.expected} usable`;
+  const off =
+    group.disabled > 0
+      ? ` · ${group.disabled} account${group.disabled === 1 ? "" : "s"} off`
+      : "";
+  if (group.ready === group.expected && group.disabled === 0) {
+    const worst = group.subscription;
+    if (isAdmin && worst && worst.percent >= 70) {
+      const reset = worst.resets_at ? until(worst.resets_at) : "";
+      return {
+        text: `${plain} · ${worst.percent}% of quota used${reset ? `, resets in ${reset}` : ""}`,
+        tone: worst.percent >= 90 ? "warn" : "info",
+      };
+    }
+    return { text: plain, tone: "pos" };
+  }
+  if (group.backoff === 0 && group.refused === 0 && group.overQuota === 0) {
+    return { text: `${plain}${off}`, tone: "pos" };
+  }
+  const problems: string[] = [];
+  if (group.backoff > 0) problems.push(`${group.backoff} unreachable`);
+  if (group.refused > 0) problems.push(`${group.refused} refused`);
+  if (group.overQuota > 0) problems.push(`${group.overQuota} out of quota`);
+  return {
+    text: `${plain}${off} · ${problems.join(", ")}`,
+    tone: group.overQuota > 0 || group.refused > 0 ? "neg" : "warn",
+  };
+}
+
+/** Human sentence for one account, used when the account list is expanded. */
+export function accountSentence(status: AccountStatus, traffic?: AccountTraffic24h): string {
+  const usage =
+    traffic && traffic.requests > 0
+      ? `${traffic.requests.toLocaleString()} request${traffic.requests === 1 ? "" : "s"} in 24h`
+      : "No requests in 24h";
+  const errors = traffic && traffic.errors > 0 ? `, ${traffic.errors.toLocaleString()} errors` : "";
+  if (status.kind === "ready") return `Ready · ${usage}${errors}`;
+  if (status.kind === "disabled") return "Off · excluded from routing";
+  return `${status.label}${status.reason ? ` · ${status.reason}` : ""}`;
+}
 
 export type AccountTraffic24h = {
   requests: number;
@@ -127,6 +208,33 @@ export type ProvidersSummary = {
     errorRate: number;
   };
 };
+
+/**
+ * The provider each card would get from "Add account": a sign-in provider when it has an
+ * OAuth flow, an API-key provider when it takes a key, nothing when this build cannot add
+ * one (so the card shows no Add button rather than a dead one).
+ */
+export function providerOptions(
+  provider: ModelProvider | undefined,
+  oauth: OAuthProvider | undefined,
+): Array<{ id: string; display: string; kind: "oauth" | "key" }> {
+  const out: Array<{ id: string; display: string; kind: "oauth" | "key" }> = [];
+  if (oauth) out.push({ id: oauth.id, display: oauth.display, kind: "oauth" });
+  if (provider && provider.kind !== "oauth") {
+    out.push({ id: provider.id, display: provider.display, kind: "key" });
+  }
+  return out;
+}
+
+/**
+ * PATCH body that replaces the API key of a keyed connection. Absent from the drawer for
+ * a sign-in account: its credential is a token pair the gateway rotates itself, and a key
+ * pasted over it would make the row lie about how it authenticates.
+ */
+export function apiKeyReplacement(key: string): { credentials: { api_key: string } } | null {
+  const trimmed = key.trim();
+  return trimmed === "" ? null : { credentials: { api_key: trimmed } };
+}
 
 export const PLACEHOLDER_LABELS = /^(resource|your-resource|placeholder)$/i;
 
@@ -688,35 +796,21 @@ export function buildTrafficByConnection(
   return map;
 }
 
-/** Filter grouped providers by the segmented filter while preserving each group's full readiness stats. */
+/**
+ * Pick the cards one summary tile stands for. The whole card is kept, so its sentence and
+ * counts still describe every account it has; only which cards are shown changes.
+ */
 export function filterProviderGroups(
   groups: ProviderGroup[],
-  filter: AccountFilter,
-  quotas?: AccountQuotaRow[],
-  subscriptions?: AccountSubscription[],
-  providers?: ModelProvider[],
+  filter: ProviderFilter,
 ): ProviderGroup[] {
-  if (filter === "all") return groups;
-  const quotaBy = new Map((quotas ?? []).map((row) => [row.connection_id, row]));
-  const subscriptionBy = new Map((subscriptions ?? []).map((row) => [row.connection_id, row]));
-  const result: ProviderGroup[] = [];
-  for (const group of groups) {
-    const matching = group.connections.filter((connection) => {
-      const status = accountStatus(
-        connection,
-        quotaBy.get(connection.id),
-        subscriptionBy.get(connection.id),
-        providers,
-      );
-      return filter === "disabled"
-        ? status.kind === "disabled"
-        : accountNeedsAttention(connection, status);
-    });
-    if (matching.length > 0) {
-      result.push({ ...group, connections: matching });
-    }
-  }
-  return result;
+  const match: Record<ProviderFilter, (group: ProviderGroup) => boolean> = {
+    connected: () => true,
+    healthy: (group) => group.state === "healthy",
+    attention: (group) => group.state === "degraded" || group.state === "down",
+    disabled: (group) => group.state === "disabled",
+  };
+  return groups.filter(match[filter]);
 }
 
 /** Pure KPI strip rollup across all visible accounts, limits, and 24h traffic. */

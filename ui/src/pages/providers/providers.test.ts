@@ -5,16 +5,20 @@ import type {
   AccountSubscription,
   Connection,
   ModelProvider,
+  OAuthProvider,
   UsageSummaryByConnection,
 } from "../../lib/api.ts";
-import { barFill, barText } from "../../components/ui";
 import {
   accountNeedsAttention,
+  accountSentence,
   accountStatus,
+  apiKeyReplacement,
   buildProviderGroups,
   buildTrafficByConnection,
   filterProviderGroups,
   providerLabel,
+  providerOptions,
+  providerSentence,
   summarizeProviders,
   until,
 } from "./types.ts";
@@ -237,15 +241,14 @@ test("stale last_error with backoff 0 maps to warn Last error status and agrees 
   assert.equal(summary.attention, 1);
   assert.equal(summary.disabled, 1);
 
-  const attentionGroups = filterProviderGroups(groups, "attention");
-  assert.equal(attentionGroups.length, 1);
-  assert.equal(attentionGroups[0]?.connections[0]?.id, "c-stale");
-  // Invariant: no account listed under Needs attention may ever carry a Healthy status pill.
-  for (const group of attentionGroups) {
-    for (const conn of group.connections) {
-      assert.notEqual(accountStatus(conn).health, "healthy");
-    }
-  }
+  // This account's stale error keeps it routable, so its provider still reads healthy and
+  // the "Need attention" card filter does not claim it; the account-level count does.
+  assert.deepEqual(
+    groups.map((group) => group.state),
+    ["healthy", "healthy", "disabled"],
+  );
+  assert.equal(filterProviderGroups(groups, "attention").length, 0);
+  assert.equal(summary.attention, 1);
 
   const disabledGroups = filterProviderGroups(groups, "disabled");
   assert.equal(disabledGroups.length, 1);
@@ -289,17 +292,110 @@ test("buildTrafficByConnection and summarizeProviders roll up 24h requests and e
   assert.equal(summary.traffic24h.errors, 3);
 });
 
-test("shared Meter helpers and providers exports (barFill, barText, until, providerLabel) stay intact", () => {
-  assert.match(barFill(50), /bg-muted/);
-  assert.match(barFill(75), /warn-fill/);
-  assert.match(barFill(95), /neg-fill/);
-  assert.match(barText(50), /text-muted/);
-  assert.match(barText(75), /warn/);
-  assert.match(barText(95), /neg/);
+test("providers exports (until, providerLabel) stay intact", () => {
   assert.equal(providerLabel("opencode-go"), "OpenCode Go");
   assert.equal(until(null), "");
   assert.equal(until(1000 + 3 * 3600 - 5, 1000), "2h 59m");
   assert.equal(until(1000 + 12 * 86_400 - 5, 1000), "11d 23h");
   assert.equal(until(1000 + 3595, 1000), "59m");
   assert.equal(until(1000 + 20, 1000), "1m");
+});
+
+test("summary filters pick whole provider cards by state, never a subset of accounts", () => {
+  const groups = buildProviderGroups([
+    makeConnection({ id: "c-ok", provider: "openai", name: "primary" }),
+    makeConnection({ id: "c-off", provider: "openai", name: "standby", is_active: false }),
+    makeConnection({ id: "c-bad", provider: "claude", name: "broken", backoff_level: 2 }),
+    makeConnection({ id: "c-parked", provider: "gemini", name: "parked", is_active: false }),
+  ]);
+  assert.equal(filterProviderGroups(groups, "connected").length, 3);
+  // A healthy group keeps its disabled account: the card's counts stay honest.
+  const healthy = filterProviderGroups(groups, "healthy");
+  assert.deepEqual(healthy.map((group) => group.key), ["openai"]);
+  assert.equal(healthy[0]?.connections.length, 2);
+  assert.deepEqual(
+    filterProviderGroups(groups, "attention").map((group) => group.key),
+    ["claude"],
+  );
+  assert.deepEqual(
+    filterProviderGroups(groups, "disabled").map((group) => group.key),
+    ["gemini"],
+  );
+});
+
+test("providerSentence answers the card in words, with the pressing fact last", () => {
+  const [ready] = buildProviderGroups([
+    makeConnection({ id: "c-1", provider: "openai", name: "a" }),
+    makeConnection({ id: "c-2", provider: "openai", name: "b", is_active: false }),
+  ]);
+  assert.ok(ready);
+  assert.deepEqual(providerSentence(ready, false), { text: "Ready · 2 accounts · 1 account off", tone: "pos" });
+
+  const [down] = buildProviderGroups([
+    makeConnection({ id: "c-3", provider: "claude", name: "x", backoff_level: 1 }),
+  ]);
+  assert.ok(down);
+  assert.deepEqual(providerSentence(down, false), { text: "Not ready · unreachable right now", tone: "neg" });
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const sub: AccountSubscription = {
+    connection_id: "c-4",
+    name: "plus",
+    provider: "openai",
+    plan: "plus",
+    windows: [
+      { id: "monthly", label: "Monthly", used_percent: 84, window_seconds: 30 * 86400, resets_at: nowSec + 22 * 86400 },
+    ],
+    fetched_at: nowSec,
+    error: null,
+  };
+  const [near] = buildProviderGroups([makeConnection({ id: "c-4", provider: "openai" })], undefined, undefined, [sub]);
+  assert.ok(near);
+  const sentence = providerSentence(near, true);
+  assert.equal(sentence.tone, "info");
+  // Under 90 % is worth saying but not alarming.
+  assert.match(sentence.text, /^Ready · 1 account · 84% of quota used, resets in 22d/);
+  // A reader sees no quota figure, so the same card stays plain.
+  assert.deepEqual(providerSentence(near, false), { text: "Ready · 1 account", tone: "pos" });
+});
+
+test("accountSentence says usage in words and keeps a non-ready reason", () => {
+  const conn = makeConnection({ id: "c-1", provider: "claude" });
+  assert.equal(
+    accountSentence(accountStatus(conn), { requests: 1200, errors: 3 }),
+    "Ready · 1,200 requests in 24h, 3 errors",
+  );
+  assert.equal(accountSentence(accountStatus(conn)), "Ready · No requests in 24h");
+  assert.equal(
+    accountSentence(accountStatus({ ...conn, is_active: false })),
+    "Off · excluded from routing",
+  );
+});
+
+test("a card offers only the add flows this build supports, and key replacement trims", () => {
+  const spec: ModelProvider = {
+    id: "openai",
+    display: "OpenAI",
+    code: "oa",
+    kind: "api_key",
+    has_connection: false,
+    scope: "global",
+    listed: true,
+    requires_base_url_override: false,
+    base_url_example: null,
+  };
+  assert.deepEqual(providerOptions(spec, undefined), [
+    { id: "openai", display: "OpenAI", kind: "key" },
+  ]);
+  const oauthRow = {
+    id: "claude",
+    display: "Claude",
+    flow: "browser",
+  } as unknown as OAuthProvider;
+  assert.deepEqual(providerOptions(undefined, oauthRow), [
+    { id: "claude", display: "Claude", kind: "oauth" },
+  ]);
+  assert.deepEqual(providerOptions(undefined, undefined), []);
+  assert.equal(apiKeyReplacement("   "), null);
+  assert.deepEqual(apiKeyReplacement(" sk-new "), { credentials: { api_key: "sk-new" } });
 });

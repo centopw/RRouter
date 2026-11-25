@@ -10,6 +10,7 @@ import {
   Input,
   Modal,
   Select,
+  Toggle,
 } from "../../components/ui";
 import {
   api,
@@ -27,6 +28,7 @@ import { accountRisk } from "../usage/pace";
 import { QuotaCell as UsageQuotaCell } from "../usage/quota";
 import {
   accountStatus,
+  apiKeyReplacement,
   baseUrlProblem,
   connectionLabel,
   credentialShapeOf,
@@ -42,7 +44,10 @@ import {
 /**
  * One-level inspection and configuration drawer for a connection: standing status,
  * shared limit bars (operator caps + plan windows), live test/toggle/remove, identity,
- * routing, and folded egress/free-mode settings.
+ * routing, a key replacement for keyed accounts, and folded egress/free-mode settings.
+ *
+ * It is the Configure surface for *existing* accounts of any kind — built-in, custom
+ * endpoint or signed-in — so nothing on the page needs a delete-and-re-add to change.
  */
 export function ConnectionDrawer({
   connection,
@@ -87,6 +92,8 @@ export function ConnectionDrawer({
   /** Empty by design: the server only ever returns the masked proxy, never the URL. */
   const [proxy, setProxy] = useState("");
   const [clearProxy, setClearProxy] = useState(false);
+  /** Replacement API key; empty keeps the stored one (the server merges by presence). */
+  const [apiKey, setApiKey] = useState("");
   const [freeRpm, setFreeRpm] = useState(
     connection.free_rpm === null || connection.free_rpm === undefined
       ? ""
@@ -104,6 +111,7 @@ export function ConnectionDrawer({
     setPriority(String(connection.priority));
     setWeight(String(connection.weight));
     setBaseUrl(connection.base_url_override ?? "");
+    setApiKey("");
     setFreeRpm(
       connection.free_rpm === null || connection.free_rpm === undefined
         ? ""
@@ -148,6 +156,7 @@ export function ConnectionDrawer({
     priority.trim() !== String(connection.priority) ||
     weight.trim() !== String(connection.weight) ||
     proxyEdit ||
+    apiKey.trim() !== "" ||
     freeRpmDirty;
 
   const invalid =
@@ -192,6 +201,7 @@ export function ConnectionDrawer({
     if (proxyEdit) credentials.proxy = proxyNext;
     if (freeRpmDirty) credentials.free_rpm = freeRpmNext;
     try {
+      const keyReplacement = apiKeyReplacement(apiKey);
       await api.patch<Connection>(`/api/connections/${connection.id}`, {
         name: nextName,
         team_id: nextTeam,
@@ -200,8 +210,10 @@ export function ConnectionDrawer({
         ...(proxyEdit ? { proxy: proxyNext } : {}),
         ...(freeRpmDirty ? { free_rpm: freeRpmNext } : {}),
         ...(Object.keys(credentials).length > 0 ? { credentials } : {}),
+        ...(keyReplacement ?? {}),
       });
       setTouched(false);
+      setApiKey("");
       setProxy("");
       setClearProxy(false);
       invalidate();
@@ -292,26 +304,46 @@ export function ConnectionDrawer({
         ) : null}
 
         {isAdmin ? (
-          <section className="flex flex-wrap items-center gap-2">
+          <section className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <span className="block text-small font-medium text-fg">Enabled</span>
+                <p className="text-caption text-muted">
+                  {connection.is_active
+                    ? "Traffic can route to this account."
+                    : "Excluded from routing until you enable it."}
+                </p>
+              </div>
+              <Toggle
+                checked={connection.is_active}
+                onChange={onToggle}
+                label={
+                  connection.is_active ? `Disable ${label}` : `Enable ${label} and clear its backoff`
+                }
+                disabled={toggling || busy}
+                size="md"
+              />
+            </div>
+            {!connection.is_active && refusal ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={toggling}
+                disabled={toggling || busy}
+                onClick={onToggle}
+                className="self-start"
+              >
+                Re-enable refused account…
+              </Button>
+            ) : null}
             <Button
               variant="secondary"
               loading={testing}
               disabled={testing || busy}
               onClick={onTest}
+              className="self-start"
             >
               {testing ? "Testing…" : "Test connection"}
-            </Button>
-            <Button
-              variant="secondary"
-              loading={toggling}
-              disabled={toggling || busy}
-              onClick={onToggle}
-            >
-              {connection.is_active
-                ? "Disable account"
-                : refusal
-                  ? "Re-enable refused account…"
-                  : "Enable account"}
             </Button>
             {currentTest ? (
               <span role="status" className="flex min-w-0 items-center gap-2 text-small tnum">
@@ -412,6 +444,23 @@ export function ConnectionDrawer({
                   disabled={busy}
                 />
               </Field>
+
+              {connection.has_api_key ? (
+                <Field
+                  label="Replace API key"
+                  optional
+                  hint="Stored encrypted. Leave empty to keep the current key. Test it after saving to confirm it works."
+                >
+                  <Input
+                    value={apiKey}
+                    onChange={(value) => patchField(() => setApiKey(value))}
+                    type="password"
+                    autoComplete="off"
+                    placeholder="leave empty to keep the current key"
+                    ariaLabel="replacement api key"
+                  />
+                </Field>
+              ) : null}
             </section>
 
             <section className="flex flex-col gap-4 border-t border-line pt-4">
@@ -419,8 +468,12 @@ export function ConnectionDrawer({
                 {showTeamField ? "Routing & team" : "Routing"}
               </h3>
               <p className="text-small leading-relaxed text-muted">
-                Lower priority is tried first. Weight splits traffic inside one priority tier only
-                under <span className="font-mono text-caption text-fg">RROUTER_STRATEGY=weighted</span>.
+                {team.length === 0
+                  ? "Everyone can route here. "
+                  : "Only this team's keys route here. "}
+                Accounts with lower priority are tried first. Accounts sharing a priority balance
+                traffic by weight — the sharing rule only applies under{" "}
+                <span className="font-mono text-caption text-fg">RROUTER_STRATEGY=weighted</span>.
               </p>
               {showTeamField ? (
                 <Field
@@ -445,7 +498,7 @@ export function ConnectionDrawer({
               <div className="grid grid-cols-2 gap-3">
                 <Field
                   label="Priority"
-                  hint="−100…100; lower tried first"
+                  hint="Lower numbers are tried first (−100…100)"
                   error={priorityProblem ?? undefined}
                 >
                   <Input
@@ -458,8 +511,8 @@ export function ConnectionDrawer({
                   />
                 </Field>
                 <Field
-                  label="Weight"
-                  hint="1…1000; weighted strategy only"
+                  label="Traffic share (weight)"
+                  hint="Share among equal-priority accounts (1…1000); weighted strategy only"
                   error={weightProblem ?? undefined}
                 >
                   <Input
