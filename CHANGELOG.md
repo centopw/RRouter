@@ -2,6 +2,28 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.38.0 — 2026-11-25
+
+### Features
+
+- feat(ui): one surface map for every page, flags and CI check ([`31481b9`](https://github.com/centopw/RRouter/commit/31481b93897fa419f01add8572228ca5710ac66a))
+- feat(naming): canonical model names, V49 backfill and request resolution ([`462f724`](https://github.com/centopw/RRouter/commit/462f724d2024befb60f26544b0503ac77b3d3438))
+
+### Bug Fixes
+
+- fix(antigravity): stop sending sessionId in the cloudcode envelope ([`d64b560`](https://github.com/centopw/RRouter/commit/d64b560c4a65abf9edb4fd94390d8f87f637ea47))
+
+### Build & CI
+
+- build(deps-dev): bump vite in /ui in the dashboard group (#12) ([`2416561`](https://github.com/centopw/RRouter/commit/241656151d3571ded880fc2d54c35a84d2639b97))
+- build(deps): bump the rust group with 2 updates (#13) ([`52fdd72`](https://github.com/centopw/RRouter/commit/52fdd7258af8d680c4eac3bd9b3ca37695c70f56))
+
+### Other Changes
+
+- test(e2e): read the canonical group name from /v1/models ([`48b595a`](https://github.com/centopw/RRouter/commit/48b595a4107b00b0cccf2cb31020d270c339f15d))
+- chore(ui): rebuild the served bundle and refresh the surface map ([`723b2d0`](https://github.com/centopw/RRouter/commit/723b2d014a0092bf146ff80d422cce2a3c062375))
+- style: rustfmt the merged slices ([`ab6ec38`](https://github.com/centopw/RRouter/commit/ab6ec388b7f2a8e2d4098e4d6bd683a0d6a70b19))
+
 ## 0.37.0 — 2026-11-25
 
 ### Features
