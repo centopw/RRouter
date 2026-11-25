@@ -2405,9 +2405,10 @@ fn pick_next_fallback_model(models: &[FreeModelView]) -> Option<String> {
 }
 
 /// Apply `PATCH /api/free-mode` (zero-config toggles). When `enabled` flips `false -> true`
-/// and `probe_on_enable` is `true` (default), probes enabled usable models concurrently.
+/// and `probe_on_enable` is `true` (default), probes enabled usable models concurrently,
+/// detached from this answer.
 pub async fn patch_settings(
-    state: &AppState,
+    state: &Arc<AppState>,
     req: PatchSettingsRequest,
 ) -> rrouter_core::Result<FreeModeStateView> {
     let (doc, mut routing) = load_config_parts(state.store.as_ref()).await?;
@@ -2430,15 +2431,32 @@ pub async fn patch_settings(
         .get("enabled")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let should_probe = !was_enabled && now_enabled && req.probe_on_enable.unwrap_or(true);
+    let view = state_view(state, false).await?;
+    let should_probe = !was_enabled
+        && now_enabled
+        && req.probe_on_enable.unwrap_or(true)
+        // Nothing discovered yet (a fresh instance, or after teardown): there is no model
+        // to probe, and the catalogs get discovered by the next state read anyway.
+        && view.summary.enabled > 0;
     if should_probe {
         // The pool IS on after the save above; a probe failure is a diagnostic, not a
-        // reason to answer the PATCH with an error. Log it and continue.
-        if let Err(err) = probe_all(state, false).await {
-            tracing::warn!(error = %err, "free-mode probe after enable failed");
-        }
+        // reason to answer the PATCH with an error. The probes are live upstream sends with
+        // their own timeouts (a whole free pool is tens of seconds), so they run detached:
+        // the toggle itself is a store write and must answer immediately. Nothing in this
+        // answer reads probe state, so the caller never waits for them.
+        let state = Arc::clone(state);
+        let summary = view.summary;
+        tokio::spawn(async move {
+            tracing::info!(
+                enabled = summary.enabled,
+                "free-mode pool enabled; probing in the background"
+            );
+            if let Err(err) = probe_all(&state, false).await {
+                tracing::warn!(error = %err, "free-mode probe after enable failed");
+            }
+        });
     }
-    build_state_view(state).await
+    Ok(view)
 }
 
 /// Apply `PATCH /api/free-mode/models` to enable or disable one discovered model.

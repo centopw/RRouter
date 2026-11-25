@@ -344,6 +344,46 @@ async fn import_creates_accounts_with_their_proxy_and_rpm() {
     assert_eq!(rows[0].source, "document");
 }
 
+/// Enabling the pool on a fresh instance answers at once and probes in the background.
+///
+/// The probe is a live send per enabled model, so awaiting it inside the PATCH held the
+/// toggle open for the whole pool (the release gate's smoke harness timed out on it). The
+/// seeded model here points at a closed port, so its probe would stall until the connect
+/// timeout; the answer must still be immediate, and discovery must not have run.
+#[tokio::test]
+async fn enabling_the_pool_answers_without_waiting_for_probes() {
+    let h = harness().await;
+    let (status, imported) = h.post("/api/free-mode/import", h.document()).await;
+    assert_eq!(status, StatusCode::OK, "{imported}");
+
+    let started = Instant::now();
+    let (status, body) = h
+        .call(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/free-mode")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "enabled": true }).to_string()))
+                .expect("request"),
+        )
+        .await;
+    let elapsed = started.elapsed();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["enabled"], true);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the toggle must not wait for the probe round: {elapsed:?}"
+    );
+    let config = h
+        .state
+        .store
+        .free_mode_config()
+        .await
+        .expect("config")
+        .expect("stored routing");
+    assert_eq!(config.routing["enabled"], true);
+}
+
 /// Re-importing the same document updates the accounts instead of duplicating them, and a
 /// changed proxy or rpm lands on the existing row.
 #[tokio::test]
