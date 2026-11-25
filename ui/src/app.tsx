@@ -21,7 +21,6 @@ import {
   SignOut,
   SortAscending,
   SquaresFour,
-  Stethoscope,
   User,
   UsersThree,
   WebhooksLogo,
@@ -147,7 +146,6 @@ const NAV_GROUPS: NavGroup[] = [
     label: "SYSTEM",
     leaves: [
       { to: "/system/health", label: "Health", icon: glyph(Heartbeat), adminOnly: true },
-      { to: "/system/diagnostics", label: "Diagnostics", icon: glyph(Stethoscope), adminOnly: true },
       { to: "/system/logs", label: "Logs", icon: glyph(ListBullets), adminOnly: true },
       { to: "/system/webhooks", label: "Webhooks", icon: glyph(WebhooksLogo), adminOnly: true },
     ],

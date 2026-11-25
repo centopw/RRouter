@@ -66,39 +66,39 @@ if [ "$CLEAN" -eq 1 ] && [ "$QUICK" -eq 1 ]; then
   fail "--clean cannot be combined with --quick (the binary is removed)"
 fi
 if [ "$CLEAN" -eq 1 ]; then
-  step "0/8 clean build output"
+  step "0/9 clean build output"
   run "cargo clean" cargo clean
   pass "target/ removed"
 fi
 
-step "1/8 formatting"
+step "1/9 formatting"
 run "rustfmt check" cargo fmt --all --check
 pass "cargo fmt --all --check"
 
-step "2/8 lints (workspace, all targets, all features)"
+step "2/9 lints (workspace, all targets, all features)"
 run "clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
 pass "clippy -D warnings"
 
-step "3/8 test suite"
+step "3/9 test suite"
 run "cargo test" cargo test --workspace --locked
 pass "workspace tests"
 
 if [ "$QUICK" -eq 1 ]; then
-  step "4/8 release build (skipped: --quick)"
+  step "4/9 release build (skipped: --quick)"
   if [ ! -x "$BIN" ]; then
     fail "--quick needs an existing $BIN"
   fi
 else
-  step "4/8 release build"
+  step "4/9 release build"
   run "release build" cargo build --release --locked
   pass "binary $(du -h "$BIN" | cut -f1)"
 fi
 
 if [ "$NO_UI" -eq 1 ]; then
-  step "5/8 dashboard (skipped: --no-ui)"
+  step "5/9 dashboard (skipped: --no-ui)"
   printf '  \033[33mSKIP\033[0m using the committed ui/dist\n'
 else
-  step "5/8 dashboard (typecheck + embedded build)"
+  step "5/9 dashboard (typecheck + embedded build)"
   need npm
   if [ ! -d ui/node_modules ]; then
     run "npm ci" npm --prefix ui ci --no-audit --no-fund
@@ -108,7 +108,7 @@ else
   pass "tsc + vite build"
 fi
 
-step "6/8 config hardening (the binary must refuse)"
+step "6/9 config hardening (the binary must refuse)"
 TMP_DATA=$(mktemp -d)
 trap 'rm -rf "$TMP_DATA"' EXIT
 out=$(RROUTER_DATA_DIR="$TMP_DATA" RROUTER_CORS_ORIGINS='*' "$BIN" 2>&1 || true)
@@ -118,11 +118,22 @@ grep -q "RROUTER_ALLOW_REMOTE_ADMIN" <<<"$out" ||
   fail "non-loopback bind without opt-in was not refused: ${out:0:200}"
 pass "wildcard CORS and unguarded remote bind refused"
 
-if [ "$QUICK" -eq 1 ]; then
-  step "7/8 live smokes (skipped: --quick)"
-  step "8/8 backup/restore drill (skipped: --quick)"
+# Static: the committed map still names every route, page, endpoint and test. Cheap enough
+# to run before the live smokes, and the step that catches a page added without its map.
+# The script is not tracked yet in a change that adds it, so the step is skipped there.
+step "7/9 surface map"
+if [ -f scripts/surface-map.py ]; then
+  run "surface map" python3 scripts/surface-map.py --check
+  pass "docs/SURFACES.md and docs/surfaces.json match the tree"
 else
-  step "7/8 live end-to-end (mock upstream + real binary)"
+  printf '  \033[33mSKIP\033[0m scripts/surface-map.py is not in this checkout\n'
+fi
+
+if [ "$QUICK" -eq 1 ]; then
+  step "8/9 live smokes (skipped: --quick)"
+  step "9/9 backup/restore drill (skipped: --quick)"
+else
+  step "8/9 live end-to-end (mock upstream + real binary)"
   run "e2e smoke" python3 scripts/e2e_smoke.py
   run "oauth smoke" python3 scripts/oauth_smoke.py
   # Free mode is its own contract: import, discovery, and the reserved refs, asserted
@@ -131,7 +142,7 @@ else
   run "free-mode smoke" python3 scripts/free_mode_smoke.py
   pass "e2e + oauth + free-mode flows"
 
-  step "8/8 backup/restore drill"
+  step "9/9 backup/restore drill"
   run "restore drill" python3 scripts/backup_restore_smoke.py
   pass "snapshot restores credentials and settings"
 fi

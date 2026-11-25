@@ -8,8 +8,6 @@ export const FLAGS_STORAGE_KEY = "rrouter:flags";
 const FLAGS_CHANGE_EVENT = "rrouter:flags-changed";
 
 export const DEFAULT_FLAGS = {
-  /** Unified Diagnostics hub (`/system/diagnostics`) combining Health and System Logs. */
-  unifiedDiagnostics: true,
   /** In-page `PresetManagerDrawer` inside `/models`. */
   presetManagerDrawer: true,
   /** Quick Actions section inside the `⌘K` Command Palette. */

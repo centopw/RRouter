@@ -47,6 +47,10 @@ jobs:
       # cuts a version without a CHANGELOG section.
       - name: Check version carriers and CHANGELOG notes
         run: python3 scripts/release.py --check
+      # The committed surface map must still name every route, page, endpoint and test,
+      # and the tool itself has to keep working: `test-surface-map.sh` runs both.
+      - name: Check the surface map
+        run: ./scripts/test-surface-map.sh
       # Static validation of the workflows themselves (pinned upstream image).
       - name: Lint GitHub Actions workflows
         uses: docker://rhysd/actionlint:1.7.12

@@ -5,7 +5,7 @@ import type { Connection } from "../lib/api";
 import { useConnections, useHealth, useSystem } from "../lib/queries";
 import { uptime } from "../lib/format";
 
-export function Health({ embedded = false }: { embedded?: boolean } = {}) {
+export function Health() {
   const health = useHealth();
   const system = useSystem();
   const connections = useConnections();
@@ -81,32 +81,22 @@ export function Health({ embedded = false }: { embedded?: boolean } = {}) {
 
   return (
     <>
-      {embedded ? (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-body text-muted">{subtitle}</p>
-          <div className="flex flex-wrap items-center gap-2">
+      <PageHeader
+        title="Health"
+        subtitle={subtitle}
+        actions={
+          <>
+            <Link
+              to="/system/logs"
+              className="inline-flex h-8 items-center rounded-full border border-line bg-surface px-3 text-body text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg"
+            >
+              System logs →
+            </Link>
             {setupLink}
             {statusBadge}
-          </div>
-        </div>
-      ) : (
-        <PageHeader
-          title="Health"
-          subtitle={subtitle}
-          actions={
-            <>
-              <Link
-                to="/system/logs"
-                className="inline-flex h-8 items-center rounded-full border border-line bg-surface px-3 text-body text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg"
-              >
-                System logs →
-              </Link>
-              {setupLink}
-              {statusBadge}
-            </>
-          }
-        />
-      )}
+          </>
+        }
+      />
 
       {system.isError ? (
         <div className="mb-4">

@@ -54,7 +54,6 @@ function page(load: () => Promise<{ default: ComponentType }>) {
 
 // Route-level chunks: the shell and Activity land first, the rest on demand.
 const Activity = page(() => import("./pages/activity"));
-const Diagnostics = page(() => import("./pages/diagnostics"));
 const Health = page(() => import("./pages/health"));
 const SystemLogs = page(() => import("./pages/system-logs"));
 const Webhooks = page(() => import("./pages/webhooks"));
@@ -115,6 +114,12 @@ function Legacy({ to, map }: { to: string; map?: (params: URLSearchParams) => vo
   const next = new URLSearchParams(search);
   map?.(next);
   return <Navigate to={{ pathname: to, search: next.toString() }} replace />;
+}
+
+/** The retired `/system/diagnostics` tab strip: `?tab=logs` was its logs tab. */
+function DiagnosticsRedirect() {
+  const { search } = useLocation();
+  return <Navigate to={search.includes("tab=logs") ? "/system/logs" : "/system/health"} replace />;
 }
 
 /** `/routing/providers?custom=openai` predates the custom-endpoint form's own params. */
@@ -263,7 +268,6 @@ const router = createBrowserRouter(
               path: "system",
               children: [
                 { index: true, element: <Navigate to="/system/health" replace /> },
-                { path: "diagnostics", element: <AdminPage><Diagnostics /></AdminPage> },
                 { path: "health", element: <AdminPage><Health /></AdminPage> },
                 { path: "webhooks", element: <AdminPage><Webhooks /></AdminPage> },
                 { path: "logs", element: <AdminPage><SystemLogs /></AdminPage> },
@@ -302,7 +306,9 @@ const router = createBrowserRouter(
             { path: "keys", element: <Navigate to="/access/keys" replace /> },
             { path: "teams", element: <Navigate to="/access/teams" replace /> },
             { path: "users", element: <Navigate to="/access/users" replace /> },
-            { path: "diagnostics", element: <Navigate to="/system/diagnostics" replace /> },
+            // Diagnostics split back into Health and System logs; a bookmarked tab picks its half.
+            { path: "diagnostics", element: <DiagnosticsRedirect /> },
+            { path: "system/diagnostics", element: <DiagnosticsRedirect /> },
             { path: "health", element: <Navigate to="/system/health" replace /> },
             { path: "webhooks", element: <Navigate to="/system/webhooks" replace /> },
             { path: "system-logs", element: <Navigate to="/system/logs" replace /> },

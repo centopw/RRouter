@@ -38,7 +38,7 @@ const LEVEL_TONE: Record<string, string> = {
  * Opt-in platform diagnostics. The gateway always writes its console log; this page
  * streams the extra in-memory capture, which is off until someone turns it on.
  */
-export function SystemLogs({ embedded = false }: { embedded?: boolean } = {}) {
+export function SystemLogs() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [capacity, setCapacity] = useState(2000);
@@ -228,28 +228,21 @@ export function SystemLogs({ embedded = false }: { embedded?: boolean } = {}) {
 
   const body = (
     <>
-      {embedded ? (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-body text-muted">{subtitle}</p>
-          <div className="flex flex-wrap items-center gap-2">{controls}</div>
-        </div>
-      ) : (
-        <PageHeader
-          title="System logs"
-          subtitle={subtitle}
-          actions={
-            <>
-              <Link
-                to="/system/health"
-                className="inline-flex h-8 items-center rounded-full border border-line bg-surface px-3 text-body text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg"
-              >
-                System health →
-              </Link>
-              {controls}
-            </>
-          }
-        />
-      )}
+      <PageHeader
+        title="System logs"
+        subtitle={subtitle}
+        actions={
+          <>
+            <Link
+              to="/system/health"
+              className="inline-flex h-8 items-center rounded-full border border-line bg-surface px-3 text-body text-muted transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg"
+            >
+              System health →
+            </Link>
+            {controls}
+          </>
+        }
+      />
 
       {failure ? (
         <div className="mb-4">
@@ -316,7 +309,6 @@ export function SystemLogs({ embedded = false }: { embedded?: boolean } = {}) {
     </>
   );
 
-  if (embedded) return body;
   return <div className="mx-auto max-w-[1160px]">{body}</div>;
 }
 
