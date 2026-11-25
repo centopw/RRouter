@@ -2,6 +2,21 @@
 
 All notable changes. Dates are local; versions follow semver once tagged.
 
+## 0.37.0 — 2026-11-25
+
+### Features
+
+- feat(ui): redesign providers page as cards with a status strip and configurable existing providers ([`022e994`](https://github.com/centopw/RRouter/commit/022e9948943b8f2c2c949f00b9cd547304d065fa))
+
+### Bug Fixes
+
+- fix(free-mode): keep a teardown marker so the next state read does not re-discover the catalogs ([`1ce19f0`](https://github.com/centopw/RRouter/commit/1ce19f0882f0b0d7f624114b2720e156e98212ae))
+- fix(free-mode): answer the enable toggle without waiting for the probe round ([`0454bfb`](https://github.com/centopw/RRouter/commit/0454bfb123b369f9c64fd4a826281a3e037f30de))
+
+### Other Changes
+
+- chore(ui): rebuild the served bundle ([`d0f9089`](https://github.com/centopw/RRouter/commit/d0f9089f4d5d33b36172f790189ccfd864badacf))
+
 ## 0.36.0 — 2026-11-24
 
 ### Features
