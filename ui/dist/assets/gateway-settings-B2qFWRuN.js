@@ -1,1 +1,0 @@
-import{Dn as e}from"./index-Dv0eoHEG.js";import{a as t}from"./api-j-GpDFME.js";var n=[`gateway-settings`];function r(){return e({queryKey:n,queryFn:()=>t.get(`/api/settings`),staleTime:6e4})}export{r as n,n as t};
